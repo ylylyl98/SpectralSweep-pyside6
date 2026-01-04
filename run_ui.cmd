@@ -22,6 +22,7 @@ REM "3.13" -> "313"
 set "PYTAG=%PYVER:.=%"
 set "VENV=%ROOT%.venv-%PYTAG%"
 set "LOCK=%ROOT%requirements\requirements-%PYTAG%.lock.txt"
+set "REQ=%ROOT%requirements\requirements.txt"
 
 if not exist "%APP%" (
   echo [ERROR] App entry not found:
@@ -30,9 +31,19 @@ if not exist "%APP%" (
   exit /b 1
 )
 
-if not exist "%LOCK%" (
-  echo [ERROR] Missing lock file for Python %PYVER%:
+REM ---- Choose requirement file: lock if exists, else requirements.txt ----
+set "REQFILE="
+if exist "%LOCK%" (
+  set "REQFILE=%LOCK%"
+) else if exist "%REQ%" (
+  echo [WARN] No lock file for Python %PYVER% found:
   echo   %LOCK%
+  echo Using requirements.txt instead (less reproducible).
+  set "REQFILE=%REQ%"
+) else (
+  echo [ERROR] Neither lock file nor requirements.txt found.
+  echo   %LOCK%
+  echo   %REQ%
   pause
   exit /b 1
 )
@@ -50,9 +61,9 @@ if not exist "%VENV%\Scripts\python.exe" (
 
 REM ---- Install/update deps ----
 echo Sync deps from:
-echo   %LOCK%
+echo   %REQFILE%
 "%VENV%\Scripts\python.exe" -m pip install --upgrade pip >nul
-"%VENV%\Scripts\python.exe" -m pip install -r "%LOCK%"
+"%VENV%\Scripts\python.exe" -m pip install -r "%REQFILE%"
 if errorlevel 1 (
   echo [ERROR] pip install failed.
   pause
