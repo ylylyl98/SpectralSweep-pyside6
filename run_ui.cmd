@@ -1,10 +1,74 @@
 @echo off
-set "APP=D:\instrument_control_v3_1\lab_runner_streamlit\app\ui_streamlit\main_ui.py"
-set "ROOT=D:\instrument_control_v3_1\lab_runner_streamlit"
-set "PORT=8502"
+setlocal enabledelayedexpansion
 
+REM ---- Settings ----
+set "PORT=8502"
+set "ROOT=%~dp0"
+set "APP=%ROOT%app\ui_streamlit\main_ui.py"
+
+REM ---- Pick Python (prefer 3.13, then 3.12, then 3.11) ----
+set "PYVER="
+for %%V in (3.13 3.12 3.11) do (
+  py -%%V --version >nul 2>&1 && (set "PYVER=%%V" & goto :found_py)
+)
+:found_py
+if "%PYVER%"=="" (
+  echo [ERROR] No Python 3.11/3.12/3.13 found via "py".
+  pause
+  exit /b 1
+)
+
+REM "3.13" -> "313"
+set "PYTAG=%PYVER:.=%"
+set "VENV=%ROOT%.venv-%PYTAG%"
+set "LOCK=%ROOT%requirements\requirements-%PYTAG%.lock.txt"
+
+if not exist "%APP%" (
+  echo [ERROR] App entry not found:
+  echo   %APP%
+  pause
+  exit /b 1
+)
+
+if not exist "%LOCK%" (
+  echo [ERROR] Missing lock file for Python %PYVER%:
+  echo   %LOCK%
+  pause
+  exit /b 1
+)
+
+REM ---- Create venv if missing ----
+if not exist "%VENV%\Scripts\python.exe" (
+  echo Creating venv: %VENV% (Python %PYVER%)
+  py -%PYVER% -m venv "%VENV%"
+  if errorlevel 1 (
+    echo [ERROR] Failed to create venv.
+    pause
+    exit /b 1
+  )
+)
+
+REM ---- Install/update deps ----
+echo Sync deps from:
+echo   %LOCK%
+"%VENV%\Scripts\python.exe" -m pip install --upgrade pip >nul
+"%VENV%\Scripts\python.exe" -m pip install -r "%LOCK%"
+if errorlevel 1 (
+  echo [ERROR] pip install failed.
+  pause
+  exit /b 1
+)
+
+REM ---- Run Streamlit + open browser ----
 pushd "%ROOT%"
-python -m streamlit run "%APP%" --server.address localhost --server.port %PORT% --server.headless false
-rem Give Streamlit a moment to start, then open default browser
-start "" http://localhost:%PORT%
+
+start "LabRunner Streamlit" /B "%VENV%\Scripts\python.exe" -m streamlit run "%APP%" ^
+  --server.address localhost ^
+  --server.port %PORT% ^
+  --server.headless false
+
+timeout /t 2 >nul
+start "" "http://localhost:%PORT%"
+
 popd
+endlocal
