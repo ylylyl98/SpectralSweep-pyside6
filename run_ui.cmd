@@ -1,25 +1,29 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 
 REM ---- Settings ----
 set "PORT=8502"
 set "ROOT=%~dp0"
-set "APP=%ROOT%app\ui_streamlit\main_ui.py"
+set "APP=%ROOT%streamlit_entry.py"
 
-REM ---- Pick Python (prefer 3.13, then 3.12, then 3.11) ----
+REM ---- Pick Python: 3.13 -> 3.12 -> 3.11 ----
 set "PYVER="
-for %%V in (3.13 3.12 3.11) do (
-  py -%%V --version >nul 2>&1 && (set "PYVER=%%V" & goto :found_py)
-)
-:found_py
+py -3.13 --version >nul 2>&1 && set "PYVER=3.13"
+if "%PYVER%"=="" py -3.12 --version >nul 2>&1 && set "PYVER=3.12"
+if "%PYVER%"=="" py -3.11 --version >nul 2>&1 && set "PYVER=3.11"
+
 if "%PYVER%"=="" (
   echo [ERROR] No Python 3.11/3.12/3.13 found via "py".
   pause
   exit /b 1
 )
 
-REM "3.13" -> "313"
-set "PYTAG=%PYVER:.=%"
+REM ---- Tag used in folder names ----
+set "PYTAG="
+if "%PYVER%"=="3.13" set "PYTAG=313"
+if "%PYVER%"=="3.12" set "PYTAG=312"
+if "%PYVER%"=="3.11" set "PYTAG=311"
+
 set "VENV=%ROOT%.venv-%PYTAG%"
 set "LOCK=%ROOT%requirements\requirements-%PYTAG%.lock.txt"
 set "REQ=%ROOT%requirements\requirements.txt"
@@ -31,16 +35,11 @@ if not exist "%APP%" (
   exit /b 1
 )
 
-REM ---- Choose requirement file: lock if exists, else requirements.txt ----
-set "REQFILE="
-if exist "%LOCK%" (
-  set "REQFILE=%LOCK%"
-) else if exist "%REQ%" (
-  echo [WARN] No lock file for Python %PYVER% found:
-  echo   %LOCK%
-  echo Using requirements.txt instead (less reproducible).
-  set "REQFILE=%REQ%"
-) else (
+REM ---- Choose requirement file ----
+set "REQFILE=%LOCK%"
+if not exist "%REQFILE%" set "REQFILE=%REQ%"
+
+if not exist "%REQFILE%" (
   echo [ERROR] Neither lock file nor requirements.txt found.
   echo   %LOCK%
   echo   %REQ%
@@ -62,7 +61,7 @@ if not exist "%VENV%\Scripts\python.exe" (
 REM ---- Install/update deps ----
 echo Sync deps from:
 echo   %REQFILE%
-"%VENV%\Scripts\python.exe" -m pip install --upgrade pip >nul
+"%VENV%\Scripts\python.exe" -m pip install --upgrade pip
 "%VENV%\Scripts\python.exe" -m pip install -r "%REQFILE%"
 if errorlevel 1 (
   echo [ERROR] pip install failed.
@@ -70,16 +69,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM ---- Run Streamlit + open browser ----
-pushd "%ROOT%"
 
-start "LabRunner Streamlit" /B "%VENV%\Scripts\python.exe" -m streamlit run "%APP%" ^
-  --server.address localhost ^
-  --server.port %PORT% ^
-  --server.headless false
+REM ---- Run Streamlit (no line continuations) ----
+cd /d "%ROOT%"
+set "PYTHONPATH=%ROOT%"
+"%VENV%\Scripts\python.exe" -m streamlit run "%APP%" --server.address localhost --server.port %PORT% --server.headless false
 
 timeout /t 2 >nul
-start "" "http://localhost:%PORT%"
+REM timeout /t 2 >nul
+REM start "" "http://localhost:%PORT%"
 
-popd
 endlocal
