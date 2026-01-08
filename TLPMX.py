@@ -305,9 +305,15 @@ class TLPMX:
 			dllabspath = os.path.dirname(os.path.abspath(__file__)) + os.path.sep + dll_name
 			self.dll = cdll.LoadLibrary(dllabspath)
 		else:
-			dll_name = "TLPMX_64.dll"
-			dllabspath = os.path.dirname(os.path.abspath(__file__)) + os.path.sep + dll_name
-			self.dll = cdll.LoadLibrary(dllabspath)
+			# dll_name = "TLPMX_64.dll"
+			# dllabspath = os.path.dirname(os.path.abspath(__file__)) + os.path.sep + dll_name
+			# self.dll = cdll.LoadLibrary(dllabspath)
+			# Get the directory where THIS file (TLPM.py) is located
+			driver_path = os.path.dirname(os.path.abspath(__file__))
+			# Join it with the DLL name
+			dll_path = os.path.join(driver_path, "TLPM_64.dll")
+			# Load the library using the full path
+			self.dll = cdll.LoadLibrary(dll_path)
 
 		self.devSession = c_long()
 		self.devSession.value = 0

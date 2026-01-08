@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import time
 import itertools
-
+import numpy as np
 from app.steps.registry import build_recipe_from_preset
 from app.engine.runner import runner_singleton
 import app.steps._import_all  # noqa: F401
@@ -40,21 +40,76 @@ def commit_preview_to_table():
         del st.session_state.preview_row
 
 def unique_stem(out_dir: Path, stem: str) -> str:
+    """
+    Always return a numbered stem like 'name_001', 'name_002', ...
+    - If no prior files: returns stem_001
+    - If 'stem.csv' (old style) exists, the next becomes stem_002
+    - If stem_00N exists, next is stem_00(N+1)
+    """
     stem = sanitize_filename(stem)
-    if not (out_dir / f"{stem}.csv").exists():
-        return stem
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Track the highest used index
     max_n = 0
+
+    # Treat old bare file (stem.csv) as occupying slot 1
+    if (out_dir / f"{stem}.csv").exists():
+        max_n = max(max_n, 1)
+
+    # Scan numbered files stem_###.csv
     pat = re.compile(re.escape(stem) + r"_(\d{3})\.csv$", re.IGNORECASE)
     for p in out_dir.glob(f"{stem}_*.csv"):
         m = pat.search(p.name)
         if m:
             max_n = max(max_n, int(m.group(1)))
-    return f"{stem}_{max_n+1:03d}"
+
+    # First numbered file if none exist → 001; otherwise increment
+    next_n = 1 if max_n == 0 else max_n + 1
+    return f"{stem}_{next_n:03d}"
+
 
 def parse_values(s: str):
     if not s or not str(s).strip(): return None
     try: return [float(x.strip()) for x in str(s).split(",") if x.strip()]
     except ValueError: return None
+
+# ---------- wavelength helpers (NEW) ----------
+def _midpoint_nm(wls: np.ndarray) -> float:
+    return 0.5 * (float(wls[0]) + float(wls[-1])) if wls.size > 1 else float("nan")
+
+def wait_lambda_from_lf6(lf6, target_center_nm: float,
+                         tol_nm: float = 1.0,
+                         timeout_s: float = 25.0,
+                         poll_s: float = 0.3,
+                         require_consecutive: int = 2) -> np.ndarray:
+    """
+    Poll lf6.get_wavelength_calibration() until mid-λ ~= target center.
+    Returns a numpy array; raises TimeoutError on failure.
+    """
+    deadline = time.time() + timeout_s
+    ok = 0
+    last_mid = None
+
+    while time.time() < deadline:
+        try:
+            w = np.asarray(lf6.get_wavelength_calibration(), dtype=float).ravel()
+        except Exception:
+            w = np.array([], dtype=float)
+
+        if w.size > 2:
+            mid = _midpoint_nm(w)
+            last_mid = mid
+            if abs(mid - float(target_center_nm)) <= tol_nm:
+                ok += 1
+                if ok >= require_consecutive:
+                    return w
+            else:
+                ok = 0
+        time.sleep(poll_s)
+
+    raise TimeoutError(f"λ not updated in {timeout_s}s via LF6 (target={target_center_nm}, last_mid={last_mid})")
+
+
 
 # ---------- UI ----------
 def render(devices, wavelength_headers, extra_scalar_fields_order):
@@ -92,7 +147,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             with m4: def_center = st.text_input("Default Center (nm)", "885")
             
             def_epf = st.number_input("Default Accumulations (EPF)", 1, 1000, 2)
-            
+            center_tol_nm = st.number_input("Center match tolerance (nm)", value=1.0, min_value=0.1, step=0.1)
+
             pattern = st.text_input("Filename pattern", 
                 "${sample}$~${tag}$~$6KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~${center_nm}nmc$_${cond_block}$")
 
@@ -593,10 +649,43 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         ),
                     )
 
+                    # --------- FRESH WAVELENGTHS (force center & wait) ---------
+                    fresh_wls = None
+                    lf6 = st.session_state.get("lf6")
+                    if lf6 is not None:
+                        try:
+                            # Apply settings now so header matches data
+                            try:
+                                lf6.change_spectra_center(f"{float(val_center):.0f}")
+                            except Exception:
+                                lf6.change_spectra_center(float(val_center))
+                            if hasattr(lf6, "change_expose_time"):
+                                lf6.change_expose_time(float(val_exp))
+                            if hasattr(lf6, "set_frames"):
+                                lf6.set_frames(int(val_epf))
+                            elif hasattr(lf6, "set_accumulations"):
+                                lf6.set_accumulations(int(val_epf))
+
+                            fresh_wls = wait_lambda_from_lf6(
+                                lf6,
+                                target_center_nm=float(val_center),
+                                tol_nm=float(center_tol_nm),
+                                timeout_s=25.0,
+                                poll_s=0.3,
+                                require_consecutive=2
+                            )
+                            ui_log(f"  > λ mid ≈ {_midpoint_nm(fresh_wls):.3f} nm")
+                        except Exception as e:
+                            ui_log(f"  > Wavelength wait warning: {e}")
+
+                    # Fall back to the initially-provided headers if needed
+                    wl_headers_for_run = (fresh_wls.tolist() if isinstance(fresh_wls, np.ndarray) and fresh_wls.size
+                                          else wavelength_headers)
+
                     ui_log(f"  > Saving: {stem_final}.csv{rep_suffix}")
                     out_dir.mkdir(parents=True, exist_ok=True)
                     runner_singleton.run_recipe(
-                        recipe, devices, wavelength_headers, extra_scalar_fields_order,
+                        recipe, devices, wl_headers_for_run, extra_scalar_fields_order,
                         str(out_dir), stem_final, ui_log
                     )
 

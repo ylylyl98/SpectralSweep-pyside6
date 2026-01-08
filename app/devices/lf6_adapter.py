@@ -1,48 +1,59 @@
-
 from __future__ import annotations
-from typing import List, Tuple
+from typing import Tuple
+import numpy as np
 import lf6_automation
 
 class SpectrometerLF6:
     """
-    Thin adapter over your lf6_automation.LF6Setup
+    Thin adapter over lf6_automation.LF6Setup.
 
     Exposes:
-      - calibration_wavelengths() -> List[float]
-      - acquire() -> (wavelengths, intensities)
+      - calibration_wavelengths(force: bool = False) -> np.ndarray
+      - acquire() -> (wavelengths: np.ndarray, intensities: np.ndarray)
+      - change_spectra_center(center_nm)  # convenience; invalidates λ cache
     """
     def __init__(self, setup: lf6_automation.LF6Setup):
         self.setup = setup
-        # Prefer explicit calibration list if available
-        # Fallback to older method names.
-        if hasattr(self.setup, "get_wavelength_calibration"):
-            self._wavelengths = list(self.setup.get_wavelength_calibration())
-        elif hasattr(self.setup, "calibrate_wavelength"):
-            self._wavelengths = list(self.setup.calibrate_wavelength())
-        else:
-            # Last resort: call 'trigger' once to obtain a frame with metadata (not ideal).
-            self._wavelengths = []
+        self._wls_cache: np.ndarray | None = None
 
-    def calibration_wavelengths(self) -> List[float]:
-        if not self._wavelengths and hasattr(self.setup, "get_wavelength_calibration"):
-            self._wavelengths = list(self.setup.get_wavelength_calibration())
-        return self._wavelengths
+    # ---- cache control ----
+    def invalidate_wavelengths(self) -> None:
+        self._wls_cache = None
 
-    def acquire(self) -> Tuple[list, list]:
-        # Newer API
-        if hasattr(self.setup, "acquire"):
-            vals = self.setup.acquire()
-            wl = self.calibration_wavelengths()
-            return wl, list(vals)
-        # Legacy API: trigger returns spectrum in a property
-        if hasattr(self.setup, "trigger"):
-            # Expect trigger to return (wavelengths, intensities) or just intensities
-            out = self.setup.trigger()
-            if isinstance(out, tuple) and len(out) == 2:
-                wl, vals = out
-                self._wavelengths = list(wl)
-                return list(wl), list(vals)
-            else:
-                wl = self.calibration_wavelengths()
-                return wl, list(out)
-        raise RuntimeError("LF6Setup is missing acquire/trigger methods")
+    # ---- wavelength API ----
+    def calibration_wavelengths(self, force: bool = False) -> np.ndarray:
+        """Return wavelength vector; refresh if force=True or cache empty."""
+        if force or self._wls_cache is None:
+            try:
+                # primary getter
+                self._wls_cache = np.asarray(
+                    self.setup.get_wavelength_calibration(), dtype=float
+                ).ravel()
+            except AttributeError:
+                # fallback to older method names
+                try:
+                    self._wls_cache = np.asarray(
+                        self.setup.calibrate_wavelength(), dtype=float
+                    ).ravel()
+                except Exception:
+                    self._wls_cache = np.array([], dtype=float)
+        return self._wls_cache
+
+    # ---- data API ----
+    def acquire(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Return (wavelengths, intensities).
+        We force λ refresh to reflect any recent center change.
+        """
+        y = np.asarray(self.setup.acquire(), dtype=float).ravel()
+        wl = self.calibration_wavelengths(force=True)
+        return wl, y
+
+    # ---- convenience setter that also clears λ cache ----
+    def change_spectra_center(self, center_nm) -> None:
+        """Accepts '730' or 730.0; forwards to LF6 and invalidates λ cache."""
+        try:
+            self.setup.change_spectra_center(f"{float(center_nm):.0f}")
+        except Exception:
+            self.setup.change_spectra_center(center_nm)
+        self.invalidate_wavelengths()

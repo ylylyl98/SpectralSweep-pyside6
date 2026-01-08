@@ -131,7 +131,7 @@ class KeithControl(PyvisaInstrument):
         self.write(':SOUR:FUNC VOLT', print_command=True)
         self.write(':SENS:FUNC \'CURR\'', print_command=True)
         self.write(':SENS:CURR:PROT %.2e' % curr_compliance, print_command=True)
-        self.write('SOUR:DEL %.3f' % delay, print_command=True)
+        self.write(':SOUR:DEL %.3f' % delay, print_command=True)
         # turn on confield functions
         self.write(':SENS:FUNC:CONC ON', print_command=True)
         # set field reading
@@ -152,7 +152,7 @@ class KeithControl(PyvisaInstrument):
         self.write(':SOUR:FUNC VOLT', print_command=True)
         self.write(':SENS:FUNC \'CURR\'', print_command=True)
         self.write(':SENS:CURR:PROT %.2e' % curr_compliance, print_command=True)
-        self.write('SOUR:DEL %.3f' % delay, print_command=True)
+        self.write(':SOUR:DEL %.3f' % delay, print_command=True)
         self.write(':SENS:FUNC:CONC ON', print_command=True)
         self.write(':FORM:ELEM VOLT ,CURR', print_command=True)
         self.write(':SOUR:VOLT:MODE FIXED', print_command=True)

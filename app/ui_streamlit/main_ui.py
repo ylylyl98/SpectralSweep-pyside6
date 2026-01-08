@@ -17,7 +17,7 @@ from app.devices.lf6_adapter import SpectrometerLF6
 from app.devices.iv_adapter import IVDevice
 
 import lf6_automation
-import iv_automation
+import iv_automation 
 
 def scan_thorlabs_devices():
     """Finds devices using the Thorlabs TLPMX driver (DLL)."""
@@ -51,6 +51,97 @@ def scan_thorlabs_devices():
         return ["Error: TLPMX.py not found in project root"]
     except Exception as e:
         return [f"Error scanning: {e}"]
+
+# --- Rotation helpers ---
+def list_serial_ports():
+    try:
+        import serial.tools.list_ports as lp
+        return [p.device for p in lp.comports()]
+    except Exception:
+        return []
+
+def render_rotation_block(devices_dict, block_name: str, key_suffix: str):
+    """
+    Renders a rotation mount block and registers the device as devices_dict[block_name]
+    key_suffix must be unique per block, e.g. "rot1", "rot2"
+    """
+    st.markdown(f"### Rotation Mount — {block_name}")
+    rot_type = st.selectbox(
+        "Type", ["<none>", "Thorlabs Elliptec", "Newport EPS300 (VISA RS-232/GPIB)"],
+        key=f"type_{key_suffix}"
+    )
+
+    col_rot1, col_rot2 = st.columns(2)
+    rot_com, rot_resource, rot_baud = "", "", None
+    with col_rot1:
+        if rot_type == "Thorlabs Elliptec":
+            ports = ["<select>"] + list_serial_ports()
+            rot_com = st.selectbox("COM Port", options=ports, key=f"com_{key_suffix}")
+        elif rot_type == "Newport EPS300 (VISA RS-232/GPIB)":
+            rot_resource = st.text_input("VISA Resource", "ASRL4::INSTR", key=f"visa_{key_suffix}")
+    with col_rot2:
+        if rot_type == "Newport EPS300 (VISA RS-232/GPIB)":
+            rot_baud = st.number_input("Baud (RS-232)", min_value=1200, max_value=921600, value=19200, step=1200, key=f"baud_{key_suffix}")
+        should_connect = st.checkbox("Connect", value=False, key=f"chk_{key_suffix}")
+
+    handle_key = f"{key_suffix}_handle"
+
+    def close_handle():
+        if handle_key in st.session_state:
+            try: st.session_state[handle_key].close()
+            except Exception as e: print(f"{block_name} close error: {e}")
+            del st.session_state[handle_key]
+
+    if should_connect and rot_type != "<none>":
+        if handle_key not in st.session_state:
+            try:
+                if rot_type == "Thorlabs Elliptec":
+                    sel = st.session_state.get(f"com_{key_suffix}", "<select>")
+                    if not sel or sel == "<select>":
+                        raise RuntimeError("Select a valid COM port.")
+                    from app.devices.rotation_thorlabs_elliptec_adapter import ElliptecRotation
+                    st.session_state[handle_key] = ElliptecRotation(sel)
+                else:
+                    from app.devices.rotation_eps300_adapter import NewportEPS300
+                    st.session_state[handle_key] = NewportEPS300(
+                        st.session_state.get(f"visa_{key_suffix}", "ASRL4::INSTR"),
+                        rm=get_rm(), baud=st.session_state.get(f"baud_{key_suffix}", None)
+                    )
+                st.sidebar.success(f"{block_name}: Connected")
+            except Exception as e:
+                close_handle()
+                st.sidebar.error(f"{block_name}: {e}")
+
+        if handle_key in st.session_state:
+            devices_dict[block_name] = st.session_state[handle_key]
+            st.markdown("---")
+            tgt = st.number_input("Angle (deg)", min_value=-9999.0, max_value=9999.0, value=0.0, step=1.0, key=f"ang_{key_suffix}")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("Go", key=f"go_{key_suffix}"):
+                    try:
+                        st.session_state[handle_key].move_to(float(tgt))
+                        st.success(f"{block_name}: moved to {tgt:.2f}°")
+                    except Exception as e:
+                        st.error(f"{block_name}: Move failed: {e}")
+            with c2:
+                if st.button("Read", key=f"read_{key_suffix}"):
+                    try:
+                        pos = st.session_state[handle_key].get_position()
+                        st.info(f"{block_name}: {pos:.3f}°")
+                    except Exception as e:
+                        st.error(f"{block_name}: Read failed: {e}")
+            with c3:
+                if st.button("Disconnect", key=f"disc_{key_suffix}"):
+                    close_handle()
+                    st.sidebar.info(f"{block_name}: Disconnected")
+                    st.rerun()
+
+    else:
+        # toggle off → ensure closed
+        if handle_key in st.session_state:
+            close_handle()
+            st.sidebar.info(f"{block_name}: Disconnected")
 
 # ---------------- Cache helpers ----------------
 @st.cache_resource(show_spinner=False)
@@ -241,15 +332,25 @@ with st.sidebar.expander("IV Instruments (VISA)", expanded=False):
 
     try:
         if selected and rm is not None:
-            from iv_automation import PyvisaInstrument, IVSetup
+            from iv_automation import PyvisaInstrument, IVSetup, KeithControl
 
-            def make_inst(addr, name_override=None):
-                inst = PyvisaInstrument(address=addr, name=name_override or addr, termination=term, rm=rm)
+            def make_inst(addr, role=None):
+                # Respect "<none>" as no termination for generic instruments
+                term_arg = None if term == "" else term
+
+                # Use KeithControl for gate/bias roles so X/Y channels are created
+                if role in ("Vbg", "Vtg", "Vbias"):
+                    # KeithControl connects itself and registers x/y as: role, measured_role, role_leakage
+                    return KeithControl(address=addr, name=f"{role}_SMU", variable_name=role, rm=rm)
+
+                # Fallback generic VISA instrument (no X channel)
+                inst = PyvisaInstrument(address=addr, name=addr, termination=term_arg, rm=rm)
                 try:
                     inst.timeout = timeout_ms
                 except Exception:
                     pass
                 return inst
+
 
             inst_list = []
             if vbg_src   != "<none>": inst_list.append(make_inst(vbg_src,   "Vbg"))
@@ -258,9 +359,8 @@ with st.sidebar.expander("IV Instruments (VISA)", expanded=False):
 
             # Any other selected devices (optional nicknames omitted for brevity)
             for addr in selected:
-                if addr in {vbg_src, vtg_src, vbias_src}:
-                    continue
-                inst_list.append(make_inst(addr, name_override=addr))
+                if addr not in {vbg_src, vtg_src, vbias_src}:
+                    inst_list.append(make_inst(addr))
 
             iv_setup = IVSetup(inst_list)
             from app.devices.iv_adapter import IVDevice
@@ -288,13 +388,9 @@ with st.sidebar.expander("Auxiliary Hardware", expanded=False):
     # --- 1. THORLABS STAGE ---
     st.markdown("### Thorlabs Stage")
     stage_port = st.text_input("Stage Port", "COM5")
-    
-    # We use a key to track the checkbox state
     should_connect_stage = st.checkbox("Connect Stage", value=False, key="chk_stage")
 
-    # LOGIC: Connect vs Disconnect
     if should_connect_stage:
-        # A. CONNECT (If not already connected)
         if "stage_handle" not in st.session_state:
             try:
                 from app.devices.stage_adapter import LinearStage
@@ -302,28 +398,19 @@ with st.sidebar.expander("Auxiliary Hardware", expanded=False):
                 st.sidebar.success(f"Stage Ready: {stage_port}")
             except Exception as e:
                 st.sidebar.error(f"Stage Error: {e}")
-        
-        # Register device for use in experiments
         if "stage_handle" in st.session_state:
             devices["stage"] = st.session_state.stage_handle
-
     else:
-        # B. DISCONNECT (If it was connected, close it now)
         if "stage_handle" in st.session_state:
             try:
                 st.session_state.stage_handle.close()
             except Exception as e:
                 print(f"Error closing stage: {e}")
-            
-            # Remove from memory so next check forces a fresh connection
             del st.session_state["stage_handle"]
             st.sidebar.info("Stage Closed & Released")
 
-
     # --- 2. POWER METER (PM100D) ---
     st.markdown("### Power Meter (PM100D)")
-    
-    # Device Selector
     if "tl_devices" not in st.session_state:
         st.session_state.tl_devices = ["<Click Scan>"]
 
@@ -333,15 +420,12 @@ with st.sidebar.expander("Auxiliary Hardware", expanded=False):
             devs = scan_thorlabs_devices()
             st.session_state.tl_devices = devs if devs else ["<No devices found>"]
             st.rerun() 
-            
     with col_sel:
         pm_resource_str = st.selectbox("Device", st.session_state.tl_devices)
 
     should_connect_pm = st.checkbox("Connect Power Meter", value=False, key="chk_pm")
 
-    # LOGIC: Connect vs Disconnect
     if should_connect_pm:
-        # A. CONNECT
         if "pm_handle" not in st.session_state:
             if pm_resource_str and "<" not in pm_resource_str:
                 try:
@@ -353,12 +437,10 @@ with st.sidebar.expander("Auxiliary Hardware", expanded=False):
             else:
                 st.sidebar.warning("Invalid Device Selected")
 
-        # Register device
         if "pm_handle" in st.session_state:
             pm = st.session_state.pm_handle
             devices["pm"] = pm
             
-            # --- NEW: WAVELENGTH SETTING ---
             st.markdown("---")
             c_wav_in, c_wav_set = st.columns([2, 1])
             with c_wav_in:
@@ -366,51 +448,169 @@ with st.sidebar.expander("Auxiliary Hardware", expanded=False):
                                             min_value=400.0, max_value=1100.0, 
                                             value=730.0, step=10.0)
             with c_wav_set:
-                st.write("") # Spacer
+                st.write("")
                 if st.button("Set λ"):
                     try:
                         pm.configure_wavelength(target_wl)
                         st.sidebar.success(f"Set to {target_wl:.0f} nm")
                     except Exception as e:
                         st.sidebar.error(f"Set Failed: {e}")
-
     else:
-        # B. DISCONNECT
         if "pm_handle" in st.session_state:
             try: st.session_state.pm_handle.close()
             except: pass
             del st.session_state["pm_handle"]
             st.sidebar.info("PM Closed & Released")
 
+    # --- 3. ROTATION MOUNT ---
+    st.markdown("### Rotation Mount")
+    render_rotation_block(devices, "rotation1", "rot1")
+    render_rotation_block(devices, "rotation2", "rot2")
+    rot_type = st.selectbox("Type", ["<none>", "Thorlabs Elliptec", "Newport EPS300 (VISA RS-232/GPIB)"])
+
+    col_rot1, col_rot2 = st.columns(2)
+    with col_rot1:
+        if rot_type == "Thorlabs Elliptec":
+            rot_com = st.text_input("COM Port (Elliptec)", "COM4")
+        elif rot_type == "Newport EPS300 (VISA RS-232/GPIB)":
+            rot_resource = st.text_input("VISA Resource", "ASRL6::INSTR")  # or "GPIB0::5::INSTR"
+        else:
+            rot_com = ""
+            rot_resource = ""
+
+    with col_rot2:
+        if rot_type == "Newport EPS300 (VISA RS-232/GPIB)":
+            rot_baud = st.number_input("Baud (RS-232 only)", min_value=1200, max_value=921600, value=19200, step=1200)
+        else:
+            rot_baud = None
+        should_connect_rot = st.checkbox("Connect Rotation", value=False, key="chk_rot")
+
+    if should_connect_rot and rot_type != "<none>":
+        if "rot_handle" not in st.session_state:
+            try:
+                if rot_type == "Thorlabs Elliptec":
+                    from app.devices.rotation_thorlabs_elliptec_adapter import ElliptecRotation
+                    st.session_state.rot_handle = ElliptecRotation(rot_com)
+                elif rot_type == "Newport EPS300 (VISA RS-232/GPIB)":
+                    from app.devices.rotation_eps300_adapter import NewportEPS300
+                    st.session_state.rot_handle = NewportEPS300(rot_resource, rm=get_rm(), baud=rot_baud)
+                st.sidebar.success("Rotation Connected")
+            except Exception as e:
+                st.sidebar.error(f"Rotation Connect Error: {e}")
+
+        if "rot_handle" in st.session_state:
+            devices["rotation"] = st.session_state.rot_handle
+
+            st.markdown("---")
+            target_deg = st.number_input("Angle (deg)", min_value=-9999.0, max_value=9999.0, value=0.0, step=1.0)
+            col_go, col_read = st.columns(2)
+            with col_go:
+                if st.button("Go", key="rot_go"):
+                    try:
+                        st.session_state.rot_handle.move_to(float(target_deg))
+                        st.success(f"Moved to {target_deg:.2f}°")
+                    except Exception as e:
+                        st.error(f"Move Fail: {e}")
+            with col_read:
+                if st.button("Read", key="rot_read"):
+                    try:
+                        pos = st.session_state.rot_handle.get_position()
+                        st.info(f"Position: {pos:.3f}°")
+                    except Exception as e:
+                        st.error(f"Read Fail: {e}")
+    else:
+        if "rot_handle" in st.session_state:
+            try: st.session_state.rot_handle.close()
+            except Exception as e: print(f"Error closing rotation: {e}")
+            del st.session_state["rot_handle"]
+            st.sidebar.info("Rotation Closed & Released")
+
+
+
     # --- MANUAL TEST (Uses whatever is currently connected) ---
     st.markdown("---")
-    c_test_pm, c_test_stg = st.columns(2)
+    c_test_pm, c_test_stg, c_test_rot = st.columns(3)
+
     
+    # --- Power meter quick read ---
     with c_test_pm:
+        st.markdown("**PM Quick Read**")
         if st.button("Read Pwr"):
             pm = devices.get("pm")
             if pm:
-                try: st.info(f"{pm.get_power()*1e6:.2f} µW")
-                except: st.error("Read Fail")
-            else: st.warning("No PM")
+                try:
+                    st.info(f"{pm.get_power()*1e6:.2f} µW")
+                except Exception as e:
+                    st.error(f"Read Fail: {e}")
+            else:
+                st.warning("No PM")
 
+    # --- Linear stage quick move ---
     with c_test_stg:
-        target_pos = st.number_input("Position (0-3600)", 
-                                     min_value=0.0, max_value=3600.0, 
-                                     value=0.0, step=10.0)
-        if st.button("Move"):
+        st.markdown("**Stage Quick Move**")
+        target_pos = st.number_input("Position (0-3600)",
+                                    min_value=0.0, max_value=3600.0,
+                                    value=0.0, step=10.0, key="stage_pos_test")
+        if st.button("Move", key="stage_move_btn"):
             stg = devices.get("stage")
             if stg:
-                try: 
+                try:
                     stg.move_to(target_pos)
                     st.success(f"Moved to {target_pos}")
-                except Exception as e: 
+                except Exception as e:
                     st.error(f"Move Fail: {e}")
-            else: 
+            else:
                 st.warning("No Stage")
 
+    # --- Rotation mount quick test (supports rotation1 / rotation2) ---
+    with c_test_rot:
+        st.markdown("**Rotation Quick Test**")
+
+        # discover connected rotation handles (work with either the single-key or dual-key setup)
+        rot_options = []
+        # devices dict (preferred if you already registered them earlier in this sidebar)
+        for k in ("rotation", "rotation1", "rotation2"):
+            if k in devices:
+                rot_options.append(k)
+        # fallback: session_state handles if not injected into devices yet
+        if "rot1_handle" in st.session_state and "rotation1" not in rot_options:
+            rot_options.append("rotation1")
+            devices["rotation1"] = st.session_state["rot1_handle"]
+        if "rot2_handle" in st.session_state and "rotation2" not in rot_options:
+            rot_options.append("rotation2")
+            devices["rotation2"] = st.session_state["rot2_handle"]
+
+        if not rot_options:
+            st.warning("No rotation mount connected.")
+        else:
+            which_rot = st.selectbox("Choose mount", rot_options, key="rot_choice_manual")
+            rot_target = st.number_input("Angle (deg)", value=0.0, step=1.0, key="rot_target_manual")
+
+            col_go, col_read, col_zero = st.columns(3)
+            with col_go:
+                if st.button("Go", key="rot_go_manual"):
+                    try:
+                        devices[which_rot].move_to(float(rot_target))
+                        st.success(f"{which_rot}: moved to {rot_target:.2f}°")
+                    except Exception as e:
+                        st.error(f"{which_rot}: Move failed: {e}")
+            with col_read:
+                if st.button("Read", key="rot_read_manual"):
+                    try:
+                        pos = devices[which_rot].get_position()
+                        st.info(f"{which_rot}: {pos:.3f}°")
+                    except Exception as e:
+                        st.error(f"{which_rot}: Read failed: {e}")
+            with col_zero:
+                # optional: convenience to go to 0°
+                if st.button("Zero", key="rot_zero_manual"):
+                    try:
+                        devices[which_rot].move_to(0.0)
+                        st.success(f"{which_rot}: moved to 0.00°")
+                    except Exception as e:
+                        st.error(f"{which_rot}: Zero failed: {e}")
+
 # ---------------- Presets panel (main content) ----------------
-# Only require spectrometer when connected; allow IV-only usage too.
 devices_main = {}
 spec = st.session_state.get("spec")
 if spec is not None and st.session_state.get("lf6_ready"):
@@ -431,6 +631,7 @@ else:
 # Scalars to include in CSV (no leakage columns)
 extra_scalar_fields_order = ["Vbias"]
 
+
 # ---------------------------------------------------------
 # BRIDGE: Pass Sidebar Connections to the Experiment Engine
 # ---------------------------------------------------------
@@ -446,6 +647,11 @@ if "pm_handle" in st.session_state:
     # CHANGE 'devices' TO 'devices_main'
     devices_main["pm"] = st.session_state.pm_handle
     print("DEBUG: PM added to devices_main")
+
+# 3. Attach rotation 
+if "rot_handle" in st.session_state:
+    devices_main["rotation"] = st.session_state.rot_handle
+    print("DEBUG: Rotation added to devices_main")
 
 # ---------------------------------------------------------
 

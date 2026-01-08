@@ -239,10 +239,16 @@ class TLPM:
 		if sizeof(c_voidp) == 4:
 			self.dll = cdll.LoadLibrary("TLPM_32.dll")
 		else:
+			# Get the directory where THIS file (TLPM.py) is located
+			driver_path = os.path.dirname(os.path.abspath(__file__))
+			# Join it with the DLL name
+			dll_path = os.path.join(driver_path, "TLPM_64.dll")
 			# dll_path =  "C:\\Users\\commo\\Desktop\\Instrument control v3\\TLPM_64.dll"
 			# dll_path =  "D:\\instrument_control_v3_1\\TLPM_64.dll"
 			# self.dll = cdll.LoadLibrary(dll_path)
-			self.dll = cdll.LoadLibrary("TLPM_64.dll")
+			# self.dll = cdll.LoadLibrary("TLPM_64.dll")
+			# Load the library using the full path
+			self.dll = cdll.LoadLibrary(dll_path)
 
 
 		self.devSession = c_long()
