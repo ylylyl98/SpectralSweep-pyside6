@@ -290,11 +290,14 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
         with st.expander("⚡ Quick Generator: Coupled Sweep (Ratio * TG ± BG = K)"):
             with st.form("eqn_preview_form"):
                 st.write("**1. Define Equation:** `Ratio * TG [±] BG = Constant`")
-                c_eq1, c_eq2, c_eq3, c_eq4 = st.columns([1.5, 1, 1, 1.5])
+                c_eq1, c_eq2, c_eq3, c_eq4, c_eq5 = st.columns([1.2, 0.4, 0.8, 0.4, 1.2])
                 with c_eq1: ratio = st.number_input("Ratio", value=0.80, step=0.05, format="%.2f")
-                with c_eq2: op_mode = st.selectbox("Operator", ["-", "+"], help="'-' for TG-BG, '+' for TG+BG")
-                with c_eq3: st.markdown("<div style='text-align: center; padding-top: 35px;'><b>BG = </b></div>", unsafe_allow_html=True)
-                with c_eq4: constant = st.number_input("Constant (K)", value=5.0, step=0.5)
+                with c_eq2: st.markdown("<div style='text-align: center; padding-top: 35px;'><b>* TG</b></div>", unsafe_allow_html=True)
+                with c_eq3: op_mode = st.selectbox("Operator", ["-", "+"], help="'-' for TG-BG (Efield), '+' for TG+BG (Doping)")
+                with c_eq4: constant = st.markdown(f"<div style='text-align: center; padding-top: 35px;'><b>{'BG'} = </b></div>", unsafe_allow_html=True)
+                with c_eq5:
+                    const_label = "Doping" if op_mode == "+" else "Efield"
+                    constant = st.number_input(f"{const_label} (K)", value=5.0, step=0.5)
 
                 st.write("**2. Define Hardware Limits (Safe Box)**")
                 c_lim1, c_lim2, c_lim3 = st.columns([1.5, 1.5, 1])
