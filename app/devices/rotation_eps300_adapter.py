@@ -188,31 +188,86 @@ class NewportEPS300:
             raise RuntimeError(f"Unexpected TP response for axis {ax}: {txt}") from e
 
     # ---------------------------
-    # Discovery
+    # Discovery Helpers
     # ---------------------------
-    def get_axes(self, conservative: bool = True):
-        probe_range = range(1, 4)
-        found = []
-        for ax in probe_range:
-            ok = False
-            for cmd in (f"{ax}TP?", f"{ax}PR?"):
-                try:
-                    resp = self._query(cmd)
-                    if resp is None: continue
-                    float(str(resp).strip())
-                    ok = True
-                    break
-                except Exception:
-                    pass
-            if ok:
-                found.append(ax)
+    def _clean_resp(self, s: str) -> str:
+        """Trim, strip echoes (like '1TP0.000') and controller prompts."""
+        if s is None:
+            return ""
+        s = str(s).strip()
+        # Drop obvious echoes of the command 
+        for tag in ("TP", "PR", "ID", "TS", "MD", "QM", "?"):
+            # keep numeric payload to the right of the last tag, if any
+            if tag in s:
+                s = s.split(tag)[-1].strip()
+        return s
 
+    def _try_query_float(self, cmd: str) -> tuple[bool, float]:
+        """Query and parse a float; tolerate junk around the number."""
+        try:
+            raw = self._query(cmd)
+            s = self._clean_resp(raw).replace(",", " ")
+            # pick first token that parses as float
+            for tok in s.split():
+                try:
+                    return True, float(tok)
+                except Exception:
+                    continue
+            return False, 0.0
+        except Exception:
+            return False, 0.0
+
+    def _try_query_text(self, cmd: str) -> tuple[bool, str]:
+        """Query that should return a non-empty, non-echo text."""
+        try:
+            raw = self._query(cmd)
+            s = self._clean_resp(raw)
+            if not s:
+                return False, ""
+            # Filter obvious error/echo markers or single digits
+            if s in ("0", "1", "?") or "ERR" in s.upper():
+                return False, ""
+            return True, s
+        except Exception:
+            return False, ""
+
+    # ---------------------------
+    # Public Discovery
+    # ---------------------------
+    def get_axes(self, conservative: bool = True, *, max_axes: int = 3) -> list[int]:
+        """
+        Discover connected axes.
+        Checks Motor Type (QM) AND Stage ID (ID).
+        """
+        found: list[int] = []
+        for ax in range(1, max_axes + 1):
+            # 1. Check Motor Type (QM?)
+            # Returns: 0 = No Motor, 1 = DC, 2 = Stepper.
+            # If the controller defaults to "2" for everything, this check passes.
+            ok_qm, type_code = self._try_query_float(f"{ax}QM?")
+            
+            if not ok_qm or int(type_code) == 0:
+                continue
+
+            # 2. Check Stage ID (ID?) - The Stricter Check
+            # Real stages usually return a name like "URM100".
+            # Unplugged axes often return "Unconfigured", "Unknown", or echoes.
+            ok_id, id_str = self._try_query_text(f"{ax}ID?")
+            
+            # If ID failed or explicitly says unconfigured, skip it
+            # (Adjust "UNCONFIGURED" if your specific controller uses a different word)
+            if ok_id and "UNCONFIGURED" not in id_str.upper() and "UNKNOWN" not in id_str.upper():
+                found.append(ax)
+            elif not ok_id and int(type_code) > 0:
+                 # Fallback: If ID? isn't supported but QM says there is a motor,
+                 # we might hesitantly accept it, but for your case, let's be strict.
+                 # Change to True if you have 'dumb' motors without ID chips.
+                 pass
+
+        # Fallback: If scan found nothing, assume the manually configured axis exists
         if not found:
-            try:
-                _ = self._query("VE?")
-                found = [1]
-            except Exception:
-                found = []
+            return [int(self._axis)]
+
         return found
 
     def motor_on_all(self, axes=None):
