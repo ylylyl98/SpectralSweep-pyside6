@@ -398,7 +398,6 @@ with st.sidebar.expander("IV Instruments (VISA)", expanded=False):
         help="Write/read line termination used by your instrument"
     )
     term = "" if term_choice == "<none>" else term_choice
-    timeout_ms = st.number_input("Timeout (ms)", min_value=100, max_value=30000, value=3000, step=100)
 
     # Safer VISA tester (non-blocking style)
     open_only = st.checkbox("Open only (no *IDN?)", value=False,
@@ -414,7 +413,7 @@ with st.sidebar.expander("IV Instruments (VISA)", expanded=False):
                 status, info = "ERROR", ""
                 try:
                     res = rm.open_resource(addr)
-                    res.timeout = min(timeout_ms, 1500)
+                    res.timeout = 2000
                     res.read_termination  = term if term else None
                     res.write_termination = term if term else None
 
@@ -461,7 +460,7 @@ with st.sidebar.expander("IV Instruments (VISA)", expanded=False):
                     return KeithControl(address=addr, name=f"{role}_SMU", variable_name=role, rm=rm)
                 inst = PyvisaInstrument(address=addr, name=addr, termination=term_arg, rm=rm)
                 try:
-                    inst.timeout = timeout_ms
+                    inst.timeout = 5000
                 except Exception:
                     pass
                 return inst
@@ -490,6 +489,61 @@ with st.sidebar.expander("IV Instruments (VISA)", expanded=False):
             st.info("No VISA devices selected. Gates/bias will be ignored.")
     except Exception as e:
         st.warning(f"IV init failed: {e}")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MANUAL GATE CONTROL (Updated with Status Feedback)
+# ──────────────────────────────────────────────────────────────────────────────
+if "iv" in devices:
+    with st.sidebar.expander("🎮 Manual Gate Control", expanded=True):
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            man_vtg = st.number_input("Vtg (V)", value=0.0, step=0.1, key="man_vtg")
+        with col_g2:
+            man_vbg = st.number_input("Vbg (V)", value=0.0, step=0.1, key="man_vbg")
+            
+        man_vbias = st.number_input("Vbias (V)", value=0.0, step=0.01, key="man_vbias")
+
+        # 1. Create a placeholder for status messages so they persist clearly
+        gate_status = st.empty()
+
+        b_col1, b_col2 = st.columns(2)
+        with b_col1:
+            if st.button("Set Values", type="primary", use_container_width=True, key="btn_set_gates"):
+                # 2. SPINNER: This shows "Running..." while the hardware works
+                with st.spinner("Setting voltages..."):
+                    try:
+                        iv_dev = devices["iv"]
+                        
+                        # Send commands
+                        if hasattr(iv_dev, "set_gates"):
+                            iv_dev.set_gates(man_vbg, man_vtg)
+                        if hasattr(iv_dev, "set_bias"):
+                            iv_dev.set_bias(man_vbias)
+                        elif hasattr(iv_dev, "set_vbias"):
+                            iv_dev.set_vbias(man_vbias)
+                        
+                        # 3. CONFIRMATION: Only runs after hardware is done
+                        gate_status.success(f"✅ Finished: TG={man_vtg}V, BG={man_vbg}V")
+                        
+                    except Exception as e:
+                        gate_status.error(f"Set error: {e}")
+
+        with b_col2:
+            if st.button("Zero All", use_container_width=True, key="btn_zero_gates"):
+                with st.spinner("Zeroing..."):
+                    try:
+                        iv_dev = devices["iv"]
+                        if hasattr(iv_dev, "set_gates"):
+                            iv_dev.set_gates(0.0, 0.0)
+                        if hasattr(iv_dev, "set_bias"):
+                            iv_dev.set_bias(0.0)
+                        elif hasattr(iv_dev, "set_vbias"):
+                            iv_dev.set_vbias(0.0)
+                            
+                        gate_status.warning("🛑 All Gates Zeroed")
+                    except Exception as e:
+                        gate_status.error(f"Zero error: {e}")
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -99,12 +99,18 @@ def normalize_df(df: pd.DataFrame, schema):
     return df[schema].reset_index(drop=True)
 
 def commit_preview_to_table():
+    """Callback: Appends the current preview row to the master batch_df."""
     if "preview_row" in st.session_state:
+        # Create a DataFrame from the single dictionary
         new_row_df = pd.DataFrame([st.session_state.preview_row])
-        st.session_state.batch_df = normalize_df(
-            pd.concat([st.session_state.batch_df, new_row_df], ignore_index=True),
-            BATCH_SCHEMA
+        
+        # Concatenate with existing history
+        st.session_state.batch_df = pd.concat(
+            [st.session_state.batch_df, new_row_df], 
+            ignore_index=True
         )
+        
+        # Clear the preview to reset the "Add" state
         del st.session_state.preview_row
 
 # ---------- UI ----------
@@ -271,16 +277,17 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
     # --- 3) BATCH TABLE & GENERATOR ---
     with c_table:
+        # Initialize Master Table if missing
         if "batch_df" not in st.session_state or st.session_state.batch_df.empty:
             st.session_state.batch_df = pd.DataFrame([
                 {"Run": True, "repeat": 1, "MeasurePower": False, "condition_label":"BGonly",
-                 "Vbg_start":0.0,"Vbg_stop":1.0,"Vtg_start":0.0,"Vtg_stop":0.0,"frames":11,"Vbias":""},
+                "Vbg_start":0.0,"Vbg_stop":1.0,"Vtg_start":0.0,"Vtg_stop":0.0,"frames":11,"Vbias":""},
                 {"Run": True, "repeat": 1, "MeasurePower": False, "condition_label":"TGonly",
-                 "Vbg_start":0.0,"Vbg_stop":0.0,"Vtg_start":0.0,"Vtg_stop":1.0,"frames":11,"Vbias":""},
+                "Vbg_start":0.0,"Vbg_stop":0.0,"Vtg_start":0.0,"Vtg_stop":1.0,"frames":11,"Vbias":""},
                 {"Run": True, "repeat": 1, "MeasurePower": False, "condition_label":"TG-BG=0",
-                 "Vbg_start":0.0,"Vbg_stop":1.0,"Vtg_start":0.0,"Vtg_stop":1.0,"frames":11,"Vbias":""},
+                "Vbg_start":0.0,"Vbg_stop":1.0,"Vtg_start":0.0,"Vtg_stop":1.0,"frames":11,"Vbias":""},
                 {"Run": True, "repeat": 1, "MeasurePower": False, "condition_label":"TG+BG=0",
-                 "Vbg_start":-1.0,"Vbg_stop":1.0,"Vtg_start":1.0,"Vtg_stop":-1.0,"frames":11,"Vbias":""},
+                "Vbg_start":-1.0,"Vbg_stop":1.0,"Vtg_start":1.0,"Vtg_stop":-1.0,"frames":11,"Vbias":""},
             ])
         st.session_state.batch_df = normalize_df(st.session_state.batch_df, BATCH_SCHEMA)
 
@@ -288,34 +295,42 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
         st.write("**Inner Electrical Sweep**")
 
         with st.expander("⚡ Quick Generator: Coupled Sweep (Ratio * TG ± BG = K)"):
-            with st.form("eqn_preview_form"):
-                st.write("**1. Define Equation:** `Ratio * TG [±] BG = Constant`")
-                c_eq1, c_eq2, c_eq3, c_eq4, c_eq5 = st.columns([1.2, 0.4, 0.8, 0.4, 1.2])
-                with c_eq1: ratio = st.number_input("Ratio", value=0.80, step=0.05, format="%.2f")
-                with c_eq2: st.markdown("<div style='text-align: center; padding-top: 35px;'><b>* TG</b></div>", unsafe_allow_html=True)
-                with c_eq3: op_mode = st.selectbox("Operator", ["-", "+"], help="'-' for TG-BG (Efield), '+' for TG+BG (Doping)")
-                with c_eq4: constant = st.markdown(f"<div style='text-align: center; padding-top: 35px;'><b>{'BG'} = </b></div>", unsafe_allow_html=True)
-                with c_eq5:
-                    const_label = "Doping" if op_mode == "+" else "Efield"
-                    constant = st.number_input(f"{const_label} (K)", value=5.0, step=0.5)
+            # EDITED: Removed st.form here so interactions happen instantly
+            st.write("**1. Define Equation:** `Ratio * TG [±] BG = Constant`")
+            
+            c_eq1, c_eq2, c_eq3, c_eq4, c_eq5 = st.columns([1.2, 0.4, 0.8, 0.4, 1.2])
+            with c_eq1: 
+                ratio = st.number_input("Ratio", value=0.80, step=0.05, format="%.2f")
+            with c_eq2: 
+                st.markdown("<div style='text-align: center; padding-top: 35px;'><b>* TG</b></div>", unsafe_allow_html=True)
+            with c_eq3: 
+                # This will now trigger a rerun immediately when changed
+                op_mode = st.selectbox("Operator", ["-", "+"], help="'-' for TG-BG (Efield), '+' for TG+BG (Doping)")
+            with c_eq4: 
+                st.markdown(f"<div style='text-align: center; padding-top: 35px;'><b>{'BG'} = </b></div>", unsafe_allow_html=True)
+            with c_eq5:
+                # This logic now updates instantly because the form is gone
+                const_label = "Doping" if op_mode == "+" else "Efield"
+                constant = st.number_input(f"{const_label} (K)", value=5.0, step=0.5)
 
-                st.write("**2. Define Hardware Limits (Safe Box)**")
-                c_lim1, c_lim2, c_lim3 = st.columns([1.5, 1.5, 1])
-                with c_lim1:
-                    lim_vtg_min = st.number_input("Vtg Min", value=-5.0)
-                    lim_vtg_max = st.number_input("Vtg Max", value=5.0)
-                with c_lim2:
-                    lim_vbg_min = st.number_input("Vbg Min", value=-5.0)
-                    lim_vbg_max = st.number_input("Vbg Max", value=5.0)
-                with c_lim3:
-                    step_size = st.number_input("Step (V)", min_value=0.001, max_value=1.0, value=0.050, step=0.001, format="%.3f")
-                    reverse = st.checkbox("Reverse?", value=True)
+            st.write("**2. Define Hardware Limits (Safe Box)**")
+            c_lim1, c_lim2, c_lim3 = st.columns([1.5, 1.5, 1])
+            with c_lim1:
+                lim_vtg_min = st.number_input("Vtg Min", value=-5.0)
+                lim_vtg_max = st.number_input("Vtg Max", value=5.0)
+            with c_lim2:
+                lim_vbg_min = st.number_input("Vbg Min", value=-5.0)
+                lim_vbg_max = st.number_input("Vbg Max", value=5.0)
+            with c_lim3:
+                step_size = st.number_input("Step (V)", min_value=0.001, max_value=1.0, value=0.050, step=0.001, format="%.3f")
+                reverse = st.checkbox("Reverse?", value=True)
 
-                op_char = "-" if op_mode == "-" else "+"
-                default_label = f"{ratio}TG{op_char}BG={constant}"
-                final_label = st.text_input("Row Label", default_label)
+            op_char = "-" if op_mode == "-" else "+"
+            default_label = f"{ratio}TG{op_char}BG={constant}"
+            final_label = st.text_input("Row Label", default_label)
 
-                calc_btn = st.form_submit_button("🔍 Calculate / Preview")
+            # EDITED: Changed to regular button (no form_submit_button)
+            calc_btn = st.button("🔍 Calculate / Preview")
 
             if calc_btn:
                 if op_mode == "-":
@@ -352,6 +367,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         p_start, p_stop = p_stop, p_start
                     max_dist = max(abs(p_stop[0] - p_start[0]), abs(p_stop[1] - p_start[1]))
                     frames = int(round(max_dist / step_size)) + 1
+                    
+                    # EDITED: Strictly overwrite preview_row using =
                     st.session_state.preview_row = {
                         "Run": True, "repeat": 1, "MeasurePower": False, "condition_label": final_label,
                         "Vtg_start": float(f"{p_start[0]:.4f}"),
@@ -361,6 +378,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         "frames": frames, "Vbias": ""
                     }
 
+            # --- PREVIEW & ADD SECTION ---
             if "preview_row" in st.session_state:
                 p = st.session_state.preview_row
                 st.markdown("---")
@@ -370,36 +388,42 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                 m2.metric("Vtg Sweep", f"{p['Vtg_start']} → {p['Vtg_stop']} V")
                 m3.metric("Frames", p['frames'])
                 m4.metric("Label", p['condition_label'])
+                
                 col_add, col_cancel = st.columns([1, 4])
                 with col_add:
+                    # EDITED: This button now calls the helper function defined at the top
                     st.button("➕ Add Row to Table", type="primary", on_click=commit_preview_to_table)
                 with col_cancel:
                     if st.button("Cancel"):
                         del st.session_state.preview_row
                         st.rerun()
 
-        with st.form("batch_form"):
-            df_init = normalize_df(st.session_state.batch_df, BATCH_SCHEMA)
-            df_batch = st.data_editor(
-                df_init,
-                num_rows="dynamic",
-                hide_index=True,
-                column_config={
-                    "Run": st.column_config.CheckboxColumn("Run", width="small"),
-                    "repeat": st.column_config.NumberColumn("Rep", min_value=1, max_value=100, step=1, width="small"),
-                    "MeasurePower": st.column_config.CheckboxColumn("Meas Pwr?"),
-                    "condition_label": st.column_config.TextColumn("Label"),
-                    "Vbg_start": st.column_config.NumberColumn("Vbg Start"),
-                    "Vbg_stop": st.column_config.NumberColumn("Vbg Stop"),
-                    "Vtg_start": st.column_config.NumberColumn("Vtg Start"),
-                    "Vtg_stop": st.column_config.NumberColumn("Vtg Stop"),
-                    "frames": st.column_config.NumberColumn("Frames"),
-                    "Vbias": st.column_config.TextColumn("Vbias"),
-                },
-                column_order=BATCH_SCHEMA
-            )
-            st.session_state.batch_df = normalize_df(df_batch, BATCH_SCHEMA)
-            run_btn = st.form_submit_button("Run Sequence")
+        # --- MAIN TABLE SECTION ---
+        # EDITED: Removed 'st.form' here too so table edits save immediately
+        # (Optional: you can put the form back if you prefer batch editing)
+        df_init = normalize_df(st.session_state.batch_df, BATCH_SCHEMA)
+        df_batch = st.data_editor(
+            df_init,
+            num_rows="dynamic",
+            hide_index=True,
+            column_config={
+                "Run": st.column_config.CheckboxColumn("Run", width="small"),
+                "repeat": st.column_config.NumberColumn("Rep", min_value=1, max_value=100, step=1, width="small"),
+                "MeasurePower": st.column_config.CheckboxColumn("Meas Pwr?"),
+                "condition_label": st.column_config.TextColumn("Label"),
+                "Vbg_start": st.column_config.NumberColumn("Vbg Start"),
+                "Vbg_stop": st.column_config.NumberColumn("Vbg Stop"),
+                "Vtg_start": st.column_config.NumberColumn("Vtg Start"),
+                "Vtg_stop": st.column_config.NumberColumn("Vtg Stop"),
+                "frames": st.column_config.NumberColumn("Frames"),
+                "Vbias": st.column_config.TextColumn("Vbias"),
+            },
+            column_order=BATCH_SCHEMA
+        )
+        # Sync manual edits back to session state
+        st.session_state.batch_df = normalize_df(df_batch, BATCH_SCHEMA)
+        run_btn = st.button("Run Sequence", type="primary")
+        st.write("🚀 Starting sequence...")
 
     # --- 4) LOG ---
     with c_log:
