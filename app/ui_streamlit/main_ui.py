@@ -730,6 +730,23 @@ with st.sidebar.expander("Auxiliary Hardware", expanded=False):
             Probe for travel limits from whatever adapter is connected.
             Returns (min_pos, max_pos). Falls back to (0, 3600).
             """
+            # 1. Explicit overrides based on the adapter class name
+            name = type(stage).__name__
+            
+            if "NewportEPS300" in name:
+                return 0.0, 50.0  # Force 0-50 for Newport
+            
+            if "LinearStage" in name: 
+                return 0.0, 3600.0 # Force 0-3600 for Thorlabs
+
+            # 2. Probe standard methods (existing logic)
+            try:
+                if hasattr(stage, "get_soft_limits"):
+                    lo, hi = stage.get_soft_limits()
+                    return float(lo), float(hi)
+            except Exception:
+                pass
+            
             try:
                 if hasattr(stage, "get_soft_limits"):
                     lo, hi = stage.get_soft_limits()
