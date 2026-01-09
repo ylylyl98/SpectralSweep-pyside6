@@ -148,7 +148,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             def_center = m4.text_input("Default Center (nm)", "885")
 
             def_epf = st.number_input("Default Accumulations (EPF)", 1, 1000, 2)
-            center_tol_nm = st.number_input("Center match tolerance (nm)", value=1.0, min_value=0.1, step=0.1)
+            # center_tol_nm = st.number_input("Center match tolerance (nm)", value=1.0, min_value=0.1, step=0.1)
 
             pattern = st.text_input(
                 "Filename pattern",
@@ -551,8 +551,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                             try:
                                 p_watts = pm.get_power()
                                 p_uw = p_watts * 1e6
-                                current_power_str = f"{p_uw:.1f}"
-                                ui_log(f"  > Meas Power: {p_uw:.2f} uW")
+                                current_power_str = f"{p_uw:.3f}"
+                                ui_log(f"  > Meas Power: {p_uw:.3f} uW")
                             except Exception as e:
                                 ui_log(f"  > Power Meas Failed: {e}")
                         else:
