@@ -23,7 +23,7 @@ class IVDevice:
         """Return True if this role is mapped to any instrument."""
         return bool(self.role_map.get(name))
 
-    def _safe_x_goto(self, name: str, value: float, delay_s: float) -> bool:
+    def _safe_x_goto(self, name: str, value: float, delay_s: float=0.02) -> bool:
         """
         Jump to value (no ramp). Kept for backward-compat.
         """
@@ -50,7 +50,7 @@ class IVDevice:
         Vbg: Optional[float] = None,
         Vtg: Optional[float] = None,
         delay_s: float = 0.05,
-        ramp_step: Optional[float] = None,
+        ramp_step: Optional[float] = 0.1,
     ):
         """
         Set gate voltages. If ramp_step>0, move in steps; otherwise jump.

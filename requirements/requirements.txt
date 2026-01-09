@@ -10,3 +10,4 @@ pythonnet
 nidaqmx
 pylablib
 watchdog
+appdirs
