@@ -15,18 +15,33 @@
 * **Motion:** Thorlabs Elliptec & Newport ESP300 (Stages and Rotators).
 * **Power:** Thorlabs PM100D Power Meters.
 
-## 🚀 Quick Start
+## 🛠️ Installation
 
-1.  **Install requirements:**
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/ylylyl98/lab_runner_streamlit.git
+    cd lab_runner_streamlit
+    ```
+
+2.  **Switch to the Stable Branch:**
+    **Important:** Please ensure you are using the stable release for all experiments.
+    ```bash
+    git checkout stable
+    ```
+
+3.  **Install dependencies:**
     ```bash
     pip install -r requirements.txt
     ```
 
-2.  **Run the App:**
-    ```bash
-    double click run_ui.cmd
-    ```
+    ## 🚀 Quick Start
 
-3.  **Usage:**
+1.  **Run the App:**
+    ```bash
+    double click run_stable.cmd
+    ```
+    *Note: This script automatically syncs your code to the `stable` branch to ensure reliability. Do not use `run_dev.cmd` for actual experiments.*
+
+2.  **Usage:**
     * Use the **Sidebar** to connect devices and select your mode ("Dual Gate" or "MegaSweep").
     * Set your **Voltage Limits** and **Sample Name** before starting.
