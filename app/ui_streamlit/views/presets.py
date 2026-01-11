@@ -5,6 +5,7 @@ import time
 import re
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
+import html
 
 import itertools
 
@@ -20,6 +21,160 @@ BASE_OUT = Path(r"D:\instrument_control_v3_1")
 
 # -------------------- log helpers --------------------
 INVALID_CHARS = '<>:"/\\|?*'
+
+def build_run_status_tree_html(
+    final_sequence: List[dict],
+    df_batch: pd.DataFrame,
+    *,
+    done: int,
+    total_acq: int,
+    current_seq_i: int,
+    current_label: str,
+    current_rep_i: int,
+    max_seq_show: int = 10,
+) -> str:
+    """
+    Live status tree (HTML <pre>) with 3 colors:
+      - done (finished)
+      - now (current running)
+      - todo (not started)
+    Shows a compact window of sequences around the current one.
+    """
+
+    # ---- normalize batch plan (enabled rows only) ----
+    dfb = _normalize_batch_types(df_batch).copy()
+    if "Run" in dfb.columns:
+        dfb["Run"] = dfb["Run"].map(_to_bool)
+        dfb = dfb[dfb["Run"] == True]
+
+    batch_plan = []
+    for _, r in dfb.iterrows():
+        lab = sanitize_filename(r.get("condition_label", ""))
+        reps = max(int(r.get("repeat", 1)), 1)
+        batch_plan.append((lab, reps))
+
+    acq_per_seq = sum(reps for _, reps in batch_plan) or 1
+
+    # ---- small ctx formatter ----
+    def fmt_ctx(ctx: dict) -> str:
+        keys = ["Center Wavelength (nm)", "Exposure Time (ms)", "Stage Position"]
+        parts = []
+        for k in keys:
+            v = ctx.get(k, None)
+            if v is None or str(v).strip() == "":
+                continue
+            k0 = k.split("(")[0].strip()
+            try:
+                parts.append(f"{k0}={float(v):g}")
+            except Exception:
+                parts.append(f"{k0}={v}")
+        return ", ".join(parts) if parts else "(no loop vars)"
+
+    def esc(s: str) -> str:
+        return html.escape(str(s), quote=False)
+
+    # ---- styling (3 colors) ----
+    # You can tweak these colors anytime.
+    STYLE_DONE = "color:#6b7280;"  # grey
+    STYLE_TODO = "color:#cbd5e1;"  # light grey
+    STYLE_NOW  = "color:#111827; background:#fff3cd; border-left:4px solid #f59e0b; padding:1px 6px; border-radius:4px; font-weight:700;"  # highlighted
+
+    def paint(text: str, state: str) -> str:
+        if state == "done":
+            return f"<span style='{STYLE_DONE}'>✓ {esc(text)}</span>"
+        if state == "now":
+            return f"<span style='{STYLE_NOW}'>▶ {esc(text)}</span>"
+        return f"<span style='{STYLE_TODO}'>• {esc(text)}</span>"
+
+    # ---- choose which sequences to show (window around current) ----
+    n_seq = len(final_sequence)
+    if n_seq <= max_seq_show:
+        start = 0
+    else:
+        start = max(0, min(current_seq_i - max_seq_show // 2, n_seq - max_seq_show))
+    end = min(n_seq, start + max_seq_show)
+
+    # ---- helper: acquisition index mapping ----
+    # acquisition index (1-based for display) increases per (seq -> batch -> rep)
+    def seq_bounds(seq_i: int):
+        s0 = seq_i * acq_per_seq
+        s1 = s0 + acq_per_seq
+        return s0, s1
+
+    # Determine the "current" acquisition index (0-based)
+    current_acq_index = current_seq_i * acq_per_seq
+    # find offset inside the seq from (label, rep_i)
+    off = 0
+    for lab, reps in batch_plan:
+        if lab == current_label:
+            current_acq_index += (off + current_rep_i)
+            break
+        off += reps
+
+    # ---- build lines (real tree) ----
+    lines = []
+    header = f"Run (progress {done}/{total_acq})"
+    lines.append(f"<span style='font-weight:700;color:#111827'>{esc(header)}</span>")
+
+    for seq_i in range(start, end):
+        ctx = final_sequence[seq_i]
+        seq_text = f"Seq {seq_i+1}: {fmt_ctx(ctx)}"
+
+        s0, s1 = seq_bounds(seq_i)
+        if done >= s1:
+            seq_state = "done"
+        elif done <= s0:
+            seq_state = "todo"
+        else:
+            seq_state = "now"
+
+        # tree glyphs
+        seq_is_last = (seq_i == end - 1)
+        seq_prefix = "└─ " if seq_is_last else "├─ "
+        child_prefix = "   " if seq_is_last else "│  "
+
+        lines.append(seq_prefix + paint(seq_text, seq_state))
+
+        # children: batch+rep flattened into acquisition lines
+        # determine per-acquisition state based on done/current
+        # acquisition absolute index for this seq starts at s0
+        acq_abs = s0
+        for b_i, (lab, reps) in enumerate(batch_plan):
+            for r_i in range(reps):
+                acq_state = "todo"
+                if acq_abs < done:
+                    acq_state = "done"
+                elif acq_abs == current_acq_index and done < total_acq:
+                    acq_state = "now"
+
+                leaf = f"{lab}  (rep {r_i+1}/{reps})"
+                # last leaf glyph control
+                is_last_leaf = (b_i == len(batch_plan) - 1) and (r_i == reps - 1)
+                leaf_prefix = "└─ " if is_last_leaf else "├─ "
+                lines.append(child_prefix + leaf_prefix + paint(leaf, acq_state))
+
+                acq_abs += 1
+
+    if end < n_seq:
+        lines.append(f"<span style='{STYLE_TODO}'>… (+{n_seq-end} more sequences)</span>")
+
+    # render each line as a block so Streamlit can't collapse it into one row
+    body = "".join(f"<div>{ln}</div>" for ln in lines)
+
+    return (
+        "<div style='"
+        "margin:0; padding:8px 10px; background:#f8fafc; border:1px solid #e5e7eb; border-radius:8px; "
+        "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; "
+        "font-size:14px; line-height:1.35; "
+        "white-space:pre; "          # keep tree indentation + spacing
+        "overflow-x:auto; "          # avoid wrapping into one line
+        "max-width:100%;"
+        "'>"
+        + body
+        + "</div>"
+    )
+
+
 
 
 def ui_log(msg: str):
@@ -275,6 +430,7 @@ def render_run_preview(ph):
     """Compact run preview based ONLY on st.session_state['run_preview']."""
     with ph.container():
         with st.expander("Run Preview (updates on Apply All)", expanded=False):
+            
             rp = st.session_state.get("run_preview")
 
             if not rp:
@@ -446,6 +602,68 @@ def _normalize_batch_types(df: pd.DataFrame) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     return df
 
+def build_run_plan_from_saved(loop_src: pd.DataFrame, batch_src: pd.DataFrame):
+    """Build final_sequence + enabled batch df + totals from SAVED tables."""
+    # --- loop -> final_sequence (same order as run) ---
+    loop_df = loop_src.copy()
+    loop_df["Enable"] = loop_df["Enable"].map(_to_bool)
+    active = loop_df[loop_df["Enable"] == True].copy().sort_values("Level")
+
+    levels = {}
+    for _, row in active.iterrows():
+        vals = parse_values(row.get("Values", ""))
+        if vals:
+            levels.setdefault(int(row.get("Level", 1)), []).append({"p": row.get("Parameter"), "v": vals})
+
+    level_combos = []
+    for lvl in sorted(levels.keys()):
+        specs = levels[lvl]
+        if len(set(len(s["v"]) for s in specs)) > 1:
+            raise ValueError(f"Level {lvl} length mismatch")
+        zipped = zip(*[s["v"] for s in specs])
+        level_combos.append([{s["p"]: val for s, val in zip(specs, z)} for z in zipped])
+
+    final_sequence = [{}] if not level_combos else []
+    if level_combos:
+        for combo in itertools.product(*level_combos):
+            ctx = {}
+            for d in combo:
+                ctx.update(d)
+            final_sequence.append(ctx)
+
+    # --- batch enabled only ---
+    df_batch = _normalize_batch_types(batch_src).copy()
+    if "Run" in df_batch.columns:
+        df_batch["Run"] = df_batch["Run"].map(_to_bool)
+        df_batch = df_batch[df_batch["Run"] == True].reset_index(drop=True)
+
+    total_batch_runs = 0
+    for _, r in df_batch.iterrows():
+        try:
+            total_batch_runs += max(int(r.get("repeat", 1)), 1)
+        except Exception:
+            total_batch_runs += 1
+
+    total_acq = max(int(len(final_sequence) * total_batch_runs), 0)
+    return final_sequence, df_batch, total_acq
+
+
+def make_tree_snapshot(loop_src: pd.DataFrame, batch_src: pd.DataFrame) -> dict:
+    """Tree state stored in session_state; used for idle view + live updates."""
+    try:
+        final_sequence, df_batch, total_acq = build_run_plan_from_saved(loop_src, batch_src)
+    except Exception:
+        final_sequence, df_batch, total_acq = [], _normalize_batch_types(batch_src), 0
+
+    return dict(
+        final_sequence=final_sequence,
+        df_batch=df_batch,
+        done=0,                 # COMPLETED acquisitions
+        total_acq=total_acq,
+        current_seq_i=-1,       # -1 means "no current"
+        current_label="",
+        current_rep_i=0,
+    )
 
 import math
 
@@ -1028,6 +1246,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             )
             st.session_state["run_preview_dirty"] = False
 
+            st.session_state["tree_snapshot"] = make_tree_snapshot(st.session_state.loop_src, st.session_state.batch_src)
 
             run_notice_ph.success("✅ Applied Loop + Table.")
 
@@ -1039,6 +1258,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             st.session_state.batch_work = st.session_state.batch_src.copy()
 
             st.session_state["run_preview"] = build_run_preview(st.session_state.loop_src, st.session_state.batch_src)
+            st.session_state["tree_snapshot"] = make_tree_snapshot(st.session_state.loop_src, st.session_state.batch_src)
 
             run_notice_ph.info("↩️ Discarded Loop + Table edits.")
 
@@ -1114,8 +1334,30 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     ui_log("Initiating run...")
 
         # Always render preview near Run (it only CHANGES when Apply All / Discard All updates run_preview)
+        tree_live_ph = None
+
         with run_preview_ph.container():
             with st.expander("Run Preview (updates on Apply All)", expanded=False):
+                tree_live_ph = st.empty()   # LIVE status tree (updates during run)
+                # If no snapshot yet OR Apply/Discard changed the plan, rebuild snapshot from SAVED tables
+                if ("tree_snapshot" not in st.session_state) or st.session_state.get("run_preview_dirty", False):
+                    st.session_state["tree_snapshot"] = make_tree_snapshot(st.session_state.loop_src, st.session_state.batch_src)
+
+                snap = st.session_state["tree_snapshot"]
+
+                # Always show HTML tree (idle = all todo)
+                html_tree = build_run_status_tree_html(
+                    snap["final_sequence"],
+                    snap["df_batch"],
+                    done=snap["done"],
+                    total_acq=snap["total_acq"],
+                    current_seq_i=snap["current_seq_i"],
+                    current_label=snap["current_label"],
+                    current_rep_i=snap["current_rep_i"],
+                    max_seq_show=10,
+                )
+
+                tree_live_ph.markdown(html_tree, unsafe_allow_html=True)
                 if st.session_state.get("run_preview_dirty", True) or ("run_preview" not in st.session_state):
                     st.session_state["run_preview"] = build_run_preview(
                         st.session_state.loop_src,
@@ -1136,26 +1378,17 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     c3.metric("Total acquisitions", rp["total_acquisitions"])
                     c4.metric("Total frames", rp["total_frames"])
 
+                    
                     if rp.get("labels"):
                         st.caption("Run structure (sample of combined sequence order):")
-                        tree_txt = build_run_preview_text_tree(
-                            st.session_state.loop_src,
-                            st.session_state.batch_src,
-                            max_branch=2,
-                            max_batch=6,
-                            max_lines=120,
-                        )
-
-                        st.code(tree_txt)
+                        
+                    # Store placeholder for run-time updates (closure-friendly)
+                    st.session_state["_tree_live_enabled"] = True
 
                     if rp.get("examples"):
                         st.caption("Example loop conditions:")
                         for s in rp["examples"]:
                             st.write(f"- {s}")
-
-
-
-
 
     # --- log panel
     with c_log:
@@ -1168,12 +1401,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                 ui_log("")
 
     # --- execution
-    def run_and_log():
+    def run_and_log(tree_live_ph=None):
         # progress bar helper
-        def _short(s: str, n: int = 110) -> str:
-            s = str(s).replace("\n", " ").strip()
-            return s if len(s) <= n else s[: n - 1] + "…"
-
         def _fmt_ctx(ctx_vars: dict) -> str:
             """Compact loop context string."""
             # order matters for readability
@@ -1195,79 +1424,6 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     except Exception:
                         parts.append(f"{k0}={ctx_vars[k]}")
             return ", ".join(parts) if parts else "(no loop vars)"
-
-
-
-        lf6 = st.session_state.get("lf6")
-        ui_log("Building sequence...")
-
-        loop_df = st.session_state.loop_src.copy()
-        loop_df["Enable"] = loop_df["Enable"].map(_to_bool)
-        active = loop_df[loop_df["Enable"] == True].copy().sort_values("Level")
-
-        levels = {}
-        for _, row in active.iterrows():
-            vals = parse_values(row.get("Values", ""))
-            if vals:
-                levels.setdefault(int(row.get("Level", 1)), []).append({"p": row.get("Parameter"), "v": vals})
-
-        level_combos = []
-        for lvl in sorted(levels.keys()):
-            specs = levels[lvl]
-            if len(set(len(s["v"]) for s in specs)) > 1:
-                ui_log(f"Error: Level {lvl} length mismatch.")
-                return
-            zipped = zip(*[s["v"] for s in specs])
-            level_combos.append([{s["p"]: val for s, val in zip(specs, z)} for z in zipped])
-
-        final_sequence = [{}] if not level_combos else []
-        if level_combos:
-            for combo in itertools.product(*level_combos):
-                ctx = {}
-                for d in combo:
-                    ctx.update(d)
-                final_sequence.append(ctx)
-
-        ui_log(f"Generated {len(final_sequence)} conditions.")
-
-        df_batch = _normalize_batch_types(st.session_state.batch_src).copy()
-        if "Run" in df_batch.columns:
-            df_batch["Run"] = df_batch["Run"].apply(_to_bool)
-            df_batch = df_batch[df_batch["Run"] == True]
-
-        if df_batch.empty:
-            ui_log("No batch rows enabled (checked).")
-            return
-
-        # --- execution
-    def run_and_log():
-        # progress bar helper
-        def _short(s: str, n: int = 110) -> str:
-            s = str(s).replace("\n", " ").strip()
-            return s if len(s) <= n else s[: n - 1] + "…"
-
-        def _fmt_ctx(ctx_vars: dict) -> str:
-            """Compact loop context string."""
-            # order matters for readability
-            keys = [
-                "Center Wavelength (nm)",
-                "Exposure Time (ms)",
-                "Stage Position",
-                "Accumulations (EPF)",
-                "Rotation1 Angle (deg)",
-                "Rotation2 Angle (deg)",
-            ]
-            parts = []
-            for k in keys:
-                if k in ctx_vars and ctx_vars[k] is not None and str(ctx_vars[k]).strip() != "":
-                    k0 = k.split("(")[0].strip()
-                    try:
-                        v = float(ctx_vars[k])
-                        parts.append(f"{k0}={v:g}")
-                    except Exception:
-                        parts.append(f"{k0}={ctx_vars[k]}")
-            return ", ".join(parts) if parts else "(no loop vars)"
-
 
 
         lf6 = st.session_state.get("lf6")
@@ -1325,6 +1481,37 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
         total_acq = max(int(total_conditions * total_batch_runs), 1)
         done = 0
+        # keep snapshot in sync so the preview tree stays updated even after run ends
+        st.session_state["tree_snapshot"] = dict(
+            final_sequence=final_sequence,
+            df_batch=df_batch.reset_index(drop=True).copy(),
+            done=0,
+            total_acq=total_acq,
+            current_seq_i=0 if total_conditions > 0 else -1,
+            current_label=sanitize_filename(df_batch.iloc[0].get("condition_label", "")) if not df_batch.empty else "",
+            current_rep_i=0,
+        )
+
+        # ---- init LIVE status tree (all TODO, first item highlighted) ----
+        if tree_live_ph is not None:
+            try:
+                first_label = sanitize_filename(df_batch.iloc[0].get("condition_label", "")) if not df_batch.empty else ""
+                tree_live_ph.markdown(
+                    build_run_status_tree_html(
+                        final_sequence,
+                        df_batch,
+                        done=0,
+                        total_acq=total_acq,
+                        current_seq_i=0,
+                        current_label=first_label,
+                        current_rep_i=0,
+                        max_seq_show=8,
+                    ),
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                pass
+
 
 
         run_progress_text_ph.info("Preparing run…")
@@ -1406,22 +1593,52 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     stem_final = unique_stem(out_dir, stem_base)
 
                     # ---- progress update (NOW we can show filename) ----
-                    done += 1
-                    pct = int(100 * done / total_acq)
+                    # show "current" progress BEFORE running
+                    running_idx = done + 1
+                    pct = int(100 * running_idx / total_acq)
                     pct = min(max(pct, 0), 100)
 
-                    # progress bar text must be plain (no markdown)
-                    bar_text = f"{done}/{total_acq} • Seq {seq_i+1}/{total} • {cond_label}"
+                    bar_text = f"Running {running_idx-1}/{total_acq} • Seq {seq_i+1}/{total} • {cond_label}"
                     if supports_text:
                         bar.progress(pct, text=bar_text)
                     else:
                         bar.progress(pct)
+
 
                     # markdown below (styled): filename + only missing sweep info
                     run_progress_text_ph.markdown(
                         f"**{stem_final}.csv**  \n"
                         f"Vbg `{vbg_s:g}→{vbg_e:g}` • Vtg `{vtg_s:g}→{vtg_e:g}` • frs `{frames}` • rep **{r_i+1}/{n_rep}**"
                     )
+
+                    # ---- LIVE tree: highlight current (done = completed so far) ----
+                    if tree_live_ph is not None:
+                        try:
+
+                            st.session_state["tree_snapshot"].update(
+                                done=done,
+                                total_acq=total_acq,
+                                current_seq_i=seq_i,
+                                current_label=cond_label,
+                                current_rep_i=r_i,
+                            )
+                            snap = st.session_state["tree_snapshot"]
+                            tree_live_ph.markdown(
+                                build_run_status_tree_html(
+                                    snap["final_sequence"],
+                                    snap["df_batch"],
+                                    done=snap["done"],
+                                    total_acq=snap["total_acq"],
+                                    current_seq_i=snap["current_seq_i"],
+                                    current_label=snap["current_label"],
+                                    current_rep_i=snap["current_rep_i"],
+                                    max_seq_show=8,
+                                ),
+                                unsafe_allow_html=True,
+                            )
+                        except Exception:
+                            pass
+
 
                     # ---- build recipe and run ----
                     recipe = [
@@ -1457,8 +1674,27 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         stem_final,
                         progress_cb=ui_log,
                     )
-
-
+                    done += 1
+                                    
+                    if tree_live_ph is not None:
+                        try:
+                            st.session_state["tree_snapshot"].update(done=done)
+                            snap = st.session_state["tree_snapshot"]
+                            tree_live_ph.markdown(
+                                build_run_status_tree_html(
+                                    snap["final_sequence"],
+                                    snap["df_batch"],
+                                    done=snap["done"],
+                                    total_acq=snap["total_acq"],
+                                    current_seq_i=snap["current_seq_i"],
+                                    current_label=snap["current_label"],
+                                    current_rep_i=snap["current_rep_i"],
+                                    max_seq_show=8,
+                                ),
+                                unsafe_allow_html=True,
+                            )
+                        except Exception:
+                            pass
 
 
         # finish
@@ -1469,9 +1705,33 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
         run_progress_text_ph.success("✅ Run complete.")
         ui_log("Run Complete.")
+        if tree_live_ph is not None:
+            st.session_state["tree_snapshot"].update(
+                done=total_acq,
+                current_seq_i=-1,
+                current_label="",
+                current_rep_i=0,
+            )
+            snap = st.session_state["tree_snapshot"]
+            tree_live_ph.markdown(
+                build_run_status_tree_html(
+                    snap["final_sequence"],
+                    snap["df_batch"],
+                    done=snap["done"],
+                    total_acq=snap["total_acq"],
+                    current_seq_i=snap["current_seq_i"],
+                    current_label=snap["current_label"],
+                    current_rep_i=snap["current_rep_i"],
+                    max_seq_show=8,
+                ),
+                unsafe_allow_html=True,
+            )
 
 
 
     if st.session_state.get("_start_run"):
         st.session_state.pop("_start_run", None)
-        run_and_log()
+        
+        run_and_log(tree_live_ph)
+        
+
