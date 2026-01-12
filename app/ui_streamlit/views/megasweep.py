@@ -521,6 +521,17 @@ def render(devices):
         o_in = np.arange(len(pts), dtype=float)
         # --- measured progress for preview overlay ---
         measured_n = int(min(st.session_state.get("megasweep_measured_n", 0), len(pts)))
+        running = bool(st.session_state.get("megasweep_running", False))
+        # "current point" index:
+        # - while running: highlight the NEXT point to be measured (measured_n = already finished count)
+        # - when not running: highlight the LAST measured point
+        if len(pts) > 0:
+            if running:
+                cur_i = min(measured_n, len(pts) - 1)
+            else:
+                cur_i = min(max(measured_n - 1, 0), len(pts) - 1)
+        else:
+            cur_i = None
 
         # --- colors for "order" (used for hollow edges and filled measured points) ---
         cmap = plt.cm.viridis
@@ -600,6 +611,24 @@ def render(devices):
 
                     ax.scatter([x_in[-1]], [y_in[-1]], s=60, marker="s", edgecolors="k", linewidths=1.0, zorder=5)
                     ax.annotate("END", (x_in[-1], y_in[-1]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+                    # --- CURRENT point highlight (red ring + dot) ---
+                    if cur_i is not None and len(x_in) > 0:
+                        cx, cy = float(x_in[cur_i]), float(y_in[cur_i])
+
+                        # big red ring
+                        ax.scatter([cx], [cy],
+                                s=160, marker="o",
+                                facecolors="none", edgecolors="red",
+                                linewidths=2.8, zorder=20)
+
+                        # small red filled dot
+                        ax.scatter([cx], [cy],
+                                s=28, marker="o",
+                                color="red", zorder=21)
+
+                        ax.annotate("NOW", (cx, cy),
+                                    xytext=(8, -12), textcoords="offset points",
+                                    color="red", fontsize=9, fontweight="bold", zorder=22)
 
                 # out-of-bounds points: red X
                 if len(x_out) > 0:
@@ -697,6 +726,22 @@ def render(devices):
 
                     ax2.scatter([dop_in[-1]], [fld_in[-1]], s=70, marker="s", edgecolors="k", linewidths=1.2, zorder=5)
                     ax2.annotate("END", (dop_in[-1], fld_in[-1]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+                    # --- CURRENT point highlight (red ring + dot) ---
+                    if cur_i is not None and len(dop_in) > 0:
+                        cd, cf = float(dop_in[cur_i]), float(fld_in[cur_i])
+
+                        ax2.scatter([cd], [cf],
+                                    s=160, marker="o",
+                                    facecolors="none", edgecolors="red",
+                                    linewidths=2.8, zorder=20)
+
+                        ax2.scatter([cd], [cf],
+                                    s=28, marker="o",
+                                    color="red", zorder=21)
+
+                        ax2.annotate("NOW", (cd, cf),
+                                    xytext=(8, -12), textcoords="offset points",
+                                    color="red", fontsize=9, fontweight="bold", zorder=22)
 
                 # out-of-bounds: red X
                 if len(dop_out) > 0:
