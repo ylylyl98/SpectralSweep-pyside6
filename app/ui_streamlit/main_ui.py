@@ -308,6 +308,19 @@ st.session_state.setdefault("lf6_auto_load_on_connect", True)
 
 # Create a single devices dict early so all panels can add to it
 devices = {}
+# Persist SMU compliance per *address* across reruns
+st.session_state.setdefault("smu_compliance_by_addr", {})  # {addr: {"curr": float, "volt": float}}
+
+import re
+def _addr_key(addr: str) -> str:
+    # Streamlit widget keys should be stable and simple
+    return re.sub(r"[^0-9a-zA-Z_]+", "_", str(addr))
+
+def _get_comp(addr: str):
+    d = st.session_state["smu_compliance_by_addr"].setdefault(str(addr), {})
+    d.setdefault("curr", 1e-6)   # default current compliance (A)
+    d.setdefault("volt", 20.0)   # default voltage range/compliance (V)
+    return d
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -468,7 +481,16 @@ with st.sidebar.expander("IV Instruments (VISA)", expanded=False):
             def make_inst(addr, role=None):
                 term_arg = None if term == "" else term
                 if role in ("Vbg", "Vtg", "Vbias"):
-                    return KeithControl(address=addr, name=f"{role}_SMU", variable_name=role, rm=rm)
+                    kc = KeithControl(address=addr, name=f"{role}_SMU", variable_name=role, rm=rm)
+
+                    # Apply persisted compliance every rerun (since kc is recreated every rerun)
+                    comp = _get_comp(addr)
+                    try:
+                        kc.set_volt_step(curr_compliance=float(comp["curr"]), volt_compliance=float(comp["volt"]))
+                    except Exception:
+                        pass
+
+                    return kc
                 inst = PyvisaInstrument(address=addr, name=addr, termination=term_arg, rm=rm)
                 try:
                     inst.timeout = 5000
@@ -516,6 +538,69 @@ if "iv" in devices:
 
         # 1. Create a placeholder for status messages so they persist clearly
         gate_status = st.empty()
+
+        # ── Compliance UI (per Keithley address) ────────────────────────────────
+        iv_dev = devices.get("iv")
+        role_map = getattr(iv_dev, "role_map", {}) if iv_dev is not None else {}
+
+        with st.expander("⚙️ Compliance (per Keithley)", expanded=False):
+            st.caption("Values are saved per SMU address and auto-applied on every rerun.")
+
+            for role, label in [("Vtg", "Top gate (Vtg)"), ("Vbg", "Back gate (Vbg)"), ("Vbias", "Bias (Vbias)")]:
+                addr = (role_map or {}).get(role)
+                if not addr:
+                    st.markdown(f"**{label}** — _not mapped_")
+                    st.markdown("---")
+                    continue
+
+                comp = _get_comp(addr)
+                ak = _addr_key(addr)
+
+                st.markdown(f"**{label}**  \n`{addr}`")
+
+                c1, c2, c3 = st.columns([1.2, 1.2, 0.8])
+                with c1:
+                    curr = st.number_input(
+                        "Current compliance (A)",
+                        min_value=0.0,
+                        format="%.2e",
+                        key=f"comp_curr_{ak}",
+                        value=float(comp["curr"]),
+                    )
+                with c2:
+                    volt = st.number_input(
+                        "Voltage compliance / range (V)",
+                        min_value=0.0,
+                        step=1.0,
+                        key=f"comp_volt_{ak}",
+                        value=float(comp["volt"]),
+                    )
+
+                # Persist immediately so it survives any rerun
+                comp["curr"] = float(curr)
+                comp["volt"] = float(volt)
+
+                with c3:
+                    if st.button("Apply", key=f"btn_apply_comp_{ak}"):
+                        try:
+                            # best-effort: get the instrument from the IV setup
+                            setup = getattr(iv_dev, "setup", None) or getattr(iv_dev, "iv_setup", None)
+                            xcc = getattr(setup, "x_channel_collection", None) if setup else None
+                            inst = xcc.get_instrument(role) if (xcc and hasattr(xcc, "get_instrument")) else None
+                            if inst and hasattr(inst, "set_volt_step"):
+                                inst.set_volt_step(curr_compliance=float(curr), volt_compliance=float(volt))
+                                gate_status.success(f"✅ {role}: I={float(curr):.2e} A, V={float(volt):g} V")
+                            else:
+                                gate_status.warning(f"{role}: instrument not available for apply.")
+                        except Exception as e:
+                            gate_status.error(f"{role}: apply failed: {e}")
+
+                st.markdown("---")
+
+
+
+
+
 
         b_col1, b_col2, b_col3 = st.columns(3)
         with b_col1:
