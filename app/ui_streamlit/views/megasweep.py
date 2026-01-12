@@ -5,7 +5,8 @@ import re
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from pathlib import Path
-
+from datetime import datetime
+import math
 BASE_OUT = Path(r"D:\instrument_control_v3_1")
 EPS = 1e-9  # kept for future use if needed
 
@@ -13,7 +14,77 @@ EPS = 1e-9  # kept for future use if needed
 # Helpers
 # -------------------------
 
-import math
+def apply_lf6_settings(lf6, center_nm: float, exp_ms: float, frames: int):
+    """Try hard to apply center/exposure/frames on many LF6 wrappers."""
+    if lf6 is None:
+        return
+
+    # center
+    if hasattr(lf6, "change_spectra_center"):
+        try:
+            lf6.change_spectra_center(f"{float(center_nm):.0f}")
+        except Exception:
+            lf6.change_spectra_center(center_nm)
+        time.sleep(0.15)
+
+    # exposure
+    if hasattr(lf6, "change_expose_time"):
+        try:
+            lf6.change_expose_time(float(exp_ms))
+        except Exception:
+            lf6.change_expose_time(exp_ms)
+        time.sleep(0.10)
+
+    # frames / accumulations (some wrappers use one, some the other; some expose both)
+    n = int(frames)
+    set_ok = False
+
+    # 1) common wrapper APIs
+    for fn in ("set_accumulations", "set_frames"):
+        if hasattr(lf6, fn):
+            try:
+                getattr(lf6, fn)(n)
+                ui_log(f"LF6: {fn}({n})")
+                set_ok = True
+                break
+            except Exception as e:
+                ui_log(f"LF6: {fn} failed: {e}")
+
+    # 2) YOUR LF6 automation API: OnlineProcessingFrameCombinationFramesCombined
+    if not set_ok:
+        for target in (lf6, getattr(lf6, "setup", None)):
+            if target is None:
+                continue
+            if hasattr(target, "change_frame_to_combine"):
+                try:
+                    target.change_frame_to_combine(n)
+                    ui_log(f"LF6: change_frame_to_combine({n})")
+                    set_ok = True
+                    break
+                except Exception as e:
+                    ui_log(f"LF6: change_frame_to_combine failed: {e}")
+
+    if not set_ok:
+        ui_log("LF6: no supported frame/accum method found (need set_frames/set_accumulations or change_frame_to_combine).")
+
+    # (optional) readback confirmation
+    # rb = None
+    # if hasattr(lf6, "readback_online_process"):
+    #     try:
+    #         rb = lf6.readback_online_process()
+    #     except Exception:
+    #         rb = None
+    # elif hasattr(getattr(lf6, "setup", None), "readback_online_process"):
+    #     try:
+    #         rb = lf6.setup.readback_online_process()
+    #     except Exception:
+    #         rb = None
+
+    # if rb is not None:
+    #     ui_log(f"LF6 online process readback: {rb}")
+
+    if not set_ok:
+        ui_log("LF6: no set_frames/set_accumulations method found.")
 
 def build_sweep_points(outer_vals, inner_vals,
                       lim_vtg_min, lim_vtg_max, lim_vbg_min, lim_vbg_max,
@@ -31,11 +102,9 @@ def build_sweep_points(outer_vals, inner_vals,
                 pts.append((float(vtg), float(vbg)))
     return pts
 
+
 def build_scan_path(outer_vals, inner_vals, is_snake: bool = True):
-    """
-    Returns ALL planned (vtg, vbg) points in the exact scan traversal order,
-    including points outside safety limits.
-    """
+    """ALL planned points in traversal order (includes out-of-safety)."""
     pts = []
     for i, vtg in enumerate(outer_vals):
         reverse = bool(is_snake) and (i % 2 == 1)
@@ -43,6 +112,30 @@ def build_scan_path(outer_vals, inner_vals, is_snake: bool = True):
         for vbg in seq:
             pts.append((float(vtg), float(vbg)))
     return pts
+
+def ui_log(msg: str, keep_last: int = 300):
+    """Append a timestamped log line to session_state."""
+    ts = datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    st.session_state.setdefault("megasweep_log", [])
+    st.session_state["megasweep_log"].append(line)
+    if len(st.session_state["megasweep_log"]) > keep_last:
+        st.session_state["megasweep_log"] = st.session_state["megasweep_log"][-keep_last:]
+
+def refresh_log_box(log_ph=None, tail: int = 200):
+    """Update the on-screen log box immediately (if placeholder exists)."""
+    if log_ph is None:
+        return
+    txt = "\n".join(st.session_state.get("megasweep_log", [])[-tail:]) or "(no messages)"
+    log_ph.code(txt, language="")
+
+
+def _megasweep_reset_tracking(reason: str = ""):
+    st.session_state["megasweep_measured_n"] = 0
+    st.session_state["megasweep_running"] = False
+    if reason:
+        ui_log(f"Reset measured state: {reason}")
+
 
 
 NAN = float("nan")
@@ -267,6 +360,10 @@ def get_wavelengths_or_fail(spec, lf6, target_center_nm: float, tol_nm: float) -
 # -------------------------
 def render(devices):
     st.header("⚡ MegaSweep (Vtg stripes, Vbg ratio-scaled step)")
+    st.session_state.setdefault("megasweep_log", [])
+    st.session_state.setdefault("megasweep_measured_n", 0)
+    st.session_state.setdefault("megasweep_running", False)
+    st.session_state.setdefault("megasweep_sig", None)
 
     iv = devices.get("iv")
     spec = devices.get("spectrometer")
@@ -298,7 +395,16 @@ def render(devices):
         with c_opt1: laser_nm = st.text_input("Laser (nm)", "730")
         with c_opt2: power_uw = st.text_input("Power (µW)", "1")
         with c_opt3: lf_exp = st.number_input("Exp (ms)", value=100.0, step=10.0)
-        with c_opt4: lf_epf = st.number_input("Frames/Accums", value=20, min_value=1)
+        with c_opt4:
+            lf_epf = st.number_input(
+                "Frames/Accums",
+                value=20,
+                min_value=1,
+                step=1,
+                format="%d",
+            )
+        lf_epf = int(lf_epf)
+
         with c_opt5: lf_center = st.number_input("Center (nm)", value=730.0, step=1.0)
 
         default_pattern = "${sample}$~${tag}$~$REF{center_nm}nm{exp_s}msx{epf}$~"
@@ -413,6 +519,13 @@ def render(devices):
         x_in = np.array([p[0] for p in pts], dtype=float)
         y_in = np.array([p[1] for p in pts], dtype=float)
         o_in = np.arange(len(pts), dtype=float)
+        # --- measured progress for preview overlay ---
+        measured_n = int(min(st.session_state.get("megasweep_measured_n", 0), len(pts)))
+
+        # --- colors for "order" (used for hollow edges and filled measured points) ---
+        cmap = plt.cm.viridis
+        norm = plt.Normalize(vmin=0, vmax=max(1, len(o_in) - 1))
+        colors_in = cmap(norm(o_in))  # RGBA per point (run order)
 
         st.caption(
             f"Planned: **{len(path_pts)}** | In safety (run): **{len(pts)}** | Out of safety: **{len(path_pts)-len(pts)}**"
@@ -447,17 +560,42 @@ def render(devices):
                 if len(x_all) >= 2:
                     ax.plot(x_all, y_all, linewidth=1, alpha=0.25)
 
-                # in-bounds points: colored by RUN order
+                # in-bounds path line (run path)
+                if len(x_in) >= 2:
+                    ax.plot(x_in, y_in, linewidth=1, alpha=0.6)
+
+                # --- unmeasured = hollow circles (edge colored by order) ---
                 if len(x_in) > 0:
-                    sc = ax.scatter(x_in, y_in, s=18, c=o_in, cmap="viridis")
-                    cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+                    ax.scatter(
+                        x_in, y_in,
+                        s=40,
+                        facecolors="none",          # hollow
+                        edgecolors=colors_in,       # order color
+                        linewidths=1.2,
+                        alpha=0.9,
+                        zorder=3
+                    )
+
+                    # --- measured = filled circles (same order color) ---
+                    if measured_n > 0:
+                        ax.scatter(
+                            x_in[:measured_n], y_in[:measured_n],
+                            s=55,
+                            facecolors=colors_in[:measured_n],  # filled
+                            edgecolors="k",
+                            linewidths=0.6,
+                            alpha=1.0,
+                            zorder=5
+                        )
+
+                    # colorbar for order (independent of scatter style)
+                    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+                    sm.set_array([])  # needed for mpl<3.8 sometimes
+                    cb = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
                     cb.set_label("Order (run)")
 
-                    if len(x_in) >= 2:
-                        ax.plot(x_in, y_in, linewidth=1, alpha=0.6)
-
                     # START/END are run start/end (in-bounds)
-                    ax.scatter([x_in[0]], [y_in[0]], s=60, marker="o", edgecolors="k", linewidths=1.0, zorder=5)
+                    ax.scatter([x_in[0]], [y_in[0]], s=60, marker="v", edgecolors="k", linewidths=1.0, zorder=5)
                     ax.annotate("START", (x_in[0], y_in[0]), xytext=(6, 6), textcoords="offset points", fontsize=9)
 
                     ax.scatter([x_in[-1]], [y_in[-1]], s=60, marker="s", edgecolors="k", linewidths=1.0, zorder=5)
@@ -488,10 +626,13 @@ def render(devices):
             ax.set_xlabel("Vtg (V)")
             ax.set_ylabel("Vbg (V)")
             ax.grid(True, linestyle="--", alpha=0.4)
-            fig.tight_layout()
 
             # use full column width (looks much nicer in Streamlit)
-            st.pyplot(fig, width="content")
+            plot_v_ph = st.empty()          # <--- ADD this placeholder (keep variable name)
+            fig.tight_layout()
+            plot_v_ph.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+
 
             # still communicate safety limits even when zoomed
             st.caption(f"Safety limits: Vtg[{lim_vtg_min:g}, {lim_vtg_max:g}]  |  Vbg[{lim_vbg_min:g}, {lim_vbg_max:g}]")
@@ -514,17 +655,44 @@ def render(devices):
                 if len(dop_all) >= 2:
                     ax2.plot(dop_all, fld_all, linewidth=1, alpha=0.25)
 
-                # in-bounds points colored by run order
+                # in-bounds path line (run path)
+                if len(dop_in) >= 2:
+                    ax2.plot(dop_in, fld_in, linewidth=1, alpha=0.6)
+
                 if len(dop_in) > 0:
-                    sc2 = ax2.scatter(dop_in, fld_in, s=18, c=o_in, cmap="viridis")
-                    cb2 = fig2.colorbar(sc2, ax=ax2, fraction=0.046, pad=0.04)
+                    # unmeasured = hollow circles
+                    ax2.scatter(
+                        dop_in, fld_in,
+                        s=40,
+                        facecolors="none",
+                        edgecolors=colors_in,
+                        linewidths=1.2,
+                        alpha=0.9,
+                        zorder=3
+                    )
+
+                    # measured = filled circles
+                    if measured_n > 0:
+                        ax2.scatter(
+                            dop_in[:measured_n], fld_in[:measured_n],
+                            s=55,
+                            facecolors=colors_in[:measured_n],
+                            edgecolors="k",
+                            linewidths=0.6,
+                            alpha=1.0,
+                            zorder=5
+                        )
+
+                    # colorbar for order
+                    sm2 = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+                    sm2.set_array([])
+                    cb2 = fig2.colorbar(sm2, ax=ax2, fraction=0.046, pad=0.04)
                     cb2.set_label("Order (run)")
 
-                    if len(dop_in) >= 2:
-                        ax2.plot(dop_in, fld_in, linewidth=1, alpha=0.6)
+
 
                     # START/END (run)
-                    ax2.scatter([dop_in[0]], [fld_in[0]], s=70, marker="o", edgecolors="k", linewidths=1.2, zorder=5)
+                    ax2.scatter([dop_in[0]], [fld_in[0]], s=70, marker="v", edgecolors="k", linewidths=1.2, zorder=5)
                     ax2.annotate("START", (dop_in[0], fld_in[0]), xytext=(6, 6), textcoords="offset points", fontsize=9)
 
                     ax2.scatter([dop_in[-1]], [fld_in[-1]], s=70, marker="s", edgecolors="k", linewidths=1.2, zorder=5)
@@ -537,29 +705,41 @@ def render(devices):
                 ax2.set_xlabel(f"D = r*Vtg + Vbg (r={ratio_val:g})")
                 ax2.set_ylabel("F = r*Vtg - Vbg")
                 ax2.grid(True, linestyle="--", alpha=0.4)
+
+                plot_p_ph = st.empty()          # <--- ADD this placeholder (keep variable name)
                 fig2.tight_layout()
-                st.pyplot(fig2, width="content")
+                plot_p_ph.pyplot(fig2,  width="content")
+                plt.close(fig2)
+
             else:
                 st.info("No points in preview (check grid).")
+
+        with st.expander("📜 MegaSweep log", expanded=False):
+            cL1, cL2 = st.columns([1, 1])
+            with cL1:
+                if st.button("Clear log",  width="stretch", key="megasweep_clear_log"):
+                    st.session_state["megasweep_log"] = []
+            with cL2:
+                if st.button("Reset measured",  width="stretch", key="megasweep_reset_measured"):
+                    _megasweep_reset_tracking("User reset")
+
+            log_ph = st.empty()
+            log_text = "\n".join(st.session_state.get("megasweep_log", [])[-200:]) or "(no messages)"
+            log_ph.code(log_text, language="")
 
 
         
     if start_clicked:
         try:
+            st.session_state["megasweep_running"] = True
+            st.session_state["megasweep_measured_n"] = 0
+            ui_log("START pressed. Beginning sweep.")
+
             # Spectrometer config (apply center/exposure/frames on the LF6 object)
             if lf6 is not None:
-                if hasattr(lf6, 'change_spectra_center'):
-                    # send as string first (LightField UI often expects text)
-                    try:
-                        lf6.change_spectra_center(f"{float(lf_center):.0f}")
-                    except Exception:
-                        lf6.change_spectra_center(lf_center)
-                if hasattr(lf6, 'change_expose_time'):
-                    lf6.change_expose_time(lf_exp)
-                if hasattr(lf6, 'set_frames'):
-                    lf6.set_frames(lf_epf)
-                elif hasattr(lf6, 'set_accumulations'):
-                    lf6.set_accumulations(lf_epf)
+                apply_lf6_settings(lf6, center_nm=lf_center, exp_ms=lf_exp, frames=lf_epf)
+
+
             # --- Vbias mapping check if requested ---
             if enable_vbias:
                 has_vbias = bool(getattr(iv, "has_role", lambda *_: False)("Vbias"))
@@ -590,7 +770,7 @@ def render(devices):
                 st.error("Could not obtain wavelength calibration (wls empty). Aborting to avoid corrupt CSV.")
                 st.stop()
 
-            st.caption(f"λ mid ≈ {_midpoint_nm(wls):.3f} nm")
+            # st.caption(f"λ mid ≈ {_midpoint_nm(wls):.3f} nm")
 
             include_setpoints = False  # (you commented out the checkbox; keep False so code won't crash)
 
@@ -626,29 +806,57 @@ def render(devices):
 
             total_pts = len(pts)
 
+            ui_log(f"Sweep points (in safety): {total_pts}. Planned total: {len(path_pts)}. Skipped(out of safety): {len(path_pts)-total_pts}.")
 
             # Initial safe ramp to the first corner
             # Optional: set Vbias once (constant throughout sweep)
             vbias_set_val = float(vbias_set) if enable_vbias else NAN
 
+            # --- log current readbacks before ramp-to-start (if available) ---
+            vbg0, vtg0 = _read_gates_readback(iv)
+            ui_log(f"Pre-ramp readback: Vtg={vtg0:.3f}, Vbg={vbg0:.3f}")
+            refresh_log_box(log_ph if "log_ph" in locals() else None)
+
+            # --- Vbias ramp (optional) ---
+            vbias_set_val = float(vbias_set) if enable_vbias else NAN
             if enable_vbias:
+                vb0 = _read_bias_readback(iv)
+                ui_log(f"Ramping Vbias: from {vb0:.3f} -> {vbias_set_val:.3f} (ramp_step={vbias_ramp_step:.3f}, delay={go_delay:.3f})")
+                refresh_log_box(log_ph if "log_ph" in locals() else None)
+
                 try:
-                    # ramp Vbias for safety
                     if hasattr(iv, "set_bias"):
                         iv.set_bias(Vbias=vbias_set_val, delay_s=go_delay, ramp_step=float(vbias_ramp_step))
                     else:
                         st.error("IV device has no set_bias().")
                         st.stop()
-
                     time.sleep(settle_delay)
+                    vb1 = _read_bias_readback(iv)
+                    ui_log(f"Vbias reached (readback): {vb1:.3f}  | settle={settle_delay:.3f}s")
+                    refresh_log_box(log_ph if "log_ph" in locals() else None)
                 except Exception as e:
                     st.error(f"Failed to set Vbias: {e}")
                     st.stop()
 
-            first_vtg, first_vbg = pts[0]  # first ACTUAL executed point (in-bounds + snake)
+            # --- ramp to first ACTUAL executed point ---
+            first_vtg, first_vbg = pts[0]
+            ui_log(f"Ramping to START point: Vtg={first_vtg:.3f}, Vbg={first_vbg:.3f} (ramp_step={go_step:.3f}, delay={go_delay:.3f})")
+            refresh_log_box(log_ph if "log_ph" in locals() else None)
+
+            # ramp Vtg then Vbg (keep your original order)
             iv.set_gates(Vtg=first_vtg, delay_s=go_delay, ramp_step=go_step)
+            ui_log(f"Vtg ramp complete (target={first_vtg:.3f})")
+            refresh_log_box(log_ph if "log_ph" in locals() else None)
+
             iv.set_gates(Vbg=first_vbg, delay_s=go_delay, ramp_step=go_step)
+            ui_log(f"Vbg ramp complete (target={first_vbg:.3f})")
+            refresh_log_box(log_ph if "log_ph" in locals() else None)
+
             time.sleep(settle_delay)
+            vbg1, vtg1 = _read_gates_readback(iv)
+            ui_log(f"START reached (readback): Vtg={vtg1:.3f}, Vbg={vbg1:.3f}  | settle={settle_delay:.3f}s")
+            refresh_log_box(log_ph if "log_ph" in locals() else None)
+
 
 
             # Sweep
@@ -685,16 +893,197 @@ def render(devices):
                     np.savetxt(f, row, fmt="%.6e", delimiter=",")
 
                     done += 1
+                    st.session_state["megasweep_measured_n"] = done
+
+                    # log each point (or throttle if you want)
+                    ui_log(f"{done}/{total_pts}: set Vtg={vtg:.3f}, Vbg={vbg:.3f} | meas Vtg={vtg_meas:.3f}, Vbg={vbg_meas:.3f}")
+
+                    # --- UI refresh: log every point, plots every point ---
+                    LOG_UPDATE_EVERY  = 1
+                    PLOT_UPDATE_EVERY = 1
+
+                    if (done % LOG_UPDATE_EVERY == 0) or (done == total_pts):
+                        log_text = "\n".join(st.session_state.get("megasweep_log", [])[-200:]) or "(no messages)"
+                        log_ph.code(log_text, language="")
+
+                    # Update plots (measured overlay)
+                    if (done % PLOT_UPDATE_EVERY == 0) or (done == total_pts):
+                        measured_n = int(min(done, len(pts)))   # done == measured count
+
+                        # ---------------------------
+                        # Voltage plot refresh
+                        # ---------------------------
+                        fig, ax = plt.subplots(figsize=(4.4, 3.4))
+
+                        # safety box
+                        if st.session_state.get("megasweep_show_safety", True):
+                            rect = patches.Rectangle(
+                                (lim_vtg_min, lim_vbg_min),
+                                lim_vtg_max - lim_vtg_min,
+                                lim_vbg_max - lim_vbg_min,
+                                linewidth=1, fill=False, edgecolor="red", linestyle="--", alpha=0.8
+                            )
+                            ax.add_patch(rect)
+
+                        # planned path (light)
+                        if len(x_all) >= 2:
+                            ax.plot(x_all, y_all, linewidth=1, alpha=0.25)
+
+                        # order colors for in-bounds points
+                        if len(x_in) > 0:
+                            cmap = plt.cm.viridis
+                            norm = plt.Normalize(vmin=0, vmax=max(1, len(o_in) - 1))
+                            colors_in = cmap(norm(o_in))
+
+                            # in-bounds run path
+                            if len(x_in) >= 2:
+                                ax.plot(x_in, y_in, linewidth=1, alpha=0.6)
+
+                            # unmeasured = hollow
+                            ax.scatter(
+                                x_in, y_in,
+                                s=40, facecolors="none",
+                                edgecolors=colors_in,
+                                linewidths=1.2, alpha=0.9, zorder=3
+                            )
+
+                            # measured = filled
+                            if measured_n > 0:
+                                ax.scatter(
+                                    x_in[:measured_n], y_in[:measured_n],
+                                    s=55,
+                                    facecolors=colors_in[:measured_n],
+                                    edgecolors="k", linewidths=0.6,
+                                    zorder=5
+                                )
+
+                            # START / END
+                            ax.scatter([x_in[0]], [y_in[0]], s=60, marker="o", edgecolors="k", linewidths=1.0, zorder=6)
+                            ax.annotate("START", (x_in[0], y_in[0]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+                            ax.scatter([x_in[-1]], [y_in[-1]], s=60, marker="s", edgecolors="k", linewidths=1.0, zorder=6)
+                            ax.annotate("END", (x_in[-1], y_in[-1]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+
+                            # out-of-bounds = red X
+                            if len(x_out) > 0:
+                                ax.scatter(x_out, y_out, s=45, marker="x", color="red", linewidths=1.5, alpha=0.9, zorder=7)
+
+                            # colorbar
+                            sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+                            sm.set_array([])
+                            cb = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+                            cb.set_label("Order (run)")
+
+                        # zoom
+                        if st.session_state.get("megasweep_zoom", True) and len(x_all) > 0:
+                            xmin, xmax = float(np.min(x_all)), float(np.max(x_all))
+                            ymin, ymax = float(np.min(y_all)), float(np.max(y_all))
+                            span_x = max(1e-9, xmax - xmin)
+                            span_y = max(1e-9, ymax - ymin)
+                            pad_x = max(abs(vtg_step_eff), 0.05 * span_x)
+                            pad_y = max(abs(vbg_step),     0.05 * span_y)
+                            ax.set_xlim(xmin - pad_x, xmax + pad_x)
+                            ax.set_ylim(ymin - pad_y, ymax + pad_y)
+                        else:
+                            ax.set_xlim(lim_vtg_min, lim_vtg_max)
+                            ax.set_ylim(lim_vbg_min, lim_vbg_max)
+
+                        ax.set_xlabel("Vtg (V)")
+                        ax.set_ylabel("Vbg (V)")
+                        ax.grid(True, linestyle="--", alpha=0.4)
+                        fig.tight_layout()
+                        plot_v_ph.pyplot(fig, width="content")
+                        plt.close(fig)
+
+                        # ---------------------------
+                        # Physics plot refresh
+                        # ---------------------------
+                        fig2, ax2 = plt.subplots(figsize=(4.4, 3.4))
+
+                        dop_all = ratio_val * x_all + y_all
+                        fld_all = ratio_val * x_all - y_all
+
+                        dop_in  = ratio_val * x_in + y_in
+                        fld_in  = ratio_val * x_in - y_in
+
+                        dop_out = dop_all[~in_mask]
+                        fld_out = fld_all[~in_mask]
+
+                        if len(dop_all) >= 2:
+                            ax2.plot(dop_all, fld_all, linewidth=1, alpha=0.25)
+
+                        if len(dop_in) > 0:
+                            cmap = plt.cm.viridis
+                            norm = plt.Normalize(vmin=0, vmax=max(1, len(o_in) - 1))
+                            colors_in = cmap(norm(o_in))
+
+                            if len(dop_in) >= 2:
+                                ax2.plot(dop_in, fld_in, linewidth=1, alpha=0.6)
+
+                            # unmeasured hollow
+                            ax2.scatter(
+                                dop_in, fld_in,
+                                s=40, facecolors="none",
+                                edgecolors=colors_in,
+                                linewidths=1.2, alpha=0.9, zorder=3
+                            )
+
+                            # measured filled
+                            if measured_n > 0:
+                                ax2.scatter(
+                                    dop_in[:measured_n], fld_in[:measured_n],
+                                    s=55,
+                                    facecolors=colors_in[:measured_n],
+                                    edgecolors="k", linewidths=0.6,
+                                    zorder=5
+                                )
+
+                            # START / END
+                            ax2.scatter([dop_in[0]], [fld_in[0]], s=70, marker="o", edgecolors="k", linewidths=1.2, zorder=6)
+                            ax2.annotate("START", (dop_in[0], fld_in[0]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+                            ax2.scatter([dop_in[-1]], [fld_in[-1]], s=70, marker="s", edgecolors="k", linewidths=1.2, zorder=6)
+                            ax2.annotate("END", (dop_in[-1], fld_in[-1]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+
+                            # out-of-bounds red X
+                            if len(dop_out) > 0:
+                                ax2.scatter(dop_out, fld_out, s=45, marker="x", color="red", linewidths=1.5, alpha=0.9, zorder=7)
+
+                            sm2 = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+                            sm2.set_array([])
+                            cb2 = fig2.colorbar(sm2, ax=ax2, fraction=0.046, pad=0.04)
+                            cb2.set_label("Order (run)")
+
+                        ax2.set_xlabel(f"D = r*Vtg + Vbg (r={ratio_val:g})")
+                        ax2.set_ylabel("F = r*Vtg - Vbg")
+                        ax2.grid(True, linestyle="--", alpha=0.4)
+                        fig2.tight_layout()
+                        plot_p_ph.pyplot(fig2, width="content")
+                        plt.close(fig2)
+
+
+
                     prog.progress(done / total_pts)
 
             prog.progress(1.0)
             st.success("Done.")
+            ui_log("Sweep complete.")
+            st.session_state["megasweep_running"] = False
+            st.session_state["megasweep_measured_n"] = total_pts
 
             # Return to 0 safely
             try:
+                ui_log("Ramping back to 0V on Vtg/Vbg...")
+                refresh_log_box(log_ph if "log_ph" in locals() else None)
+
                 iv.set_gates(Vbg=0.0, Vtg=0.0, delay_s=go_delay, ramp_step=go_step)
-            except Exception:
-                pass
+                time.sleep(settle_delay)
+
+                vbgz, vtgz = _read_gates_readback(iv)
+                ui_log(f"Returned to 0V (readback): Vtg={vtgz:.3f}, Vbg={vbgz:.3f}")
+                refresh_log_box(log_ph if "log_ph" in locals() else None)
+            except Exception as e:
+                ui_log(f"Return-to-zero failed: {e}")
+                refresh_log_box(log_ph if "log_ph" in locals() else None)
+
 
         except Exception as e:
             st.error(f"Error: {e}")

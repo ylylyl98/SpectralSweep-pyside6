@@ -57,3 +57,23 @@ class SpectrometerLF6:
         except Exception:
             self.setup.change_spectra_center(center_nm)
         self.invalidate_wavelengths()
+
+    # ---- frames/accums convenience ----
+    def set_accumulations(self, n: int) -> None:
+        """
+        Map UI 'Frames/Accums' to LightField Online Processing:
+        OnlineProcesses -> Exposures per Frame.
+        """
+        if hasattr(self.setup, "change_frame_to_combine"):
+            self.setup.change_frame_to_combine(int(n))
+            return
+        raise AttributeError("LF6Setup has no change_frame_to_combine()")
+
+    def set_frames(self, n: int) -> None:
+        """Alias for set_accumulations (common naming)."""
+        self.set_accumulations(n)
+
+    # OPTIONAL but handy: forward any other LF6Setup methods automatically
+    def __getattr__(self, name):
+        return getattr(self.setup, name)
+
