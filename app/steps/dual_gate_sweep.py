@@ -96,8 +96,8 @@ class DualGateSweep:
         vbg_list = _as_float_list(np.linspace(self.vbg_start, self.vbg_stop, int(self.npts), dtype=float))
         vtg_list = _as_float_list(np.linspace(self.vtg_start, self.vtg_stop, int(self.npts), dtype=float))
 
-        log("Vbg sweep (setpoints): " + ", ".join(f"{x:g}" for x in vbg_list))
-        log("Vtg sweep (setpoints): " + ", ".join(f"{x:g}" for x in vtg_list))
+        # log("Vbg sweep (setpoints): " + ", ".join(f"{x:g}" for x in vbg_list))
+        # log("Vtg sweep (setpoints): " + ", ".join(f"{x:g}" for x in vtg_list))
 
         total = len(vbg_list)
 
@@ -114,12 +114,12 @@ class DualGateSweep:
         try:
             # --------- Ramp to start (ramped) ----------
             if iv:
-                log("Reading hardware state...")
+                # log("Reading hardware state...")
                 start_bg, start_tg = vbg_list[0], vtg_list[0]
                 # Use your adapter's ramp facility for a smooth move-in
                 try:
-                    log(f"Ramping to start: Vbg={start_bg:g} V, Vtg={start_tg:g} V "
-                        f"(step={self.ramp_step_size:g} V, delay={self.ramp_step_time:g} s)")
+                    
+                    log(f"Ramping to start: Vbg={start_bg:g} V, Vtg={start_tg:g} V ")
                     iv.set_gates(
                         Vbg=start_bg if has_vbg else None,
                         Vtg=start_tg if has_vtg else None,
@@ -172,11 +172,18 @@ class DualGateSweep:
 
                 # Read back actual values for logging & CSV
                 bg_meas, tg_meas = _safe_read_current(iv)
-                vbg_use = float(bg_meas if bg_meas is not None else vbg_set)
-                vtg_use = float(tg_meas if tg_meas is not None else vtg_set)
 
-                log(f"[{i+1}/{total}] Vbg_set={vbg_set:g} V, Vbg={vbg_use:g} V; "
-                    f"Vtg_set={vtg_set:g} V, Vtg={vtg_use:g} V")
+                nan = float("nan")
+                vbg_use = float(bg_meas) if (has_vbg and bg_meas is not None) else (float(vbg_set) if has_vbg else nan)
+                vtg_use = float(tg_meas) if (has_vtg and tg_meas is not None) else (float(vtg_set) if has_vtg else nan)
+
+                log(
+                    f"[{i+1}/{total}] "
+                    f"Vbg_set={vbg_set:g} V, Vbg={vbg_use:g} V; "
+                    f"Vtg_set={vtg_set:g} V, Vtg={vtg_use:g} V"
+                )
+
+
 
                 # Wait before spectral acquisition (integration settled etc.)
                 time.sleep(self.measure_delay)

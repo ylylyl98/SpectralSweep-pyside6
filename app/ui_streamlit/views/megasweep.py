@@ -12,6 +12,70 @@ EPS = 1e-9  # kept for future use if needed
 # -------------------------
 # Helpers
 # -------------------------
+
+import math
+
+def build_sweep_points(outer_vals, inner_vals,
+                      lim_vtg_min, lim_vtg_max, lim_vbg_min, lim_vbg_max,
+                      is_snake: bool = True):
+    """
+    Returns ordered list of (vtg, vbg) points EXACTLY as executed.
+    Stripe index i: reverse inner sweep if snake and i is odd.
+    """
+    pts = []
+    for i, vtg in enumerate(outer_vals):
+        reverse = bool(is_snake) and (i % 2 == 1)
+        seq = inner_vals[::-1] if reverse else inner_vals
+        for vbg in seq:
+            if (lim_vtg_min <= vtg <= lim_vtg_max) and (lim_vbg_min <= vbg <= lim_vbg_max):
+                pts.append((float(vtg), float(vbg)))
+    return pts
+
+def build_scan_path(outer_vals, inner_vals, is_snake: bool = True):
+    """
+    Returns ALL planned (vtg, vbg) points in the exact scan traversal order,
+    including points outside safety limits.
+    """
+    pts = []
+    for i, vtg in enumerate(outer_vals):
+        reverse = bool(is_snake) and (i % 2 == 1)
+        seq = inner_vals[::-1] if reverse else inner_vals
+        for vbg in seq:
+            pts.append((float(vtg), float(vbg)))
+    return pts
+
+
+NAN = float("nan")
+
+def _read_gates_readback(iv) -> tuple[float, float]:
+    """Return (Vbg_meas, Vtg_meas) as floats; NAN if unavailable."""
+    if iv is None or not hasattr(iv, "read_current_gates"):
+        return NAN, NAN
+    try:
+        bg, tg = iv.read_current_gates()
+        bg = float(bg) if bg is not None else NAN
+        tg = float(tg) if tg is not None else NAN
+        return bg, tg
+    except Exception:
+        return NAN, NAN
+
+def _read_bias_readback(iv) -> float:
+    """Return Vbias_meas as float; NAN if unavailable."""
+    if iv is None:
+        return NAN
+
+    # support either name
+    if hasattr(iv, "read_current_bias"):
+        try:
+            vb = iv.read_current_bias()
+            return float(vb) if vb is not None else NAN
+        except Exception:
+            return NAN
+
+    return NAN
+
+
+
 def sanitize_filename(s: str) -> str:
     for ch in '<>:"/\\|?*':
         s = s.replace(ch, "")
@@ -27,21 +91,16 @@ def unique_stem(out_dir: Path, stem: str) -> str:
     stem = sanitize_filename(stem)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Track the highest used index
     max_n = 0
-
-    # Treat old bare file (stem.csv) as occupying slot 1
     if (out_dir / f"{stem}.csv").exists():
         max_n = max(max_n, 1)
 
-    # Scan numbered files stem_###.csv
     pat = re.compile(re.escape(stem) + r"_(\d{3})\.csv$", re.IGNORECASE)
     for p in out_dir.glob(f"{stem}_*.csv"):
         m = pat.search(p.name)
         if m:
             max_n = max(max_n, int(m.group(1)))
 
-    # First numbered file if none exist → 001; otherwise increment
     next_n = 1 if max_n == 0 else max_n + 1
     return f"{stem}_{next_n:03d}"
 
@@ -87,20 +146,37 @@ def arange_inclusive(start: float, stop: float, step: float) -> np.ndarray:
             vals = np.append(vals, stop)
     return vals
 
+def _pad_or_trim(y: np.ndarray, n: int, pad_val: float = 0.0) -> np.ndarray:
+    """Force vector length == n (keeps CSV rectangular)."""
+    y = np.asarray(y, dtype=float).reshape(-1)
+    if n <= 0:
+        return y
+    if y.size > n:
+        return y[:n]
+    if y.size < n:
+        return np.pad(y, (0, n - y.size), constant_values=float(pad_val))
+    return y
+
 # ---------- Always return intensity for saving ----------
 def read_intensity(spec, expected_len: int):
-    """Always return intensity (not λ)."""
+    """Always return intensity (not λ), padded/trimmed to expected_len."""
     sp = spec.acquire()
     if isinstance(sp, tuple) and len(sp) >= 2:
-        return np.asarray(sp[1]).squeeze()
+        y = np.asarray(sp[1]).squeeze()
+        return _pad_or_trim(y, expected_len, pad_val=0.0)
+
     if isinstance(sp, dict):
         for k in ("intensity", "y", "counts", "data"):
             if k in sp:
-                return np.asarray(sp[k]).squeeze()
+                y = np.asarray(sp[k]).squeeze()
+                return _pad_or_trim(y, expected_len, pad_val=0.0)
+
     arr = np.asarray(sp).squeeze()
     if arr.ndim == 2 and 2 in arr.shape:
-        return arr[1, :] if arr.shape[0] == 2 else arr[-1, :]
-    return arr
+        y = arr[1, :] if arr.shape[0] == 2 else arr[-1, :]
+        return _pad_or_trim(y, expected_len, pad_val=0.0)
+
+    return _pad_or_trim(arr, expected_len, pad_val=0.0)
 
 # ---------- Get wavelengths by querying LF6 directly (bypasses wrapper cache) ----------
 def _midpoint_nm(wls: np.ndarray) -> float:
@@ -138,6 +214,54 @@ def wait_lambda_from_lf6(lf6, target_center_nm: float,
 
     raise TimeoutError(f"λ not updated in {timeout_s}s via LF6 (target={target_center_nm}, last_mid={last_mid})")
 
+def get_wavelengths_or_fail(spec, lf6, target_center_nm: float, tol_nm: float) -> np.ndarray:
+    """
+    Robust wavelength header acquisition:
+      1) try LF6 wait/poll
+      2) fallback LF6 get_wavelength_calibration
+      3) fallback spec.calibration_wavelengths()
+      4) fallback one spec.acquire() tuple (wl, y)
+    """
+    # 1) wait via LF6
+    if lf6 is not None:
+        try:
+            w = wait_lambda_from_lf6(lf6, target_center_nm=float(target_center_nm), tol_nm=float(tol_nm))
+            w = np.asarray(w, dtype=float).ravel()
+            if w.size > 2:
+                return w
+        except Exception:
+            pass
+
+        # 2) direct LF6 read
+        try:
+            w = np.asarray(lf6.get_wavelength_calibration(), dtype=float).ravel()
+            if w.size > 2:
+                return w
+        except Exception:
+            pass
+
+    # 3) spec calibration
+    if spec is not None and hasattr(spec, "calibration_wavelengths"):
+        try:
+            w = np.asarray(list(spec.calibration_wavelengths()), dtype=float).ravel()
+            if w.size > 2:
+                return w
+        except Exception:
+            pass
+
+    # 4) last resort: first acquisition tuple
+    if spec is not None:
+        try:
+            sp = spec.acquire()
+            if isinstance(sp, tuple) and len(sp) >= 2:
+                w = np.asarray(sp[0], dtype=float).ravel()
+                if w.size > 2:
+                    return w
+        except Exception:
+            pass
+
+    return np.array([], dtype=float)
+
 # -------------------------
 # Main render
 # -------------------------
@@ -149,7 +273,8 @@ def render(devices):
     lf6 = st.session_state.get("lf6")
 
     role_map = getattr(iv, "role_map", {}) if iv else {}
-    axes_available = [k for k, v in (role_map or {}).items() if v is not None]
+    # FIX: match adapter semantics (empty string is NOT a mapping)
+    axes_available = [k for k, v in (role_map or {}).items() if bool(v)]
     if role_map:
         st.info(f"🔌 IV Role Map: {role_map}")
 
@@ -190,15 +315,29 @@ def render(devices):
         if not iv or "Vtg" not in axes_available or "Vbg" not in axes_available:
             st.error("Map both Vtg and Vbg in the sidebar to run this sweep.")
             st.stop()
+        can_run = (iv is not None) and (spec is not None) and {"Vtg", "Vbg"}.issubset(set(axes_available))
 
-        c_r1, c_r2 = st.columns(2)
+        c_r1, c_r2, c_r3 = st.columns(3)
         with c_r1:
             go_step  = st.number_input("Ramp step (V) for ramping", value=0.1, min_value=0.001, format="%.3f")
         with c_r2:
-            go_delay = st.number_input("Ramp delay (s)", value=0.02, min_value=0.0,   format="%.3f")
+            go_delay = st.number_input("Ramp delay (s)", value=0.02, min_value=0.0, format="%.3f")
+        with c_r3:
+            settle_delay = st.number_input("Settle after each point (s)", value=0.05, step=0.01, format="%.3f")
+
+        # --- Vbias option (constant during whole sweep) ---
+        st.subheader("2) Vbias (optional)")
+
+        c_b1, c_b2, c_b3 = st.columns([1.2, 1, 1])
+        with c_b1:
+            enable_vbias = st.checkbox("Enable Vbias", value=False)
+        with c_b2:
+            vbias_set = st.number_input("Vbias set (V)", value=0.0, step=0.05, disabled=not enable_vbias)
+        with c_b3:
+            vbias_ramp_step = st.number_input("Vbias ramp step (V)", value=0.1, min_value=0.001, format="%.3f", disabled=not enable_vbias)
 
         # NEW: user-configurable center tolerance
-        center_tol_nm = st.number_input("Center match tolerance (nm)", value=1.0, min_value=0.1, step=0.1)
+        center_tol_nm = 1.0
 
         with st.expander("🛡️ Absolute Voltage Limits", expanded=True):
             c_s1, c_s2, c_s3, c_s4 = st.columns(4)
@@ -207,7 +346,8 @@ def render(devices):
             with c_s3: lim_vbg_min = st.number_input("Min Vbg", value=-10.0)
             with c_s4: lim_vbg_max = st.number_input("Max Vbg", value= 10.0)
 
-        st.subheader("2) Grids (Vtg stripes / Vbg linear)")
+        st.subheader("3) Grids (Vtg stripes / Vbg linear)")
+        is_snake = st.checkbox("Snake pattern (reverse Vbg every stripe)", value=True)
 
         # Outer Vtg range
         st.caption("**Outer (fixed per stripe): Vtg**")
@@ -239,155 +379,322 @@ def render(devices):
     # Preview  (no seam de-dupe: show ALL points)
     # ==========================================
     with col_view:
-        is_snake = st.checkbox("Zig-Zag (snake inner order)", value=True)
+        # ---- compact "run bar" at the top of the preview column ----
+        h1, h3 = st.columns([1.6, 1.0], vertical_alignment="bottom")
+        with h1:
+            st.markdown("### Preview")
+        with h3:
+            start_clicked = st.button(
+                "🚀 START",
+                type="primary",
+                width="stretch",
+                disabled=not can_run,
+            )
 
-        sim_vtg, sim_vbg = [], []
-        flag = True
-        for vtg in outer_vals:
-            seq = inner_vals[::-1] if (is_snake and not flag) else inner_vals
-            for vbg in seq:
-                if lim_vtg_min <= vtg <= lim_vtg_max and lim_vbg_min <= vbg <= lim_vbg_max:
-                    sim_vtg.append(vtg); sim_vbg.append(vbg)
-            flag = not flag
+        # 1) full planned traversal (includes out-of-safety)
+        path_pts = build_scan_path(outer_vals, inner_vals, is_snake=is_snake)
+        x_all = np.array([p[0] for p in path_pts], dtype=float)
+        y_all = np.array([p[1] for p in path_pts], dtype=float)
+
+        in_mask = (
+            (x_all >= lim_vtg_min) & (x_all <= lim_vtg_max) &
+            (y_all >= lim_vbg_min) & (y_all <= lim_vbg_max)
+        )
+
+        x_out = x_all[~in_mask]
+        y_out = y_all[~in_mask]
+
+        # 2) run-executed points (in-bounds only) -> keeps preview/run order 1:1
+        pts = build_sweep_points(
+            outer_vals, inner_vals,
+            lim_vtg_min, lim_vtg_max, lim_vbg_min, lim_vbg_max,
+            is_snake=is_snake
+        )
+        x_in = np.array([p[0] for p in pts], dtype=float)
+        y_in = np.array([p[1] for p in pts], dtype=float)
+        o_in = np.arange(len(pts), dtype=float)
+
+        st.caption(
+            f"Planned: **{len(path_pts)}** | In safety (run): **{len(pts)}** | Out of safety: **{len(path_pts)-len(pts)}**"
+        )
+        st.caption("Red ✕ = outside safety limits (will be skipped by run)")
 
         tab_v, tab_p = st.tabs(["⚡ Voltage Grid", "📐 Physics (analysis)"])
+
         with tab_v:
-            fig, ax = plt.subplots(figsize=(3.5, 2.8))
-            if sim_vtg:
-                ax.scatter(sim_vtg, sim_vbg, s=8)
-            rect = patches.Rectangle(
-                (lim_vtg_min, lim_vbg_min),
-                lim_vtg_max - lim_vtg_min,
-                lim_vbg_max - lim_vbg_min,
-                linewidth=1, fill=False, linestyle='--'
-            )
-            ax.add_patch(rect)
-            ax.set_xlabel("Vtg (V)"); ax.set_ylabel("Vbg (V)")
-            ax.grid(True, linestyle='--', alpha=0.5)
+            # --- UI controls for preview zoom ---
+            focus_preview = st.checkbox("Auto-zoom to sweep region", value=True, key="megasweep_zoom")
+            show_safety_box = st.checkbox("Show safety limits box", value=True, key="megasweep_show_safety")
+
+            fig, ax = plt.subplots(figsize=(4.4, 3.4))
+
+            # safety box (draw it, but DO NOT let it decide the zoom; we'll set limits later)
+            if show_safety_box:
+                rect = patches.Rectangle(
+                    (lim_vtg_min, lim_vbg_min),
+                    lim_vtg_max - lim_vtg_min,
+                    lim_vbg_max - lim_vbg_min,
+                    linewidth=1,
+                    fill=False,
+                    edgecolor="red",
+                    linestyle="--",
+                    alpha=0.8,
+                )
+                ax.add_patch(rect)
+
+            if len(path_pts) > 0:
+                # draw full planned path lightly (includes out-of-safety)
+                if len(x_all) >= 2:
+                    ax.plot(x_all, y_all, linewidth=1, alpha=0.25)
+
+                # in-bounds points: colored by RUN order
+                if len(x_in) > 0:
+                    sc = ax.scatter(x_in, y_in, s=18, c=o_in, cmap="viridis")
+                    cb = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+                    cb.set_label("Order (run)")
+
+                    if len(x_in) >= 2:
+                        ax.plot(x_in, y_in, linewidth=1, alpha=0.6)
+
+                    # START/END are run start/end (in-bounds)
+                    ax.scatter([x_in[0]], [y_in[0]], s=60, marker="o", edgecolors="k", linewidths=1.0, zorder=5)
+                    ax.annotate("START", (x_in[0], y_in[0]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+
+                    ax.scatter([x_in[-1]], [y_in[-1]], s=60, marker="s", edgecolors="k", linewidths=1.0, zorder=5)
+                    ax.annotate("END", (x_in[-1], y_in[-1]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+
+                # out-of-bounds points: red X
+                if len(x_out) > 0:
+                    ax.scatter(x_out, y_out, s=45, marker="x", color="red", linewidths=1.5, alpha=0.9, zorder=6)
+
+                # --- zoom uses ALL planned points so out-of-bounds are visible ---
+                if focus_preview:
+                    xmin, xmax = float(np.min(x_all)), float(np.max(x_all))
+                    ymin, ymax = float(np.min(y_all)), float(np.max(y_all))
+                    span_x = max(1e-9, xmax - xmin)
+                    span_y = max(1e-9, ymax - ymin)
+                    pad_x = max(abs(vtg_step_eff), 0.05 * span_x)
+                    pad_y = max(abs(vbg_step),     0.05 * span_y)
+                    ax.set_xlim(xmin - pad_x, xmax + pad_x)
+                    ax.set_ylim(ymin - pad_y, ymax + pad_y)
+                else:
+                    ax.set_xlim(lim_vtg_min, lim_vtg_max)
+                    ax.set_ylim(lim_vbg_min, lim_vbg_max)
+            else:
+                ax.set_xlim(lim_vtg_min, lim_vtg_max)
+                ax.set_ylim(lim_vbg_min, lim_vbg_max)
+
+
+            ax.set_xlabel("Vtg (V)")
+            ax.set_ylabel("Vbg (V)")
+            ax.grid(True, linestyle="--", alpha=0.4)
             fig.tight_layout()
-            st.pyplot(fig)
+
+            # use full column width (looks much nicer in Streamlit)
+            st.pyplot(fig, width="content")
+
+            # still communicate safety limits even when zoomed
+            st.caption(f"Safety limits: Vtg[{lim_vtg_min:g}, {lim_vtg_max:g}]  |  Vbg[{lim_vbg_min:g}, {lim_vbg_max:g}]")
+
 
         with tab_p:
-            if sim_vtg:
-                vtg_arr = np.array(sim_vtg)
-                vbg_arr = np.array(sim_vbg)
-                dop = ratio_val * vtg_arr + vbg_arr
-                fld = ratio_val * vtg_arr - vbg_arr
-                fig2, ax2 = plt.subplots(figsize=(3.5, 2.8))
-                ax2.scatter(dop, fld, s=8)
-                ax2.set_xlabel(f"D = r*Vtg + Vbg (r={ratio_val})")
+            if len(path_pts) > 0:
+                dop_all = ratio_val * x_all + y_all
+                fld_all = ratio_val * x_all - y_all
+
+                dop_in  = ratio_val * x_in + y_in
+                fld_in  = ratio_val * x_in - y_in
+
+                dop_out = dop_all[~in_mask]
+                fld_out = fld_all[~in_mask]
+
+                fig2, ax2 = plt.subplots(figsize=(4.4, 3.4))
+
+                # full planned path lightly
+                if len(dop_all) >= 2:
+                    ax2.plot(dop_all, fld_all, linewidth=1, alpha=0.25)
+
+                # in-bounds points colored by run order
+                if len(dop_in) > 0:
+                    sc2 = ax2.scatter(dop_in, fld_in, s=18, c=o_in, cmap="viridis")
+                    cb2 = fig2.colorbar(sc2, ax=ax2, fraction=0.046, pad=0.04)
+                    cb2.set_label("Order (run)")
+
+                    if len(dop_in) >= 2:
+                        ax2.plot(dop_in, fld_in, linewidth=1, alpha=0.6)
+
+                    # START/END (run)
+                    ax2.scatter([dop_in[0]], [fld_in[0]], s=70, marker="o", edgecolors="k", linewidths=1.2, zorder=5)
+                    ax2.annotate("START", (dop_in[0], fld_in[0]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+
+                    ax2.scatter([dop_in[-1]], [fld_in[-1]], s=70, marker="s", edgecolors="k", linewidths=1.2, zorder=5)
+                    ax2.annotate("END", (dop_in[-1], fld_in[-1]), xytext=(6, 6), textcoords="offset points", fontsize=9)
+
+                # out-of-bounds: red X
+                if len(dop_out) > 0:
+                    ax2.scatter(dop_out, fld_out, s=45, marker="x", color="red", linewidths=1.5, alpha=0.9, zorder=6)
+
+                ax2.set_xlabel(f"D = r*Vtg + Vbg (r={ratio_val:g})")
                 ax2.set_ylabel("F = r*Vtg - Vbg")
-                ax2.grid(True, linestyle='--', alpha=0.5)
+                ax2.grid(True, linestyle="--", alpha=0.4)
                 fig2.tight_layout()
-                st.pyplot(fig2)
+                st.pyplot(fig2, width="content")
             else:
-                st.info("No points in preview (check limits).")
+                st.info("No points in preview (check grid).")
 
-    # ==========================================
-    # Run
-    # ==========================================
-    st.divider()
-    c_run1, c_run2 = st.columns([1, 2])
-    with c_run1:
-        settle_delay = st.number_input("Settle after each point (s)", value=0.05, step=0.01)
-    with c_run2:
-        st.write(""); st.write("")
-        can_run = iv is not None and spec is not None and {"Vtg","Vbg"}.issubset(set(axes_available))
-        if st.button("🚀 START", type="primary", use_container_width=True, disabled=not can_run):
-            try:
-                # Spectrometer config (apply center/exposure/frames on the LF6 object)
-                if lf6 is not None:
-                    if hasattr(lf6, 'change_spectra_center'):
-                        # send as string first (LightField UI often expects text)
-                        try:
-                            lf6.change_spectra_center(f"{float(lf_center):.0f}")
-                        except Exception:
-                            lf6.change_spectra_center(lf_center)
-                    if hasattr(lf6, 'change_expose_time'):
-                        lf6.change_expose_time(lf_exp)
-                    if hasattr(lf6, 'set_frames'):
-                        lf6.set_frames(lf_epf)
-                    elif hasattr(lf6, 'set_accumulations'):
-                        lf6.set_accumulations(lf_epf)
 
-                # Filename
-                exp_s_fmt = format_exposure_for_filename(lf_exp)
-                name_vars = {
-                    "sample": sample, "tag": tag,
-                    "laser_nm": laser_nm, "power_uw": power_uw,
-                    "exp_s": exp_s_fmt, "epf": lf_epf, "center_nm": lf_center
-                }
-                clean_pattern = pattern.replace("${", "{").replace("}$", "}")
-                base_name = clean_pattern.format(**name_vars)
-                out_path.mkdir(parents=True, exist_ok=True)
-                file_path = out_path / f"{unique_stem(out_path, base_name)}.csv"
-
-                # Header (wavelengths) — get λ DIRECTLY from LF6 and block until updated
-                try:
-                    wls = wait_lambda_from_lf6(
-                        lf6,
-                        target_center_nm=float(lf_center),
-                        tol_nm=float(center_tol_nm),  # <- use UI tolerance
-                        timeout_s=25.0, poll_s=0.3, require_consecutive=2
-                    )
-                except TimeoutError as e:
-                    st.warning(str(e))
+        
+    if start_clicked:
+        try:
+            # Spectrometer config (apply center/exposure/frames on the LF6 object)
+            if lf6 is not None:
+                if hasattr(lf6, 'change_spectra_center'):
+                    # send as string first (LightField UI often expects text)
                     try:
-                        wls = np.asarray(lf6.get_wavelength_calibration(), dtype=float).ravel()
+                        lf6.change_spectra_center(f"{float(lf_center):.0f}")
                     except Exception:
-                        wls = np.array([], dtype=float)
+                        lf6.change_spectra_center(lf_center)
+                if hasattr(lf6, 'change_expose_time'):
+                    lf6.change_expose_time(lf_exp)
+                if hasattr(lf6, 'set_frames'):
+                    lf6.set_frames(lf_epf)
+                elif hasattr(lf6, 'set_accumulations'):
+                    lf6.set_accumulations(lf_epf)
+            # --- Vbias mapping check if requested ---
+            if enable_vbias:
+                has_vbias = bool(getattr(iv, "has_role", lambda *_: False)("Vbias"))
+                if not has_vbias:
+                    st.error("Vbias is enabled but IV role 'Vbias' is NOT mapped. Map Vbias or disable Vbias.")
+                    st.stop()
 
-                # show actual mid (quantized)
-                if wls.size > 1:
-                    st.caption(f"λ mid ≈ {_midpoint_nm(wls):.3f} nm")
+            # Filename
+            exp_s_fmt = format_exposure_for_filename(lf_exp)
+            name_vars = {
+                "sample": sample, "tag": tag,
+                "laser_nm": laser_nm, "power_uw": power_uw,
+                "exp_s": exp_s_fmt, "epf": lf_epf, "center_nm": lf_center
+            }
+            clean_pattern = pattern.replace("${", "{").replace("}$", "}")
+            base_name = clean_pattern.format(**name_vars)
+            out_path.mkdir(parents=True, exist_ok=True)
+            file_path = out_path / f"{unique_stem(out_path, base_name)}.csv"
 
-                h_row = np.concatenate((np.array(["Vbg","Vtg"], dtype='U'), wls.astype('U'))).reshape([1, -1])
-                with open(file_path, 'a') as f:
-                    np.savetxt(f, h_row, fmt='%s', delimiter=',')
+            # Header wavelengths (robust)
+            wls = get_wavelengths_or_fail(
+                spec=spec,
+                lf6=lf6,
+                target_center_nm=float(lf_center),
+                tol_nm=float(center_tol_nm),
+            )
+            if wls.size <= 2:
+                st.error("Could not obtain wavelength calibration (wls empty). Aborting to avoid corrupt CSV.")
+                st.stop()
 
-                # Initial safe ramp to the first corner
-                first_vtg = float(outer_vals[0]); first_vbg = float(inner_vals[0])
-                iv.set_gates(Vtg=first_vtg, delay_s=go_delay, ramp_step=go_step)
-                iv.set_gates(Vbg=first_vbg, delay_s=go_delay, ramp_step=go_step)
-                time.sleep(settle_delay)
+            st.caption(f"λ mid ≈ {_midpoint_nm(wls):.3f} nm")
 
-                # Sweep (outer = Vtg fixed, inner = Vbg with ratio-scaled step)
-                total_pts = max(1, int(len(outer_vals) * len(inner_vals)))
-                done, flag = 0, True
-                prog = st.progress(0.0)
+            include_setpoints = False  # (you commented out the checkbox; keep False so code won't crash)
 
-                with open(file_path, 'a') as f:
-                    for vtg in outer_vals:
-                        iv.set_gates(Vtg=float(vtg), delay_s=go_delay, ramp_step=go_step)
 
-                        seq = inner_vals[::-1] if (is_snake and not flag) else inner_vals
-                        for vbg in seq:
-                            if not (lim_vtg_min <= vtg <= lim_vtg_max and lim_vbg_min <= vbg <= lim_vbg_max):
-                                continue
-                            iv.set_gates(Vbg=float(vbg), delay_s=go_delay, ramp_step=go_step)
-                            time.sleep(settle_delay)
+            # Write header (NEW file)
+            # Columns:
+            # - if include_setpoints: Vbg_set, Vtg_set (and Vbias_set if enabled)
+            # - always: Vbg_meas, Vtg_meas, Vbias_meas (Vbias columns filled with NAN if disabled)
+            cols = []
+            # if include_setpoints:
+            #     cols += ["Vbg_set", "Vtg_set"]
+            #     cols += ["Vbias_set"]  # keep for clarity even if disabled
 
-                            # Save INTENSITY aligned to wavelength header
-                            y = np.asarray(read_intensity(spec, expected_len=len(wls))).reshape(-1)
-                            if wls.size and y.size != wls.size:  # keep CSV rectangular
-                                y = y[:min(wls.size, y.size)]
-                            row = np.concatenate((np.array([vbg, vtg], ndmin=1, dtype=np.float64), y)).reshape([1, -1])
-                            np.savetxt(f, row, fmt='%.5e', delimiter=',')
+            cols += ["Vbg_meas", "Vtg_meas", "Vbias_meas"]
 
-                            done += 1
-                            if done % 5 == 0:
-                                prog.progress(min(1.0, done / total_pts))
-                        flag = not flag
+            wl_str = np.array([f"{float(x):g}" for x in wls], dtype="U")
+            h_row = np.concatenate((np.array(cols, dtype="U"), wl_str)).reshape([1, -1])
 
-                prog.progress(1.0)
-                st.success("Done.")
+            with open(file_path, "w", newline="") as f:
+                np.savetxt(f, h_row, fmt="%s", delimiter=",")
 
-                # Return to 0 safely
+
+            # Compute total valid points (for accurate progress)
+            pts = build_sweep_points(
+                outer_vals, inner_vals,
+                lim_vtg_min, lim_vtg_max, lim_vbg_min, lim_vbg_max,
+                is_snake=is_snake
+            )
+
+            if not pts:
+                st.error("No points in sweep (all out of bounds). Check limits/grid.")
+                st.stop()
+
+            total_pts = len(pts)
+
+
+            # Initial safe ramp to the first corner
+            # Optional: set Vbias once (constant throughout sweep)
+            vbias_set_val = float(vbias_set) if enable_vbias else NAN
+
+            if enable_vbias:
                 try:
-                    iv.set_gates(Vbg=0.0, delay_s=go_delay, ramp_step=go_step)
-                    iv.set_gates(Vtg=0.0, delay_s=go_delay, ramp_step=go_step)
-                except Exception:
-                    pass
+                    # ramp Vbias for safety
+                    if hasattr(iv, "set_bias"):
+                        iv.set_bias(Vbias=vbias_set_val, delay_s=go_delay, ramp_step=float(vbias_ramp_step))
+                    else:
+                        st.error("IV device has no set_bias().")
+                        st.stop()
 
-            except Exception as e:
-                st.error(f"Error: {e}")
+                    time.sleep(settle_delay)
+                except Exception as e:
+                    st.error(f"Failed to set Vbias: {e}")
+                    st.stop()
+
+            first_vtg, first_vbg = pts[0]  # first ACTUAL executed point (in-bounds + snake)
+            iv.set_gates(Vtg=first_vtg, delay_s=go_delay, ramp_step=go_step)
+            iv.set_gates(Vbg=first_vbg, delay_s=go_delay, ramp_step=go_step)
+            time.sleep(settle_delay)
+
+
+            # Sweep
+            done = 0
+            prog = st.progress(0.0)
+
+            current_vtg = None
+
+            with open(file_path, "a", newline="") as f:
+                for vtg, vbg in pts:
+                    # only change Vtg when needed
+                    if current_vtg is None or (vtg != current_vtg):
+                        iv.set_gates(Vtg=vtg, delay_s=go_delay, ramp_step=go_step)
+                        current_vtg = vtg
+
+                    iv.set_gates(Vbg=vbg, delay_s=go_delay, ramp_step=go_step)
+                    time.sleep(settle_delay)
+
+                    # Read back measured gates/bias
+                    vbg_meas, vtg_meas = _read_gates_readback(iv)
+                    vbias_meas = _read_bias_readback(iv) if enable_vbias else NAN
+
+                    # Save intensity aligned to wavelength header
+                    y = read_intensity(spec, expected_len=int(wls.size))
+
+                    prefix = []
+                    if include_setpoints:
+                        prefix += [vbg, vtg]
+                        prefix += [vbias_set_val]
+
+                    prefix += [vbg_meas, vtg_meas, vbias_meas]
+
+                    row = np.concatenate((np.array(prefix, dtype=np.float64), y)).reshape([1, -1])
+                    np.savetxt(f, row, fmt="%.6e", delimiter=",")
+
+                    done += 1
+                    prog.progress(done / total_pts)
+
+            prog.progress(1.0)
+            st.success("Done.")
+
+            # Return to 0 safely
+            try:
+                iv.set_gates(Vbg=0.0, Vtg=0.0, delay_s=go_delay, ramp_step=go_step)
+            except Exception:
+                pass
+
+        except Exception as e:
+            st.error(f"Error: {e}")

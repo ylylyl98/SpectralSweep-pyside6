@@ -91,12 +91,28 @@ class IVDevice:
                 return 0.0
         return _get("Vbg_leakage"), _get("Vtg_leakage")
 
-    def read_current_gates(self) -> Tuple[float, float]:
+    def read_current_bias(self) -> Optional[float]:
+        if not self.has_role("Vbias"):
+            return None
+        try:
+            meas_key = "measured_Vbias"
+            inst = self.setup.y_channel_collection.get_instrument(meas_key)
+            if inst:
+                inst.read_y()
+            self.setup.y_channel_collection.receive_y(meas_key)
+            return float(self.setup.get_single_y_value(meas_key))
+        except Exception:
+            return None
+
+
+    def read_current_gates(self):
         """
         Forces a hardware read of 'measured_Vbg' and 'measured_Vtg'.
-        Fixes the issue where update_ys() didn't trigger a real measurement.
+        Returns nan for any role that is not mapped / not readable.
         """
-        bg_val, tg_val = 0.0, 0.0
+        nan = float("nan")
+        bg_val = nan
+        tg_val = nan
 
         roles_to_check = []
         if self.has_role("Vbg"): roles_to_check.append(("Vbg", "measured_Vbg"))
@@ -108,7 +124,7 @@ class IVDevice:
                 try:
                     inst = self.setup.y_channel_collection.get_instrument(meas_key)
                 except KeyError:
-                    print(f"Warning: Key '{meas_key}' not found. Check initialization name.")
+                    # key missing -> keep nan
                     continue
 
                 if inst:
@@ -117,10 +133,13 @@ class IVDevice:
                 self.setup.y_channel_collection.receive_y(meas_key)
                 val = self.setup.get_single_y_value(meas_key)
 
-                if role == "Vbg": bg_val = val
-                if role == "Vtg": tg_val = val
+                if role == "Vbg": bg_val = float(val)
+                if role == "Vtg": tg_val = float(val)
 
-            except Exception as e:
-                print(f"Warning: Failed reading {role}: {e}")
+            except Exception:
+                # keep nan
+                pass
 
-        return float(bg_val), float(tg_val)
+        return bg_val, tg_val
+
+

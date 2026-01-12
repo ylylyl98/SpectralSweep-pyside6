@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict
 import html
+import math
 
 import itertools
 
@@ -32,6 +33,7 @@ def build_run_status_tree_html(
     current_label: str,
     current_rep_i: int,
     max_seq_show: int = 10,
+    param_order: Optional[List[str]] = None
 ) -> str:
     """
     Live status tree (HTML <pre>) with 3 colors:
@@ -57,7 +59,9 @@ def build_run_status_tree_html(
 
     # ---- small ctx formatter ----
     def fmt_ctx(ctx: dict) -> str:
-        keys = ["Center Wavelength (nm)", "Exposure Time (ms)", "Stage Position"]
+        default_keys = ["Center Wavelength (nm)", "Exposure Time (ms)", "Stage Position"]
+        keys = param_order or default_keys
+
         parts = []
         for k in keys:
             v = ctx.get(k, None)
@@ -70,14 +74,22 @@ def build_run_status_tree_html(
                 parts.append(f"{k0}={v}")
         return ", ".join(parts) if parts else "(no loop vars)"
 
+
     def esc(s: str) -> str:
         return html.escape(str(s), quote=False)
 
     # ---- styling (3 colors) ----
     # You can tweak these colors anytime.
-    STYLE_DONE = "color:#6b7280;"  # grey
-    STYLE_TODO = "color:#cbd5e1;"  # light grey
-    STYLE_NOW  = "color:#111827; background:#fff3cd; border-left:4px solid #f59e0b; padding:1px 6px; border-radius:4px; font-weight:700;"  # highlighted
+    STYLE_DONE = "color:#6E7681;"   # readable in dark + light
+    STYLE_TODO = "color:#8B949E;"  # still visible but lighter
+    STYLE_NOW  = (
+        "color: var(--text-color, #111827);"
+        "background: rgba(245,158,11,0.22);"        # amber highlight works in dark mode
+        "border-left: 4px solid #f59e0b;"
+        "padding: 1px 6px;"
+        "border-radius: 4px;"
+        "font-weight: 800;"
+    )
 
     def paint(text: str, state: str) -> str:
         if state == "done":
@@ -114,7 +126,7 @@ def build_run_status_tree_html(
     # ---- build lines (real tree) ----
     lines = []
     header = f"Run (progress {done}/{total_acq})"
-    lines.append(f"<span style='font-weight:700;color:#111827'>{esc(header)}</span>")
+    lines.append(f"<span style='font-weight:700;color:#8B949E'>{esc(header)}</span>")
 
     for seq_i in range(start, end):
         ctx = final_sequence[seq_i]
@@ -163,11 +175,15 @@ def build_run_status_tree_html(
 
     return (
         "<div style='"
-        "margin:0; padding:8px 10px; background:#f8fafc; border:1px solid #e5e7eb; border-radius:8px; "
-        "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; "
-        "font-size:14px; line-height:1.35; "
-        "white-space:pre; "          # keep tree indentation + spacing
-        "overflow-x:auto; "          # avoid wrapping into one line
+        "margin:0; padding:8px 10px;"
+        "background: var(--secondary-background-color, rgba(148,163,184,0.12));"
+        "border: 1px solid rgba(148,163,184,0.35);"
+        "border-radius:8px;"
+        "color: var(--text-color, #8B949E);"
+        "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"
+        "font-size:18px; line-height:1.35;"
+        "white-space:pre;"
+        "overflow-x:auto;"
         "max-width:100%;"
         "'>"
         + body
@@ -175,26 +191,57 @@ def build_run_status_tree_html(
     )
 
 
+def get_enabled_param_order(loop_src: pd.DataFrame) -> List[str]:
+    df = normalize_df(loop_src, LOOP_SCHEMA).copy()
+    df["Enable"] = df["Enable"].map(_to_bool)
+    df["Level"] = pd.to_numeric(df.get("Level", 1), errors="coerce").fillna(1).astype(int)
+
+    df = df[df["Enable"] == True].reset_index().rename(columns={"index": "_row"})
+    # stable sort: Level first, then original row order
+    df = df.sort_values(["Level", "_row"], kind="mergesort")
+
+    order: List[str] = []
+    for p in df["Parameter"].astype(str).tolist():
+        if p and p not in order:
+            order.append(p)
+    return order
+
 
 
 def ui_log(msg: str):
     """Log to session state and update the UI box if it exists."""
     if "run_log" not in st.session_state:
         st.session_state.run_log = []
-
+    # dedupe
+    if msg and st.session_state.get("_last_log_msg") == msg:
+        return
+    st.session_state["_last_log_msg"] = msg
     if msg:
         ts = time.strftime("%H:%M:%S")
         st.session_state.run_log.append(f"[{ts}] {str(msg)}")
 
     box = st.session_state.get("active_log_box")
     if box:
+        # IMPORTANT: escape because we render inside unsafe HTML
+        safe_lines = [html.escape(x, quote=False) for x in st.session_state.run_log[-200:]]
+
         box.markdown(
-            "<div style='font-family:monospace;white-space:pre-wrap;max-height:300px;overflow-y:auto;"
-            "background-color:#f0f2f6;padding:10px;border-radius:5px;'>"
-            + "\n".join(st.session_state.run_log[-200:])
+            "<div style='"
+            "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"
+            "white-space: pre-wrap;"
+            "max-height: 300px;"
+            "overflow-y: auto;"
+            "padding: 10px;"
+            "border-radius: 8px;"
+            "color: var(--text-color, #7C8A9A);"
+            "background: var(--secondary-background-color, rgba(148,163,184,0.12));"
+            "border: 1px solid rgba(148,163,184,0.35);"
+            "'>"
+            + "\n".join(safe_lines)
             + "</div>",
             unsafe_allow_html=True,
         )
+
 
 def build_run_preview(loop_src: pd.DataFrame, batch_src: pd.DataFrame, max_examples: int = 6) -> dict:
     """
@@ -212,7 +259,8 @@ def build_run_preview(loop_src: pd.DataFrame, batch_src: pd.DataFrame, max_examp
 
     levels: Dict[int, List[dict]] = {}
     for _, row in active.iterrows():
-        vals = parse_values(row.get("Values", ""))
+        vals = parse_values(row.get("Values", ""), row.get("Parameter", ""))
+
         if vals:
             levels.setdefault(int(row.get("Level", 1)), []).append({"p": row["Parameter"], "v": vals})
 
@@ -326,7 +374,8 @@ def build_run_preview_text_tree(
 
     levels: Dict[int, List[dict]] = {}
     for _, row in active.iterrows():
-        vals = parse_values(row.get("Values", ""))
+        vals = parse_values(row.get("Values", ""), row.get("Parameter", ""))
+
         if vals:
             levels.setdefault(int(row.get("Level", 1)), []).append({
                 "param": str(row.get("Parameter", "")),
@@ -520,14 +569,113 @@ def unique_stem(out_dir: Path, stem: str) -> str:
     return f"{stem}_{next_n:03d}"
 
 
-def parse_values(s: str):
+def parse_values(s: str, param: str | None = None):
+    """
+    Parse the Values cell.
+
+    Default:
+      "1,2,3" -> [1.0, 2.0, 3.0]
+
+    Stage Position special:
+      "(start,stop,n)" -> np.linspace(start, stop, n).tolist()
+
+    IMPORTANT:
+      "0,3600,15" stays as 3 literal values (NO linspace)
+      Only "(0,3600,15)" triggers linspace.
+    """
     if not s or not str(s).strip():
         return None
+
+    raw = str(s).strip()
+    p = str(param or "")
+    is_stage = p.startswith("Stage Position")
+
+    # Detect linspace shorthand ONLY if wrapped by parentheses
+    linspace_mode = raw.startswith("(") and raw.endswith(")")
+    if linspace_mode:
+        raw = raw[1:-1].strip()
+
     try:
-        clean = str(s).replace(";", ",")
-        return [float(x.strip()) for x in clean.split(",") if x.strip()]
+        clean = raw.replace(";", ",")
+        nums = [float(x.strip()) for x in clean.split(",") if x.strip()]
     except ValueError:
         return None
+
+    # Apply linspace only for Stage Position and only when using parentheses
+    if is_stage and linspace_mode and len(nums) == 3:
+        a, b, n = nums
+        if float(n).is_integer() and int(n) >= 2:
+            return np.linspace(float(a), float(b), int(n)).astype(float).tolist()
+
+    return nums
+
+
+def _parse_optional_float(x):
+    """Return float if x looks like a number; otherwise None. Treat '', None, 'none', 'nan' as None."""
+    if x is None:
+        return None
+    s = str(x).strip()
+    if s == "" or s.lower() in ("none", "nan"):
+        return None
+    try:
+        v = float(s)
+        if math.isnan(v):
+            return None
+        return v
+    except Exception:
+        # non-empty but not parseable -> treat as invalid (caller can decide)
+        return "INVALID"
+
+def _check_vbias_mapping(batch_df: pd.DataFrame, devices) -> Optional[str]:
+    """
+    If any enabled row (Run=True) requests Vbias but IV has no Vbias role, return an error string.
+    Also flags invalid (non-numeric) Vbias cells.
+    """
+    iv = (devices or {}).get("iv", None)
+    has_vbias = bool(getattr(iv, "has_role", lambda *_: False)("Vbias")) if iv else False
+
+    dfb = normalize_df(batch_df, BATCH_SCHEMA).copy()
+    if "Run" in dfb.columns:
+        dfb["Run"] = dfb["Run"].map(_to_bool)
+        dfb = dfb[dfb["Run"] == True]
+
+    if dfb.empty:
+        return None
+
+    needs_vbias = []
+    invalid_vbias = []
+
+    for idx, row in dfb.reset_index(drop=True).iterrows():
+        vb = _parse_optional_float(row.get("Vbias", ""))
+        label = str(row.get("condition_label", f"row_{idx+1}")).strip() or f"row_{idx+1}"
+        if vb == "INVALID":
+            invalid_vbias.append((idx + 1, label, row.get("Vbias", "")))
+        elif vb is not None:
+            needs_vbias.append((idx + 1, label, vb))
+
+    if invalid_vbias:
+        show = ", ".join([f"#{r}({lab}) Vbias='{val}'" for r, lab, val in invalid_vbias[:6]])
+        more = "" if len(invalid_vbias) <= 6 else f" … (+{len(invalid_vbias)-6} more)"
+        return f"⛔ Invalid Vbias value(s): {show}{more}. Use a number or leave blank/None."
+
+    if needs_vbias and not has_vbias:
+        show = ", ".join([f"#{r}({lab}) Vbias={vb:g}V" for r, lab, vb in needs_vbias[:6]])
+        more = "" if len(needs_vbias) <= 6 else f" … (+{len(needs_vbias)-6} more)"
+        return (
+            f"⛔ Vbias is requested but **Vbias source is not mapped**. "
+            f"Rows: {show}{more}. Map Vbias or clear those Vbias cells."
+        )
+
+    return None
+
+def _vbias_block_from_row(row) -> str:
+    """
+    Returns "" if no Vbias, else a filename-safe suffix like 'Vbias0.5V'.
+    """
+    vb = _parse_optional_float(row.get("Vbias", ""))
+    if vb in (None, "INVALID"):
+        return ""
+    return f"Vbias{float(vb):g}V"
 
 
 def _to_bool(x):
@@ -611,7 +759,8 @@ def build_run_plan_from_saved(loop_src: pd.DataFrame, batch_src: pd.DataFrame):
 
     levels = {}
     for _, row in active.iterrows():
-        vals = parse_values(row.get("Values", ""))
+        vals = parse_values(row.get("Values", ""), row.get("Parameter", ""))
+
         if vals:
             levels.setdefault(int(row.get("Level", 1)), []).append({"p": row.get("Parameter"), "v": vals})
 
@@ -665,7 +814,6 @@ def make_tree_snapshot(loop_src: pd.DataFrame, batch_src: pd.DataFrame) -> dict:
         current_rep_i=0,
     )
 
-import math
 
 def validate_sweep_steps(
     df: pd.DataFrame,
@@ -789,6 +937,12 @@ def _compute_loop_view(loop_work: pd.DataFrame, *, sweep_mode: str, is_custom: b
         if "Level" not in df.columns:
             df["Level"] = 1
         df["Level"] = pd.to_numeric(df["Level"], errors="coerce").fillna(1).astype(int)
+        # --- NEW: renumber enabled levels so min enabled Level == 1 ---
+        enabled = df["Enable"].map(_to_bool)
+        if enabled.any():
+            shift = int(df.loc[enabled, "Level"].min()) - 1
+            if shift > 0:
+                df.loc[enabled, "Level"] = df.loc[enabled, "Level"] - shift
     else:
         if sweep_mode == "Grid Scan (Nested)":
             lvl, out = 1, []
@@ -935,12 +1089,12 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             c2.text_input("Subfolder", "Initial data", key="subfolder")
             c3.text_input("Tag", "p1", key="tag")
 
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.text_input("Laser λ (nm)", "730", key="def_laser")
             m2.text_input("Power (µW)", "1", key="def_power")
             m3.text_input("Default Exp (ms)", "1000", key="def_exp")
             m4.text_input("Default Center (nm)", "885", key="def_center")
-            st.number_input("Default Accumulations (EPF)", 1, 1000, 2, key="def_epf")
+            m5.number_input("Default Accumulations (EPF)", 1, 1000, 1, key="def_epf")
 
             st.text_input(
                 "Filename pattern",
@@ -999,7 +1153,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     step=0.001, format="%.3f", key="qgen_step"
                 )
                 step_v = float(min(step_raw, max_step))
-                reverse = st.checkbox("Reverse?", value=bool(st.session_state.get("qgen_reverse", True)), key="qgen_reverse")
+                reverse = st.checkbox("Reverse?", value=bool(st.session_state.get("qgen_reverse", False)), key="qgen_reverse")
                 st.caption(f"Step is capped at max step: {max_step:g} V")
 
             op_char = "+" if op_mode == "+" else "-"
@@ -1009,14 +1163,16 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             if auto_on:
                 st.session_state["qgen_row_label"] = auto_label
 
-            row_label = st.text_input("Row Label", key="qgen_row_label", disabled=auto_on)
+            
 
-            r1, r2, r3 = st.columns([1, 1, 1.4])
+            r1, r2, r3, r4 = st.columns([1.4, 1, 1, 1.4])
             with r1:
-                q_repeat = st.number_input("repeat", min_value=1, value=int(st.session_state.get("qgen_repeat", 1)), step=1, key="qgen_repeat")
+                row_label = st.text_input("Row Label", key="qgen_row_label", disabled=auto_on)
             with r2:
-                q_measpwr = st.checkbox("MeasurePower", value=bool(st.session_state.get("qgen_measpwr", False)), key="qgen_measpwr")
+                q_repeat = st.number_input("repeat", min_value=1, value=int(st.session_state.get("qgen_repeat", 1)), step=1, key="qgen_repeat")
             with r3:
+                q_measpwr = st.checkbox("MeasurePower", value=bool(st.session_state.get("qgen_measpwr", False)), key="qgen_measpwr")
+            with r4:
                 q_vbias = st.text_input("Vbias (optional)", value=str(st.session_state.get("qgen_vbias", "")), key="qgen_vbias")
 
             if st.button("🔍 Calculate / Preview", key="btn_qgen_calc"):
@@ -1051,7 +1207,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             if "preview_row" in st.session_state and isinstance(st.session_state.preview_row, dict):
                 p = st.session_state.preview_row
                 st.markdown("---")
-                st.markdown("##### 📊 Result Preview (Coupled Sweep)")
+                st.markdown("##### 📊 Result Preview (Dual gate Sweep)")
                 m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Vbg", f"{p['Vbg_start']} → {p['Vbg_stop']} V")
                 m2.metric("Vtg", f"{p['Vtg_start']} → {p['Vtg_stop']} V")
@@ -1071,7 +1227,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
     # --- editors + run controls (FORM to avoid hiccups)
     with c_edit:
-        st.subheader("Loop Builder + Inner Electrical Sweep (Buffered Editing)")
+        st.subheader("Loop Builder + Inner Electrical Sweep")
         st.caption("Edits do NOT trigger reruns. Preview + checks update when you click a button below.")
 
         sweep_mode = st.radio(
@@ -1081,6 +1237,13 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             key="sweep_mode_radio",
         )
         is_custom = (sweep_mode == "Custom (Advanced)")
+        # ✅ Add this explanation here
+        if sweep_mode == "Grid Scan (Nested)":
+            st.caption("Grid Scan: nesting order follows the order of enabled rows (top → bottom).")
+        elif sweep_mode == "Synchronized (Zipped)":
+            st.caption("Zipped: all enabled parameters advance together by index (same length required).")
+        elif sweep_mode == "Custom (Advanced)":
+            st.caption("Custom: Level is nesting order. Same Level = ZIPPED together.")
 
         base_cols = {
             "Enable": st.column_config.CheckboxColumn("On", default=False, width="small"),
@@ -1089,7 +1252,12 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
         }
         custom_cols = {
             **base_cols,
-            "Level": st.column_config.NumberColumn("Level", min_value=1, max_value=5, step=1),
+            "Level": st.column_config.SelectboxColumn(
+                "Level",
+                options=[1, 2, 3, 4, 5],
+                help="1 = outermost. Same Level means parameters are ZIPPED together (must have same # of values).",
+                width="small",
+            ),
         }
 
         col_cfg = {
@@ -1111,9 +1279,14 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
         with st.form("edit_form", clear_on_submit=False):
             st.markdown("### Loop Builder")
 
-            loop_init = normalize_df(st.session_state.loop_work, LOOP_SCHEMA)
-            if not is_custom:
-                loop_init = loop_init.drop(columns=["Level"], errors="ignore")
+            loop_init_full = _compute_loop_view(
+                st.session_state.loop_work,
+                sweep_mode=sweep_mode,
+                is_custom=is_custom,
+            )
+
+            loop_init = loop_init_full if is_custom else loop_init_full.drop(columns=["Level"], errors="ignore")
+
 
             loop_work = st.data_editor(
                 loop_init,
@@ -1137,7 +1310,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         levels = {}
                         for _, row in active_rows.iterrows():
                             lvl = int(row["Level"])
-                            vals = parse_values(row.get("Values", ""))
+                            vals = parse_values(row.get("Values", ""), row.get("Parameter", ""))
+
                             if vals:
                                 levels.setdefault(lvl, []).append({"param": row["Parameter"], "vals": vals})
 
@@ -1248,9 +1422,12 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
             st.session_state["tree_snapshot"] = make_tree_snapshot(st.session_state.loop_src, st.session_state.batch_src)
 
-            run_notice_ph.success("✅ Applied Loop + Table.")
+            vbias_issue = _check_vbias_mapping(st.session_state.batch_src, devices)
 
-
+            with run_notice_ph.container():
+                st.success("✅ Applied Loop + Table.")
+                if vbias_issue:
+                    st.error(vbias_issue)
 
         # --- Discard All ---
         if discard_all_btn:
@@ -1259,8 +1436,11 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
             st.session_state["run_preview"] = build_run_preview(st.session_state.loop_src, st.session_state.batch_src)
             st.session_state["tree_snapshot"] = make_tree_snapshot(st.session_state.loop_src, st.session_state.batch_src)
-
-            run_notice_ph.info("↩️ Discarded Loop + Table edits.")
+            vbias_issue = _check_vbias_mapping(st.session_state.batch_src, devices)
+            with run_notice_ph.container():
+                run_notice_ph.info("↩️ Discarded Loop + Table edits.")
+                if vbias_issue:
+                    st.error(vbias_issue)    
 
 
         if run_btn:
@@ -1299,39 +1479,42 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     f"⛔ Unsaved edits detected in: {', '.join(parts)}. "
                     f"Apply or Discard, then Run again."
                 )
-
             else:
-                # Safety checks (only when saved)
-                max_step = float(st.session_state.get("safe_max_v_per_step", 0.5))
-                vbg_limits = (
-                    float(st.session_state.get("safe_vbg_min", -5.0)),
-                    float(st.session_state.get("safe_vbg_max", 5.0)),
-                )
-                vtg_limits = (
-                    float(st.session_state.get("safe_vtg_min", -5.0)),
-                    float(st.session_state.get("safe_vtg_max", 5.0)),
-                )
-
-                bad = validate_sweep_steps(
-                    st.session_state.batch_src,
-                    max_volts_per_step=max_step,
-                    vbg_limits=vbg_limits,
-                    vtg_limits=vtg_limits,
-                )
-
-                if bad:
-                    # Red box + compact table, near the Run button
-                    with run_notice_ph.container():
-                        st.error("Safety violation(s). Fix these rows:")
-
-                        vdf = pd.DataFrame(bad)
-                        show_cols = [c for c in ["row", "label", "problem", "fix"] if c in vdf.columns]
-                        st.dataframe(vdf[show_cols], use_container_width=True, hide_index=True)
-
+                #  Vbias mapping check (only when saved + before safety checks)
+                vbias_issue = _check_vbias_mapping(st.session_state.batch_src, devices)
+                if vbias_issue:
+                    run_notice_ph.error(vbias_issue)
+                    st.session_state["_start_run"] = False
                 else:
-                    run_notice_ph.success("✅ Starting run…")
-                    st.session_state["_start_run"] = True
-                    ui_log("Initiating run...")
+                    # Safety checks (only when saved)
+                    max_step = float(st.session_state.get("safe_max_v_per_step", 0.5))
+                    vbg_limits = (
+                        float(st.session_state.get("safe_vbg_min", -5.0)),
+                        float(st.session_state.get("safe_vbg_max", 5.0)),
+                    )
+                    vtg_limits = (
+                        float(st.session_state.get("safe_vtg_min", -5.0)),
+                        float(st.session_state.get("safe_vtg_max", 5.0)),
+                    )
+
+                    bad = validate_sweep_steps(
+                        st.session_state.batch_src,
+                        max_volts_per_step=max_step,
+                        vbg_limits=vbg_limits,
+                        vtg_limits=vtg_limits,
+                    )
+
+                    if bad:
+                        with run_notice_ph.container():
+                            st.error("Safety violation(s). Fix these rows:")
+                            vdf = pd.DataFrame(bad)
+                            show_cols = [c for c in ["row", "label", "problem", "fix"] if c in vdf.columns]
+                            st.dataframe(vdf[show_cols], use_container_width=True, hide_index=True)
+                    else:
+                        run_notice_ph.success("✅ Starting run…")
+                        st.session_state["_start_run"] = True
+                        ui_log("Initiating run...")
+
 
         # Always render preview near Run (it only CHANGES when Apply All / Discard All updates run_preview)
         tree_live_ph = None
@@ -1344,7 +1527,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     st.session_state["tree_snapshot"] = make_tree_snapshot(st.session_state.loop_src, st.session_state.batch_src)
 
                 snap = st.session_state["tree_snapshot"]
-
+                param_order = get_enabled_param_order(st.session_state.loop_src)
                 # Always show HTML tree (idle = all todo)
                 html_tree = build_run_status_tree_html(
                     snap["final_sequence"],
@@ -1355,6 +1538,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     current_label=snap["current_label"],
                     current_rep_i=snap["current_rep_i"],
                     max_seq_show=10,
+                    param_order=param_order
                 )
 
                 tree_live_ph.markdown(html_tree, unsafe_allow_html=True)
@@ -1379,8 +1563,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     c4.metric("Total frames", rp["total_frames"])
 
                     
-                    if rp.get("labels"):
-                        st.caption("Run structure (sample of combined sequence order):")
+                    
                         
                     # Store placeholder for run-time updates (closure-friendly)
                     st.session_state["_tree_live_enabled"] = True
@@ -1424,6 +1607,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     except Exception:
                         parts.append(f"{k0}={ctx_vars[k]}")
             return ", ".join(parts) if parts else "(no loop vars)"
+        param_order = get_enabled_param_order(st.session_state.loop_src)
 
 
         lf6 = st.session_state.get("lf6")
@@ -1435,7 +1619,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
         levels = {}
         for _, row in active.iterrows():
-            vals = parse_values(row.get("Values", ""))
+            vals = parse_values(row.get("Values", ""), row.get("Parameter", ""))
+
             if vals:
                 levels.setdefault(int(row.get("Level", 1)), []).append({"p": row.get("Parameter"), "v": vals})
 
@@ -1506,6 +1691,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         current_label=first_label,
                         current_rep_i=0,
                         max_seq_show=8,
+                        param_order=param_order
                     ),
                     unsafe_allow_html=True,
                 )
@@ -1541,6 +1727,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
             for _, row in df_batch.iterrows():
                 cond_label = sanitize_filename(row.get("condition_label", ""))
+                vbias_block = _vbias_block_from_row(row)
+                cond_block_for_name = cond_label + (f"_{vbias_block}" if vbias_block else "")
 
                 # sweep params for display
                 try:
@@ -1577,7 +1765,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                             "laser_nm": st.session_state.get("def_laser"),
                             "power_uw": power_uw_str,
                             "exp_s": _exp_s_str(val_exp),
-                            "cond_block": cond_label,
+                            "cond_block": cond_block_for_name,
                             "center_nm": f"{float(val_center):.0f}",
                             "epf": f"{val_epf}",
                         }
@@ -1598,18 +1786,19 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     pct = int(100 * running_idx / total_acq)
                     pct = min(max(pct, 0), 100)
 
-                    bar_text = f"Running {running_idx-1}/{total_acq} • Seq {seq_i+1}/{total} • {cond_label}"
-                    if supports_text:
-                        bar.progress(pct, text=bar_text)
-                    else:
-                        bar.progress(pct)
+                    # bar_text = f"Running {running_idx-1}/{total_acq} • Seq {seq_i+1}/{total} • {cond_label}"
+                    
+                    bar.progress(pct)
 
 
                     # markdown below (styled): filename + only missing sweep info
                     run_progress_text_ph.markdown(
-                        f"**{stem_final}.csv**  \n"
+                        f"**Saving file:**\n\n"
+                        f"```text\n{stem_final}.csv\n```\n"
                         f"Vbg `{vbg_s:g}→{vbg_e:g}` • Vtg `{vtg_s:g}→{vtg_e:g}` • frs `{frames}` • rep **{r_i+1}/{n_rep}**"
                     )
+
+
 
                     # ---- LIVE tree: highlight current (done = completed so far) ----
                     if tree_live_ph is not None:
@@ -1633,6 +1822,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                                     current_label=snap["current_label"],
                                     current_rep_i=snap["current_rep_i"],
                                     max_seq_show=8,
+                                    param_order=param_order
                                 ),
                                 unsafe_allow_html=True,
                             )
@@ -1645,12 +1835,12 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         {"step": "set_lightfield", "ms": float(val_exp), "center_nm": float(val_center), "epf": int(val_epf)}
                     ]
 
-                    vbias_str = str(row.get("Vbias", "")).strip()
-                    if vbias_str:
-                        try:
-                            recipe.append({"step": "set_bias", "Vbias": float(vbias_str)})
-                        except Exception:
-                            ui_log("Vbias parse warning (ignored).")
+                    vb = _parse_optional_float(row.get("Vbias", ""))
+                    if vb == "INVALID":
+                        ui_log("Vbias parse warning (ignored).")
+                    elif vb is not None:
+                        recipe.append({"step": "set_bias", "Vbias": float(vb)})
+
 
                     recipe += build_recipe_from_preset(
                         "dual_gate_sweep",
@@ -1690,6 +1880,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                                     current_label=snap["current_label"],
                                     current_rep_i=snap["current_rep_i"],
                                     max_seq_show=8,
+                                    param_order=param_order
                                 ),
                                 unsafe_allow_html=True,
                             )
@@ -1704,7 +1895,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             bar.progress(100)
 
         run_progress_text_ph.success("✅ Run complete.")
-        ui_log("Run Complete.")
+        ui_log("✅ All acquisitions complete.")
+
         if tree_live_ph is not None:
             st.session_state["tree_snapshot"].update(
                 done=total_acq,
@@ -1723,6 +1915,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     current_label=snap["current_label"],
                     current_rep_i=snap["current_rep_i"],
                     max_seq_show=8,
+                    param_order=param_order
                 ),
                 unsafe_allow_html=True,
             )

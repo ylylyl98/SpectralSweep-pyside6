@@ -56,6 +56,17 @@ def get_rm():
 # ──────────────────────────────────────────────────────────────────────────────
 # LOW-LEVEL DISCOVERY HELPERS
 # ──────────────────────────────────────────────────────────────────────────────
+import math
+def _fmt_v(v) -> str:
+    if v is None:
+        return "nan"
+    try:
+        v = float(v)
+        if math.isnan(v):
+            return "nan"
+        return f"{v:.3f}"
+    except Exception:
+        return "nan"
 
 def list_serial_ports():
     """
@@ -506,9 +517,9 @@ if "iv" in devices:
         # 1. Create a placeholder for status messages so they persist clearly
         gate_status = st.empty()
 
-        b_col1, b_col2 = st.columns(2)
+        b_col1, b_col2, b_col3 = st.columns(3)
         with b_col1:
-            if st.button("Set Values", type="primary", use_container_width=True, key="btn_set_gates"):
+            if st.button("Set Values", type="primary", width="stretch", key="btn_set_gates"):
                 # 2. SPINNER: This shows "Running..." while the hardware works
                 with st.spinner("Setting voltages..."):
                     try:
@@ -527,9 +538,32 @@ if "iv" in devices:
                         
                     except Exception as e:
                         gate_status.error(f"Set error: {e}")
-
+                        
         with b_col2:
-            if st.button("Zero All", use_container_width=True, key="btn_zero_gates"):
+            if st.button("Read voltages", use_container_width=True, key="btn_read_gates"):
+                with st.spinner("Reading voltages..."):
+                    try:
+                        iv_dev = devices.get("iv")
+                        if iv_dev is None:
+                            gate_status.error("IV device not connected.")
+                        else:
+                            bg, tg = (float("nan"), float("nan"))
+                            vb = None
+
+                            if hasattr(iv_dev, "read_current_gates"):
+                                bg, tg = iv_dev.read_current_gates()
+
+                            if hasattr(iv_dev, "read_current_bias"):
+                                vb = iv_dev.read_current_bias()
+
+                            gate_status.info(
+                                f"📟 Measured: BG={_fmt_v(bg)} V, TG={_fmt_v(tg)} V, Bias={_fmt_v(vb)} V"
+                            )
+
+                    except Exception as e:
+                        gate_status.error(f"Read error: {e}")
+        with b_col3:
+            if st.button("Zero All", width="stretch", key="btn_zero_gates"):
                 with st.spinner("Zeroing..."):
                     try:
                         iv_dev = devices["iv"]
