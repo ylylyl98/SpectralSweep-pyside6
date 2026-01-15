@@ -18,6 +18,7 @@ modules = [
     "app.steps.set_lightfield",  # unified LF settings
     "app.steps.set_gate",
     "app.steps.set_bias",
+    "app.steps.sync_wavelength_axis",
     # include whichever one is correct for your file name:
     "app.steps.dual_gate_sweep",   # if your file is dual_gate_swep.py
 ]

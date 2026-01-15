@@ -102,7 +102,8 @@ class DualGateSweep:
         total = len(vbg_list)
 
         # Wavelength headers setup (if CSVWriter doesn't have them yet)
-        wl_headers = getattr(csvw, "wavelength_headers", None)
+        wl_headers = None  # ✅ don't trust pre-passed headers; we'll lock to first acquired wl
+
         if (not wl_headers) and hasattr(spec, "calibration_wavelengths"):
             try:
                 wl_headers = list(spec.calibration_wavelengths())
@@ -190,8 +191,16 @@ class DualGateSweep:
 
                 # Acquire spectrum
                 wl, intens = spec.acquire()
+                wl = list(map(float, wl))                 # ✅ make wl a float list
                 intens = list(map(float, intens))
-
+                # ✅ ADD THIS: on the first row, force CSV wavelength header = actual wl from acquire()
+                if getattr(csvw, "_data_rows_written", 0) == 0:
+                    wl_headers = wl
+                    if hasattr(csvw, "set_wavelength_headers"):
+                        csvw.set_wavelength_headers(wl_headers)
+                else:
+                    # keep using existing headers
+                    wl_headers = wl_headers or getattr(csvw, "wavelength_headers", None)
                 # Align to headers length if needed
                 if wl_headers and len(intens) != len(wl_headers):
                     if len(intens) > len(wl_headers):
