@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Callable, Optional
 from .context import RunContext
 from .csv_writer import CSVWriter
 from app.steps.registry import get_step_class  # registry auto-imports built-ins
+import app.steps._import_all  # noqa: F401
 
 
 class Runner:

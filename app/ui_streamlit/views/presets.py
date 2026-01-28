@@ -1891,17 +1891,37 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
 
                     # ---- build recipe and run ----
-                    recipe = [
-                        {"step": "set_lightfield", "ms": float(val_exp), "center_nm": float(val_center), "epf": int(val_epf)}
-                    ]
+                    # recipe = [
+                    #     {"step": "set_lightfield", "ms": float(val_exp), "center_nm": float(val_center), "epf": int(val_epf)}
+                    # ]
+                    recipe = []
 
+                    # --- rotate first (if loop provided angles) ---
+                    if val_rot1 is not None and str(val_rot1).strip() != "":
+                        if devices and devices.get("rotation1"):
+                            recipe.append({"step": "rotate_to", "which": "rotation1", "angle_deg": float(val_rot1)})
+                        else:
+                            ui_log("Rotation1 not connected; skipping rotate_to.")
+
+                    if val_rot2 is not None and str(val_rot2).strip() != "":
+                        if devices and devices.get("rotation2"):
+                            recipe.append({"step": "rotate_to", "which": "rotation2", "angle_deg": float(val_rot2)})
+                        else:
+                            ui_log("Rotation2 not connected; skipping rotate_to.")
+
+
+                    # --- then configure LF6 ---
+                    recipe.append(
+                        {"step": "set_lightfield", "ms": float(val_exp), "center_nm": float(val_center), "epf": int(val_epf)}
+                    )
+                    # --- optional bias ---
                     vb = _parse_optional_float(row.get("Vbias", ""))
                     if vb == "INVALID":
                         ui_log("Vbias parse warning (ignored).")
                     elif vb is not None:
                         recipe.append({"step": "set_bias", "Vbias": float(vb)})
 
-
+                    # --- then the sweep preset ---
                     recipe += build_recipe_from_preset(
                         "dual_gate_sweep",
                         dict(
@@ -1915,6 +1935,10 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     )
 
                     ui_log(f"  > Saving: {stem_final}.csv")
+                    ui_log(f"devices keys = {list((devices or {}).keys())}")
+                    from app.steps.registry import list_steps
+                    ui_log("Registered steps: " + ", ".join(list_steps()))
+
                     runner_singleton.run_recipe(
                         recipe,
                         devices,

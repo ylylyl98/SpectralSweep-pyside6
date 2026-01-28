@@ -21,6 +21,7 @@ modules = [
     "app.steps.sync_wavelength_axis",
     # include whichever one is correct for your file name:
     "app.steps.dual_gate_sweep",   # if your file is dual_gate_swep.py
+    "app.steps.rotate_to"
 ]
 
 for m in modules:
