@@ -1108,12 +1108,30 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             m4.text_input("Default Center (nm)", "885", key="def_center")
             m5.number_input("Default Accumulations (EPF)", 1, 1000, 1, key="def_epf")
 
+            # st.text_input(
+            #     "Filename pattern",
+            #     # "${sample}$~${tag}$~$6KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~${center_nm}nmc$~${cond_block}$",
+            #     "${sample}$~${tag}$~$6KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~${center_nm}nmc$~${rot_block}$~${cond_block}$",
+            #     help="Vars: {sample}, {tag}, {laser_nm}, {power_uw}, {exp_s}, {epf}, {center_nm}, {cond_block}. Tip: $...$ blocks make parsing easier.",
+            #     key="filename_pattern",
+            # )
+            DEFAULT_PATTERN = (
+                "${sample}$~${tag}$~$1.8KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~"
+                "${center_nm}nmc$~${rot_block}$~${cond_block}$"
+            )
+
+            # initialize only once
+            if "filename_pattern" not in st.session_state:
+                st.session_state["filename_pattern"] = DEFAULT_PATTERN
+
+            cpat1, cpat2 = st.columns([1, 1])
+            if cpat1.button("Reset filename pattern"):
+                st.session_state["filename_pattern"] = DEFAULT_PATTERN
+
             st.text_input(
                 "Filename pattern",
-                # "${sample}$~${tag}$~$6KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~${center_nm}nmc$~${cond_block}$",
-                "${sample}$~${tag}$~$6KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~${center_nm}nmc$~${rot_block}$~${cond_block}$",
-                help="Vars: {sample}, {tag}, {laser_nm}, {power_uw}, {exp_s}, {epf}, {center_nm}, {cond_block}. Tip: $...$ blocks make parsing easier.",
                 key="filename_pattern",
+                help="Vars: {sample}, {tag}, {laser_nm}, {power_uw}, {exp_s}, {epf}, {center_nm}, {rot_block}, {cond_block}",
             )
 
 
