@@ -1788,9 +1788,9 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
                     rot_parts = []
                     if rot1_deg:
-                        rot_parts.append(f"R1{rot1_deg}deg")
+                        rot_parts.append(f"R1_{rot1_deg}deg")
                     if rot2_deg:
-                        rot_parts.append(f"R2{rot2_deg}deg")
+                        rot_parts.append(f"R2_{rot2_deg}deg")
                     rot_block = "_".join(rot_parts)  # "" if neither is set
 
                     fname_ctx = SafeDict(**ctx_vars)
