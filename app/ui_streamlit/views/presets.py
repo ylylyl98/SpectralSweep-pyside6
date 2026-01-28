@@ -1036,6 +1036,7 @@ def coupled_sweep_preview(
 # -------------------- UI main --------------------
 def render(devices, wavelength_headers, extra_scalar_fields_order):
     st.session_state.setdefault("extra_scalar_fields_order", extra_scalar_fields_order)
+    # st.session_state.pop("filename_pattern", None)
 
     PARAM_TYPES = [
         "Center Wavelength (nm)",
@@ -1813,6 +1814,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
                     try:
                         pat = st.session_state.get("filename_pattern")
+                        ui_log(f"DEBUG filename_pattern = {st.session_state.get('filename_pattern')}")
                         stem_base = sanitize_filename(pat.format_map(fname_ctx)) + rep_suffix
                     except Exception as e:
                         ui_log(f"Filename Error: {e}")
