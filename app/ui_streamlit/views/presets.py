@@ -962,6 +962,17 @@ def _exp_s_str(ms_val: float) -> str:
     s = float(ms_val) / 1000.0
     return f"{int(s)}" if float(s).is_integer() else f"{s:.3g}"
 
+def _fmt_deg_for_name(v) -> str:
+    """Format a (possibly None) degree value for filenames."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    if s == "" or s.lower() in ("none", "nan"):
+        return ""
+    try:
+        return f"{float(s):g}"
+    except Exception:
+        return ""
 
 # -------------------- quick generator math --------------------
 def coupled_sweep_preview(
@@ -1098,7 +1109,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
             st.text_input(
                 "Filename pattern",
-                "${sample}$~${tag}$~$6KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~${center_nm}nmc$~${cond_block}$",
+                # "${sample}$~${tag}$~$6KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~${center_nm}nmc$~${cond_block}$",
+                "${sample}$~${tag}$~$6KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~${center_nm}nmc$~${rot_block}$~${cond_block}$",
                 help="Vars: {sample}, {tag}, {laser_nm}, {power_uw}, {exp_s}, {epf}, {center_nm}, {cond_block}. Tip: $...$ blocks make parsing easier.",
                 key="filename_pattern",
             )
@@ -1757,6 +1769,29 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                             except Exception as e:
                                 ui_log(f"  > Power Meas Failed: {e}")
 
+                    # fname_ctx = SafeDict(**ctx_vars)
+                    # fname_ctx.update(
+                    #     {
+                    #         "sample": st.session_state.get("sample_name"),
+                    #         "tag": st.session_state.get("tag"),
+                    #         "laser_nm": st.session_state.get("def_laser"),
+                    #         "power_uw": power_uw_str,
+                    #         "exp_s": _exp_s_str(val_exp),
+                    #         "cond_block": cond_block_for_name,
+                    #         "center_nm": f"{float(val_center):.0f}",
+                    #         "epf": f"{val_epf}",
+                    #     }
+                    # )
+                    rot1_deg = _fmt_deg_for_name(val_rot1)
+                    rot2_deg = _fmt_deg_for_name(val_rot2)
+
+                    rot_parts = []
+                    if rot1_deg:
+                        rot_parts.append(f"R1{rot1_deg}deg")
+                    if rot2_deg:
+                        rot_parts.append(f"R2{rot2_deg}deg")
+                    rot_block = "_".join(rot_parts)  # "" if neither is set
+
                     fname_ctx = SafeDict(**ctx_vars)
                     fname_ctx.update(
                         {
@@ -1768,6 +1803,11 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                             "cond_block": cond_block_for_name,
                             "center_nm": f"{float(val_center):.0f}",
                             "epf": f"{val_epf}",
+
+                            # NEW: rotation placeholders for filename_pattern
+                            "rot1_deg": rot1_deg,
+                            "rot2_deg": rot2_deg,
+                            "rot_block": rot_block,
                         }
                     )
 

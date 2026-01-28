@@ -115,7 +115,7 @@ class IVDevice:
         self,
         Vbg: Optional[float] = None,
         Vtg: Optional[float] = None,
-        delay_s: float = 0.05,
+        delay_s: float = 0.03,
         ramp_step: Optional[float] = 0.1,
     ):
         """

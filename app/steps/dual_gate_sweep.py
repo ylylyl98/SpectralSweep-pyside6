@@ -67,7 +67,7 @@ class DualGateSweep:
         # These apply to the **ramp-in** and **ramp-out** only.
         self.measure_delay: float = float(cfg.get("measure_delay", 0.20))
         self.ramp_step_size: float = float(cfg.get("ramp_step_size", 0.10))
-        self.ramp_step_time: float = float(cfg.get("ramp_step_time", 0.03))
+        self.ramp_step_time: float = float(cfg.get("ramp_step_time", 0.02))
 
         # Optional tiny settle after a jump (during the sweep)
         self.jump_settle_s: float = float(cfg.get("jump_settle_s", 0.0))
