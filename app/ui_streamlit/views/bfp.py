@@ -24,7 +24,7 @@ BASE_OUT.mkdir(parents=True, exist_ok=True)
 def _st_pyplot(fig):
     """Streamlit pyplot compat across versions."""
     try:
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width="stretch")
     except TypeError:
         st.pyplot(fig)
 
@@ -691,9 +691,9 @@ def render(devices: Dict[str, Any]) -> None:
         with r2[1]:
             st.checkbox("Auto-apply", key="bfp_auto_apply_on_acquire")
         with r2[2]:
-            do_acq = st.button("Acquire", type="primary", key="btn_bfp_acquire", use_container_width=True)
+            do_acq = st.button("Acquire", type="primary", key="btn_bfp_acquire", width="stretch")
         with r2[3]:
-            do_clear = st.button("Clear", key="btn_bfp_clear", use_container_width=True)
+            do_clear = st.button("Clear", key="btn_bfp_clear", width="stretch")
 
         est_s = (float(st.session_state["bfp_exposure_ms"]) / 1000.0) * int(st.session_state["bfp_epf"])
         st.caption(f"≈ {est_s:.1f}s  •  Full sensor→2D, Bin all→1D")
@@ -979,7 +979,7 @@ def render(devices: Dict[str, Any]) -> None:
     out_png = out_dir / f"{stem}.png"
     st.caption(f"Will save to: `{out_csv}` and `{out_png}`")
 
-    if st.button("Save CSV + PNG", key="btn_bfp_save_csv", use_container_width=True):
+    if st.button("Save CSV + PNG", key="btn_bfp_save_csv", width="stretch"):
         try:
             wls = _get_wavelengths_nm(spec)
             _save_csv_with_wavelengths(out_csv, data, wls)
