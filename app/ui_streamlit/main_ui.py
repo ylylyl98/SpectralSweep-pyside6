@@ -25,6 +25,7 @@ import app.steps._import_all  # noqa: F401
 
 from app.ui_streamlit.views.presets import render as render_presets
 from app.ui_streamlit.views.megasweep import render as render_megasweep
+from app.ui_streamlit.views.bfp import render as render_bfp
 from app.devices.lf6_adapter import SpectrometerLF6
 from app.devices.iv_adapter import IVDevice
 
@@ -1071,10 +1072,12 @@ st.sidebar.title("Experiment Selection")
 
 app_mode = st.sidebar.radio(
     "Select Mode",
-    ["Dual Gate Sweep", "MegaSweep"]
+    ["Dual Gate Sweep", "MegaSweep", "Back Focal Plane (BFP)"]
 )
 
 if app_mode == "Dual Gate Sweep":
     render_presets(devices_main, wavelength_headers, extra_scalar_fields_order)
 elif app_mode == "MegaSweep":
     render_megasweep(devices_main)
+elif app_mode == "Back Focal Plane (BFP)":
+    render_bfp(devices_main)

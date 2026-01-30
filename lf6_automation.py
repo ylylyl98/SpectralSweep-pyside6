@@ -63,6 +63,44 @@ class LF6Setup:
         array = self.convert_buffer(image_data, image_frame.Format)
         return array
 
+    def _frame_dims(self, frame):
+        """Try common LightField frame width/height attributes (property or method)."""
+        def _get(names):
+            for name in names:
+                if hasattr(frame, name):
+                    v = getattr(frame, name)
+                    try:
+                        v = v() if callable(v) else v
+                        v = int(v)
+                        if v > 0:
+                            return v
+                    except Exception:
+                        pass
+            return None
+
+        w = _get(["Width", "GetWidth", "SizeX", "GetSizeX", "XSize", "GetXSize"])
+        h = _get(["Height", "GetHeight", "SizeY", "GetSizeY", "YSize", "GetYSize"])
+        return w, h
+
+    def acquire_2d(self):
+        """
+        Capture one frame and return a 2D array (H, W) if frame dimensions are available.
+        If dimension detection fails, returns the raw 1D array (same as acquire()).
+        """
+        frames = 1
+        dataset = self.experiment.Capture(frames)
+
+        # for frames=1, index is always 0
+        frame = dataset.GetFrame(0, 0)
+        image_data = frame.GetData()
+
+        arr = self.convert_buffer(image_data, frame.Format)
+
+        w, h = self._frame_dims(frame)
+        if w and h and arr.ndim == 1 and arr.size == w * h:
+            arr = arr.reshape(h, w)  # (H, W)
+
+        return arr
 
     def change_exp_setting(self, setting, value):
         # Check for existence before setting

@@ -49,6 +49,42 @@ class SpectrometerLF6:
         wl = self.calibration_wavelengths(force=True)
         return wl, y
 
+    def acquire_2d(self):
+        """
+        Capture one frame and return a 2D array if the frame reports Width/Height.
+        Keeps your existing acquire() behavior unchanged (still 1D for other code).
+        """
+        import numpy as np
+
+        frames = 1
+        dataset = self.experiment.Capture(frames)
+
+        frame = dataset.GetFrame(0, frames - 1)
+        image_data = frame.GetData()
+
+        arr = np.asarray(self.convert_buffer(image_data, frame.Format))
+
+        # Local helper => cannot NameError due to scope/indentation
+        def _dim(f, candidates):
+            for name in candidates:
+                if hasattr(f, name):
+                    v = getattr(f, name)
+                    try:
+                        return int(v() if callable(v) else v)
+                    except Exception:
+                        pass
+            return None
+
+        # Try common LightField frame dimension names
+        w = _dim(frame, ["Width", "GetWidth", "SizeX", "GetSizeX", "XSize", "GetXSize"])
+        h = _dim(frame, ["Height", "GetHeight", "SizeY", "GetSizeY", "YSize", "GetYSize"])
+
+        # If 2D is flattened, reshape back
+        if w and h and arr.ndim == 1 and arr.size == w * h:
+            arr = arr.reshape(h, w)
+
+        return arr
+
     # ---- convenience setter that also clears λ cache ----
     def change_spectra_center(self, center_nm) -> None:
         """Accepts '730' or 730.0; forwards to LF6 and invalidates λ cache."""
