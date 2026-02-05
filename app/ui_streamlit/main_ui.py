@@ -68,6 +68,29 @@ def _fmt_v(v) -> str:
         return f"{v:.3f}"
     except Exception:
         return "nan"
+    
+import math
+
+def _fmt_i(i):
+    if i is None:
+        return "?"
+    try:
+        i = float(i)
+        if not math.isfinite(i):
+            return "nan"
+    except Exception:
+        return "?"
+
+    a = abs(i)
+    if a >= 1e-3:
+        return f"{i*1e3:.3g} mA"
+    if a >= 1e-6:
+        return f"{i*1e6:.3g} µA"
+    if a >= 1e-9:
+        return f"{i*1e9:.3g} nA"
+    if a >= 1e-12:
+        return f"{i*1e12:.3g} pA"
+    return f"{i:.3g} A"
 
 def list_serial_ports():
     """
@@ -615,13 +638,30 @@ if "iv" in devices:
                         if hasattr(iv_dev, "set_gates"):
                             iv_dev.set_gates(man_vbg, man_vtg)
                         if hasattr(iv_dev, "set_bias"):
-                            iv_dev.set_bias(man_vbias)
+                            iv_dev.set_bias(man_vbias, ramp_step=0.1)
                         elif hasattr(iv_dev, "set_vbias"):
-                            iv_dev.set_vbias(man_vbias)
+                            iv_dev.set_vbias(man_vbias, ramp_step=0.1)
                         
                         # 3. CONFIRMATION: Only runs after hardware is done
-                        gate_status.success(f"✅ Finished: TG={man_vtg}V, BG={man_vbg}V")
-                        
+                        # --- read back AFTER it finishes ---
+                        bg_m, tg_m = (float("nan"), float("nan"))
+                        vb_m = None
+                        Ibg = Itg = Ib = None
+
+                        if hasattr(iv_dev, "read_current_gates"):
+                            bg_m, tg_m = iv_dev.read_current_gates()
+                        if hasattr(iv_dev, "read_current_bias"):
+                            vb_m = iv_dev.read_current_bias()
+                        if hasattr(iv_dev, "read_currents"):
+                            Ibg, Itg, Ib = iv_dev.read_currents()
+
+                        gate_status.success(
+                            "✅ Finished (measured):\n"
+                            f"- TG:   V={_fmt_v(tg_m)} V, I={_fmt_i(Itg)}\n"
+                            f"- BG:   V={_fmt_v(bg_m)} V, I={_fmt_i(Ibg)}\n"
+                            f"- Bias: V={_fmt_v(vb_m)} V, I={_fmt_i(Ib)}"
+                        )
+
                     except Exception as e:
                         gate_status.error(f"Set error: {e}")
                         
@@ -642,12 +682,25 @@ if "iv" in devices:
                             if hasattr(iv_dev, "read_current_bias"):
                                 vb = iv_dev.read_current_bias()
 
+                            # --- NEW: read currents ---
+                            Ibg = Itg = Ib = None
+                            if hasattr(iv_dev, "read_currents"):
+                                Ibg, Itg, Ib = iv_dev.read_currents()
+                            else:
+                                # fallback: at least gates leakage if older adapter
+                                if hasattr(iv_dev, "read_leakages"):
+                                    Ibg, Itg = iv_dev.read_leakages()
+
                             gate_status.info(
-                                f"📟 Measured: BG={_fmt_v(bg)} V, TG={_fmt_v(tg)} V, Bias={_fmt_v(vb)} V"
+                                "📟 Measured:\n"
+                                f"- BG = {_fmt_v(bg)} V,  I_BG = {_fmt_i(Ibg)}\n"
+                                f"- TG = {_fmt_v(tg)} V,  I_TG = {_fmt_i(Itg)}\n"
+                                f"- Bias = {_fmt_v(vb)} V,  I_Bias = {_fmt_i(Ib)}"
                             )
 
                     except Exception as e:
                         gate_status.error(f"Read error: {e}")
+
         with b_col3:
             if st.button("Zero All", width="stretch", key="btn_zero_gates"):
                 with st.spinner("Zeroing..."):

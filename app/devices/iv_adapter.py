@@ -152,7 +152,7 @@ class IVDevice:
         self,
         Vbias: Optional[float] = None,
         delay_s: float = 0.05,
-        ramp_step: Optional[float] = None,
+        ramp_step: Optional[float] = 0.1,
     ):
         """
         Set source-drain bias. If ramp_step>0, move in steps; otherwise jump.
@@ -171,6 +171,52 @@ class IVDevice:
             except Exception:
                 return 0.0
         return _get("Vbg_leakage"), _get("Vtg_leakage")
+
+    def _safe_read_y(self, key: str) -> Optional[float]:
+        """
+        Best-effort: force a hardware read for the instrument that owns this y-channel,
+        then return the latest y value for that key.
+        """
+        try:
+            ycc = getattr(self.setup, "y_channel_collection", None)
+            if ycc is None:
+                return None
+
+            try:
+                inst = ycc.get_instrument(key)
+            except Exception:
+                return None
+
+            # Trigger a fresh read on that instrument (Keithley READ? updates volt+curr)
+            if inst is not None and hasattr(inst, "read_y"):
+                try:
+                    inst.read_y()
+                except Exception:
+                    pass
+
+            # Pull the specific y channel from the instrument into the collection cache
+            try:
+                ycc.receive_y(key)
+            except Exception:
+                pass
+
+            try:
+                return float(self.setup.get_single_y_value(key))
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def read_currents(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """
+        Return (Ibg, Itg, Ibias) in Amps.
+        Keys come directly from iv_automation.py: <x_name>_leakage.
+        """
+        Ibg = self._safe_read_y("Vbg_leakage") if self.has_role("Vbg") else None
+        Itg = self._safe_read_y("Vtg_leakage") if self.has_role("Vtg") else None
+        Ib  = self._safe_read_y("Vbias_leakage") if self.has_role("Vbias") else None
+        return Ibg, Itg, Ib
+
 
     def read_current_bias(self) -> Optional[float]:
         if not self.has_role("Vbias"):

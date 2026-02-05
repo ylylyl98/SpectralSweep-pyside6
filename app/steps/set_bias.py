@@ -73,7 +73,7 @@ class SetBias:
 
         try:
             # Keep ramping behavior for safety (IVDevice.set_bias defaults ramp_step>0)
-            iv.set_bias(Vbias)
+            iv.set_bias(Vbias=Vbias, ramp_step=0.1)
         except Exception as e:
             ctx.log(f"SetBias error: {e}")
             return
