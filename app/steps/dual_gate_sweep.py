@@ -103,6 +103,29 @@ class DualGateSweep:
 
         # Wavelength headers setup (if CSVWriter doesn't have them yet)
         wl_headers = None  # ✅ don't trust pre-passed headers; we'll lock to first acquired wl
+        
+        # ---- log-only formatters ----
+        def _fmt_v(v) -> str:
+            try:
+                x = float(v)
+                return "?" if not np.isfinite(x) else f"{x:g}"
+            except Exception:
+                return "?"
+
+        def _fmt_i(i_a) -> str:
+            """Pretty current units."""
+            try:
+                x = float(i_a)
+                if not np.isfinite(x):
+                    return "?"
+            except Exception:
+                return "?"
+            ax = abs(x)
+            if ax >= 1e-3:   return f"{x*1e3:.3g} mA"
+            if ax >= 1e-6:   return f"{x*1e6:.3g} µA"
+            if ax >= 1e-9:   return f"{x*1e9:.3g} nA"
+            if ax >= 1e-12:  return f"{x*1e12:.3g} pA"
+            return f"{x:.3g} A"
 
         if (not wl_headers) and hasattr(spec, "calibration_wavelengths"):
             try:
@@ -178,11 +201,48 @@ class DualGateSweep:
                 vbg_use = float(bg_meas) if (has_vbg and bg_meas is not None) else (float(vbg_set) if has_vbg else nan)
                 vtg_use = float(tg_meas) if (has_vtg and tg_meas is not None) else (float(vtg_set) if has_vtg else nan)
 
-                log(
+                                # ---- LOG ONLY: read currents + optional bias (no CSV changes) ----
+                Ibg = Itg = Ibias = None
+                if iv and hasattr(iv, "read_currents"):
+                    try:
+                        Ibg, Itg, Ibias = iv.read_currents()
+                    except Exception:
+                        pass
+
+                vbias_set = None
+                vbias_active = False
+                vbias_meas = None
+
+                try:
+                    vbias_set = ctx.axes.get("Vbias", None) if getattr(ctx, "axes", None) else None
+                    vbias_active = (
+                        vbias_set is not None
+                        and iv is not None
+                        and bool(getattr(iv, "has_role", lambda *_: False)("Vbias"))
+                        and np.isfinite(float(vbias_set))
+                    )
+                except Exception:
+                    vbias_active = False
+
+                if vbias_active and hasattr(iv, "read_current_bias"):
+                    try:
+                        vbias_meas = iv.read_current_bias()
+                    except Exception:
+                        vbias_meas = None
+
+                msg = (
                     f"[{i+1}/{total}] "
-                    f"Vbg_set={vbg_set:g} V, Vbg={vbg_use:g} V; "
-                    f"Vtg_set={vtg_set:g} V, Vtg={vtg_use:g} V"
+                    f"Vbg_set={vbg_set:g} V, Vbg={vbg_use:g} V, Ibg={_fmt_i(Ibg)}; "
+                    f"Vtg_set={vtg_set:g} V, Vtg={vtg_use:g} V, Itg={_fmt_i(Itg)}"
                 )
+                if vbias_active:
+                    msg += (
+                        f"; Vbias_set={float(vbias_set):g} V, "
+                        f"Vbias={_fmt_v(vbias_meas)} V, Ibias={_fmt_i(Ibias)}"
+                    )
+
+                log(msg)
+
 
 
 

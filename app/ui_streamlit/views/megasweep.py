@@ -113,6 +113,37 @@ def build_scan_path(outer_vals, inner_vals, is_snake: bool = True):
             pts.append((float(vtg), float(vbg)))
     return pts
 
+def df_to_vtg_vbg(D: float, F: float, r: float) -> tuple[float, float]:
+    """
+    Convert:
+      D = r*Vtg + Vbg
+      F = r*Vtg - Vbg
+    to (Vtg, Vbg).
+    """
+    r = float(r)
+    if abs(r) < 1e-12:
+        raise ValueError("ratio r is too close to 0 (cannot convert D,F to Vtg,Vbg)")
+    D = float(D); F = float(F)
+    Vbg = 0.5 * (D - F)
+    Vtg = 0.5 * (D + F) / r
+    return Vtg, Vbg
+
+
+def build_gate_path_from_DV(D_vals, Vb_vals, F_fixed: float, r: float, is_snake: bool = True):
+    """
+    Build a planned path in (Vtg,Vbg) space for a (D outer, Vbias inner) scan.
+    Note: Vbias doesn't change Vtg/Vbg, so points repeat; that's OK for progress overlay.
+    """
+    pts = []
+    for i, D in enumerate(D_vals):
+        vtg, vbg = df_to_vtg_vbg(D, F_fixed, r)
+        reverse = bool(is_snake) and (i % 2 == 1)
+        seq = Vb_vals[::-1] if reverse else Vb_vals
+        for _vb in seq:
+            pts.append((float(vtg), float(vbg)))
+    return pts
+
+
 def ui_log(msg: str, keep_last: int = 300):
     """Append a timestamped log line to session_state."""
     ts = datetime.now().strftime("%H:%M:%S")
@@ -421,7 +452,7 @@ def render(devices):
         if not iv or "Vtg" not in axes_available or "Vbg" not in axes_available:
             st.error("Map both Vtg and Vbg in the sidebar to run this sweep.")
             st.stop()
-        can_run = (iv is not None) and (spec is not None) and {"Vtg", "Vbg"}.issubset(set(axes_available))
+        can_run_basic = (iv is not None) and (spec is not None)
 
         c_r1, c_r2, c_r3 = st.columns(3)
         with c_r1:
@@ -452,34 +483,87 @@ def render(devices):
             with c_s3: lim_vbg_min = st.number_input("Min Vbg", value=-10.0)
             with c_s4: lim_vbg_max = st.number_input("Max Vbg", value= 10.0)
 
-        st.subheader("3) Grids (Vtg stripes / Vbg linear)")
-        is_snake = st.checkbox("Snake pattern (reverse Vbg every stripe)", value=True)
+        st.subheader("3) Grids")
 
-        # Outer Vtg range
-        st.caption("**Outer (fixed per stripe): Vtg**")
-        c_o1, c_o2, c_o3 = st.columns([1, 1, 1])
-        with c_o1: vtg_start = st.number_input("Vtg Start", value=-5.0, key="vtg_s")
-        with c_o2: vtg_stop  = st.number_input("Vtg Stop",  value= 5.0, key="vtg_e")
-        with c_o3:
-            vtg_mode = st.radio("Vtg Grid", ["Step Size (Grid)", "Total Points"], horizontal=True, key="vtg_mode")
-        vtg_param = (st.number_input("Vtg Pts",  value=11, min_value=2, key="vtg_pts")
-                     if vtg_mode == "Total Points"
-                     else st.number_input("Vtg Step", value=1.0, min_value=0.001, format="%.3f", key="vtg_step"))
-        outer_vals = get_linear_array(vtg_start, vtg_stop, vtg_param, vtg_mode)
+        sweep_mode = st.radio(
+            "Sweep type",
+            ["Vtg stripes & Vbg (current)", "D (r*Vtg+Vbg) & Vbias  (fixed F=r*Vtg-Vbg)"],
+            horizontal=True,
+            key="megasweep_mode",
+        )
 
-        # Ratio defines inner (Vbg) step magnitude relative to effective Vtg step
-        st.caption("**Inner (swept for each stripe): Vbg**")
-        c_i1, c_i2, c_i3 = st.columns([1, 1, 1])
-        with c_i1: vbg_start = st.number_input("Vbg Start", value=-5.0, key="vbg_s")
-        with c_i2: vbg_stop  = st.number_input("Vbg Stop",  value= 5.0, key="vbg_e")
-        with c_i3: ratio_val = st.number_input("Ratio r (Vbg step = r × Vtg step)", value=1.0, step=0.05)
+        is_snake = st.checkbox("Snake pattern (reverse inner sweep every stripe)", value=True)
 
-        vtg_step_eff = abs(infer_step_from_array(outer_vals, fallback=1.0))
-        vbg_step_mag = max(1e-9, abs(ratio_val) * vtg_step_eff)
-        vbg_step = make_signed_step(vbg_start, vbg_stop, vbg_step_mag)
-        inner_vals = arange_inclusive(vbg_start, vbg_stop, vbg_step)
+        # keep a single definition of r for both modes
+        ratio_val = st.number_input("r (defines D,F):  D=r*Vtg+Vbg,  F=r*Vtg-Vbg", value=1.0, step=0.05)
 
-        st.caption(f"Derived steps → Vtg step ≈ {vtg_step_eff:.6g} V, Vbg step ≈ {vbg_step_mag:.6g} V (signed {vbg_step:.6g})")
+        if sweep_mode == "Vtg stripes & Vbg (current)":
+            # Outer Vtg range
+            st.caption("**Outer (fixed per stripe): Vtg**")
+            c_o1, c_o2, c_o3 = st.columns([1, 1, 1])
+            with c_o1: vtg_start = st.number_input("Vtg Start", value=-5.0, key="vtg_s")
+            with c_o2: vtg_stop  = st.number_input("Vtg Stop",  value= 5.0, key="vtg_e")
+            with c_o3:
+                vtg_mode = st.radio("Vtg Grid", ["Step Size (Grid)", "Total Points"], horizontal=True, key="vtg_mode")
+            vtg_param = (st.number_input("Vtg Pts",  value=11, min_value=2, key="vtg_pts")
+                        if vtg_mode == "Total Points"
+                        else st.number_input("Vtg Step", value=1.0, min_value=0.001, format="%.3f", key="vtg_step"))
+            outer_vals = get_linear_array(vtg_start, vtg_stop, vtg_param, vtg_mode)
+
+            # Inner Vbg defined by ratio to Vtg step
+            st.caption("**Inner (swept for each stripe): Vbg**")
+            c_i1, c_i2, c_i3 = st.columns([1, 1, 1])
+            with c_i1: vbg_start = st.number_input("Vbg Start", value=-5.0, key="vbg_s")
+            with c_i2: vbg_stop  = st.number_input("Vbg Stop",  value= 5.0, key="vbg_e")
+            with c_i3: ratio_step = st.number_input("Ratio for step: Vbg step = r_step × Vtg step", value=1.0, step=0.05, key="ratio_step")
+
+            vtg_step_eff = abs(infer_step_from_array(outer_vals, fallback=1.0))
+            vbg_step_mag = max(1e-9, abs(ratio_step) * vtg_step_eff)
+            vbg_step = make_signed_step(vbg_start, vbg_stop, vbg_step_mag)
+            inner_vals = arange_inclusive(vbg_start, vbg_stop, vbg_step)
+
+            st.caption(f"Derived steps → Vtg step ≈ {vtg_step_eff:.6g} V, Vbg step ≈ {vbg_step_mag:.6g} V (signed {vbg_step:.6g})")
+
+            # placeholders so later code doesn't crash in other mode
+            F_fixed = 0.0
+            D_vals = np.array([])
+            Vb_vals = np.array([])
+
+        else:
+            # ===== NEW MODE: outer D, inner Vbias, fixed F =====
+            st.caption("**Fixed E-field coordinate:** F = r*Vtg - Vbg (constant)")
+            F_fixed = st.number_input("F fixed (V)", value=0.0, step=0.1, key="F_fixed")
+
+            st.caption("**Outer:** D = r*Vtg + Vbg")
+            cD1, cD2, cD3 = st.columns([1, 1, 1])
+            with cD1: D_start = st.number_input("D Start", value=-5.0, key="D_s")
+            with cD2: D_stop  = st.number_input("D Stop",  value= 5.0, key="D_e")
+            with cD3:
+                D_mode = st.radio("D Grid", ["Step Size (Grid)", "Total Points"], horizontal=True, key="D_mode")
+            D_param = (st.number_input("D Pts",  value=11, min_value=2, key="D_pts")
+                    if D_mode == "Total Points"
+                    else st.number_input("D Step", value=1.0, min_value=0.001, format="%.3f", key="D_step"))
+            D_vals = get_linear_array(D_start, D_stop, D_param, D_mode)
+
+            st.caption("**Inner:** Vbias")
+            cVb1, cVb2, cVb3 = st.columns([1, 1, 1])
+            with cVb1: vb_start = st.number_input("Vbias Start", value=-0.5, key="vb_s")
+            with cVb2: vb_stop  = st.number_input("Vbias Stop",  value= 0.5, key="vb_e")
+            with cVb3:
+                vb_mode = st.radio("Vbias Grid", ["Step Size (Grid)", "Total Points"], horizontal=True, key="vb_mode")
+            vb_param = (st.number_input("Vbias Pts", value=21, min_value=2, key="vb_pts")
+                        if vb_mode == "Total Points"
+                        else st.number_input("Vbias Step", value=0.05, min_value=0.001, format="%.3f", key="vb_step"))
+            Vb_vals = get_linear_array(vb_start, vb_stop, vb_param, vb_mode)
+
+            # In this mode your "inner_vals/outer_vals" are not used; set placeholders
+            outer_vals = np.array([])
+            inner_vals = np.array([])
+            vtg_step_eff = 0.1
+            vbg_step = 0.1
+        # --- decide START button enable/disable based on required roles for chosen mode ---
+        need_roles = {"Vtg", "Vbg"} if sweep_mode == "Vtg stripes & Vbg (current)" else {"Vtg", "Vbg", "Vbias"}
+        can_run = can_run_basic and need_roles.issubset(set(axes_available))
 
     # ==========================================
     # Preview  (no seam de-dupe: show ALL points)
@@ -498,7 +582,12 @@ def render(devices):
             )
 
         # 1) full planned traversal (includes out-of-safety)
-        path_pts = build_scan_path(outer_vals, inner_vals, is_snake=is_snake)
+        if sweep_mode == "Vtg stripes & Vbg (current)":
+            path_pts = build_scan_path(outer_vals, inner_vals, is_snake=is_snake)
+        else:
+            # planned path in (Vtg,Vbg) derived from D + fixed F, repeated for each Vbias
+            path_pts = build_gate_path_from_DV(D_vals, Vb_vals, F_fixed, ratio_val, is_snake=is_snake)
+
         x_all = np.array([p[0] for p in path_pts], dtype=float)
         y_all = np.array([p[1] for p in path_pts], dtype=float)
 
@@ -511,11 +600,17 @@ def render(devices):
         y_out = y_all[~in_mask]
 
         # 2) run-executed points (in-bounds only) -> keeps preview/run order 1:1
-        pts = build_sweep_points(
-            outer_vals, inner_vals,
-            lim_vtg_min, lim_vtg_max, lim_vbg_min, lim_vbg_max,
-            is_snake=is_snake
-        )
+        if sweep_mode == "Vtg stripes & Vbg (current)":
+            pts = build_sweep_points(
+                outer_vals, inner_vals,
+                lim_vtg_min, lim_vtg_max, lim_vbg_min, lim_vbg_max,
+                is_snake=is_snake
+            )
+        else:
+            # filter the planned path by safety to get the executed points order 1:1
+            pts = [(vtg, vbg) for (vtg, vbg) in path_pts
+                if (lim_vtg_min <= vtg <= lim_vtg_max) and (lim_vbg_min <= vbg <= lim_vbg_max)]
+
         x_in = np.array([p[0] for p in pts], dtype=float)
         y_in = np.array([p[1] for p in pts], dtype=float)
         o_in = np.arange(len(pts), dtype=float)
@@ -818,6 +913,126 @@ def render(devices):
             # st.caption(f"λ mid ≈ {_midpoint_nm(wls):.3f} nm")
 
             include_setpoints = False  # (you commented out the checkbox; keep False so code won't crash)
+
+            # ==========================
+            # NEW MODE RUN: D & Vbias with fixed F
+            # ==========================
+            if sweep_mode == "D (r*Vtg+Vbg) & Vbias  (fixed F=r*Vtg-Vbg)":
+                # require all roles
+                has_role = getattr(iv, "has_role", lambda *_: False)
+                if not (iv and has_role("Vtg") and has_role("Vbg") and has_role("Vbias")):
+
+                    st.error("Need Vtg, Vbg, and Vbias all mapped for this mode.")
+                    st.stop()
+
+                r = float(ratio_val)
+                F = float(F_fixed)
+
+                # Build VALID D stripes (must convert to in-limit Vtg/Vbg)
+                valid_D = []
+                valid_vtg = []
+                valid_vbg = []
+                for D in D_vals:
+                    try:
+                        vtg, vbg = df_to_vtg_vbg(D, F, r)
+                    except Exception:
+                        continue
+
+                    if (lim_vtg_min <= vtg <= lim_vtg_max) and (lim_vbg_min <= vbg <= lim_vbg_max):
+                        valid_D.append(float(D))
+                        valid_vtg.append(float(vtg))
+                        valid_vbg.append(float(vbg))
+
+                if not valid_D:
+                    st.error("No D points remain after converting to (Vtg,Vbg) within limits. Check r, F, and limits.")
+                    st.stop()
+
+                # Use your UI vbias grid (optionally also clip by your instrument limits if you add them)
+                vb_seq_base = [float(x) for x in Vb_vals]
+                if not vb_seq_base:
+                    st.error("Vbias grid is empty.")
+                    st.stop()
+
+                total_pts = len(valid_D) * len(vb_seq_base)
+                ui_log(f"D&Vbias sweep: {len(valid_D)} D stripes × {len(vb_seq_base)} vbias points = {total_pts} points (F fixed={F:.3f}).")
+
+                # CSV header: store D,F,Vbias set + measured Vtg/Vbg/Vbias + spectrum
+                cols = ["D_set", "F_set", "Vbias_set", "Vbg_meas", "Vtg_meas", "Vbias_meas"]
+                wl_str = np.array([f"{float(x):g}" for x in wls], dtype="U")
+                h_row = np.concatenate((np.array(cols, dtype="U"), wl_str)).reshape([1, -1])
+
+                with open(file_path, "w", newline="") as f:
+                    np.savetxt(f, h_row, fmt="%s", delimiter=",")
+
+                # Ramp to start: first (Vtg,Vbg) + first vbias
+                vtg0, vbg0 = valid_vtg[0], valid_vbg[0]
+                vb0 = vb_seq_base[0]
+
+                ui_log(f"Ramping to START: D={valid_D[0]:.3f}, F={F:.3f} -> Vtg={vtg0:.3f}, Vbg={vbg0:.3f}, Vbias={vb0:.3f}")
+                refresh_log_box(log_ph if "log_ph" in locals() else None)
+
+                iv.set_gates(Vtg=vtg0, Vbg=vbg0, delay_s=go_delay, ramp_step=go_step)
+                iv.set_bias(Vbias=vb0, delay_s=go_delay, ramp_step=float(vbias_ramp_step))
+                time.sleep(settle_delay)
+
+                done = 0
+                prog = st.progress(0.0)
+
+                with open(file_path, "a", newline="") as f:
+                    for i, (D, vtg, vbg) in enumerate(zip(valid_D, valid_vtg, valid_vbg)):
+                        # set gates once per D stripe (keeps F constant)
+                        iv.set_gates(Vtg=vtg, Vbg=vbg, delay_s=go_delay, ramp_step=go_step)
+
+                        # snake vbias per stripe
+                        reverse = bool(is_snake) and (i % 2 == 1)
+                        vb_seq = list(reversed(vb_seq_base)) if reverse else vb_seq_base
+
+                        for vb in vb_seq:
+                            iv.set_bias(Vbias=vb, delay_s=go_delay, ramp_step=float(vbias_ramp_step))
+                            time.sleep(settle_delay)
+
+                            # measured readbacks
+                            vbg_meas, vtg_meas = _read_gates_readback(iv)
+                            vbias_meas = _read_bias_readback(iv)
+
+                            # spectrum
+                            y = read_intensity(spec, expected_len=int(wls.size))
+
+                            prefix = np.array([D, F, vb, vbg_meas, vtg_meas, vbias_meas], dtype=np.float64)
+                            row = np.concatenate((prefix, y)).reshape([1, -1])
+                            np.savetxt(f, row, fmt="%.6e", delimiter=",")
+
+                            done += 1
+                            st.session_state["megasweep_measured_n"] = done
+                            prog.progress(done / total_pts)
+
+                            ui_log(
+                                f"{done}/{total_pts}: D={D:.3f}, vb={vb:.3f} | "
+                                f"meas Vtg={vtg_meas:.3f}, Vbg={vbg_meas:.3f}, Vb={vbias_meas:.3f}"
+                            )
+
+                            # keep your log box updating
+                            log_text = "\n".join(st.session_state.get("megasweep_log", [])[-200:]) or "(no messages)"
+                            log_ph.code(log_text, language="")
+
+                prog.progress(1.0)
+                st.success("Done.")
+                ui_log("D&Vbias sweep complete.")
+                st.session_state["megasweep_running"] = False
+                st.session_state["megasweep_measured_n"] = total_pts
+
+                # Return to zero (optional): gates + bias
+                try:
+                    ui_log("Ramping back to 0V on Vtg/Vbg/Vbias...")
+                    refresh_log_box(log_ph if "log_ph" in locals() else None)
+                    iv.set_bias(Vbias=0.0, delay_s=go_delay, ramp_step=float(vbias_ramp_step))
+                    iv.set_gates(Vbg=0.0, Vtg=0.0, delay_s=go_delay, ramp_step=go_step)
+                    time.sleep(settle_delay)
+                except Exception as e:
+                    ui_log(f"Return-to-zero failed: {e}")
+
+                return  # IMPORTANT: stop here so the old Vtg/Vbg sweep code doesn't run
+
 
 
             # Write header (NEW file)
