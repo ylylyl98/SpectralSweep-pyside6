@@ -198,6 +198,39 @@ def _read_bias_readback(iv) -> float:
 
     return NAN
 
+def _read_currents_readback(iv) -> tuple[float, float, float]:
+    """Return (Ibg, Itg, Ibias) in Amps; NAN if unavailable."""
+    NAN = float("nan")
+    if iv is None:
+        return NAN, NAN, NAN
+
+    if hasattr(iv, "read_currents"):
+        try:
+            Ibg, Itg, Ib = iv.read_currents()  # expected in Amps
+        except Exception:
+            return NAN, NAN, NAN
+
+        def _to_float(x):
+            try:
+                if x is None:
+                    return NAN
+                x = float(x)
+                return x if math.isfinite(x) else NAN
+            except Exception:
+                return NAN
+
+        return _to_float(Ibg), _to_float(Itg), _to_float(Ib)
+
+    return NAN, NAN, NAN
+
+
+def _fmt_uA(I: float) -> str:
+    """Format current in µA for logs."""
+    try:
+        I = float(I)
+        return f"{(I*1e6):.3f}" if math.isfinite(I) else "nan"
+    except Exception:
+        return "nan"
 
 
 def sanitize_filename(s: str) -> str:
@@ -956,8 +989,11 @@ def render(devices):
                 total_pts = len(valid_D) * len(vb_seq_base)
                 ui_log(f"D&Vbias sweep: {len(valid_D)} D stripes × {len(vb_seq_base)} vbias points = {total_pts} points (F fixed={F:.3f}).")
 
-                # CSV header: store D,F,Vbias set + measured Vtg/Vbg/Vbias + spectrum
-                cols = ["D_set", "F_set", "Vbias_set", "Vbg_meas", "Vtg_meas", "Vbias_meas"]
+                # CSV header: add currents (A)
+                cols = ["D_set", "F_set", "Vbias_set",
+                        "Vbg_meas", "Vtg_meas", "Vbias_meas",
+                        "Ibg_A", "Itg_A", "Ibias_A"]
+
                 wl_str = np.array([f"{float(x):g}" for x in wls], dtype="U")
                 h_row = np.concatenate((np.array(cols, dtype="U"), wl_str)).reshape([1, -1])
 
@@ -995,21 +1031,31 @@ def render(devices):
                             vbg_meas, vtg_meas = _read_gates_readback(iv)
                             vbias_meas = _read_bias_readback(iv)
 
+                            # NEW: currents (Amps)
+                            Ibg, Itg, Ib = _read_currents_readback(iv)
+
                             # spectrum
                             y = read_intensity(spec, expected_len=int(wls.size))
 
-                            prefix = np.array([D, F, vb, vbg_meas, vtg_meas, vbias_meas], dtype=np.float64)
+                            prefix = np.array(
+                                [D, F, vb, vbg_meas, vtg_meas, vbias_meas, Ibg, Itg, Ib],
+                                dtype=np.float64
+                            )
                             row = np.concatenate((prefix, y)).reshape([1, -1])
                             np.savetxt(f, row, fmt="%.6e", delimiter=",")
+
 
                             done += 1
                             st.session_state["megasweep_measured_n"] = done
                             prog.progress(done / total_pts)
 
                             ui_log(
-                                f"{done}/{total_pts}: D={D:.3f}, vb={vb:.3f} | "
-                                f"meas Vtg={vtg_meas:.3f}, Vbg={vbg_meas:.3f}, Vb={vbias_meas:.3f}"
+                                f"{done}/{total_pts}: D={D:.3f}, vb_set={vb:.3f} | "
+                                f"meas Vtg={vtg_meas:.3f} V, Vbg={vbg_meas:.3f} V, Vb={vbias_meas:.3f} V | "
+                                f"Itg={_fmt_uA(Itg)} uA, Ibg={_fmt_uA(Ibg)} uA, Ib={_fmt_uA(Ib)} uA"
                             )
+
+
 
                             # keep your log box updating
                             log_text = "\n".join(st.session_state.get("megasweep_log", [])[-200:]) or "(no messages)"
@@ -1044,7 +1090,9 @@ def render(devices):
             #     cols += ["Vbg_set", "Vtg_set"]
             #     cols += ["Vbias_set"]  # keep for clarity even if disabled
 
-            cols += ["Vbg_meas", "Vtg_meas", "Vbias_meas"]
+            # measured volts + measured currents
+            cols += ["Vbg_meas", "Vtg_meas", "Vbias_meas", "Ibg_A", "Itg_A", "Ibias_A"]
+
 
             wl_str = np.array([f"{float(x):g}" for x in wls], dtype="U")
             h_row = np.concatenate((np.array(cols, dtype="U"), wl_str)).reshape([1, -1])
@@ -1139,6 +1187,8 @@ def render(devices):
                     vbg_meas, vtg_meas = _read_gates_readback(iv)
                     vbias_meas = _read_bias_readback(iv) if enable_vbias else NAN
 
+                    Ibg, Itg, Ib = _read_currents_readback(iv)
+
                     # Save intensity aligned to wavelength header
                     y = read_intensity(spec, expected_len=int(wls.size))
 
@@ -1147,7 +1197,8 @@ def render(devices):
                         prefix += [vbg, vtg]
                         prefix += [vbias_set_val]
 
-                    prefix += [vbg_meas, vtg_meas, vbias_meas]
+                    prefix += [vbg_meas, vtg_meas, vbias_meas, Ibg, Itg, Ib]
+
 
                     row = np.concatenate((np.array(prefix, dtype=np.float64), y)).reshape([1, -1])
                     np.savetxt(f, row, fmt="%.6e", delimiter=",")
@@ -1156,7 +1207,12 @@ def render(devices):
                     st.session_state["megasweep_measured_n"] = done
 
                     # log each point (or throttle if you want)
-                    ui_log(f"{done}/{total_pts}: set Vtg={vtg:.3f}, Vbg={vbg:.3f} | meas Vtg={vtg_meas:.3f}, Vbg={vbg_meas:.3f}")
+                    ui_log(
+                        f"{done}/{total_pts}: set Vtg={vtg:.3f}, Vbg={vbg:.3f} | "
+                        f"meas Vtg={vtg_meas:.3f} V, Vbg={vbg_meas:.3f} V, Vb={vbias_meas:.3f} V | "
+                        f"Itg={_fmt_uA(Itg)} uA, Ibg={_fmt_uA(Ibg)} uA, Ib={_fmt_uA(Ib)} uA"
+                    )
+
 
                     # --- UI refresh: log every point, plots every point ---
                     LOG_UPDATE_EVERY  = 1

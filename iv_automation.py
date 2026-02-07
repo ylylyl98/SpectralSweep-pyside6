@@ -407,16 +407,21 @@ class IVSetup:
         return OneDSweep(sample_name, exp_name, sweep_x_names, sweep_y_names, self)
 
     def x_goto(self, x_name: str, target: float, delta: float, delay: float, print_steps: bool=False):
-        start = self.get_single_x_value(x_name)
+        start = float(self.get_single_x_value(x_name))
+        target = float(target)
 
-        if delta == 0 or delta is None:
+        if delta is None or float(delta) == 0:
             steps = 2
         else:
+            delta = float(delta)
+            # keep delta sign consistent with direction
             if (target - start) * delta < 0:
-                delta = - delta
-            steps = (target - start)/delta + 1
-            if steps <= 1:
-                steps += 1
+                delta = -delta
+
+            # number of intervals needed, then +1 points
+            n_intervals = int(np.ceil(abs(target - start) / max(abs(delta), 1e-12)))
+            steps = max(2, n_intervals + 1)
+
 
         y_names = ['measured_' + x_name]
         # Force-include leakage/current channel that matches the X name

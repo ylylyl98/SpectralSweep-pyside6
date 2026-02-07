@@ -86,6 +86,7 @@ class DualGateSweep:
         # Role presence (adapter decides if a role exists)
         has_vbg = bool(getattr(iv, "has_role", lambda *_: False)("Vbg")) if iv else False
         has_vtg = bool(getattr(iv, "has_role", lambda *_: False)("Vtg")) if iv else False
+        has_vbias = bool(getattr(iv, "has_role", lambda *_: False)("Vbias")) if iv else False
 
         if abs(self.vbg_start - self.vbg_stop) > 1e-12 and not has_vbg:
             raise RuntimeError("Sweep includes Vbg but no 'Vbg' role configured.")
@@ -307,8 +308,27 @@ class DualGateSweep:
             raise
 
         finally:
-            # --------- Ramp down to 0 V (ramped) ----------
             if iv:
+                # --------- Ramp bias down to 0 V (ONLY if it was set) ----------
+                vb_was_set = False
+                try:
+                    vb_was_set = (getattr(ctx, "axes", None) is not None and ctx.axes.get("Vbias") is not None)
+                except Exception:
+                    vb_was_set = False
+
+                if has_vbias and vb_was_set:
+                    log("Ramping bias down to 0V...")
+                    try:
+                        iv.set_bias(
+                            Vbias=0.0,
+                            delay_s=self.ramp_step_time,
+                            ramp_step=self.ramp_step_size,
+                        )
+                        ctx.axes["Vbias"] = 0.0
+                    except Exception as e:
+                        log(f"Bias ramp down failed: {e}")
+
+                # --------- Ramp gates down to 0 V (ramped) ----------
                 log("Ramping down to 0V...")
                 try:
                     iv.set_gates(
@@ -319,4 +339,6 @@ class DualGateSweep:
                     )
                 except Exception as e:
                     log(f"Ramp down failed: {e}")
+
                 log("Outputs at 0V.")
+

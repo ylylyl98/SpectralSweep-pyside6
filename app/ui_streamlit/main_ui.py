@@ -1125,7 +1125,7 @@ st.sidebar.title("Experiment Selection")
 
 app_mode = st.sidebar.radio(
     "Select Mode",
-    ["Dual Gate Sweep", "MegaSweep", "Back Focal Plane (BFP)"]
+    ["Dual Gate Sweep", "MegaSweep", "Back Focal Plane (BFP)", ]
 )
 
 if app_mode == "Dual Gate Sweep":
