@@ -18,14 +18,25 @@ def list_steps() -> List[str]:
 
 def build_recipe_from_preset(name: str, params: dict) -> list:
     if name == "dual_gate_sweep":
+        step_cfg = {
+            "Vbg_start": params["Vbg_start"], "Vbg_stop": params["Vbg_stop"],
+            "Vtg_start": params["Vtg_start"], "Vtg_stop": params["Vtg_stop"],
+            "frames": params["frames"],
+            "file_base": params.get("file_base", "run"),
+        }
+
+        # Optional bias sweep
+        if ("Vbias_start" in params) and ("Vbias_stop" in params):
+            step_cfg["Vbias_start"] = params["Vbias_start"]
+            step_cfg["Vbias_stop"]  = params["Vbias_stop"]
+
         return [
             {"step": "set_gate", "Vbg": params["Vbg_start"], "Vtg": params["Vtg_start"]},
-            {"step": "dual_gate_sweep",
-             "Vbg_start": params["Vbg_start"], "Vbg_stop": params["Vbg_stop"],
-             "Vtg_start": params["Vtg_start"], "Vtg_stop": params["Vtg_stop"],
-             "frames": params["frames"], "file_base": params.get("file_base","run")},
+            {"step": "dual_gate_sweep", **step_cfg},
         ]
+
     raise ValueError(f"Unknown preset {name}")
+
 
 try:
     from . import _import_all  # noqa

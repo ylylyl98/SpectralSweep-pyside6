@@ -315,7 +315,7 @@ def build_run_preview(loop_src: pd.DataFrame, batch_src: pd.DataFrame, max_examp
     # Build a compact preview table for enabled batch rows
     preview_table = pd.DataFrame()
     if batch_rows:
-        cols = ["condition_label", "repeat", "frames", "Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop"]
+        cols = ["condition_label", "repeat", "frames", "Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop", "Vbias_start", "Vbias_stop"]
         cols = [c for c in cols if c in dfb.columns]
         preview_table = dfb[cols].copy()
         preview_table = preview_table.rename(columns={"condition_label": "label"}).reset_index(drop=True)
@@ -524,11 +524,13 @@ def render_run_preview(ph):
                     st.warning("No batch rows enabled (Run=True).")
 
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Loop conditions", rp["cond_count"])
-            c2.metric("Enabled batch rows", rp["batch_rows"])
-            c3.metric("Total acquisitions", rp["total_acquisitions"])
-            c4.metric("Total frames", rp["total_frames"])
+            if rp and rp.get("ok", True):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Loop conditions", rp.get("cond_count", 0))
+                c2.metric("Enabled batch rows", rp.get("batch_rows", 0))
+                c3.metric("Total acquisitions", rp.get("total_acquisitions", 0))
+                c4.metric("Total frames", rp.get("total_frames", 0))
+
 
             if rp.get("labels"):
                 st.caption("Batch labels (first 10): " + ", ".join(rp["labels"]))
@@ -646,36 +648,65 @@ def _check_vbias_mapping(batch_df: pd.DataFrame, devices) -> Optional[str]:
     invalid_vbias = []
 
     for idx, row in dfb.reset_index(drop=True).iterrows():
-        vb = _parse_optional_float(row.get("Vbias", ""))
+        vb_s = _parse_optional_float(row.get("Vbias_start", ""))
+        vb_e = _parse_optional_float(row.get("Vbias_stop", ""))
         label = str(row.get("condition_label", f"row_{idx+1}")).strip() or f"row_{idx+1}"
-        if vb == "INVALID":
-            invalid_vbias.append((idx + 1, label, row.get("Vbias", "")))
-        elif vb is not None:
-            needs_vbias.append((idx + 1, label, vb))
+        # invalid detection
+        if vb_s == "INVALID" or vb_e == "INVALID":
+            invalid_vbias.append((idx + 1, label, row.get("Vbias_start", ""), row.get("Vbias_stop", "")))
+        else:
+            # treat single-entry as constant bias
+            if vb_s is None and vb_e is not None:
+                vb_s = vb_e
+            if vb_e is None and vb_s is not None:
+                vb_e = vb_s
+
+            if vb_s is not None and vb_e is not None:
+                needs_vbias.append((idx + 1, label, float(vb_s), float(vb_e)))
 
     if invalid_vbias:
-        show = ", ".join([f"#{r}({lab}) Vbias='{val}'" for r, lab, val in invalid_vbias[:6]])
+        show = ", ".join([f"#{r}({lab}) Vbias_start='{a}' Vbias_stop='{b}'" for r, lab, a, b in invalid_vbias[:6]])
         more = "" if len(invalid_vbias) <= 6 else f" … (+{len(invalid_vbias)-6} more)"
-        return f"⛔ Invalid Vbias value(s): {show}{more}. Use a number or leave blank/None."
+        return f"⛔ Invalid Vbias value(s): {show}{more}. Use numbers or leave blank."
+
 
     if needs_vbias and not has_vbias:
-        show = ", ".join([f"#{r}({lab}) Vbias={vb:g}V" for r, lab, vb in needs_vbias[:6]])
+        show = ", ".join([f"#{r}({lab}) Vbias={a:g}→{b:g}V" for r, lab, a, b in needs_vbias[:6]])
         more = "" if len(needs_vbias) <= 6 else f" … (+{len(needs_vbias)-6} more)"
         return (
             f"⛔ Vbias is requested but **Vbias source is not mapped**. "
-            f"Rows: {show}{more}. Map Vbias or clear those Vbias cells."
+            f"Rows: {show}{more}. Map Vbias or clear those cells."
         )
+
 
     return None
 
 def _vbias_block_from_row(row) -> str:
-    """
-    Returns "" if no Vbias, else a filename-safe suffix like 'Vbias0.5V'.
-    """
-    vb = _parse_optional_float(row.get("Vbias", ""))
-    if vb in (None, "INVALID"):
+    vb_s = _parse_optional_float(row.get("Vbias_start", ""))
+    vb_e = _parse_optional_float(row.get("Vbias_stop", ""))
+
+    if vb_s in (None, "INVALID") and vb_e in (None, "INVALID"):
         return ""
-    return f"Vbias{float(vb):g}V"
+
+    if vb_s == "INVALID" or vb_e == "INVALID":
+        return ""
+
+    # single-entry => constant
+    if vb_s is None and vb_e is not None:
+        vb_s = vb_e
+    if vb_e is None and vb_s is not None:
+        vb_e = vb_s
+
+    if vb_s is None or vb_e is None:
+        return ""
+
+    vb_s = float(vb_s)
+    vb_e = float(vb_e)
+
+    if abs(vb_s - vb_e) < 1e-12:
+        return f"Vbias{vb_s:g}V"
+    return f"Vbias{vb_s:g}to{vb_e:g}V"
+
 
 
 def _to_bool(x):
@@ -714,8 +745,10 @@ BATCH_SCHEMA = [
     "Vtg_start",
     "Vtg_stop",
     "frames",
-    "Vbias",
+    "Vbias_start",
+    "Vbias_stop",
 ]
+
 
 
 def normalize_df(df: pd.DataFrame, schema):
@@ -748,6 +781,10 @@ def _normalize_batch_types(df: pd.DataFrame) -> pd.DataFrame:
     for c in ("Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    # IMPORTANT: bias is OPTIONAL -> do NOT fillna(0.0), keep blank as NaN/None-like
+    for c in ("Vbias_start", "Vbias_stop"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")  # blanks -> NaN
     return df
 
 def build_run_plan_from_saved(loop_src: pd.DataFrame, batch_src: pd.DataFrame):
@@ -1076,7 +1113,8 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     "Vtg_start": 0.0,
                     "Vtg_stop": 0.0,
                     "frames": 11,
-                    "Vbias": "",
+                    "Vbias_start": "",
+                    "Vbias_stop": "",
                 }
             ]
         )
@@ -1222,6 +1260,23 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     st.session_state.pop("preview_row", None)
                     st.error("❌ Line does not intersect the safe box. Adjust ratio/K/bounds.")
                 else:
+                    # --- Parse q_vbias into Vbias_start / Vbias_stop (supports: "0", "0,-1.7", "0->-1.7", "0 to -1.7") ---
+                    vb_txt = str(q_vbias).strip()
+                    vb_start_txt = ""
+                    vb_stop_txt = ""
+
+                    if vb_txt:
+                        t = vb_txt.replace("→", "->")
+                        t = re.sub(r"\s+to\s+", "->", t, flags=re.IGNORECASE)  # "a to b" -> "a->b"
+                        t = t.replace(",", "->")                               # "a,b" -> "a->b"
+                        parts = [p.strip() for p in t.split("->") if p.strip()]
+                        if len(parts) == 1:
+                            vb_start_txt = parts[0]
+                            vb_stop_txt  = parts[0]
+                        elif len(parts) >= 2:
+                            vb_start_txt = parts[0]
+                            vb_stop_txt  = parts[1]
+
                     st.session_state.preview_row = {
                         "Run": True,
                         "repeat": int(q_repeat),
@@ -1232,8 +1287,22 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         "Vtg_start": prev["Vtg_start"],
                         "Vtg_stop": prev["Vtg_stop"],
                         "frames": int(prev["frames"]),
-                        "Vbias": str(q_vbias).strip(),
+                        "Vbias_start": vb_start_txt,
+                        "Vbias_stop":  vb_stop_txt,
                     }
+
+                    # st.session_state.preview_row = {
+                    #     "Run": True,
+                    #     "repeat": int(q_repeat),
+                    #     "MeasurePower": bool(q_measpwr),
+                    #     "condition_label": str(row_label).strip() if str(row_label).strip() else auto_label,
+                    #     "Vbg_start": prev["Vbg_start"],
+                    #     "Vbg_stop": prev["Vbg_stop"],
+                    #     "Vtg_start": prev["Vtg_start"],
+                    #     "Vtg_stop": prev["Vtg_stop"],
+                    #     "frames": int(prev["frames"]),
+                    #     "Vbias": str(q_vbias).strip(),
+                    # }
 
             if "preview_row" in st.session_state and isinstance(st.session_state.preview_row, dict):
                 p = st.session_state.preview_row
@@ -1301,7 +1370,14 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             "Vtg_start": st.column_config.NumberColumn("Vtg Start", format="%.3f"),
             "Vtg_stop": st.column_config.NumberColumn("Vtg Stop", format="%.3f"),
             "frames": st.column_config.NumberColumn("Frames", min_value=1),
-            "Vbias": st.column_config.TextColumn("Vbias"),
+            "Vbias_start": st.column_config.NumberColumn(
+                "Vbias Start (V)", format="%.3f", help="Leave blank to disable bias."
+            ),
+            "Vbias_stop": st.column_config.NumberColumn(
+                "Vbias Stop (V)", format="%.3f", help="Leave blank to disable bias."
+            ),
+
+
         }
 
         # We'll fill this *after* we know what happened (Run/Apply/etc)
@@ -1852,10 +1928,29 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
 
                     # markdown below (styled): filename + only missing sweep info
+                    # run_progress_text_ph.markdown(
+                    #     f"**Saving file:**\n\n"
+                    #     f"```text\n{stem_final}.csv\n```\n"
+                    #     f"Vbg `{vbg_s:g}→{vbg_e:g}` • Vtg `{vtg_s:g}→{vtg_e:g}` • frs `{frames}` • rep **{r_i+1}/{n_rep}**"
+                    # )
+                    vb_s = _parse_optional_float(row.get("Vbias_start", ""))
+                    vb_e = _parse_optional_float(row.get("Vbias_stop", ""))
+
+                    vb_txt = ""
+                    if vb_s != "INVALID" and vb_e != "INVALID":
+                        if vb_s is None and vb_e is not None:
+                            vb_s = vb_e
+                        if vb_e is None and vb_s is not None:
+                            vb_e = vb_s
+                        if vb_s is not None and vb_e is not None:
+                            vb_s = float(vb_s); vb_e = float(vb_e)
+                            vb_txt = f" • Vbias `{vb_s:g}→{vb_e:g} V`"
+
+
                     run_progress_text_ph.markdown(
                         f"**Saving file:**\n\n"
                         f"```text\n{stem_final}.csv\n```\n"
-                        f"Vbg `{vbg_s:g}→{vbg_e:g}` • Vtg `{vtg_s:g}→{vtg_e:g}` • frs `{frames}` • rep **{r_i+1}/{n_rep}**"
+                        f"Vbg `{vbg_s:g}→{vbg_e:g}` • Vtg `{vtg_s:g}→{vtg_e:g}`{vb_txt} • frs `{frames}` • rep **{r_i+1}/{n_rep}**"
                     )
 
 
@@ -1915,24 +2010,39 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         {"step": "set_lightfield", "ms": float(val_exp), "center_nm": float(val_center), "epf": int(val_epf)}
                     )
                     # --- optional bias ---
-                    vb = _parse_optional_float(row.get("Vbias", ""))
-                    if vb == "INVALID":
-                        ui_log("Vbias parse warning (ignored).")
-                    elif vb is not None:
-                        recipe.append({"step": "set_bias", "Vbias": float(vb)})
+                    # vb = _parse_optional_float(row.get("Vbias", ""))
+                    # if vb == "INVALID":
+                    #     ui_log("Vbias parse warning (ignored).")
+                    # elif vb is not None:
+                    #     recipe.append({"step": "set_bias", "Vbias": float(vb)})
+
+                    # NOTE: do NOT append a separate set_bias step here.
+                    # Bias (if requested) will be handled inside the sweep step.
 
                     # --- then the sweep preset ---
-                    recipe += build_recipe_from_preset(
-                        "dual_gate_sweep",
-                        dict(
-                            Vbg_start=float(row["Vbg_start"]),
-                            Vbg_stop=float(row["Vbg_stop"]),
-                            Vtg_start=float(row["Vtg_start"]),
-                            Vtg_stop=float(row["Vtg_stop"]),
-                            frames=int(row["frames"]),
-                            file_base=stem_final,
-                        ),
+                    params = dict(
+                        Vbg_start=float(row["Vbg_start"]),
+                        Vbg_stop=float(row["Vbg_stop"]),
+                        Vtg_start=float(row["Vtg_start"]),
+                        Vtg_stop=float(row["Vtg_stop"]),
+                        frames=int(row["frames"]),
+                        file_base=stem_final,
                     )
+
+                    vb_s = _parse_optional_float(row.get("Vbias_start", ""))
+                    vb_e = _parse_optional_float(row.get("Vbias_stop", ""))
+
+                    if vb_s != "INVALID" and vb_e != "INVALID":
+                        if vb_s is None and vb_e is not None:
+                            vb_s = vb_e
+                        if vb_e is None and vb_s is not None:
+                            vb_e = vb_s
+                        if vb_s is not None and vb_e is not None:
+                            params["Vbias_start"] = float(vb_s)
+                            params["Vbias_stop"]  = float(vb_e)
+
+                    recipe += build_recipe_from_preset("dual_gate_sweep", params)
+
 
                     ui_log(f"  > Saving: {stem_final}.csv")
                     ui_log(f"devices keys = {list((devices or {}).keys())}")
