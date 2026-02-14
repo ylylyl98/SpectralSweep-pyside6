@@ -1773,6 +1773,26 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
         total_acq = max(int(total_conditions * total_batch_runs), 1)
         done = 0
+
+        # NEW: progress is based on TOTAL FRAMES across ALL acquisitions
+        # frames_sum_per_condition = Σ(repeat * frames) for enabled batch rows
+        frames_sum_per_condition = 0
+        try:
+            frames_sum_per_condition = int((df_batch["repeat"] * df_batch["frames"]).sum())
+        except Exception:
+            # fallback (be robust)
+            for _, r in df_batch.iterrows():
+                try:
+                    frames_sum_per_condition += max(int(r.get("repeat", 1)), 1) * max(int(r.get("frames", 1)), 1)
+                except Exception:
+                    frames_sum_per_condition += 1
+
+        total_frames_all = max(int(total_conditions * frames_sum_per_condition), 1)
+        done_frames = 0  # completed frames across ALL files
+
+        total_frames_global = total_frames_all   # ✅ ADD THIS (so your later code works)
+
+
         # keep snapshot in sync so the preview tree stays updated even after run ends
         st.session_state["tree_snapshot"] = dict(
             final_sequence=final_sequence,
@@ -1811,10 +1831,11 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
         supports_text = True
         try:
-            bar = run_progress_ph.progress(0, text="Preparing…")
+            bar = run_progress_ph.progress(0, text=f"Frames 0/{total_frames_global}")
         except TypeError:
             supports_text = False
             bar = run_progress_ph.progress(0)
+
 
         total = total_conditions
 
@@ -1918,13 +1939,15 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
                     # ---- progress update (NOW we can show filename) ----
                     # show "current" progress BEFORE running
-                    running_idx = done + 1
-                    pct = int(100 * running_idx / total_acq)
+                    # At the start of this acquisition, show progress based on frames already completed
+                    pct = int(100 * (done_frames / total_frames_global))
                     pct = min(max(pct, 0), 100)
 
-                    # bar_text = f"Running {running_idx-1}/{total_acq} • Seq {seq_i+1}/{total} • {cond_label}"
-                    
-                    bar.progress(pct)
+                    if supports_text:
+                        bar.progress(pct, text=f"Frames {done_frames}/{total_frames_global}")
+                    else:
+                        bar.progress(pct)
+
 
 
                     # markdown below (styled): filename + only missing sweep info
@@ -2040,8 +2063,36 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         if vb_s is not None and vb_e is not None:
                             params["Vbias_start"] = float(vb_s)
                             params["Vbias_stop"]  = float(vb_e)
+                    acq_frames = max(int(frames), 1)
 
-                    recipe += build_recipe_from_preset("dual_gate_sweep", params)
+                    def _frame_progress_cb(frame_i: int, frame_total_in_this_file: int):
+                        # frame_i is 1..frame_total_in_this_file
+                        nonlocal done_frames
+
+                        pct = int(100 * ((done_frames + frame_i) / total_frames_global))
+                        pct = min(max(pct, 0), 100)
+
+                        try:
+                            if supports_text:
+                                bar.progress(pct, text=f"Frames {done_frames + frame_i}/{total_frames_global}")
+                            else:
+                                bar.progress(pct)
+                        except Exception:
+                            pass
+
+
+
+                    # recipe += build_recipe_from_preset("dual_gate_sweep", params)
+                    sweep_recipe = build_recipe_from_preset("dual_gate_sweep", params)
+
+                    # attach callback to the sweep step(s)
+                    for stp in sweep_recipe:
+                        if stp.get("step") == "dual_gate_sweep":
+                            stp["frame_progress_cb"] = _frame_progress_cb
+
+                    recipe += sweep_recipe
+
+
 
 
                     ui_log(f"  > Saving: {stem_final}.csv")
@@ -2059,6 +2110,17 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                         progress_cb=ui_log,
                     )
                     done += 1
+                    done_frames += acq_frames
+
+                    # keep bar text consistent right after acquisition ends
+                    pct = int(100 * (done_frames / total_frames_global))
+                    pct = min(max(pct, 0), 100)
+                    if supports_text:
+                        bar.progress(pct, text=f"Frames {done_frames}/{total_frames_global}")
+                    else:
+                        bar.progress(pct)
+
+
                                     
                     if tree_live_ph is not None:
                         try:

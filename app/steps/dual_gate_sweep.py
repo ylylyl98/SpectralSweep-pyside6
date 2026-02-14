@@ -116,6 +116,9 @@ class DualGateSweep:
 
         # Optional tiny settle after a jump (during the sweep)
         self.jump_settle_s: float = float(cfg.get("jump_settle_s", 0.0))
+        # Optional: per-frame progress callback injected by UI layer (Streamlit)
+        # Signature: cb(frame_i: int, frame_total: int) where frame_i is 1-based
+        self.frame_progress_cb = cfg.get("frame_progress_cb", None)
 
     # ------------------------------ main ------------------------------
 
@@ -377,12 +380,18 @@ class DualGateSweep:
                     "Ibias": None if Ibias_a is None else float(Ibias_a),
                 }
 
-
-
                 if hasattr(csvw, "write_row"):
                     csvw.write_row(scalars, intens)
                 else:
                     csvw.add_row(scalars, intens)
+
+                # NEW: per-frame progress callback (safe)
+                cb = getattr(self, "frame_progress_cb", None)
+                if callable(cb):
+                    try:
+                        cb(i + 1, total)  # frame index is 1-based
+                    except Exception:
+                        pass
 
                 # Keep context axes updated
                 ctx.axes["Vbg"] = vbg_use
