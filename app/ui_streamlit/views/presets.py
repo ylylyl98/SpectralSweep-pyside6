@@ -825,6 +825,36 @@ def _check_vbias_mapping(batch_df: pd.DataFrame, devices) -> Optional[str]:
             f"Rows: {show}{more}. Map Vbias or clear those cells."
         )
 
+    return None
+
+def _check_gate_mapping(devices) -> Optional[str]:
+    """
+    Dual gate sweep ALWAYS includes Vbg/Vtg keys in params.
+    If IV is missing or roles aren't mapped, block the run with a clear UI error.
+    """
+    iv = (devices or {}).get("iv", None)
+    if iv is None:
+        return "⛔ IV device not connected. Go to sidebar → IV Instruments (VISA) and map Vbg/Vtg sources."
+
+    # Prefer has_role() if available, else fall back to role_map dict.
+    role_map = getattr(iv, "role_map", {}) or {}
+
+    missing = []
+    for role in ("Vbg", "Vtg"):
+        try:
+            has = bool(getattr(iv, "has_role", lambda r: False)(role))
+        except Exception:
+            has = False
+
+        if (not has) and (not role_map.get(role)):
+            missing.append(role)
+
+    if missing:
+        miss = ", ".join(missing)
+        return (
+            f"⛔ Sweep requires **{miss}** role(s) but they are not mapped.\n\n"
+            f"Fix: sidebar → IV Instruments (VISA) → set **{miss} source** to the correct Keithley address."
+        )
 
     return None
 
@@ -866,6 +896,116 @@ def _to_bool(x):
     s = str(x).strip().lower()
     return s in ("true", "1", "yes", "y", "on")
 
+import inspect
+
+def _filter_kwargs_for_callable(fn, kwargs: dict) -> dict:
+    """Keep only kwargs that exist in fn signature (avoids TypeError)."""
+    try:
+        sig = inspect.signature(fn)
+        return {k: v for k, v in kwargs.items() if k in sig.parameters}
+    except Exception:
+        return kwargs
+
+def _call_compat(fn, *args, **kwargs):
+    """Call fn with only supported kwargs; fallback to positional-only if needed."""
+    if fn is None:
+        return None
+    kw = _filter_kwargs_for_callable(fn, dict(kwargs))
+    return fn(*args, **kw)
+
+def _has_role(iv, role: str) -> bool:
+    try:
+        return bool(getattr(iv, "has_role")(role))
+    except Exception:
+        return False
+
+def ramp_all_to_zero(iv, *, ramp_step: float = 0.1, delay_s: float = 0.02, log_fn=None):
+    """
+    Best-effort ramp TG/BG/Bias to 0V across different IV adapter APIs.
+    This is intentionally defensive: it tries multiple method names/signatures.
+    """
+    def _log(msg: str):
+        if callable(log_fn):
+            try:
+                log_fn(msg)
+            except Exception:
+                pass
+
+    if iv is None:
+        _log("Stop ramp: IV device not present.")
+        return
+
+    # 1) If IV adapter provides a single method, prefer it.
+    if hasattr(iv, "ramp_all_to_zero"):
+        try:
+            _call_compat(getattr(iv, "ramp_all_to_zero"), ramp_step=ramp_step, delay_s=delay_s)
+            _call_compat(getattr(iv, "ramp_all_to_zero"), ramp_step=0.0, delay_s=0.0)
+            return
+        except Exception as e:
+            _log(f"Stop ramp: iv.ramp_all_to_zero failed, falling back. err={e}")
+
+    # 2) Bias → 0V (try set_bias / set_vbias)
+    try:
+        if _has_role(iv, "Vbias"):
+            if hasattr(iv, "set_bias"):
+                # common: set_bias(value, ramp_step=?, delay_s=?)
+                try:
+                    _call_compat(getattr(iv, "set_bias"), 0.0, ramp_step=ramp_step, delay_s=delay_s)
+                    _call_compat(getattr(iv, "set_bias"), 0.0, ramp_step=0.0, delay_s=0.0)
+                except TypeError:
+                    # some adapters use keyword name "Vbias"
+                    _call_compat(getattr(iv, "set_bias"), Vbias=0.0, ramp_step=ramp_step, delay_s=delay_s)
+                    _call_compat(getattr(iv, "set_bias"), Vbias=0.0, ramp_step=0.0, delay_s=0.0)
+            elif hasattr(iv, "set_vbias"):
+                _call_compat(getattr(iv, "set_vbias"), 0.0, ramp_step=ramp_step, delay_s=delay_s)
+                _call_compat(getattr(iv, "set_vbias"), 0.0, ramp_step=0.0, delay_s=0.0)
+    except Exception as e:
+        _log(f"Stop ramp: bias ramp failed (continuing). err={e}")
+
+    # 3) Gates → 0V (handle keyword or positional APIs)
+    try:
+        if hasattr(iv, "set_gates"):
+            vbg_ok = _has_role(iv, "Vbg")
+            vtg_ok = _has_role(iv, "Vtg")
+
+            # If your adapter requires both args positionally, only call when both exist.
+            fn = getattr(iv, "set_gates")
+            try:
+                sig = inspect.signature(fn)
+                names = list(sig.parameters.keys())
+            except Exception:
+                names = []
+
+            # Prefer keyword form if supported
+            if ("Vbg" in names) or ("Vtg" in names):
+                kw1 = {}
+                if vbg_ok: kw1["Vbg"] = 0.0
+                if vtg_ok: kw1["Vtg"] = 0.0
+                kw1["ramp_step"] = ramp_step
+                kw1["delay_s"] = delay_s
+                _call_compat(fn, **kw1)
+
+                kw2 = {}
+                if vbg_ok: kw2["Vbg"] = 0.0
+                if vtg_ok: kw2["Vtg"] = 0.0
+                kw2["ramp_step"] = 0.0
+                kw2["delay_s"] = 0.0
+                _call_compat(fn, **kw2)
+
+            else:
+                # Positional form: set_gates(vbg, vtg, ...)
+                if vbg_ok and vtg_ok:
+                    _call_compat(fn, 0.0, 0.0, ramp_step=ramp_step, delay_s=delay_s)
+                    _call_compat(fn, 0.0, 0.0, ramp_step=0.0, delay_s=0.0)
+                elif vbg_ok and not vtg_ok:
+                    # If only BG exists, best we can do is try (0, 0) anyway, or skip.
+                    _log("Stop ramp: only Vbg mapped but set_gates is positional; skipping gate ramp.")
+                elif vtg_ok and not vbg_ok:
+                    _log("Stop ramp: only Vtg mapped but set_gates is positional; skipping gate ramp.")
+                else:
+                    _log("Stop ramp: no gate roles mapped; skipping gate ramp.")
+    except Exception as e:
+        _log(f"Stop ramp: gate ramp failed. err={e}")
 
 def to_header_list(h):
     if h is None:
@@ -1666,11 +1806,52 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
         run_progress_text_ph = st.empty()
 
         # -------- emergency stop state + button --------
+                # -------- emergency stop state + button --------
+        st.session_state.setdefault("_run_active", False)
         st.session_state.setdefault("_stop_now", False)
 
-        if st.button("🛑 STOP NOW (ramp TG/BG/Bias → 0V)", key="btn_stop_now"):
+        iv_dev = (devices or {}).get("iv", None)
+        run_active = bool(st.session_state.get("_run_active", False))
+
+        if st.button(
+            "🛑 STOP NOW (ramp TG/BG/Bias → 0V)",
+            key="btn_stop_now",
+            disabled=(iv_dev is None),
+        ):
             st.session_state["_stop_now"] = True
             ui_log("🛑 STOP pressed — will ramp outputs to 0V ASAP.")
+
+            # If we're NOT currently running, do an immediate ramp right now.
+            # If we ARE running, let the running sweep/stop_cb handle it (avoid double-ramping).
+            if not run_active:
+                try:
+                    if iv_dev and hasattr(iv_dev, "ramp_all_to_zero"):
+                        iv_dev.ramp_all_to_zero(ramp_step=0.1, delay_s=0.02)
+                    elif iv_dev:
+                        # fallback using existing API
+                        if getattr(iv_dev, "has_role", lambda *_: False)("Vbias") and hasattr(iv_dev, "set_bias"):
+                            iv_dev.set_bias(Vbias=0.0, delay_s=0.02, ramp_step=0.1)
+                            iv_dev.set_bias(Vbias=0.0, delay_s=0.0, ramp_step=0.0)
+
+                        iv_dev.set_gates(
+                            Vbg=0.0 if getattr(iv_dev, "has_role", lambda *_: False)("Vbg") else None,
+                            Vtg=0.0 if getattr(iv_dev, "has_role", lambda *_: False)("Vtg") else None,
+                            delay_s=0.02,
+                            ramp_step=0.1,
+                        )
+                        iv_dev.set_gates(
+                            Vbg=0.0 if getattr(iv_dev, "has_role", lambda *_: False)("Vbg") else None,
+                            Vtg=0.0 if getattr(iv_dev, "has_role", lambda *_: False)("Vtg") else None,
+                            delay_s=0.0,
+                            ramp_step=0.0,
+                        )
+
+                    ui_log("🛑 Idle STOP: outputs ramped to 0V.")
+                except Exception as e:
+                    ui_log(f"Stop ramp error (ignored): {e}")
+
+                st.session_state["_stop_now"] = False
+
 
 
         # --------- process actions (one rerun per click; no per-edit hiccups) ---------
@@ -1779,41 +1960,47 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                             keep.append(bool(ok_any))
                     df_effective = df_effective[pd.Series(keep)].reset_index(drop=True)
 
-                vbias_issue = _check_vbias_mapping(df_effective, devices)
-                #  Vbias mapping check (only when saved + before safety checks)
-                # vbias_issue = _check_vbias_mapping(st.session_state.batch_src, devices)
-                if vbias_issue:
-                    run_notice_ph.error(vbias_issue)
+                # 1) Require Vbg/Vtg roles for dual gate sweep
+                gate_issue = _check_gate_mapping(devices)
+                if gate_issue:
+                    run_notice_ph.error(gate_issue)
                     st.session_state["_start_run"] = False
+
                 else:
-                    # Safety checks (only when saved)
-                    max_step = float(st.session_state.get("safe_max_v_per_step", 0.5))
-                    vbg_limits = (
-                        float(st.session_state.get("safe_vbg_min", -5.0)),
-                        float(st.session_state.get("safe_vbg_max", 5.0)),
-                    )
-                    vtg_limits = (
-                        float(st.session_state.get("safe_vtg_min", -5.0)),
-                        float(st.session_state.get("safe_vtg_max", 5.0)),
-                    )
-
-                    bad = validate_sweep_steps(
-                        df_effective,
-                        max_volts_per_step=max_step,
-                        vbg_limits=vbg_limits,
-                        vtg_limits=vtg_limits,
-                    )
-
-                    if bad:
-                        with run_notice_ph.container():
-                            st.error("Safety violation(s). Fix these rows:")
-                            vdf = pd.DataFrame(bad)
-                            show_cols = [c for c in ["row", "label", "problem", "fix"] if c in vdf.columns]
-                            st.dataframe(vdf[show_cols], width="stretch", hide_index=True)
+                    # 2) Vbias is optional: only required if requested in table
+                    vbias_issue = _check_vbias_mapping(df_effective, devices)
+                    if vbias_issue:
+                        run_notice_ph.error(vbias_issue)
+                        st.session_state["_start_run"] = False
                     else:
-                        run_notice_ph.success("✅ Starting run…")
-                        st.session_state["_start_run"] = True
-                        ui_log("Initiating run...")
+                        # 3) Safety checks (only when saved)
+                        max_step = float(st.session_state.get("safe_max_v_per_step", 0.5))
+                        vbg_limits = (
+                            float(st.session_state.get("safe_vbg_min", -5.0)),
+                            float(st.session_state.get("safe_vbg_max", 5.0)),
+                        )
+                        vtg_limits = (
+                            float(st.session_state.get("safe_vtg_min", -5.0)),
+                            float(st.session_state.get("safe_vtg_max", 5.0)),
+                        )
+
+                        bad = validate_sweep_steps(
+                            df_effective,
+                            max_volts_per_step=max_step,
+                            vbg_limits=vbg_limits,
+                            vtg_limits=vtg_limits,
+                        )
+
+                        if bad:
+                            with run_notice_ph.container():
+                                st.error("Safety violation(s). Fix these rows:")
+                                vdf = pd.DataFrame(bad)
+                                show_cols = [c for c in ["row", "label", "problem", "fix"] if c in vdf.columns]
+                                st.dataframe(vdf[show_cols], width="stretch", hide_index=True)
+                        else:
+                            run_notice_ph.success("✅ Starting run…")
+                            st.session_state["_start_run"] = True
+                            ui_log("Initiating run...")
 
 
         # Always render preview near Run (it only CHANGES when Apply All / Discard All updates run_preview)
@@ -2311,34 +2498,18 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     ui_log("Registered steps: " + ", ".join(list_steps()))
 
                     if st.session_state.get("_stop_now", False):
-                        ui_log("🛑 STOP requested (between acquisitions) — ramping outputs to 0V...")
+                        ui_log("🛑 STOP requested — ramping outputs to 0V...")
                         iv = (devices or {}).get("iv", None)
-                        try:
-                            if iv and hasattr(iv, "ramp_all_to_zero"):
-                                iv.ramp_all_to_zero(ramp_step=0.1, delay_s=0.02)
-                            elif iv:
-                                # fallback using existing API
-                                if getattr(iv, "has_role", lambda *_: False)("Vbias") and hasattr(iv, "set_bias"):
-                                    iv.set_bias(Vbias=0.0, delay_s=0.02, ramp_step=0.1)
-                                    iv.set_bias(Vbias=0.0, delay_s=0.0, ramp_step=0.0)
-                                iv.set_gates(
-                                    Vbg=0.0 if getattr(iv, "has_role", lambda *_: False)("Vbg") else None,
-                                    Vtg=0.0 if getattr(iv, "has_role", lambda *_: False)("Vtg") else None,
-                                    delay_s=0.02,
-                                    ramp_step=0.1,
-                                )
-                                iv.set_gates(
-                                    Vbg=0.0 if getattr(iv, "has_role", lambda *_: False)("Vbg") else None,
-                                    Vtg=0.0 if getattr(iv, "has_role", lambda *_: False)("Vtg") else None,
-                                    delay_s=0.0,
-                                    ramp_step=0.0,
-                                )
-                        except Exception as e:
-                            ui_log(f"Stop ramp error (ignored): {e}")
+
+                        # IMPORTANT: do NOT swallow signature errors; use the compat ramp.
+                        ramp_all_to_zero(iv, ramp_step=0.1, delay_s=0.02, log_fn=ui_log)
 
                         st.session_state["_stop_now"] = False
-                        run_progress_text_ph.warning("🛑 Stopped. Outputs at 0V.")
+                        run_progress_text_ph.warning("🛑 Stopped. (Best-effort ramp to 0V issued.)")
                         return
+
+
+                    iv = (devices or {}).get("iv", None)
 
                     try:
                         runner_singleton.run_recipe(
@@ -2351,14 +2522,20 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                             progress_cb=ui_log,
                         )
                     except Exception as e:
-                        # avoid importing; match by class name
+                        # If your step raises StopRequested, treat as normal stop
                         if e.__class__.__name__ in ("StopRequested",):
-                            ui_log("🛑 Run aborted safely (outputs ramped to 0V).")
+                            ui_log("🛑 StopRequested caught — ramping outputs to 0V.")
+                            ramp_all_to_zero(iv, ramp_step=0.1, delay_s=0.02, log_fn=ui_log)
                             st.session_state["_stop_now"] = False
-                            run_progress_text_ph.warning("🛑 Stopped. Outputs at 0V.")
+                            run_progress_text_ph.warning("🛑 Stopped. (Ramp to 0V issued.)")
                             return
-                        raise    
-                    
+
+                        # Any other exception: still ramp to safe 0V, then re-raise so you see the traceback
+                        ui_log(f"⛔ Run error: {e} — ramping outputs to 0V before raising.")
+                        ramp_all_to_zero(iv, ramp_step=0.1, delay_s=0.02, log_fn=ui_log)
+                        raise
+
+
                     done += 1
                     done_frames += acq_frames
 
@@ -2430,7 +2607,14 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
     if st.session_state.get("_start_run"):
         st.session_state.pop("_start_run", None)
-        
-        run_and_log(tree_live_ph)
+
+        # IMPORTANT: tells main_ui.py "do not rebuild IV right now"
+        st.session_state["_run_active"] = True
+        try:
+            run_and_log(tree_live_ph)
+        finally:
+            st.session_state["_run_active"] = False
+            st.session_state["_stop_now"] = False
+
         
 

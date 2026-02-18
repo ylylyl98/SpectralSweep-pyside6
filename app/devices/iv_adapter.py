@@ -23,8 +23,24 @@ class IVDevice:
     # ---------------- internal helpers ----------------
 
     def has_role(self, name: str) -> bool:
-        """Return True if this role is mapped to any instrument."""
-        return bool(self.role_map.get(name))
+        """
+        Return True if this role is mapped OR can be auto-detected from the setup.
+        This avoids "no Vbg role configured" when the channel exists but role_map wasn't passed.
+        """
+        if bool(self.role_map.get(name)):
+            return True
+
+        # Auto-detect if the setup can read this x channel name.
+        try:
+            fn = getattr(self.setup, "get_single_x_value", None)
+            if callable(fn):
+                _ = fn(name)  # raises if missing
+                return True
+        except Exception:
+            pass
+
+        return False
+
 
     def _safe_x_goto(self, name: str, value: float, delay_s: float = 0.02) -> bool:
         """
