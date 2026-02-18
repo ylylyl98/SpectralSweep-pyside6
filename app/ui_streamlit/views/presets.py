@@ -922,7 +922,11 @@ def _has_role(iv, role: str) -> bool:
 def ramp_all_to_zero(iv, *, ramp_step: float = 0.1, delay_s: float = 0.02, log_fn=None):
     """
     Best-effort ramp TG/BG/Bias to 0V across different IV adapter APIs.
-    This is intentionally defensive: it tries multiple method names/signatures.
+
+    Fixes:
+      1) Works with keyword-only adapters that use lowercase names (vbg/vtg/vbias).
+      2) Logs best-effort readback BEFORE and AFTER ramp (current gates/bias).
+      3) Still defensive: tries multiple APIs, then falls back.
     """
     def _log(msg: str):
         if callable(log_fn):
@@ -931,15 +935,61 @@ def ramp_all_to_zero(iv, *, ramp_step: float = 0.1, delay_s: float = 0.02, log_f
             except Exception:
                 pass
 
+    def _read_setup(role: str):
+        # best-effort: iv.setup.get_single_x_value("Vbg"/"Vtg"/"Vbias")
+        try:
+            setup = getattr(iv, "setup", None)
+            getx = getattr(setup, "get_single_x_value", None) if setup else None
+            if callable(getx):
+                return float(getx(role))
+        except Exception:
+            pass
+        return None
+
+    def _read_gates():
+        # best-effort: iv.read_current_gates() OR setup channel read
+        try:
+            if hasattr(iv, "read_current_gates"):
+                a, b = iv.read_current_gates()
+                return float(a), float(b)
+        except Exception:
+            pass
+        return _read_setup("Vbg"), _read_setup("Vtg")
+
+    def _read_bias():
+        # best-effort: iv.read_current_bias/read_bias_voltage/read_bias OR setup channel read
+        for name in ("read_current_bias", "read_bias_voltage", "read_bias"):
+            if hasattr(iv, name):
+                try:
+                    return float(getattr(iv, name)())
+                except Exception:
+                    pass
+        return _read_setup("Vbias")
+
     if iv is None:
         _log("Stop ramp: IV device not present.")
         return
+
+    # --- log readback BEFORE ---
+    try:
+        bg0, tg0 = _read_gates()
+        vb0 = _read_bias()
+        _log(f"Stop ramp (before): Vbg={bg0} V, Vtg={tg0} V, Vbias={vb0} V")
+    except Exception:
+        pass
 
     # 1) If IV adapter provides a single method, prefer it.
     if hasattr(iv, "ramp_all_to_zero"):
         try:
             _call_compat(getattr(iv, "ramp_all_to_zero"), ramp_step=ramp_step, delay_s=delay_s)
             _call_compat(getattr(iv, "ramp_all_to_zero"), ramp_step=0.0, delay_s=0.0)
+            # --- log readback AFTER ---
+            try:
+                bg1, tg1 = _read_gates()
+                vb1 = _read_bias()
+                _log(f"Stop ramp (after):  Vbg={bg1} V, Vtg={tg1} V, Vbias={vb1} V")
+            except Exception:
+                pass
             return
         except Exception as e:
             _log(f"Stop ramp: iv.ramp_all_to_zero failed, falling back. err={e}")
@@ -948,48 +998,95 @@ def ramp_all_to_zero(iv, *, ramp_step: float = 0.1, delay_s: float = 0.02, log_f
     try:
         if _has_role(iv, "Vbias"):
             if hasattr(iv, "set_bias"):
-                # common: set_bias(value, ramp_step=?, delay_s=?)
+                fn = getattr(iv, "set_bias")
+
+                # Try positional first
                 try:
-                    _call_compat(getattr(iv, "set_bias"), 0.0, ramp_step=ramp_step, delay_s=delay_s)
-                    _call_compat(getattr(iv, "set_bias"), 0.0, ramp_step=0.0, delay_s=0.0)
+                    _call_compat(fn, 0.0, ramp_step=ramp_step, delay_s=delay_s)
+                    _call_compat(fn, 0.0, ramp_step=0.0, delay_s=0.0)
                 except TypeError:
-                    # some adapters use keyword name "Vbias"
-                    _call_compat(getattr(iv, "set_bias"), Vbias=0.0, ramp_step=ramp_step, delay_s=delay_s)
-                    _call_compat(getattr(iv, "set_bias"), Vbias=0.0, ramp_step=0.0, delay_s=0.0)
+                    # Try common keyword spellings
+                    for key in ("Vbias", "vbias"):
+                        try:
+                            _call_compat(fn, **{key: 0.0, "ramp_step": ramp_step, "delay_s": delay_s})
+                            _call_compat(fn, **{key: 0.0, "ramp_step": 0.0, "delay_s": 0.0})
+                            break
+                        except Exception:
+                            continue
+
             elif hasattr(iv, "set_vbias"):
-                _call_compat(getattr(iv, "set_vbias"), 0.0, ramp_step=ramp_step, delay_s=delay_s)
-                _call_compat(getattr(iv, "set_vbias"), 0.0, ramp_step=0.0, delay_s=0.0)
+                fn = getattr(iv, "set_vbias")
+                try:
+                    _call_compat(fn, 0.0, ramp_step=ramp_step, delay_s=delay_s)
+                    _call_compat(fn, 0.0, ramp_step=0.0, delay_s=0.0)
+                except TypeError:
+                    for key in ("Vbias", "vbias"):
+                        try:
+                            _call_compat(fn, **{key: 0.0, "ramp_step": ramp_step, "delay_s": delay_s})
+                            _call_compat(fn, **{key: 0.0, "ramp_step": 0.0, "delay_s": 0.0})
+                            break
+                        except Exception:
+                            continue
     except Exception as e:
         _log(f"Stop ramp: bias ramp failed (continuing). err={e}")
 
-    # 3) Gates → 0V (handle keyword or positional APIs)
+    # 3) Gates → 0V (handle keyword-only, lowercase keywords, or positional APIs)
     try:
         if hasattr(iv, "set_gates"):
             vbg_ok = _has_role(iv, "Vbg")
             vtg_ok = _has_role(iv, "Vtg")
-
-            # If your adapter requires both args positionally, only call when both exist.
             fn = getattr(iv, "set_gates")
+
             try:
                 sig = inspect.signature(fn)
                 names = list(sig.parameters.keys())
+                names_l = [n.lower() for n in names]
             except Exception:
                 names = []
+                names_l = []
 
-            # Prefer keyword form if supported
-            if ("Vbg" in names) or ("Vtg" in names):
-                kw1 = {}
-                if vbg_ok: kw1["Vbg"] = 0.0
-                if vtg_ok: kw1["Vtg"] = 0.0
-                kw1["ramp_step"] = ramp_step
-                kw1["delay_s"] = delay_s
+            # Decide supported keyword spellings
+            bg_key = None
+            tg_key = None
+
+            # Prefer exact matches first (keeps original casing)
+            if "Vbg" in names:
+                bg_key = "Vbg"
+            elif "vbg" in names:
+                bg_key = "vbg"
+            elif "bg" in names:
+                bg_key = "bg"
+            elif "vbg" in names_l:
+                bg_key = names[names_l.index("vbg")]
+            elif "bg" in names_l:
+                bg_key = names[names_l.index("bg")]
+
+            if "Vtg" in names:
+                tg_key = "Vtg"
+            elif "vtg" in names:
+                tg_key = "vtg"
+            elif "tg" in names:
+                tg_key = "tg"
+            elif "vtg" in names_l:
+                tg_key = names[names_l.index("vtg")]
+            elif "tg" in names_l:
+                tg_key = names[names_l.index("tg")]
+
+
+            # Keyword attempt (works for keyword-only adapters)
+            if bg_key or tg_key:
+                kw1 = {"ramp_step": ramp_step, "delay_s": delay_s}
+                if vbg_ok and bg_key:
+                    kw1[bg_key] = 0.0
+                if vtg_ok and tg_key:
+                    kw1[tg_key] = 0.0
                 _call_compat(fn, **kw1)
 
-                kw2 = {}
-                if vbg_ok: kw2["Vbg"] = 0.0
-                if vtg_ok: kw2["Vtg"] = 0.0
-                kw2["ramp_step"] = 0.0
-                kw2["delay_s"] = 0.0
+                kw2 = {"ramp_step": 0.0, "delay_s": 0.0}
+                if vbg_ok and bg_key:
+                    kw2[bg_key] = 0.0
+                if vtg_ok and tg_key:
+                    kw2[tg_key] = 0.0
                 _call_compat(fn, **kw2)
 
             else:
@@ -998,14 +1095,21 @@ def ramp_all_to_zero(iv, *, ramp_step: float = 0.1, delay_s: float = 0.02, log_f
                     _call_compat(fn, 0.0, 0.0, ramp_step=ramp_step, delay_s=delay_s)
                     _call_compat(fn, 0.0, 0.0, ramp_step=0.0, delay_s=0.0)
                 elif vbg_ok and not vtg_ok:
-                    # If only BG exists, best we can do is try (0, 0) anyway, or skip.
-                    _log("Stop ramp: only Vbg mapped but set_gates is positional; skipping gate ramp.")
+                    _log("Stop ramp: only Vbg mapped but set_gates looks positional; skipping gate ramp.")
                 elif vtg_ok and not vbg_ok:
-                    _log("Stop ramp: only Vtg mapped but set_gates is positional; skipping gate ramp.")
+                    _log("Stop ramp: only Vtg mapped but set_gates looks positional; skipping gate ramp.")
                 else:
                     _log("Stop ramp: no gate roles mapped; skipping gate ramp.")
     except Exception as e:
         _log(f"Stop ramp: gate ramp failed. err={e}")
+
+    # --- log readback AFTER ---
+    try:
+        bg1, tg1 = _read_gates()
+        vb1 = _read_bias()
+        _log(f"Stop ramp (after):  Vbg={bg1} V, Vtg={tg1} V, Vbias={vb1} V")
+    except Exception:
+        pass
 
 def to_header_list(h):
     if h is None:
@@ -1818,39 +1922,23 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             key="btn_stop_now",
             disabled=(iv_dev is None),
         ):
+            # 1) Tell the running sweep to stop ASAP (stop_cb reads this)
             st.session_state["_stop_now"] = True
-            ui_log("🛑 STOP pressed — will ramp outputs to 0V ASAP.")
+            ui_log("🛑 STOP pressed — forcing ramp outputs to 0V NOW.")
 
-            # If we're NOT currently running, do an immediate ramp right now.
-            # If we ARE running, let the running sweep/stop_cb handle it (avoid double-ramping).
+            # 2) Force ramp immediately even if a run is active.
+            #    This guarantees we don't rely on the sweep step to do the ramp.
+            try:
+                ramp_all_to_zero(iv_dev, ramp_step=0.1, delay_s=0.02, log_fn=ui_log)
+                ui_log("🛑 STOP: ramp command issued (see before/after readback above).")
+            except Exception as e:
+                ui_log(f"Stop ramp error (ignored): {e}")
+
+            # 3) If not running, we can clear the stop flag right away.
+            #    If running, keep it True so stop_cb stays True until the runner exits.
             if not run_active:
-                try:
-                    if iv_dev and hasattr(iv_dev, "ramp_all_to_zero"):
-                        iv_dev.ramp_all_to_zero(ramp_step=0.1, delay_s=0.02)
-                    elif iv_dev:
-                        # fallback using existing API
-                        if getattr(iv_dev, "has_role", lambda *_: False)("Vbias") and hasattr(iv_dev, "set_bias"):
-                            iv_dev.set_bias(Vbias=0.0, delay_s=0.02, ramp_step=0.1)
-                            iv_dev.set_bias(Vbias=0.0, delay_s=0.0, ramp_step=0.0)
-
-                        iv_dev.set_gates(
-                            Vbg=0.0 if getattr(iv_dev, "has_role", lambda *_: False)("Vbg") else None,
-                            Vtg=0.0 if getattr(iv_dev, "has_role", lambda *_: False)("Vtg") else None,
-                            delay_s=0.02,
-                            ramp_step=0.1,
-                        )
-                        iv_dev.set_gates(
-                            Vbg=0.0 if getattr(iv_dev, "has_role", lambda *_: False)("Vbg") else None,
-                            Vtg=0.0 if getattr(iv_dev, "has_role", lambda *_: False)("Vtg") else None,
-                            delay_s=0.0,
-                            ramp_step=0.0,
-                        )
-
-                    ui_log("🛑 Idle STOP: outputs ramped to 0V.")
-                except Exception as e:
-                    ui_log(f"Stop ramp error (ignored): {e}")
-
                 st.session_state["_stop_now"] = False
+
 
 
 
