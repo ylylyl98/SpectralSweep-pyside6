@@ -1480,6 +1480,16 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
     st.header("Dual Gate Sweep – Advanced Looper (v4)")
 
+    # --- recovery: Streamlit rerun can interrupt a run and leave _run_active stuck True ---
+    st.session_state.setdefault("_run_active", False)
+    st.session_state.setdefault("_stop_now", False)
+
+    iv_now = (devices or {}).get("iv", None)
+    if st.session_state.get("_run_active", False) and iv_now is None:
+        st.session_state["_run_active"] = False
+        st.session_state["_stop_now"] = False
+        ui_log("Recovered: _run_active was stuck True while IV is disconnected. Controls unlocked.")
+
     # init state
     if "loop_src" not in st.session_state:
         df = pd.DataFrame(
@@ -1924,7 +1934,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
         ):
             # 1) Tell the running sweep to stop ASAP (stop_cb reads this)
             st.session_state["_stop_now"] = True
-            ui_log("🛑 STOP pressed — forcing ramp outputs to 0V NOW.")
+            ui_log("🛑 STOP pressed — Use Manual Gate Control to ramp outputs to 0V NOW.")
 
             # 2) Force ramp immediately even if a run is active.
             #    This guarantees we don't rely on the sweep step to do the ramp.
@@ -1940,6 +1950,11 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                 st.session_state["_stop_now"] = False
 
 
+        if st.button("🔓 UNLOCK reconnect (force clear run state)", key="btn_force_unlock"):
+            st.session_state["_run_active"] = False
+            st.session_state["_stop_now"] = False
+            ui_log("Force unlocked run state (reconnect controls enabled).")
+            st.rerun()
 
 
         # --------- process actions (one rerun per click; no per-edit hiccups) ---------
