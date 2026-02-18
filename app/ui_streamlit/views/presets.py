@@ -9,10 +9,13 @@ import html
 import math
 
 import itertools
+import threading
+import queue
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+
 
 from app.steps.registry import build_recipe_from_preset
 from app.engine.runner import runner_singleton
@@ -43,19 +46,48 @@ def build_run_status_tree_html(
     Shows a compact window of sequences around the current one.
     """
 
-    # ---- normalize batch plan (enabled rows only) ----
+    # ---- normalize batch rows (Run=True) ----
     dfb = _normalize_batch_types(df_batch).copy()
     if "Run" in dfb.columns:
         dfb["Run"] = dfb["Run"].map(_to_bool)
-        dfb = dfb[dfb["Run"] == True]
+        dfb = dfb[dfb["Run"] == True].reset_index(drop=True)
 
-    batch_plan = []
-    for _, r in dfb.iterrows():
-        lab = sanitize_filename(r.get("condition_label", ""))
-        reps = max(int(r.get("repeat", 1)), 1)
-        batch_plan.append((lab, reps))
+    # ---- per-sequence acquisition counts (depends on When + outer ctx) ----
+    acq_counts: List[int] = []
+    seq_plans: List[List[Tuple[str, int]]] = []  # per seq: [(label, reps), ...]
 
-    acq_per_seq = sum(reps for _, reps in batch_plan) or 1
+    for ctx in final_sequence:
+        outer = _outer_ctx_alias(ctx)
+        plan = []
+        n = 0
+        for _, r in dfb.iterrows():
+            if _when_ok(r.get("When", ""), outer):
+                lab = sanitize_filename(r.get("condition_label", ""))
+                reps = max(int(r.get("repeat", 1)), 1)
+                plan.append((lab, reps))
+                n += reps
+        seq_plans.append(plan)
+        acq_counts.append(n)
+
+    # prefix sums for mapping done -> seq bounds
+    prefix = [0]
+    for n in acq_counts:
+        prefix.append(prefix[-1] + n)
+
+    def seq_bounds(seq_i: int):
+        s0 = prefix[seq_i]
+        s1 = prefix[seq_i + 1]
+        return s0, s1
+
+    # map current (seq_i,label,rep_i) -> absolute acquisition index
+    current_acq_index = prefix[current_seq_i] if (0 <= current_seq_i < len(prefix) - 1) else 0
+    if 0 <= current_seq_i < len(seq_plans):
+        off = 0
+        for lab, reps in seq_plans[current_seq_i]:
+            if lab == current_label:
+                current_acq_index += min(max(current_rep_i, 0), max(reps - 1, 0)) + off
+                break
+            off += reps
 
     # ---- small ctx formatter ----
     def fmt_ctx(ctx: dict) -> str:
@@ -106,22 +138,6 @@ def build_run_status_tree_html(
         start = max(0, min(current_seq_i - max_seq_show // 2, n_seq - max_seq_show))
     end = min(n_seq, start + max_seq_show)
 
-    # ---- helper: acquisition index mapping ----
-    # acquisition index (1-based for display) increases per (seq -> batch -> rep)
-    def seq_bounds(seq_i: int):
-        s0 = seq_i * acq_per_seq
-        s1 = s0 + acq_per_seq
-        return s0, s1
-
-    # Determine the "current" acquisition index (0-based)
-    current_acq_index = current_seq_i * acq_per_seq
-    # find offset inside the seq from (label, rep_i)
-    off = 0
-    for lab, reps in batch_plan:
-        if lab == current_label:
-            current_acq_index += (off + current_rep_i)
-            break
-        off += reps
 
     # ---- build lines (real tree) ----
     lines = []
@@ -151,7 +167,8 @@ def build_run_status_tree_html(
         # determine per-acquisition state based on done/current
         # acquisition absolute index for this seq starts at s0
         acq_abs = s0
-        for b_i, (lab, reps) in enumerate(batch_plan):
+        plan = seq_plans[seq_i] if (0 <= seq_i < len(seq_plans)) else []
+        for b_i, (lab, reps) in enumerate(plan):
             for r_i in range(reps):
                 acq_state = "todo"
                 if acq_abs < done:
@@ -161,9 +178,10 @@ def build_run_status_tree_html(
 
                 leaf = f"{lab}  (rep {r_i+1}/{reps})"
                 # last leaf glyph control
-                is_last_leaf = (b_i == len(batch_plan) - 1) and (r_i == reps - 1)
+                is_last_leaf = (b_i == len(plan) - 1) and (r_i == reps - 1)
                 leaf_prefix = "└─ " if is_last_leaf else "├─ "
                 lines.append(child_prefix + leaf_prefix + paint(leaf, acq_state))
+
 
                 acq_abs += 1
 
@@ -293,18 +311,31 @@ def build_run_preview(loop_src: pd.DataFrame, batch_src: pd.DataFrame, max_examp
     param_summary_df = pd.DataFrame(param_summary).sort_values(["level", "parameter"]) if param_summary else pd.DataFrame()
 
 
-    # --- Batch enabled rows + totals ---
-    dfb = _normalize_batch_types(batch_src).copy()
-    if "Run" in dfb.columns:
-        dfb["Run"] = dfb["Run"].map(_to_bool)
-        dfb = dfb[dfb["Run"] == True]
+    # --- Batch enabled rows + totals (RESPECTS When) ---
+    # Use the same plan builder the runner uses
+    try:
+        final_sequence, dfb, total_acq = build_run_plan_from_saved(loop_src, batch_src)
+    except Exception as e:
+        return {"ok": False, "error": f"Preview build failed: {e}"}
 
-    batch_rows = len(dfb)
+    batch_rows = int(len(dfb))
+
+    # Totals depend on When + outer-loop ctx
+    total_frames = 0
+    for ctx in final_sequence:
+        outer = _outer_ctx_alias(ctx)
+        for _, r in dfb.iterrows():
+            if _when_ok(r.get("When", ""), outer):
+                reps = max(int(r.get("repeat", 1)), 1)
+                frs  = max(int(r.get("frames", 1)), 1)
+                total_frames += reps * frs
+
+    # Keep these keys for the UI
+    cond_count = int(len(final_sequence))     # exact number of sequences
+    total_acquisitions = int(total_acq)       # exact acquisitions
     rep_sum = int(dfb["repeat"].sum()) if (batch_rows and "repeat" in dfb.columns) else 0
     frames_sum = int((dfb["repeat"] * dfb["frames"]).sum()) if (batch_rows and "frames" in dfb.columns) else 0
 
-    total_acquisitions = int(cond_count * rep_sum) if batch_rows else 0
-    total_frames = int(cond_count * frames_sum) if batch_rows else 0
 
     labels = (
         dfb["condition_label"].astype(str).tolist()[:10]
@@ -315,7 +346,7 @@ def build_run_preview(loop_src: pd.DataFrame, batch_src: pd.DataFrame, max_examp
     # Build a compact preview table for enabled batch rows
     preview_table = pd.DataFrame()
     if batch_rows:
-        cols = ["condition_label", "repeat", "frames", "Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop", "Vbias_start", "Vbias_stop"]
+        cols = ["condition_label", "When", "repeat", "frames", "Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop", "Vbias_start", "Vbias_stop"]
         cols = [c for c in cols if c in dfb.columns]
         preview_table = dfb[cols].copy()
         preview_table = preview_table.rename(columns={"condition_label": "label"}).reset_index(drop=True)
@@ -495,15 +526,18 @@ def render_run_preview(ph):
                 total_frames = int(rp["total_frames"])
 
                 st.markdown(
-                    f"**Total runs:** `{cond} loop` × `{br} batch` × `{rep} repeats` = **{total_runs}**  \n"
+                    f"**Total sequences:** `{cond}`  \n"
+                    f"**Enabled batch rows (Run=True):** `{br}`  \n"
+                    f"**Total acquisitions (after When):** **{total_runs}**  \n"
                     f"**Total frames:** **{total_frames}**"
                 )
+
 
                 # Middle: loop summary
                 ps = rp.get("param_summary")
                 if isinstance(ps, pd.DataFrame) and not ps.empty:
                     st.caption("Loop parameters (why loop count is what it is):")
-                    st.dataframe(ps[["parameter", "count", "values"]], use_container_width=True, hide_index=True)
+                    st.dataframe(ps[["parameter", "count", "values"]], width="stretch", hide_index=True)
                 else:
                     st.caption("Loop parameters: (none enabled)")
 
@@ -519,7 +553,7 @@ def render_run_preview(ph):
                         b2["Vtg"] = b2["Vtg_start"].map(lambda x: f"{x:g}") + " → " + b2["Vtg_stop"].map(lambda x: f"{x:g}")
 
                     show_cols = [c for c in ["label", "Vbg", "Vtg", "frames", "repeat"] if c in b2.columns]
-                    st.dataframe(b2[show_cols], use_container_width=True, hide_index=True)
+                    st.dataframe(b2[show_cols], width="stretch", hide_index=True)
                 else:
                     st.warning("No batch rows enabled (Run=True).")
 
@@ -532,10 +566,10 @@ def render_run_preview(ph):
                 c4.metric("Total frames", rp.get("total_frames", 0))
 
 
-            if rp.get("labels"):
+            if rp and rp.get("labels"):
                 st.caption("Batch labels (first 10): " + ", ".join(rp["labels"]))
 
-            if rp.get("examples"):
+            if rp and rp.get("examples"):
                 st.caption("Example loop conditions:")
                 for s in rp["examples"]:
                     st.write(f"- {s}")
@@ -611,6 +645,119 @@ def parse_values(s: str, param: str | None = None):
 
     return nums
 
+def _outer_ctx_alias(ctx_vars: dict) -> dict:
+    """Map outer-loop ctx_vars to short names for guards."""
+    def _f(x):
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    return {
+        "center_nm":   _f(ctx_vars.get("Center Wavelength (nm)")),
+        "exposure_ms": _f(ctx_vars.get("Exposure Time (ms)")),
+        "stage_pos":   _f(ctx_vars.get("Stage Position")),
+        "epf":         _f(ctx_vars.get("Accumulations (EPF)")),
+        "rot1_deg":    _f(ctx_vars.get("Rotation1 Angle (deg)")),
+        "rot2_deg":    _f(ctx_vars.get("Rotation2 Angle (deg)")),
+    }
+
+
+def _when_ok(when: str, outer: dict) -> bool:
+    """
+    Guard syntax (AND across clauses split by ';' or newline):
+      center_nm=755,703
+      exposure_ms>=500
+      stage_pos==0
+      rot1_deg!=85
+      center_nm=755; exposure_ms=100,500
+    """
+    s = str(when or "").strip()
+    if not s:
+        return True
+
+    # allow some short aliases too
+    keymap = {
+        "center": "center_nm",
+        "centernm": "center_nm",
+        "exp": "exposure_ms",
+        "exposure": "exposure_ms",
+        "stage": "stage_pos",
+        "stagepos": "stage_pos",
+        "rot1": "rot1_deg",
+        "rot2": "rot2_deg",
+    }
+
+    parts = re.split(r"[;\n]+", s)
+    tol = 1e-9
+
+    def _to_num_list(rhs: str):
+        out = []
+        for t in rhs.split(","):
+            t = t.strip()
+            if not t:
+                continue
+            out.append(float(t))
+        return out
+
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+
+        m = re.search(r"(<=|>=|!=|==|=|<|>)", part)
+        if not m:
+            return False
+
+        op = m.group(1)
+        k = part[: m.start()].strip()
+        rhs = part[m.end() :].strip()
+
+        kn = re.sub(r"\s+", "", k.lower())
+        var = keymap.get(kn, kn)  # allow "center" etc
+        if var not in outer:
+            return False
+
+        v = outer.get(var, None)
+        if v is None:
+            return False
+
+        # list: "755,703"
+        if "," in rhs and op in ("=", "==", "!="):
+            vals = _to_num_list(rhs)
+            hit = any(abs(v - x) < tol for x in vals)
+            if op in ("!=",):
+                hit = not hit
+            if not hit:
+                return False
+            continue
+
+        # scalar numeric
+        try:
+            x = float(rhs)
+        except Exception:
+            return False
+
+        if op in ("=", "=="):
+            if not (abs(v - x) < tol):
+                return False
+        elif op == "!=":
+            if abs(v - x) < tol:
+                return False
+        elif op == "<":
+            if not (v < x):
+                return False
+        elif op == "<=":
+            if not (v <= x):
+                return False
+        elif op == ">":
+            if not (v > x):
+                return False
+        elif op == ">=":
+            if not (v >= x):
+                return False
+
+    return True
 
 def _parse_optional_float(x):
     """Return float if x looks like a number; otherwise None. Treat '', None, 'none', 'nan' as None."""
@@ -739,6 +886,7 @@ BATCH_SCHEMA = [
     "Run",
     "repeat",
     "MeasurePower",
+    "When",  # NEW (outer-loop guard)
     "condition_label",
     "Vbg_start",
     "Vbg_stop",
@@ -748,6 +896,7 @@ BATCH_SCHEMA = [
     "Vbias_start",
     "Vbias_stop",
 ]
+
 
 
 
@@ -772,6 +921,10 @@ def _equal(a: pd.DataFrame, b: pd.DataFrame, cols: List[str]) -> bool:
 # -------------------- batch helpers --------------------
 def _normalize_batch_types(df: pd.DataFrame) -> pd.DataFrame:
     df = normalize_df(df, BATCH_SCHEMA).copy()
+    # NEW: keep When as a plain string (avoid NaN in editor / logic)
+    if "When" in df.columns:
+        df["When"] = df["When"].fillna("").astype(str)
+
     for c in ("Run", "MeasurePower"):
         if c in df.columns:
             df[c] = df[c].map(_to_bool)
@@ -790,9 +943,12 @@ def _normalize_batch_types(df: pd.DataFrame) -> pd.DataFrame:
 def build_run_plan_from_saved(loop_src: pd.DataFrame, batch_src: pd.DataFrame):
     """Build final_sequence + enabled batch df + totals from SAVED tables."""
     # --- loop -> final_sequence (same order as run) ---
-    loop_df = loop_src.copy()
+    loop_df = normalize_df(loop_src, LOOP_SCHEMA).copy()
     loop_df["Enable"] = loop_df["Enable"].map(_to_bool)
+    loop_df["Level"] = pd.to_numeric(loop_df["Level"], errors="coerce").fillna(1).astype(int)
+
     active = loop_df[loop_df["Enable"] == True].copy().sort_values("Level")
+
 
     levels = {}
     for _, row in active.iterrows():
@@ -823,15 +979,20 @@ def build_run_plan_from_saved(loop_src: pd.DataFrame, batch_src: pd.DataFrame):
         df_batch["Run"] = df_batch["Run"].map(_to_bool)
         df_batch = df_batch[df_batch["Run"] == True].reset_index(drop=True)
 
-    total_batch_runs = 0
-    for _, r in df_batch.iterrows():
-        try:
-            total_batch_runs += max(int(r.get("repeat", 1)), 1)
-        except Exception:
-            total_batch_runs += 1
+    # total acquisitions depends on When + outer-loop ctx
+    total_acq = 0
+    for ctx in final_sequence:
+        outer = _outer_ctx_alias(ctx)
+        for _, r in df_batch.iterrows():
+            if _when_ok(r.get("When", ""), outer):
+                try:
+                    total_acq += max(int(r.get("repeat", 1)), 1)
+                except Exception:
+                    total_acq += 1
 
-    total_acq = max(int(len(final_sequence) * total_batch_runs), 0)
+    total_acq = max(int(total_acq), 0)
     return final_sequence, df_batch, total_acq
+
 
 
 def make_tree_snapshot(loop_src: pd.DataFrame, batch_src: pd.DataFrame) -> dict:
@@ -861,8 +1022,9 @@ def validate_sweep_steps(
 ):
     """
     Returns a list[dict] with explicit safety violations.
-    Each dict has: row, label, issue, details, suggestion
+    Each dict has: row, label, problem, fix
     """
+
     bad: List[dict] = []
     if df is None or df.empty:
         return bad
@@ -886,10 +1048,10 @@ def validate_sweep_steps(
             bad.append({
                 "row": rownum,
                 "label": label,
-                "issue": "Parse error",
-                "details": "Could not parse Vbg/Vtg/frames as numbers.",
-                "suggestion": "Fix the row values (numbers only).",
+                "problem": "Parse error: Vbg/Vtg/frames",
+                "fix": "Use numbers for Vbg/Vtg and an integer for frames.",
             })
+
             continue
 
         # --- Global limit violations (start/stop must be inside) ---
@@ -921,9 +1083,6 @@ def validate_sweep_steps(
         vbg_step = dvbg / denom
         vtg_step = dvtg / denom
 
-        issues = []
-        suggestions = []
-
         def min_frames_needed(delta_v: float, limit: float) -> int:
             if delta_v <= 0:
                 return 1
@@ -945,15 +1104,6 @@ def validate_sweep_steps(
                 "label": label,
                 "problem": f"Vtg step {vtg_step:.2f} > {max_volts_per_step:.2f} (frames={frames})",
                 "fix": f"Set frames ≥ {need} or reduce Vtg span.",
-            })
-
-        if issues:
-            bad.append({
-                "row": rownum,
-                "label": label,
-                "issue": " / ".join(["Step limit exceeded"] * len(issues)) if len(issues) > 1 else "Step limit exceeded",
-                "details": " | ".join(issues),
-                "suggestion": " | ".join(suggestions),
             })
 
     return bad
@@ -1107,6 +1257,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     "Run": True,
                     "repeat": 1,
                     "MeasurePower": False,
+                    "When": "",
                     "condition_label": "BGonly",
                     "Vbg_start": 0.0,
                     "Vbg_stop": 1.0,
@@ -1364,6 +1515,15 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             "Run": st.column_config.CheckboxColumn("Run", default=True, width="small"),
             "repeat": st.column_config.NumberColumn("Rep", min_value=1, default=1),
             "MeasurePower": st.column_config.CheckboxColumn("Meas Pwr?", default=False),
+            "When": st.column_config.TextColumn(
+                "When (outer-loop)",
+                help=(
+                    "Examples: center_nm=755,703; exposure_ms>=500; stage_pos==0; rot1_deg!=85\n"
+                    "Allowed keys: center_nm, exposure_ms, stage_pos, epf, rot1_deg, rot2_deg\n"
+                    "Ops: =, ==, !=, <, <=, >, >=  |  AND by ';' or newline"
+                ),
+                # width="large",
+            ),
             "condition_label": st.column_config.TextColumn("Label"),
             "Vbg_start": st.column_config.NumberColumn("Vbg Start", format="%.3f"),
             "Vbg_stop": st.column_config.NumberColumn("Vbg Stop", format="%.3f"),
@@ -1471,7 +1631,13 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     st.error(f"Preview Error: {e}")
 
             st.markdown("### Inner Electrical Sweep")
-            batch_init = normalize_df(st.session_state.batch_work, BATCH_SCHEMA)
+            batch_init = normalize_df(st.session_state.batch_work, BATCH_SCHEMA).copy()
+
+            # ✅ Force editor-friendly dtypes
+            if "When" in batch_init.columns:
+                batch_init["When"] = batch_init["When"].fillna("").astype(str)
+            if "condition_label" in batch_init.columns:
+                batch_init["condition_label"] = batch_init["condition_label"].fillna("").astype(str)
 
             batch_work = st.data_editor(
                 batch_init,
@@ -1482,6 +1648,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                 num_rows="dynamic",
                 width="stretch",
             )
+
 
             # buttons row
             b1, b2, b3 = st.columns([1.2, 1.2, 1.6])
@@ -1497,6 +1664,13 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
         # outside st.form, near the Run button area
         run_progress_ph = st.empty()
         run_progress_text_ph = st.empty()
+
+        # -------- emergency stop state + button --------
+        st.session_state.setdefault("_stop_now", False)
+
+        if st.button("🛑 STOP NOW (ramp TG/BG/Bias → 0V)", key="btn_stop_now"):
+            st.session_state["_stop_now"] = True
+            ui_log("🛑 STOP pressed — will ramp outputs to 0V ASAP.")
 
 
         # --------- process actions (one rerun per click; no per-edit hiccups) ---------
@@ -1545,7 +1719,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             st.session_state["tree_snapshot"] = make_tree_snapshot(st.session_state.loop_src, st.session_state.batch_src)
             vbias_issue = _check_vbias_mapping(st.session_state.batch_src, devices)
             with run_notice_ph.container():
-                run_notice_ph.info("↩️ Discarded Loop + Table edits.")
+                st.info("↩️ Discarded Loop + Table edits.")
                 if vbias_issue:
                     st.error(vbias_issue)    
 
@@ -1587,8 +1761,27 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     f"Apply or Discard, then Run again."
                 )
             else:
+                # Build final_sequence from SAVED tables, then keep only rows that run at least once
+                final_sequence_saved, df_batch_saved, _ = build_run_plan_from_saved(
+                    st.session_state.loop_src,
+                    st.session_state.batch_src,
+                )
+
+                df_effective = df_batch_saved.copy().reset_index(drop=True)
+                if "When" in df_effective.columns and not df_effective.empty:
+                    keep = []
+                    for _, row in df_effective.iterrows():
+                        w = row.get("When", "")
+                        if not str(w).strip():
+                            keep.append(True)
+                        else:
+                            ok_any = any(_when_ok(w, _outer_ctx_alias(ctx)) for ctx in final_sequence_saved)
+                            keep.append(bool(ok_any))
+                    df_effective = df_effective[pd.Series(keep)].reset_index(drop=True)
+
+                vbias_issue = _check_vbias_mapping(df_effective, devices)
                 #  Vbias mapping check (only when saved + before safety checks)
-                vbias_issue = _check_vbias_mapping(st.session_state.batch_src, devices)
+                # vbias_issue = _check_vbias_mapping(st.session_state.batch_src, devices)
                 if vbias_issue:
                     run_notice_ph.error(vbias_issue)
                     st.session_state["_start_run"] = False
@@ -1605,7 +1798,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     )
 
                     bad = validate_sweep_steps(
-                        st.session_state.batch_src,
+                        df_effective,
                         max_volts_per_step=max_step,
                         vbg_limits=vbg_limits,
                         vtg_limits=vtg_limits,
@@ -1616,7 +1809,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                             st.error("Safety violation(s). Fix these rows:")
                             vdf = pd.DataFrame(bad)
                             show_cols = [c for c in ["row", "label", "problem", "fix"] if c in vdf.columns]
-                            st.dataframe(vdf[show_cols], use_container_width=True, hide_index=True)
+                            st.dataframe(vdf[show_cols], width="stretch", hide_index=True)
                     else:
                         run_notice_ph.success("✅ Starting run…")
                         st.session_state["_start_run"] = True
@@ -1692,6 +1885,9 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
     # --- execution
     def run_and_log(tree_live_ph=None):
+        def _stop_requested() -> bool:
+            return bool(st.session_state.get("_stop_now", False))
+
         # progress bar helper
         def _fmt_ctx(ctx_vars: dict) -> str:
             """Compact loop context string."""
@@ -1763,58 +1959,68 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
         # total "acquisitions" = loop conditions × enabled batch rows × repeats
         total_conditions = len(final_sequence)
 
-        # exact acquisitions per loop condition = sum(repeat) across enabled batch rows
-        total_batch_runs = 0
-        for _, r in df_batch.iterrows():
-            try:
-                total_batch_runs += max(int(r.get("repeat", 1)), 1)
-            except Exception:
-                total_batch_runs += 1
+        # NEW: per-seq enabled batch ids (based on When) + exact totals
+        df_batch = df_batch.reset_index(drop=True)
+        batch_ids_per_seq: List[set] = []
+        total_acq = 0
+        total_frames_all = 0
 
-        total_acq = max(int(total_conditions * total_batch_runs), 1)
+        for ctx_vars in final_sequence:
+            outer = _outer_ctx_alias(ctx_vars)
+            enabled_ids = set()
+            for b_i, row in df_batch.iterrows():
+                if _when_ok(row.get("When", ""), outer):
+                    enabled_ids.add(b_i)
+                    reps = max(int(row.get("repeat", 1)), 1)
+                    frs  = max(int(row.get("frames", 1)), 1)
+                    total_acq += reps
+                    total_frames_all += reps * frs
+            batch_ids_per_seq.append(enabled_ids)
+
+        if total_acq <= 0:
+            ui_log("Nothing to run: all batch rows are skipped by 'When' guards.")
+            return
+
         done = 0
+        done_frames = 0
+        total_frames_global = max(int(total_frames_all), 1)
 
-        # NEW: progress is based on TOTAL FRAMES across ALL acquisitions
-        # frames_sum_per_condition = Σ(repeat * frames) for enabled batch rows
-        frames_sum_per_condition = 0
-        try:
-            frames_sum_per_condition = int((df_batch["repeat"] * df_batch["frames"]).sum())
-        except Exception:
-            # fallback (be robust)
-            for _, r in df_batch.iterrows():
-                try:
-                    frames_sum_per_condition += max(int(r.get("repeat", 1)), 1) * max(int(r.get("frames", 1)), 1)
-                except Exception:
-                    frames_sum_per_condition += 1
-
-        total_frames_all = max(int(total_conditions * frames_sum_per_condition), 1)
-        done_frames = 0  # completed frames across ALL files
-
-        total_frames_global = total_frames_all   # ✅ ADD THIS (so your later code works)
 
 
         # keep snapshot in sync so the preview tree stays updated even after run ends
+        # pick first allowed batch row for seq 0 (if any)
+        first_label = ""
+        if total_conditions > 0 and batch_ids_per_seq and batch_ids_per_seq[0]:
+            first_id = sorted(list(batch_ids_per_seq[0]))[0]
+            first_label = sanitize_filename(df_batch.iloc[first_id].get("condition_label", ""))
+
         st.session_state["tree_snapshot"] = dict(
             final_sequence=final_sequence,
             df_batch=df_batch.reset_index(drop=True).copy(),
             done=0,
             total_acq=total_acq,
             current_seq_i=0 if total_conditions > 0 else -1,
-            current_label=sanitize_filename(df_batch.iloc[0].get("condition_label", "")) if not df_batch.empty else "",
+            current_label=first_label,
             current_rep_i=0,
         )
+
 
         # ---- init LIVE status tree (all TODO, first item highlighted) ----
         if tree_live_ph is not None:
             try:
-                first_label = sanitize_filename(df_batch.iloc[0].get("condition_label", "")) if not df_batch.empty else ""
+                # Use the first *allowed* batch row for seq 0 (respects When)
+                first_label = ""
+                if total_conditions > 0 and batch_ids_per_seq and batch_ids_per_seq[0]:
+                    first_id = sorted(list(batch_ids_per_seq[0]))[0]
+                    first_label = sanitize_filename(df_batch.iloc[first_id].get("condition_label", ""))
+
                 tree_live_ph.markdown(
                     build_run_status_tree_html(
                         final_sequence,
                         df_batch,
                         done=0,
                         total_acq=total_acq,
-                        current_seq_i=0,
+                        current_seq_i=0 if total_conditions > 0 else -1,
                         current_label=first_label,
                         current_rep_i=0,
                         max_seq_show=8,
@@ -1824,6 +2030,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                 )
             except Exception:
                 pass
+
 
 
 
@@ -1852,8 +2059,10 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
             # (your stage/rotation/LF config code stays the same)
 
             ctx_str = _fmt_ctx(ctx_vars)
-
-            for _, row in df_batch.iterrows():
+            allowed_ids = batch_ids_per_seq[seq_i]
+            for b_i, row in df_batch.iterrows():
+                if b_i not in allowed_ids:
+                    continue
                 cond_label = sanitize_filename(row.get("condition_label", ""))
                 vbias_block = _vbias_block_from_row(row)
                 cond_block_for_name = cond_label + (f"_{vbias_block}" if vbias_block else "")
@@ -2089,6 +2298,7 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     for stp in sweep_recipe:
                         if stp.get("step") == "dual_gate_sweep":
                             stp["frame_progress_cb"] = _frame_progress_cb
+                            stp["stop_cb"] = _stop_requested
 
                     recipe += sweep_recipe
 
@@ -2100,15 +2310,55 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     from app.steps.registry import list_steps
                     ui_log("Registered steps: " + ", ".join(list_steps()))
 
-                    runner_singleton.run_recipe(
-                        recipe,
-                        devices,
-                        to_header_list(wavelength_headers),
-                        st.session_state.get("extra_scalar_fields_order", []),
-                        str(out_dir),
-                        stem_final,
-                        progress_cb=ui_log,
-                    )
+                    if st.session_state.get("_stop_now", False):
+                        ui_log("🛑 STOP requested (between acquisitions) — ramping outputs to 0V...")
+                        iv = (devices or {}).get("iv", None)
+                        try:
+                            if iv and hasattr(iv, "ramp_all_to_zero"):
+                                iv.ramp_all_to_zero(ramp_step=0.1, delay_s=0.02)
+                            elif iv:
+                                # fallback using existing API
+                                if getattr(iv, "has_role", lambda *_: False)("Vbias") and hasattr(iv, "set_bias"):
+                                    iv.set_bias(Vbias=0.0, delay_s=0.02, ramp_step=0.1)
+                                    iv.set_bias(Vbias=0.0, delay_s=0.0, ramp_step=0.0)
+                                iv.set_gates(
+                                    Vbg=0.0 if getattr(iv, "has_role", lambda *_: False)("Vbg") else None,
+                                    Vtg=0.0 if getattr(iv, "has_role", lambda *_: False)("Vtg") else None,
+                                    delay_s=0.02,
+                                    ramp_step=0.1,
+                                )
+                                iv.set_gates(
+                                    Vbg=0.0 if getattr(iv, "has_role", lambda *_: False)("Vbg") else None,
+                                    Vtg=0.0 if getattr(iv, "has_role", lambda *_: False)("Vtg") else None,
+                                    delay_s=0.0,
+                                    ramp_step=0.0,
+                                )
+                        except Exception as e:
+                            ui_log(f"Stop ramp error (ignored): {e}")
+
+                        st.session_state["_stop_now"] = False
+                        run_progress_text_ph.warning("🛑 Stopped. Outputs at 0V.")
+                        return
+
+                    try:
+                        runner_singleton.run_recipe(
+                            recipe,
+                            devices,
+                            to_header_list(wavelength_headers),
+                            st.session_state.get("extra_scalar_fields_order", []),
+                            str(out_dir),
+                            stem_final,
+                            progress_cb=ui_log,
+                        )
+                    except Exception as e:
+                        # avoid importing; match by class name
+                        if e.__class__.__name__ in ("StopRequested",):
+                            ui_log("🛑 Run aborted safely (outputs ramped to 0V).")
+                            st.session_state["_stop_now"] = False
+                            run_progress_text_ph.warning("🛑 Stopped. Outputs at 0V.")
+                            return
+                        raise    
+                    
                     done += 1
                     done_frames += acq_frames
 

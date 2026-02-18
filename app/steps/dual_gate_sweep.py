@@ -8,6 +8,9 @@ import numpy as np
 
 from .registry import register
 
+class StopRequested(Exception):
+    """User requested stop; triggers safe ramp-down in finally."""
+    pass
 
 def _as_float_list(arr: Iterable[float]) -> list[float]:
     return [float(x) for x in arr]
@@ -120,6 +123,8 @@ class DualGateSweep:
         # Signature: cb(frame_i: int, frame_total: int) where frame_i is 1-based
         self.frame_progress_cb = cfg.get("frame_progress_cb", None)
 
+        self.stop_cb = cfg.get("stop_cb", None)  # callable -> bool
+
     # ------------------------------ main ------------------------------
 
     def run(self, ctx) -> None:
@@ -203,7 +208,7 @@ class DualGateSweep:
             if iv:
                 start_bg, start_tg = vbg_list[0], vtg_list[0]
 
-                # Ramp gates to start
+                # Ramp gates to start (STOP-aware)
                 try:
                     log(f"Ramping to start: Vbg={start_bg:g} V, Vtg={start_tg:g} V")
                     iv.set_gates(
@@ -211,7 +216,11 @@ class DualGateSweep:
                         Vtg=start_tg if has_vtg else None,
                         delay_s=self.ramp_step_time,
                         ramp_step=self.ramp_step_size,
+                        stop_cb=self.stop_cb,
+                        stop_exc=StopRequested,
                     )
+                except StopRequested:
+                    raise
                 except Exception as e:
                     log(f"Ramp to start (gates) failed: {e}")
 
@@ -226,14 +235,22 @@ class DualGateSweep:
                 except Exception:
                     pass
 
-                # Ramp/snap bias to start (if bias sweep requested)
+                # Ramp/snap bias to start (STOP-aware) if bias sweep requested
                 if vbias_list is not None:
                     try:
                         vb_start = float(vbias_list[0])
                         log(f"Ramping bias to start: Vbias={vb_start:g} V")
-                        iv.set_bias(Vbias=vb_start, delay_s=self.ramp_step_time, ramp_step=self.ramp_step_size)
+                        iv.set_bias(
+                            Vbias=vb_start,
+                            delay_s=self.ramp_step_time,
+                            ramp_step=self.ramp_step_size,
+                            stop_cb=self.stop_cb,
+                            stop_exc=StopRequested,
+                        )
                         iv.set_bias(Vbias=vb_start, delay_s=0.0, ramp_step=0.0)
                         ctx.axes["Vbias"] = vb_start
+                    except StopRequested:
+                        raise
                     except Exception as e:
                         log(f"Ramp bias to start failed: {e}")
 
@@ -250,6 +267,18 @@ class DualGateSweep:
 
             # --------- Main sweep (jump between points) ----------
             for i in range(total):
+                # ---- STOP requested? -> abort -> finally ramps to 0V ----
+                if callable(getattr(self, "stop_cb", None)):
+                    try:
+                        if bool(self.stop_cb()):
+                            log("🛑 STOP requested — aborting sweep (will ramp outputs to 0V).")
+                            raise StopRequested()
+                    except StopRequested:
+                        raise
+                    except Exception:
+                        # never let stop checking crash the run
+                        pass
+
                 vbg_set = vbg_list[i]
                 vtg_set = vtg_list[i]
 
@@ -347,19 +376,6 @@ class DualGateSweep:
                     except Exception:
                         Ibg_a = Itg_a = Ibias_a = None
 
-                # # Fallback: only if read_currents is missing/failed
-                # if (Ibg_a is None and Itg_a is None and Ibias_a is None) and (iv and hasattr(iv, "read_leakages")):
-                #     try:
-                #         leak = iv.read_leakages()
-                #         if isinstance(leak, dict):
-                #             # try common current keys
-                #             Ibg_a   = leak.get("Ibg", None)
-                #             Itg_a   = leak.get("Itg", None)
-                #             Ibias_a = leak.get("Ibias", None)
-                #         elif isinstance(leak, (list, tuple)) and len(leak) >= 3:
-                #             Ibg_a, Itg_a, Ibias_a = leak[0], leak[1], leak[2]
-                #     except Exception:
-                #         pass
 
                 # ---- Save scalars (add setpoints + measured values) ----
                 # NOTE: _csv_num() gives ~float64 precision text (helps if your CSV writer uses str()).
@@ -389,9 +405,12 @@ class DualGateSweep:
                 cb = getattr(self, "frame_progress_cb", None)
                 if callable(cb):
                     try:
-                        cb(i + 1, total)  # frame index is 1-based
+                        cb(i + 1, total)
+                    except StopRequested:
+                        raise
                     except Exception:
                         pass
+
 
                 # Keep context axes updated
                 ctx.axes["Vbg"] = vbg_use
