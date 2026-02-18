@@ -330,6 +330,12 @@ st.sidebar.title("Device Configuration")
 st.session_state.setdefault("lf6_ready", False)
 st.session_state.setdefault("lf6_auto_load_on_connect", True)
 
+st.session_state.setdefault("_run_active", False)   # set True while a sweep is running
+st.session_state.setdefault("_stop_now", False)     # stop flag set by STOP button
+st.session_state.setdefault("iv_device", None)      # cached IVDevice
+st.session_state.setdefault("iv_cfg_sig", None)     # cached config signature
+
+
 # Create a single devices dict early so all panels can add to it
 devices = {}
 # Persist SMU compliance per *address* across reruns
@@ -420,6 +426,70 @@ with st.sidebar.expander("LF6 Spectrometer", expanded=True):
         if spec is not None:
             devices["spectrometer"] = spec
 
+def _close_iv_device(iv_dev):
+    """Best-effort close/release VISA handles."""
+    if iv_dev is None:
+        return
+    setup = getattr(iv_dev, "setup", None) or getattr(iv_dev, "iv_setup", None)
+    # If iv_automation exposes a close(), use it
+    try:
+        if setup is not None and hasattr(setup, "close"):
+            setup.close()
+            return
+    except Exception:
+        pass
+    # Otherwise do nothing (safe). You can extend this if your IVSetup exposes instruments.
+
+def _build_iv_device(*, rm, selected, term, role_map):
+    """Create IVDevice once (can be slow/blocking)."""
+    from iv_automation import PyvisaInstrument, IVSetup, KeithControl
+
+    def make_inst(addr, role=None):
+        term_arg = None if term == "" else term
+
+        if role in ("Vbg", "Vtg", "Vbias"):
+            kc = KeithControl(address=addr, name=f"{role}_SMU", variable_name=role, rm=rm)
+
+            # Apply persisted compliance ON BUILD
+            comp = _get_comp(addr)
+            try:
+                kc.set_volt_step(curr_compliance=float(comp["curr"]), volt_compliance=float(comp["volt"]))
+            except Exception:
+                pass
+            return kc
+
+        inst = PyvisaInstrument(address=addr, name=addr, termination=term_arg, rm=rm)
+        try:
+            inst.timeout = 5000
+        except Exception:
+            pass
+        return inst
+
+    vbg_src   = role_map.get("Vbg")
+    vtg_src   = role_map.get("Vtg")
+    vbias_src = role_map.get("Vbias")
+
+    inst_list = []
+    if vbg_src:   inst_list.append(make_inst(vbg_src,   "Vbg"))
+    if vtg_src:   inst_list.append(make_inst(vtg_src,   "Vtg"))
+    if vbias_src: inst_list.append(make_inst(vbias_src, "Vbias"))
+
+    for addr in selected:
+        if addr not in {vbg_src, vtg_src, vbias_src}:
+            inst_list.append(make_inst(addr, None))
+
+    iv_setup = IVSetup(inst_list)
+    return IVDevice(iv_setup, role_map=role_map)
+
+def _iv_cfg_signature(selected, term, role_map):
+    """Hashable signature so we rebuild only when mapping changes."""
+    return (
+        tuple(selected),
+        str(term),
+        str(role_map.get("Vbg")),
+        str(role_map.get("Vtg")),
+        str(role_map.get("Vbias")),
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # VISA (IV) DISCOVERY & ROLE MAPPING
@@ -499,51 +569,72 @@ with st.sidebar.expander("IV Instruments (VISA)", expanded=False):
 
     # Build IV setup if any devices selected
     try:
-        if selected and rm is not None:
-            from iv_automation import PyvisaInstrument, IVSetup, KeithControl
+        # Build / cache IV setup (ONLY when requested)
+        run_active = bool(st.session_state.get("_run_active", False))
 
-            def make_inst(addr, role=None):
-                term_arg = None if term == "" else term
-                if role in ("Vbg", "Vtg", "Vbias"):
-                    kc = KeithControl(address=addr, name=f"{role}_SMU", variable_name=role, rm=rm)
+        role_map = {
+            "Vbg":   (vbg_src if vbg_src != "<none>" else None),
+            "Vtg":   (vtg_src if vtg_src != "<none>" else None),
+            "Vbias": (vbias_src if vbias_src != "<none>" else None),
+        }
+        cfg_sig = _iv_cfg_signature(selected, term, role_map)
 
-                    # Apply persisted compliance every rerun (since kc is recreated every rerun)
-                    comp = _get_comp(addr)
-                    try:
-                        kc.set_volt_step(curr_compliance=float(comp["curr"]), volt_compliance=float(comp["volt"]))
-                    except Exception:
-                        pass
+        c_iv1, c_iv2 = st.columns(2)
+        with c_iv1:
+            btn_rebuild = st.button(
+                "Connect / Rebuild IV",
+                disabled=(rm is None or (not selected) or run_active),
+                help=("Disabled while a run is active." if run_active else "Build IV once and reuse across reruns."),
+                key="btn_iv_rebuild",
+            )
+        with c_iv2:
+            btn_disconnect = st.button(
+                "Disconnect IV",
+                disabled=(st.session_state.get("iv_device") is None),
+                key="btn_iv_disconnect",
+            )
 
-                    return kc
-                inst = PyvisaInstrument(address=addr, name=addr, termination=term_arg, rm=rm)
-                try:
-                    inst.timeout = 5000
-                except Exception:
-                    pass
-                return inst
+        if btn_disconnect:
+            _close_iv_device(st.session_state.get("iv_device"))
+            st.session_state["iv_device"] = None
+            st.session_state["iv_cfg_sig"] = None
+            st.info("IV disconnected.")
+            st.rerun()
 
-            inst_list = []
-            if vbg_src   != "<none>": inst_list.append(make_inst(vbg_src,   "Vbg"))
-            if vtg_src   != "<none>": inst_list.append(make_inst(vtg_src,   "Vtg"))
-            if vbias_src != "<none>": inst_list.append(make_inst(vbias_src, "Vbias"))
-            for addr in selected:
-                if addr not in {vbg_src, vtg_src, vbias_src}:
-                    inst_list.append(make_inst(addr))
+        # If user clicks rebuild, (re)build and cache
+        if btn_rebuild:
+            try:
+                _close_iv_device(st.session_state.get("iv_device"))
+            except Exception:
+                pass
 
-            iv_setup = IVSetup(inst_list)
-            role_map = {"Vbg": vbg_src if vbg_src != "<none>" else None,
-                        "Vtg": vtg_src if vtg_src != "<none>" else None,
-                        "Vbias": vbias_src if vbias_src != "<none>" else None}
-            iv = IVDevice(iv_setup, role_map=role_map)
-            devices["iv"] = iv
+            try:
+                iv = _build_iv_device(rm=rm, selected=selected, term=term, role_map=role_map)
+                st.session_state["iv_device"] = iv
+                st.session_state["iv_cfg_sig"] = cfg_sig
+                st.success("IV connected (cached).")
+                st.rerun()
+            except Exception as e:
+                st.session_state["iv_device"] = None
+                st.session_state["iv_cfg_sig"] = None
+                st.warning(f"IV init failed: {e}")
+
+        # Reuse cached IV across reruns (NO rebuild on STOP rerun)
+        iv_cached = st.session_state.get("iv_device")
+
+        if iv_cached is not None:
+            devices["iv"] = iv_cached
 
             mapped = []
             if role_map["Vbg"]:   mapped.append(f"Vbg→{role_map['Vbg']}")
             if role_map["Vtg"]:   mapped.append(f"Vtg→{role_map['Vtg']}")
             if role_map["Vbias"]: mapped.append(f"Vbias→{role_map['Vbias']}")
-            st.success("IV ready: " + (", ".join(mapped) if mapped else "no roles set"))
+            st.success("IV ready (cached): " + (", ".join(mapped) if mapped else "no roles set"))
         else:
-            st.info("No VISA devices selected. Gates/bias will be ignored.")
+            if selected:
+                st.info("Select mapping, then click **Connect / Rebuild IV**.")
+            else:
+                st.info("No VISA devices selected. Gates/bias will be ignored.")
     except Exception as e:
         st.warning(f"IV init failed: {e}")
 
@@ -1098,8 +1189,10 @@ devices_main = {}
 spec = st.session_state.get("spec")
 if spec is not None and st.session_state.get("lf6_ready"):
     devices_main["spectrometer"] = spec
-if "iv" in locals() and isinstance(devices.get("iv"), IVDevice):
-    devices_main["iv"] = devices["iv"]
+iv_dev = devices.get("iv")
+if isinstance(iv_dev, IVDevice):
+    devices_main["iv"] = iv_dev
+
 
 # Bring over aux devices (if connected)
 for k in ("stage", "pm", "rotation", "rotation1", "rotation2"):
