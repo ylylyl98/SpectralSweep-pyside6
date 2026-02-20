@@ -41,14 +41,72 @@ class IVDevice:
 
         return False
 
-
-    def _safe_x_goto(self, name: str, value: float, delay_s: float = 0.02) -> bool:
+    def _write_x_only(self, values: Dict[str, float]) -> bool:
         """
-        Jump to value (no ramp). Kept for backward-compat.
+        Fast path: update X setpoints and call each owning instrument.write_x()
+        WITHOUT creating sweeps or reading Y channels.
+        """
+        setup = getattr(self, "setup", None)
+        xcc = getattr(setup, "x_channel_collection", None) if setup else None
+        if xcc is None:
+            return False
+        if not (hasattr(xcc, "send_x") and hasattr(xcc, "get_instrument")):
+            return False
+
+        insts = []
+        seen = set()
+
+        for name, val in (values or {}).items():
+            if val is None:
+                continue
+            try:
+                xcc.send_x(str(name), float(val))  # updates cache + instrument.receive_x()
+                inst = xcc.get_instrument(str(name))
+                if inst is not None:
+                    k = id(inst)
+                    if k not in seen:
+                        seen.add(k)
+                        insts.append(inst)
+            except Exception:
+                pass
+
+        if not insts:
+            return False
+
+        for inst in insts:
+            try:
+                inst.write_x()
+            except Exception:
+                pass
+
+        return True
+
+    def _set_x_fast(self, name: str, value: float) -> bool:
+        """
+        Fast set (no ramp, no readback). Falls back to setup.x_goto if needed.
         """
         if not self.has_role(name):
             return False
-        self.setup.x_goto(name, float(value), delta=0, delay=delay_s, print_steps=False)
+
+        ok = self._write_x_only({name: float(value)})
+        if ok:
+            return True
+
+        try:
+            self.setup.x_goto(name, float(value), delta=0, delay=0.0, print_steps=False)
+            return True
+        except Exception:
+            return False
+
+    def _safe_x_goto(self, name: str, value: float, delay_s: float = 0.05) -> bool:
+        """
+        Jump to value (no ramp). Uses fast write_x_only when possible.
+        """
+        ok = self._set_x_fast(name, float(value))
+        if not ok:
+            return False
+        if delay_s and float(delay_s) > 0:
+            time.sleep(float(delay_s))
         return True
 
     def _check_stop(
@@ -88,14 +146,14 @@ class IVDevice:
         name: str,
         target: float,
         step: float,
-        delay_s: float = 0.02,
+        delay_s: float = 0.05,
         *,
         stop_cb: Optional[Callable[[], bool]] = None,
         stop_exc: Optional[Type[BaseException]] = None,
     ) -> bool:
         """
-        Manual stepped ramp using delta=0 jumps so we can poll stop_cb each step.
-        Returns False if the role does not exist.
+        Manual stepped ramp so we can poll stop_cb each step.
+        Fast per-step write (no sweep construction / no per-step READ?).
         """
         if not self.has_role(name):
             return False
@@ -106,8 +164,9 @@ class IVDevice:
         # jump mode
         if step <= 0:
             self._check_stop(stop_cb, stop_exc)
-            self.setup.x_goto(name, target, delta=0, delay=0.0, print_steps=False)
-            time.sleep(delay_s)
+            self._set_x_fast(name, target)
+            if delay_s and float(delay_s) > 0:
+                time.sleep(float(delay_s))
             return True
 
         x0 = self._safe_read_x(name)
@@ -121,13 +180,15 @@ class IVDevice:
             self._check_stop(stop_cb, stop_exc)
             f = i / n
             xi = float(x0) + dx * f
-            self.setup.x_goto(name, xi, delta=0, delay=0.0, print_steps=False)
-            time.sleep(delay_s)
+            self._set_x_fast(name, float(xi))
+            if delay_s and float(delay_s) > 0:
+                time.sleep(float(delay_s))
 
-        # exact final snap
+        # exact final snap (should be equal already, but keep it explicit)
         self._check_stop(stop_cb, stop_exc)
-        self.setup.x_goto(name, target, delta=0, delay=0.0, print_steps=False)
-        time.sleep(delay_s)
+        self._set_x_fast(name, target)
+        if delay_s and float(delay_s) > 0:
+            time.sleep(float(delay_s))
         return True
 
     def ramp_to(
@@ -135,7 +196,7 @@ class IVDevice:
         name: str,
         value: float,
         step: float,
-        delay_s: float = 0.02,
+        delay_s: float = 0.05,
         *,
         stop_cb: Optional[Callable[[], bool]] = None,
         stop_exc: Optional[Type[BaseException]] = None,
@@ -167,10 +228,8 @@ class IVDevice:
         stop_exc: Optional[Type[BaseException]] = None,
     ) -> None:
         """
-        Interleaved ramp: at each step, set BOTH Vbg and Vtg (delta=0 jumps),
-        then sleep once. This avoids: 'finish Vbg ramp then start Vtg'.
-
-        Stop-aware: checks stop_cb each step and raises stop_exc().
+        Interleaved ramp: at each step, set BOTH Vbg and Vtg, then sleep once.
+        Fast per-step write (no sweep construction / no per-step READ?).
         """
         # start points: prefer measured, fall back to x setpoint
         bg0, tg0 = self.read_current_gates()
@@ -195,9 +254,9 @@ class IVDevice:
         step = float(abs(ramp_step)) if ramp_step and ramp_step > 0 else 0.0
         if step <= 0:
             self._check_stop(stop_cb, stop_exc)
-            self.setup.x_goto("Vbg", bg1, delta=0, delay=0.0, print_steps=False)
-            self.setup.x_goto("Vtg", tg1, delta=0, delay=0.0, print_steps=False)
-            time.sleep(delay_s)
+            self._write_x_only({"Vbg": bg1, "Vtg": tg1})
+            if delay_s and float(delay_s) > 0:
+                time.sleep(float(delay_s))
             return
 
         max_d = max(abs(d_bg), abs(d_tg))
@@ -205,20 +264,17 @@ class IVDevice:
 
         for i in range(1, n + 1):
             self._check_stop(stop_cb, stop_exc)
-
             f = i / n
             bg_i = bg0 + d_bg * f
             tg_i = tg0 + d_tg * f
-
-            # Use delta=0 jumps (do not nest ramps)
-            self.setup.x_goto("Vbg", float(bg_i), delta=0, delay=0.0, print_steps=False)
-            self.setup.x_goto("Vtg", float(tg_i), delta=0, delay=0.0, print_steps=False)
-            time.sleep(delay_s)
+            self._write_x_only({"Vbg": float(bg_i), "Vtg": float(tg_i)})
+            if delay_s and float(delay_s) > 0:
+                time.sleep(float(delay_s))
 
         self._check_stop(stop_cb, stop_exc)
-        self.setup.x_goto("Vbg", bg1, delta=0, delay=0.0, print_steps=False)
-        self.setup.x_goto("Vtg", tg1, delta=0, delay=0.0, print_steps=False)
-        time.sleep(delay_s)
+        self._write_x_only({"Vbg": bg1, "Vtg": tg1})
+        if delay_s and float(delay_s) > 0:
+            time.sleep(float(delay_s))
 
     # ---------------- public API used by UI/steps ----------------
 
@@ -226,7 +282,7 @@ class IVDevice:
         self,
         Vbg: Optional[float] = None,
         Vtg: Optional[float] = None,
-        delay_s: float = 0.03,
+        delay_s: float = 0.05,
         ramp_step: Optional[float] = 0.1,
         *,
         stop_cb: Optional[Callable[[], bool]] = None,
@@ -392,7 +448,7 @@ class IVDevice:
 
         return bg_val, tg_val
 
-    def ramp_all_to_zero(self, ramp_step: float = 0.1, delay_s: float = 0.02):
+    def ramp_all_to_zero(self, ramp_step: float = 0.1, delay_s: float = 0.05):
         """Ramp Vbias, Vbg, Vtg -> 0V if roles exist."""
         try:
             if self.has_role("Vbias"):

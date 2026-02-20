@@ -111,6 +111,72 @@ def _iv_set_bias_jump(iv, Vbias: float, *, delay_s: float = 0.0):
         _call_compat(fn, float(Vbias), delay_s=float(delay_s), ramp_step=0.0)
 
 
+def _iv_write_x_only(iv, values: dict, *, delay_s: float = 0.0) -> bool:
+    """
+    Write-only setpoints WITHOUT per-step READ?.
+    Uses iv.setup.x_channel_collection if available.
+    Returns True if succeeded, else False.
+    """
+    if iv is None:
+        return False
+
+    setup = getattr(iv, "setup", None)
+    xcc = getattr(setup, "x_channel_collection", None) if setup else None
+    if xcc is None:
+        return False
+    if not (hasattr(xcc, "send_x") and hasattr(xcc, "get_instrument")):
+        return False
+
+    insts = []
+    seen = set()
+
+    for name, val in (values or {}).items():
+        if val is None:
+            continue
+        try:
+            xcc.send_x(str(name), float(val))  # updates cache + instrument.receive_x()
+            inst = xcc.get_instrument(str(name))
+            if inst is not None:
+                k = id(inst)
+                if k not in seen:
+                    seen.add(k)
+                    insts.append(inst)
+        except Exception:
+            pass
+
+    for inst in insts:
+        try:
+            inst.write_x()
+        except Exception:
+            pass
+
+    if delay_s and float(delay_s) > 0:
+        time.sleep(float(delay_s))
+
+    return True
+
+
+def _iv_set_gates_rampstep(iv, *, Vbg=None, Vtg=None):
+    """
+    Used ONLY inside ramp-to-start and ramp-down-to-0 loops.
+    Writes setpoints without per-step READ?.
+    No sleeping here; the caller controls dt so we get exactly dt per step.
+    """
+    ok = _iv_write_x_only(iv, {"Vbg": Vbg, "Vtg": Vtg}, delay_s=0.0)
+    if not ok:
+        _iv_set_gates_jump(iv, Vbg=Vbg, Vtg=Vtg, delay_s=0.0)
+
+
+def _iv_set_bias_rampstep(iv, Vbias: float):
+    """
+    Writes bias setpoints without per-step READ?.
+    No sleeping here; the caller controls dt so we get exactly dt per step.
+    """
+    ok = _iv_write_x_only(iv, {"Vbias": Vbias}, delay_s=0.0)
+    if not ok:
+        _iv_set_bias_jump(iv, float(Vbias), delay_s=0.0)
+
+
 def _safe_read_setup_x(iv, role: str) -> Optional[float]:
     """
     Try reading a channel value via iv.setup.get_single_x_value(role) if available.
@@ -149,12 +215,14 @@ def _safe_read_current(iv) -> Tuple[Optional[float], Optional[float]]:
                 tg = float(tg)
             except Exception:
                 tg = None
-            return (bg if (bg is not None and np.isfinite(bg)) else None,
-                    tg if (tg is not None and np.isfinite(tg)) else None)
+            return (
+                bg if (bg is not None and np.isfinite(bg)) else None,
+                tg if (tg is not None and np.isfinite(tg)) else None,
+            )
     except Exception:
         pass
 
-    # fallback: setup channel read
+    # fallback: setup channel read (setpoint cache)
     bg = _safe_read_setup_x(iv, "Vbg")
     tg = _safe_read_setup_x(iv, "Vtg")
     return bg, tg
@@ -181,6 +249,80 @@ def _safe_read_bias_voltage(iv) -> Optional[float]:
     return _safe_read_setup_x(iv, "Vbias")
 
 
+def _sync_ctx_gates(
+    ctx,
+    iv,
+    *,
+    has_vbg: bool,
+    has_vtg: bool,
+    fallback_vbg: Optional[float] = None,
+    fallback_vtg: Optional[float] = None,
+    log=None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Best-effort: read back current gates and store them into ctx.axes.
+    If readback is unavailable, fall back to provided fallbacks (or keep existing ctx.axes).
+    Returns (Vbg_now, Vtg_now) from ctx.axes (may be None).
+    """
+    if not getattr(ctx, "axes", None):
+        ctx.axes = {}
+
+    bg_meas, tg_meas = _safe_read_current(iv)
+
+    if has_vbg:
+        if bg_meas is not None:
+            ctx.axes["Vbg"] = float(bg_meas)
+        elif fallback_vbg is not None:
+            ctx.axes["Vbg"] = float(fallback_vbg)
+
+    if has_vtg:
+        if tg_meas is not None:
+            ctx.axes["Vtg"] = float(tg_meas)
+        elif fallback_vtg is not None:
+            ctx.axes["Vtg"] = float(fallback_vtg)
+
+    try:
+        if callable(log):
+            log(f"Synced gates: Vbg={ctx.axes.get('Vbg', None)}, Vtg={ctx.axes.get('Vtg', None)}")
+    except Exception:
+        pass
+
+    return ctx.axes.get("Vbg", None), ctx.axes.get("Vtg", None)
+
+
+def _sync_ctx_bias(
+    ctx,
+    iv,
+    *,
+    has_vbias: bool,
+    fallback_vbias: Optional[float] = None,
+    log=None,
+) -> Optional[float]:
+    """
+    Best-effort: read back bias and store into ctx.axes.
+    Returns ctx.axes["Vbias"] (may be None).
+    """
+    if not getattr(ctx, "axes", None):
+        ctx.axes = {}
+
+    if not has_vbias:
+        return None
+
+    vb_meas = _safe_read_bias_voltage(iv)
+    if vb_meas is not None:
+        ctx.axes["Vbias"] = float(vb_meas)
+    elif fallback_vbias is not None:
+        ctx.axes["Vbias"] = float(fallback_vbias)
+
+    try:
+        if callable(log):
+            log(f"Synced bias: Vbias={ctx.axes.get('Vbias', None)}")
+    except Exception:
+        pass
+
+    return ctx.axes.get("Vbias", None)
+
+
 def _as_float_list(arr: Iterable[float]) -> list[float]:
     return [float(x) for x in arr]
 
@@ -205,22 +347,24 @@ def _ramp_linear_2ch(
     Vbg0=None, Vtg0=None,
     Vbg1=None, Vtg1=None,
     step: float = 0.1,
-    dt: float = 0.02,
+    dt: float = 0.05,
     stop_cb=None,
     log=None,
 ):
     """
     STOP-aware ramp (works even if IV adapter doesn't support ramp_step/stop_cb kwargs).
     Ramps both channels together in N steps where max(|Δ|)/N <= step.
+
+    IMPORTANT:
+      We do NOT sleep inside _iv_set_gates_rampstep. We sleep here with _sleep_with_stop(dt),
+      so you get exactly "one 0.1V step per dt seconds" (e.g. dt=0.05).
     """
     if iv is None:
         return
 
-    # if nothing to do
     if (Vbg1 is None) and (Vtg1 is None):
         return
 
-    # defaults: try readback; if absent, keep None (caller should pass ctx.axes values)
     if Vbg0 is None or Vtg0 is None:
         bgm, tgm = _safe_read_current(iv)
         if Vbg0 is None:
@@ -228,20 +372,17 @@ def _ramp_linear_2ch(
         if Vtg0 is None:
             Vtg0 = tgm
 
-    # If still missing, assume 0 (last resort)
     if Vbg0 is None:
         Vbg0 = 0.0
     if Vtg0 is None:
         Vtg0 = 0.0
 
-    # deltas only for active channels
     dbg = 0.0 if Vbg1 is None else float(Vbg1) - float(Vbg0)
     dtg = 0.0 if Vtg1 is None else float(Vtg1) - float(Vtg0)
 
     maxd = max(abs(dbg), abs(dtg))
     if maxd < 1e-15:
-        # snap (no ramp)
-        _iv_set_gates_jump(iv, Vbg=Vbg1, Vtg=Vtg1, delay_s=0.0)
+        _iv_set_gates_rampstep(iv, Vbg=Vbg1, Vtg=Vtg1)
         return
 
     step = max(float(step), 1e-6)
@@ -255,10 +396,10 @@ def _ramp_linear_2ch(
         bg = None if Vbg1 is None else (float(Vbg0) + dbg * frac)
         tg = None if Vtg1 is None else (float(Vtg0) + dtg * frac)
 
-        _iv_set_gates_jump(iv, Vbg=bg, Vtg=tg, delay_s=0.0)
+        _iv_set_gates_rampstep(iv, Vbg=bg, Vtg=tg)
 
         if dt > 0:
-            _sleep_with_stop(float(dt), stop_cb, log=log, check_dt=0.05)
+            _sleep_with_stop(float(dt), stop_cb, log=log, check_dt=min(0.05, float(dt)))
 
 
 def _ramp_bias_1ch(
@@ -267,14 +408,16 @@ def _ramp_bias_1ch(
     V0: Optional[float],
     V1: float,
     step: float = 0.1,
-    dt: float = 0.02,
+    dt: float = 0.05,
     stop_cb=None,
     log=None,
 ):
+    """
+    STOP-aware bias ramp. Same timing rule: one step per dt seconds.
+    """
     if iv is None:
         return
 
-    # defaults: try readback; if absent, keep None (caller should pass ctx.axes value)
     if V0 is None:
         vm = _safe_read_bias_voltage(iv)
         V0 = vm
@@ -284,7 +427,7 @@ def _ramp_bias_1ch(
 
     d = float(V1) - float(V0)
     if abs(d) < 1e-15:
-        _iv_set_bias_jump(iv, float(V1), delay_s=0.0)
+        _iv_set_bias_rampstep(iv, float(V1))
         return
 
     step = max(float(step), 1e-6)
@@ -294,9 +437,9 @@ def _ramp_bias_1ch(
     for k in range(1, n + 1):
         _raise_if_stop(stop_cb, log=log, msg="🛑 STOP requested during bias ramp — aborting (will ramp to 0V).")
         v = float(V0) + d * (k / n)
-        _iv_set_bias_jump(iv, v, delay_s=0.0)
+        _iv_set_bias_rampstep(iv, v)
         if dt > 0:
-            _sleep_with_stop(float(dt), stop_cb, log=log, check_dt=0.05)
+            _sleep_with_stop(float(dt), stop_cb, log=log, check_dt=min(0.05, float(dt)))
 
 
 def _ramp_all_to_zero(
@@ -315,9 +458,9 @@ def _ramp_all_to_zero(
     """
     Best-effort ramp-down that does NOT depend on adapter kwargs.
 
-    IMPORTANT FIX:
-      If readback is unavailable, Vbg0/Vtg0/Vbias0 should come from ctx.axes (last commanded/measured),
-      otherwise the ramp can incorrectly assume 0V and do nothing.
+    IMPORTANT:
+      No "snap-to-0V" at the end (you said never jump 1V->0V in one step).
+      The ramp itself reaches 0 in steps.
     """
     if iv is None:
         return
@@ -334,7 +477,6 @@ def _ramp_all_to_zero(
                 stop_cb=None,  # ALWAYS ramp down
                 log=log,
             )
-            _iv_set_bias_jump(iv, 0.0, delay_s=0.0)
     except Exception as e:
         if callable(log):
             log(f"Bias ramp-down failed (ignored): {e}")
@@ -352,7 +494,6 @@ def _ramp_all_to_zero(
             stop_cb=None,  # ALWAYS ramp down
             log=log,
         )
-        _iv_set_gates_jump(iv, Vbg=(0.0 if has_vbg else None), Vtg=(0.0 if has_vtg else None), delay_s=0.0)
     except Exception as e:
         if callable(log):
             log(f"Gate ramp-down failed (ignored): {e}")
@@ -365,7 +506,7 @@ class DualGateSweep:
     """
     Dual-gate (+ optional bias) sweep that:
       • ramps to the initial point,
-      • jumps (no ramp) between sweep points,
+      • jumps (no ramp) between sweep points (measurement frames),
       • ramps gates back to 0 V at the end (STOP-safe),
       • reads back actual Vbg/Vtg/Vbias if supported and writes those to CSV,
       • on STOP: still ramps outputs to 0V even if readback methods are missing.
@@ -402,7 +543,7 @@ class DualGateSweep:
         # Timing / ramping knobs (ramp-in + ramp-out only)
         self.measure_delay: float = float(cfg.get("measure_delay", 0.20))
         self.ramp_step_size: float = float(cfg.get("ramp_step_size", 0.10))
-        self.ramp_step_time: float = float(cfg.get("ramp_step_time", 0.02))
+        self.ramp_step_time: float = float(cfg.get("ramp_step_time", 0.15))  # default 0.05s
 
         # Optional tiny settle after a jump (during the sweep)
         self.jump_settle_s: float = float(cfg.get("jump_settle_s", 0.0))
@@ -495,6 +636,17 @@ class DualGateSweep:
             if iv:
                 start_bg, start_tg = vbg_list[0], vtg_list[0]
 
+                # Always read current gates before any ramp
+                _sync_ctx_gates(
+                    ctx,
+                    iv,
+                    has_vbg=has_vbg,
+                    has_vtg=has_vtg,
+                    fallback_vbg=ctx.axes.get("Vbg", None),
+                    fallback_vtg=ctx.axes.get("Vtg", None),
+                    log=None,
+                )
+
                 log(f"Ramping to start: Vbg={start_bg:g} V, Vtg={start_tg:g} V")
                 _ramp_linear_2ch(
                     iv=iv,
@@ -508,13 +660,30 @@ class DualGateSweep:
                     log=log,
                 )
 
-                # Snap precisely (no ramp)
-                _iv_set_gates_jump(iv, Vbg=(start_bg if has_vbg else None), Vtg=(start_tg if has_vtg else None), delay_s=0.0)
+                # After ramp: read current gates and store, then continue
+                _sync_ctx_gates(
+                    ctx,
+                    iv,
+                    has_vbg=has_vbg,
+                    has_vtg=has_vtg,
+                    fallback_vbg=start_bg if has_vbg else None,
+                    fallback_vtg=start_tg if has_vtg else None,
+                    log=None,
+                )
 
                 # Bias ramp to start (STOP-aware)
                 if vbias_list is not None:
                     vb_start = float(vbias_list[0])
                     log(f"Ramping bias to start: Vbias={vb_start:g} V")
+
+                    _sync_ctx_bias(
+                        ctx,
+                        iv,
+                        has_vbias=has_vbias,
+                        fallback_vbias=ctx.axes.get("Vbias", None),
+                        log=None,
+                    )
+
                     _ramp_bias_1ch(
                         iv=iv,
                         V0=ctx.axes.get("Vbias", None),
@@ -524,8 +693,8 @@ class DualGateSweep:
                         stop_cb=self.stop_cb,
                         log=log,
                     )
-                    _iv_set_bias_jump(iv, vb_start, delay_s=0.0)
-                    ctx.axes["Vbias"] = vb_start
+
+                    _sync_ctx_bias(ctx, iv, has_vbias=has_vbias, fallback_vbias=vb_start, log=None)
 
             # --------- Main sweep (jump between points) ----------
             for i in range(total):
@@ -534,39 +703,55 @@ class DualGateSweep:
                 vbg_set = vbg_list[i]
                 vtg_set = vtg_list[i]
 
-                # Jump gates (no ramp)
+                # Jump gates (no ramp) — measurement part stays "manual jump by frames"
                 if iv:
                     try:
                         _iv_set_gates_jump(
                             iv,
                             Vbg=(vbg_set if has_vbg else None),
                             Vtg=(vtg_set if has_vtg else None),
-                            delay_s=0.0,
+                            delay_s=0.05,
                         )
                     except Exception as e:
                         log(f"Set gates failed: {e}")
 
+                # Immediately read current gates after any change (your rule)
+                bg_meas, tg_meas = _sync_ctx_gates(
+                    ctx,
+                    iv,
+                    has_vbg=has_vbg,
+                    has_vtg=has_vtg,
+                    fallback_vbg=(vbg_set if has_vbg else None),
+                    fallback_vtg=(vtg_set if has_vtg else None),
+                    log=None,
+                )
+
                 # Jump bias (no ramp) if requested
                 vbias_set = None
+                vbias_meas = None
                 if iv and vbias_list is not None:
                     try:
                         vbias_set = float(vbias_list[i])
-                        _iv_set_bias_jump(iv, vbias_set, delay_s=0.0)
-                        ctx.axes["Vbias"] = vbias_set
+                        _iv_set_bias_jump(iv, vbias_set, delay_s=0.05)
                     except Exception as e:
                         log(f"Set bias failed: {e}")
                         vbias_set = None
+
+                    vbias_meas = _sync_ctx_bias(
+                        ctx,
+                        iv,
+                        has_vbias=has_vbias,
+                        fallback_vbias=(vbias_set if vbias_set is not None else None),
+                        log=None,
+                    )
 
                 # Optional settle (STOP-aware)
                 if self.jump_settle_s > 0:
                     _sleep_with_stop(self.jump_settle_s, self.stop_cb, log=log, check_dt=0.02)
 
-                # Read back actual gates for logging & CSV (best effort)
-                bg_meas, tg_meas = _safe_read_current(iv)
-
                 nan = float("nan")
-                vbg_use = float(bg_meas) if (has_vbg and bg_meas is not None) else (float(vbg_set) if has_vbg else nan)
-                vtg_use = float(tg_meas) if (has_vtg and tg_meas is not None) else (float(vtg_set) if has_vtg else nan)
+                vbg_use = float(bg_meas) if (has_vbg and bg_meas is not None and np.isfinite(bg_meas)) else (float(vbg_set) if has_vbg else nan)
+                vtg_use = float(tg_meas) if (has_vtg and tg_meas is not None and np.isfinite(tg_meas)) else (float(vtg_set) if has_vtg else nan)
 
                 # LOG ONLY: currents + bias
                 Ibg = Itg = Ibias = None
@@ -575,8 +760,6 @@ class DualGateSweep:
                         Ibg, Itg, Ibias = iv.read_currents()
                     except Exception:
                         pass
-
-                vbias_meas = _safe_read_bias_voltage(iv) if (vbias_set is not None) else None
 
                 msg = (
                     f"[{i+1}/{total}] "
@@ -590,13 +773,13 @@ class DualGateSweep:
                     )
                 log(msg)
 
-                # Keep context axes updated (important for STOP ramp when readback is unavailable)
+                # Keep context axes updated
                 if has_vbg:
                     ctx.axes["Vbg"] = float(vbg_use) if np.isfinite(vbg_use) else float(vbg_set)
                 if has_vtg:
                     ctx.axes["Vtg"] = float(vtg_use) if np.isfinite(vtg_use) else float(vtg_set)
                 if vbias_set is not None:
-                    ctx.axes["Vbias"] = float(vbias_set)
+                    ctx.axes["Vbias"] = float(vbias_meas) if (vbias_meas is not None and np.isfinite(vbias_meas)) else float(vbias_set)
 
                 # Wait before spectral acquisition (STOP-aware)
                 _sleep_with_stop(self.measure_delay, self.stop_cb, log=log, check_dt=0.01)
@@ -625,7 +808,7 @@ class DualGateSweep:
                         intens = intens + [0.0] * (len(wl_headers) - len(intens))
 
                 # Measured bias voltage (if bias is active)
-                vbias_meas_v = _safe_read_bias_voltage(iv) if (vbias_set is not None) else None
+                vbias_meas_v = float(vbias_meas) if (vbias_set is not None and vbias_meas is not None and np.isfinite(vbias_meas)) else None
 
                 # Currents (A). Prefer read_currents()
                 Ibg_a = Itg_a = Ibias_a = None
@@ -635,19 +818,15 @@ class DualGateSweep:
                     except Exception:
                         Ibg_a = Itg_a = Ibias_a = None
 
-                # Save scalars (setpoints + measured values)
                 scalars = {
-                    # commanded setpoints
                     "Vbg_set":   float(vbg_set) if has_vbg else None,
                     "Vtg_set":   float(vtg_set) if has_vtg else None,
                     "Vbias_set": float(vbias_set) if vbias_set is not None else None,
 
-                    # measured (readback) values
                     "Vbg":   float(vbg_use) if has_vbg else None,
                     "Vtg":   float(vtg_use) if has_vtg else None,
                     "Vbias": float(vbias_meas_v) if vbias_meas_v is not None else (float(vbias_set) if vbias_set is not None else None),
 
-                    # measured currents (A)
                     "Ibg":   None if Ibg_a is None else float(Ibg_a),
                     "Itg":   None if Itg_a is None else float(Itg_a),
                     "Ibias": None if Ibias_a is None else float(Ibias_a),
@@ -658,7 +837,6 @@ class DualGateSweep:
                 else:
                     csvw.add_row(scalars, intens)
 
-                # per-frame progress callback
                 cb = getattr(self, "frame_progress_cb", None)
                 if callable(cb):
                     try:
@@ -681,7 +859,6 @@ class DualGateSweep:
             if iv:
                 log("Ramping outputs down to 0V...")
 
-                # Use last known values from ctx.axes as ramp start (critical when readback isn't implemented)
                 def _finite_or_none(x):
                     try:
                         x = float(x)
