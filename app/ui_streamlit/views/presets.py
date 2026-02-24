@@ -36,14 +36,23 @@ def build_run_status_tree_html(
     current_label: str,
     current_rep_i: int,
     max_seq_show: int = 10,
-    param_order: Optional[List[str]] = None
+    param_order: Optional[List[str]] = None,
+    # filename preview controls
+    show_filenames: bool = False,
+    filename_pattern: Optional[str] = None,
+    filename_preview_mode: str = "full",   # "minimal" | "medium" | "full"  (full shows ALL components)
+    file_line_scope: str = "top",          # kept for backward compatibility (ignored; stem is top-only)
+    filename_max_chars: int = 0,           # ignored in "full" mode; kept for compatibility
 ) -> str:
     """
     Live status tree (HTML <pre>) with 3 colors:
       - done (finished)
       - now (current running)
       - todo (not started)
-    Shows a compact window of sequences around the current one.
+
+    Filename preview (TOP ONLY):
+      - One dim "stem:" line showing the FULL filename pattern with placeholders
+      - Leaf lines stay compact: cond + (i/N)
     """
 
     # ---- normalize batch rows (Run=True) ----
@@ -52,44 +61,56 @@ def build_run_status_tree_html(
         dfb["Run"] = dfb["Run"].map(_to_bool)
         dfb = dfb[dfb["Run"] == True].reset_index(drop=True)
 
-    # ---- per-sequence acquisition counts (depends on When + outer ctx) ----
-    acq_counts: List[int] = []
-    seq_plans: List[List[Tuple[str, int]]] = []  # per seq: [(label, reps), ...]
+    # ---- helpers ----
+    def esc(s: str) -> str:
+        return html.escape(str(s), quote=False)
 
-    for ctx in final_sequence:
-        outer = _outer_ctx_alias(ctx)
-        plan = []
-        n = 0
-        for _, r in dfb.iterrows():
-            if _when_ok(r.get("When", ""), outer):
-                lab = sanitize_filename(r.get("condition_label", ""))
-                reps = max(int(r.get("repeat", 1)), 1)
-                plan.append((lab, reps))
-                n += reps
-        seq_plans.append(plan)
-        acq_counts.append(n)
+    def _clean_for_preview(s: str) -> str:
+        # Turn your $~$ parsing-friendly separators into a human preview
+        s = str(s)
+        s = s.replace("$~$", " | ").replace("~", " | ").replace("$", "")
+        s = re.sub(r"\s*\|\s*", " | ", s).strip(" |")
+        return s
 
-    # prefix sums for mapping done -> seq bounds
-    prefix = [0]
-    for n in acq_counts:
-        prefix.append(prefix[-1] + n)
+    def _stem_template_from_pattern() -> str:
+        """
+        Build a FULL stem template from filename_pattern using placeholders.
+        Example output:
+          YZD341 | p1 | 1.8KPL⟨laser⟩nm⟨pwr⟩uw⟨exp⟩sx⟨epf⟩ | ⟨center⟩nmc | ⟨rot⟩ | [cond]
+        """
+        if not show_filenames:
+            return ""
 
-    def seq_bounds(seq_i: int):
-        s0 = prefix[seq_i]
-        s1 = prefix[seq_i + 1]
-        return s0, s1
+        pat = (filename_pattern or st.session_state.get("filename_pattern", "") or "").strip()
+        if not pat:
+            return ""
 
-    # map current (seq_i,label,rep_i) -> absolute acquisition index
-    current_acq_index = prefix[current_seq_i] if (0 <= current_seq_i < len(prefix) - 1) else 0
-    if 0 <= current_seq_i < len(seq_plans):
-        off = 0
-        for lab, reps in seq_plans[current_seq_i]:
-            if lab == current_label:
-                current_acq_index += min(max(current_rep_i, 0), max(reps - 1, 0)) + off
-                break
-            off += reps
+        # placeholders (honest: these may change per sequence / runtime measurement)
+        ctx = SafeDict()
+        ctx.update(
+            {
+                "sample": st.session_state.get("sample_name", "Sample"),
+                "tag": st.session_state.get("tag", ""),
+                "laser_nm": "⟨laser⟩",
+                "power_uw": "⟨pwr⟩",
+                "exp_s": "⟨exp⟩",
+                "epf": "⟨epf⟩",
+                "center_nm": "⟨center⟩",
+                "rot_block": "⟨rot⟩",
+                "rot1_deg": "⟨r1⟩",
+                "rot2_deg": "⟨r2⟩",
+                "cond_block": "[cond]",
+            }
+        )
 
-    # ---- small ctx formatter ----
+        try:
+            stem = sanitize_filename(str(pat).format_map(ctx))
+        except Exception:
+            return ""
+
+        return _clean_for_preview(stem)
+
+    # ---- ctx formatter (for Seq header) ----
     def fmt_ctx(ctx: dict) -> str:
         default_keys = ["Center Wavelength (nm)", "Exposure Time (ms)", "Stage Position"]
         keys = param_order or default_keys
@@ -106,22 +127,18 @@ def build_run_status_tree_html(
                 parts.append(f"{k0}={v}")
         return ", ".join(parts) if parts else "(no loop vars)"
 
-
-    def esc(s: str) -> str:
-        return html.escape(str(s), quote=False)
-
-    # ---- styling (3 colors) ----
-    # You can tweak these colors anytime.
-    STYLE_DONE = "color:#6E7681;"   # readable in dark + light
-    STYLE_TODO = "color:#8B949E;"  # still visible but lighter
+    # ---- styling ----
+    STYLE_DONE = "color:#6E7681;"
+    STYLE_TODO = "color:#8B949E;"
     STYLE_NOW  = (
         "color: var(--text-color, #111827);"
-        "background: rgba(245,158,11,0.22);"        # amber highlight works in dark mode
+        "background: rgba(245,158,11,0.22);"
         "border-left: 4px solid #f59e0b;"
         "padding: 1px 6px;"
         "border-radius: 4px;"
         "font-weight: 800;"
     )
+    STYLE_HINT_TOP = "color:#9CA3AF; font-style:italic; font-size:0.95em;"
 
     def paint(text: str, state: str) -> str:
         if state == "done":
@@ -130,19 +147,83 @@ def build_run_status_tree_html(
             return f"<span style='{STYLE_NOW}'>▶ {esc(text)}</span>"
         return f"<span style='{STYLE_TODO}'>• {esc(text)}</span>"
 
+    def paint_top_hint(text: str) -> str:
+        return f"<span style='{STYLE_HINT_TOP}'>• {esc(text)}</span>"
+
+    # ---- per-sequence acquisition counts ----
+    acq_counts: List[int] = []
+    seq_plans: List[List[Tuple[str, int, int]]] = []  # per seq: [(label, reps, row_i), ...]
+
+    for ctx in final_sequence:
+        outer = _outer_ctx_alias(ctx)
+        plan = []
+        n = 0
+        for row_i, r in dfb.iterrows():
+            if _when_ok(r.get("When", ""), outer):
+                lab = sanitize_filename(r.get("condition_label", ""))
+                reps = max(int(r.get("repeat", 1)), 1)
+                plan.append((lab, reps, int(row_i)))
+                n += reps
+        seq_plans.append(plan)
+        acq_counts.append(n)
+
+    prefix = [0]
+    for n in acq_counts:
+        prefix.append(prefix[-1] + n)
+
+    def seq_bounds(seq_i: int):
+        return prefix[seq_i], prefix[seq_i + 1]
+
+    # map current (seq_i,label,rep_i) -> absolute acquisition index
+    current_acq_index = prefix[current_seq_i] if (0 <= current_seq_i < len(prefix) - 1) else 0
+    if 0 <= current_seq_i < len(seq_plans):
+        off = 0
+        for lab, reps, _row_i in seq_plans[current_seq_i]:
+            if lab == current_label:
+                current_acq_index += min(max(current_rep_i, 0), max(reps - 1, 0)) + off
+                break
+            off += reps
+
     # ---- choose which sequences to show (window around current) ----
     n_seq = len(final_sequence)
     if n_seq <= max_seq_show:
         start = 0
     else:
-        start = max(0, min(current_seq_i - max_seq_show // 2, n_seq - max_seq_show))
+        # if idle (current_seq_i < 0), show from 0
+        center_i = current_seq_i if current_seq_i >= 0 else 0
+        start = max(0, min(center_i - max_seq_show // 2, n_seq - max_seq_show))
     end = min(n_seq, start + max_seq_show)
 
-
-    # ---- build lines (real tree) ----
+    # ---- build lines ----
     lines = []
     header = f"Run (progress {done}/{total_acq})"
     lines.append(f"<span style='font-weight:700;color:#8B949E'>{esc(header)}</span>")
+
+    # TOP stem (FULL components)
+    stem_top = _stem_template_from_pattern()
+    if stem_top:
+        lines.append(paint_top_hint("stem: " + stem_top))
+
+    # If no sequences, show a friendly line
+    if n_seq == 0:
+        lines.append(paint("No sequences (loop disabled?)", "todo"))
+        body = "".join(f"<div>{ln}</div>" for ln in lines)
+        return (
+            "<div style='"
+            "margin:0; padding:8px 10px;"
+            "background: var(--secondary-background-color, rgba(148,163,184,0.12));"
+            "border: 1px solid rgba(148,163,184,0.35);"
+            "border-radius:8px;"
+            "color: var(--text-color, #8B949E);"
+            "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"
+            "font-size:18px; line-height:1.35;"
+            "white-space:pre;"
+            "overflow-x:auto;"
+            "max-width:100%;"
+            "'>"
+            + body
+            + "</div>"
+        )
 
     for seq_i in range(start, end):
         ctx = final_sequence[seq_i]
@@ -163,32 +244,39 @@ def build_run_status_tree_html(
 
         lines.append(seq_prefix + paint(seq_text, seq_state))
 
-        # children: batch+rep flattened into acquisition lines
-        # determine per-acquisition state based on done/current
-        # acquisition absolute index for this seq starts at s0
-        acq_abs = s0
         plan = seq_plans[seq_i] if (0 <= seq_i < len(seq_plans)) else []
-        for b_i, (lab, reps) in enumerate(plan):
+
+        # children: batch+rep flattened into acquisition lines
+        acq_abs = s0
+        for b_i, (lab, reps, row_i) in enumerate(plan):
+            # build vbias block (matches run naming)
+            try:
+                row = dfb.iloc[int(row_i)]
+            except Exception:
+                row = {}
+
+            vbias_block = _vbias_block_from_row(row) if (hasattr(row, "get") or isinstance(row, dict)) else ""
+            cond_block_for_name = lab + (f"_{vbias_block}" if vbias_block else "")
+
             for r_i in range(reps):
-                acq_state = "todo"
                 if acq_abs < done:
                     acq_state = "done"
                 elif acq_abs == current_acq_index and done < total_acq:
                     acq_state = "now"
+                else:
+                    acq_state = "todo"
 
-                leaf = f"{lab}  (rep {r_i+1}/{reps})"
-                # last leaf glyph control
+                leaf = f"{cond_block_for_name}  ({r_i+1}/{reps})"
+
                 is_last_leaf = (b_i == len(plan) - 1) and (r_i == reps - 1)
                 leaf_prefix = "└─ " if is_last_leaf else "├─ "
                 lines.append(child_prefix + leaf_prefix + paint(leaf, acq_state))
-
 
                 acq_abs += 1
 
     if end < n_seq:
         lines.append(f"<span style='{STYLE_TODO}'>… (+{n_seq-end} more sequences)</span>")
 
-    # render each line as a block so Streamlit can't collapse it into one row
     body = "".join(f"<div>{ln}</div>" for ln in lines)
 
     return (
@@ -208,7 +296,6 @@ def build_run_status_tree_html(
         + "</div>"
     )
 
-
 def get_enabled_param_order(loop_src: pd.DataFrame) -> List[str]:
     df = normalize_df(loop_src, LOOP_SCHEMA).copy()
     df["Enable"] = df["Enable"].map(_to_bool)
@@ -223,7 +310,6 @@ def get_enabled_param_order(loop_src: pd.DataFrame) -> List[str]:
         if p and p not in order:
             order.append(p)
     return order
-
 
 
 def ui_log(msg: str):
@@ -378,6 +464,7 @@ def build_run_preview(loop_src: pd.DataFrame, batch_src: pd.DataFrame, max_examp
 
     }
 
+
 def build_run_preview_text_tree(
     loop_src: pd.DataFrame,
     batch_src: pd.DataFrame,
@@ -503,7 +590,6 @@ def build_run_preview_text_tree(
         add_subtree("", 0)
 
     return "\n".join(lines)
-
 
 
 def render_run_preview(ph):
@@ -645,6 +731,7 @@ def parse_values(s: str, param: str | None = None):
 
     return nums
 
+
 def _outer_ctx_alias(ctx_vars: dict) -> dict:
     """Map outer-loop ctx_vars to short names for guards."""
     def _f(x):
@@ -759,6 +846,7 @@ def _when_ok(when: str, outer: dict) -> bool:
 
     return True
 
+
 def _parse_optional_float(x):
     """Return float if x looks like a number; otherwise None. Treat '', None, 'none', 'nan' as None."""
     if x is None:
@@ -774,6 +862,7 @@ def _parse_optional_float(x):
     except Exception:
         # non-empty but not parseable -> treat as invalid (caller can decide)
         return "INVALID"
+
 
 def _check_vbias_mapping(batch_df: pd.DataFrame, devices) -> Optional[str]:
     """
@@ -827,6 +916,7 @@ def _check_vbias_mapping(batch_df: pd.DataFrame, devices) -> Optional[str]:
 
     return None
 
+
 def _check_gate_mapping(devices) -> Optional[str]:
     """
     Dual gate sweep ALWAYS includes Vbg/Vtg keys in params.
@@ -857,6 +947,7 @@ def _check_gate_mapping(devices) -> Optional[str]:
         )
 
     return None
+
 
 def _vbias_block_from_row(row) -> str:
     vb_s = _parse_optional_float(row.get("Vbias_start", ""))
@@ -2128,7 +2219,10 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     current_label=snap["current_label"],
                     current_rep_i=snap["current_rep_i"],
                     max_seq_show=10,
-                    param_order=param_order
+                    param_order=param_order,
+                    show_filenames=True,
+                    filename_pattern=st.session_state.get("filename_pattern"),
+                    filename_preview_mode="full",
                 )
 
                 tree_live_ph.markdown(html_tree, unsafe_allow_html=True)
@@ -2306,15 +2400,18 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
 
                 tree_live_ph.markdown(
                     build_run_status_tree_html(
-                        final_sequence,
-                        df_batch,
-                        done=0,
-                        total_acq=total_acq,
-                        current_seq_i=0 if total_conditions > 0 else -1,
-                        current_label=first_label,
-                        current_rep_i=0,
-                        max_seq_show=8,
-                        param_order=param_order
+                        snap["final_sequence"],
+                        snap["df_batch"],
+                        done=snap["done"],
+                        total_acq=snap["total_acq"],
+                        current_seq_i=snap["current_seq_i"],
+                        current_label=snap["current_label"],
+                        current_rep_i=snap["current_rep_i"],
+                        max_seq_show=10,
+                        param_order=param_order,
+                        show_filenames=True,
+                        filename_pattern=st.session_state.get("filename_pattern"),
+                        filename_preview_mode="full",
                     ),
                     unsafe_allow_html=True,
                 )
@@ -2498,8 +2595,11 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                                     current_seq_i=snap["current_seq_i"],
                                     current_label=snap["current_label"],
                                     current_rep_i=snap["current_rep_i"],
-                                    max_seq_show=8,
-                                    param_order=param_order
+                                    max_seq_show=10,
+                                    param_order=param_order,
+                                    show_filenames=True,
+                                    filename_pattern=st.session_state.get("filename_pattern"),
+                                    filename_preview_mode="full",
                                 ),
                                 unsafe_allow_html=True,
                             )
@@ -2665,8 +2765,11 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                                     current_seq_i=snap["current_seq_i"],
                                     current_label=snap["current_label"],
                                     current_rep_i=snap["current_rep_i"],
-                                    max_seq_show=8,
-                                    param_order=param_order
+                                    max_seq_show=10,
+                                    param_order=param_order,
+                                    show_filenames=True,
+                                    filename_pattern=st.session_state.get("filename_pattern"),
+                                    filename_preview_mode="full",
                                 ),
                                 unsafe_allow_html=True,
                             )
@@ -2700,8 +2803,11 @@ def render(devices, wavelength_headers, extra_scalar_fields_order):
                     current_seq_i=snap["current_seq_i"],
                     current_label=snap["current_label"],
                     current_rep_i=snap["current_rep_i"],
-                    max_seq_show=8,
-                    param_order=param_order
+                    max_seq_show=10,
+                    param_order=param_order,
+                    show_filenames=True,
+                    filename_pattern=st.session_state.get("filename_pattern"),
+                    filename_preview_mode="full",
                 ),
                 unsafe_allow_html=True,
             )
