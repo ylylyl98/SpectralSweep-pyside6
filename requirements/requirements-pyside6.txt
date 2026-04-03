@@ -1,0 +1,16 @@
+# SpectralSweep PySide6 requirements
+# Tested with Python 3.13
+
+PySide6>=6.7
+pyqtgraph>=0.13
+numpy
+pandas
+scipy
+matplotlib
+pyvisa
+pyvisa-py
+pyserial
+pylablib
+pythonnet
+appdirs
+nidaqmx

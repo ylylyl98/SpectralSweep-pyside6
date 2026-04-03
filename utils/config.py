@@ -1,0 +1,141 @@
+# utils/config.py
+# ──────────────────────────────────────────────────────────────────────────────
+# Central configuration for SpectralSweep-pyside6.
+#
+# All defaults are gathered here from their scattered Streamlit equivalents:
+#   - BASE_OUT       was hardcoded in presets.py, megasweep.py, bfp.py
+#   - LF6 defaults   were inline in main_ui.py sidebar widgets
+#   - SMU defaults   were inline st.session_state.setdefault() calls
+#   - Ramp defaults  were inline number_input(value=…) calls
+#   - Filename pat.  was a DEFAULT_PATTERN local in presets.py
+#
+# Usage:
+#   from utils.config import cfg          # always the live singleton
+#   cfg.base_out                          # Path
+#   cfg.lf6.exposure_ms                   # float
+#   cfg.save()                            # persist to config.json
+#   cfg.load()                            # reload from config.json
+#
+# Rules:
+#   - No PySide6 / Qt imports here.  This module must be importable in a
+#     headless context (unit tests, mock runs, CLI helpers).
+#   - importlib.reload(utils.config) is safe: the module-level `cfg` singleton
+#     is re-created on each reload, which is fine because controllers hold
+#     their own reference and are not reloaded alongside UI modules.
+# ──────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+from typing import Optional
+
+
+# ── Location of the persisted config file ─────────────────────────────────────
+_CONFIG_FILE = Path(__file__).resolve().parents[1] / "config.json"
+
+
+# ── Sub-configs (plain dataclasses — no Qt dependency) ───────────────────────
+
+@dataclass
+class LF6Config:
+    """LightField spectrometer defaults."""
+    exposure_ms: float = 2000.0       # ms  — matches main_ui.py sidebar default
+    center_nm: float = 860.0          # nm  — matches main_ui.py sidebar default
+    accumulations: int = 1            # frames to combine (EPF)
+    auto_load_on_connect: bool = True # load saved experiment automatically
+
+
+@dataclass
+class SMUConfig:
+    """Keithley SMU defaults (applied at connect time)."""
+    curr_compliance_A: float = 1e-6   # A   — smu_compliance_by_addr default
+    volt_compliance_V: float = 20.0   # V   — smu_compliance_by_addr default
+
+
+@dataclass
+class RampConfig:
+    """Voltage ramp / settle defaults used by both sweep modes."""
+    step_V: float = 0.1               # V   — go_step default
+    delay_s: float = 0.02             # s   — go_delay default
+    settle_s: float = 0.05            # s   — settle_delay default
+    vbias_step_V: float = 0.1         # V   — vbias_ramp_step default
+
+
+@dataclass
+class FilenameConfig:
+    """Filename pattern and output path."""
+    base_out: str = r"D:\instrument_control_v3_1"
+    pattern: str = (
+        "${sample}$~${tag}$~$1.8KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~"
+        "${center_nm}nmc$~${rot_block}$~${cond_block}$"
+    )
+    # Characters forbidden in Windows filenames — kept here so UI can validate
+    invalid_chars: str = r'<>:"/\|?*'
+
+
+@dataclass
+class AppConfig:
+    """Top-level config object.  Holds all sub-configs plus misc app settings."""
+    lf6: LF6Config = field(default_factory=LF6Config)
+    smu: SMUConfig = field(default_factory=SMUConfig)
+    ramp: RampConfig = field(default_factory=RampConfig)
+    filename: FilenameConfig = field(default_factory=FilenameConfig)
+    font_size_pt: int = 9          # UI-wide font size in points
+
+    # ── convenience properties ────────────────────────────────────────────────
+
+    @property
+    def base_out(self) -> Path:
+        """Output root as a Path object."""
+        return Path(self.filename.base_out)
+
+    # ── persistence ──────────────────────────────────────────────────────────
+
+    def save(self, path: Optional[Path] = None) -> None:
+        """Serialise to JSON.  Creates parent dirs if needed."""
+        target = Path(path) if path else _CONFIG_FILE
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8") as fh:
+            json.dump(asdict(self), fh, indent=2)
+
+    def load(self, path: Optional[Path] = None) -> None:
+        """
+        Deserialise from JSON in-place.
+        Missing keys are silently ignored so older config files remain valid
+        after fields are added to the dataclasses.
+        """
+        target = Path(path) if path else _CONFIG_FILE
+        if not target.exists():
+            return
+
+        try:
+            with target.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            return  # corrupt / unreadable — keep defaults
+
+        _update_dataclass(self.lf6,      data.get("lf6", {}))
+        _update_dataclass(self.smu,      data.get("smu", {}))
+        _update_dataclass(self.ramp,     data.get("ramp", {}))
+        _update_dataclass(self.filename, data.get("filename", {}))
+        if "font_size_pt" in data:
+            self.font_size_pt = int(data["font_size_pt"])
+
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+def _update_dataclass(obj, mapping: dict) -> None:
+    """Overwrite dataclass fields from a dict, ignoring unknown keys."""
+    for key, value in mapping.items():
+        if hasattr(obj, key):
+            setattr(obj, key, value)
+
+
+# ── Module-level singleton ────────────────────────────────────────────────────
+# Controllers and UI modules import this object directly.
+# On first import the saved config.json is loaded if it exists.
+
+cfg = AppConfig()
+cfg.load()
