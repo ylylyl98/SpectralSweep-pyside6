@@ -137,20 +137,32 @@ class _Expander(QWidget):
         self._btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._btn.setStyleSheet(
             "QToolButton {"
-            "  font-weight: bold;"
-            "  border: 1px solid palette(mid);"
-            "  border-radius: 3px;"
-            "  background: palette(button);"
-            "  padding: 5px 4px;"
+            "  font-weight: 600;"
+            "  font-size: 11px;"
+            "  border: 1px solid #c8c8c8;"
+            "  border-radius: 4px;"
+            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "    stop:0 #f0f0f0, stop:1 #e4e4e4);"
+            "  padding: 5px 6px;"
             "  text-align: left;"
+            "  color: #2a2a2a;"
             "}"
-            "QToolButton:hover { background: palette(midlight); }"
+            "QToolButton:hover {"
+            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "    stop:0 #f8f8f8, stop:1 #eeeeee);"
+            "  border-color: #a8a8c0;"
+            "}"
+            "QToolButton:checked {"
+            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "    stop:0 #e8e8f0, stop:1 #d8d8ec);"
+            "  border-color: #a8a8c0;"
+            "}"
         )
 
         self._content = content
         self._content.setVisible(not collapsed)
-        # Slight left indent so content feels nested
-        self._content.setContentsMargins(6, 0, 0, 0)
+        # Left indent so content feels nested under the header
+        self._content.setContentsMargins(8, 2, 0, 4)
 
         lay.addWidget(self._btn)
         lay.addWidget(self._content)
@@ -1582,8 +1594,9 @@ class InstrumentPanel(QScrollArea):
 
         container = QWidget()
         lay = QVBoxLayout(container)
+        lay.setContentsMargins(4, 4, 4, 6)
         lay.setAlignment(Qt.AlignmentFlag.AlignTop)
-        lay.setSpacing(4)
+        lay.setSpacing(3)
 
         if lf6_ctrl is not None:
             lay.addWidget(_Expander("LF6 Spectrometer", _LF6Section(lf6_ctrl)))

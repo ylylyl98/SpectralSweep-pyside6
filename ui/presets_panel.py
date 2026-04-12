@@ -32,19 +32,20 @@ import time
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import Qt, QThread, QObject, Signal, Slot
+from PySide6.QtCore import Qt, QThread, QObject, Signal, Slot, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QGroupBox, QLabel, QPushButton, QLineEdit,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QProgressBar, QTextEdit, QSizePolicy, QFormLayout,
-    QCheckBox, QAbstractItemView, QComboBox,
-    QCompleter, QStyledItemDelegate,
+    QCheckBox, QAbstractItemView, QComboBox, QFrame, QToolButton,
+    QCompleter, QStyledItemDelegate, QMessageBox, QDoubleSpinBox, QSpinBox,
+    QAbstractSpinBox,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,17 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
+from utils.filename_builder import (
+    FilenameContext,
+    PART_SPECS,
+    build_base_filename,
+    build_condition_display_label,
+    build_filename_tokens,
+    build_part_values,
+    clean_condition_label,
+    make_unique_stem,
+    resolve_power_uw,
+)
 from ui.preview_widget import RunPlanTree
 
 # ── Schema constants ───────────────────────────────────────────────────────────
@@ -77,21 +89,30 @@ BATCH_SCHEMA = [
     "Vbias_start", "Vbias_stop",
 ]
 
-# Batch column widths (px).  -1 = stretch to fill.
+# Batch column widths (px). Keep the label readable, but do not let it
+# dominate the numeric sweep columns.
 _BATCH_COL_WIDTHS = {
-    "Run":             40,
-    "When":           110,
-    "MeasurePower":    90,
-    "condition_label": 100,
-    "repeat":          50,
-    "frames":          50,
-    "Vbg_start":       70,
-    "Vbg_stop":        70,
-    "Vtg_start":       70,
-    "Vtg_stop":        70,
-    "Vbias_start":     75,
-    "Vbias_stop":      75,
+    "Run":             38,
+    "When":            108,
+    "MeasurePower":    82,
+    "condition_label": 144,
+    "repeat":          52,
+    "frames":          52,
+    "Vbg_start":       68,
+    "Vbg_stop":        68,
+    "Vtg_start":       68,
+    "Vtg_stop":        68,
+    "Vbias_start":     72,
+    "Vbias_stop":      72,
 }
+# Source-drain bias columns stay visible; blank values still mean skip.
+_VBIAS_COLUMNS = ("Vbias_start", "Vbias_stop")
+
+_BATCH_BOOL_COLUMNS = {"Run", "MeasurePower"}
+_BATCH_INT_COLUMNS = {"repeat", "frames"}
+_BATCH_FLOAT_COLUMNS = {"Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop", "Vbias_start", "Vbias_stop"}
+
+_BATCH_STRETCH_COLUMNS = {"When", "condition_label"}
 
 # Loop mode labels and their tooltips.
 LOOP_MODES = {
@@ -127,7 +148,7 @@ _DEFAULT_LOOP = pd.DataFrame([
 
 _DEFAULT_BATCH = pd.DataFrame([{
     "Run": True, "When": "", "MeasurePower": False,
-    "condition_label": "ZB_VB0", "repeat": 1, "frames": 1,
+    "condition_label": "baseline", "repeat": 1, "frames": 1,
     "Vbg_start": 0.0, "Vbg_stop": 0.0,
     "Vtg_start": 0.0, "Vtg_stop": 0.0,
     "Vbias_start": "", "Vbias_stop": "",
@@ -147,10 +168,6 @@ def _sanitize(s: str) -> str:
     for ch in _INVALID_CHARS:
         s = s.replace(ch, "")
     return s.strip()
-
-
-class _SafeDict(dict):
-    def __missing__(self, k): return f"{{{k}}}"
 
 
 def _parse_values(s: str, param: str = "") -> Optional[List[float]]:
@@ -284,17 +301,250 @@ def _build_plan(loop_df: pd.DataFrame, batch_df: pd.DataFrame,
     return final_sequence, batch, max(total_acq, 0)
 
 
-def _exp_s_str(ms: float) -> str:
-    s = float(ms) / 1000.0
-    if s >= 1.0:
-        return f"{s:g}s"
-    return f"{int(ms):d}ms"
+def _sweep_point_count(row: Dict[str, Any]) -> int:
+    return max(int(row.get("frames", 1) or 1), 1)
 
 
-def _fmt_deg(v) -> str:
-    if v is None: return ""
-    try: return f"{float(v):.1f}"
-    except Exception: return ""
+def _count_total_points(final_sequence: Sequence[Dict[str, Any]], batch_df: pd.DataFrame) -> int:
+    total_points = 0
+    for ctx in final_sequence:
+        outer = _outer_ctx(ctx)
+        for _, row in batch_df.iterrows():
+            if _when_ok(row.get("When", ""), outer):
+                reps = max(int(row.get("repeat", 1) or 1), 1)
+                total_points += reps * _sweep_point_count(row.to_dict())
+    return max(int(total_points), 0)
+
+
+def _resolve_sweep_vectors(row: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        vbg_s = float(row["Vbg_start"])
+        vbg_e = float(row["Vbg_stop"])
+        vtg_s = float(row["Vtg_start"])
+        vtg_e = float(row["Vtg_stop"])
+    except Exception:
+        vbg_s = vbg_e = vtg_s = vtg_e = 0.0
+
+    point_count = _sweep_point_count(row)
+    vbg_points = np.linspace(vbg_s, vbg_e, point_count, dtype=float).tolist()
+    vtg_points = np.linspace(vtg_s, vtg_e, point_count, dtype=float).tolist()
+
+    vbias_s = _valid_bias_value(row.get("Vbias_start"))
+    vbias_e = _valid_bias_value(row.get("Vbias_stop"))
+    vbias_points: Optional[List[float]] = None
+    if vbias_s is not None or vbias_e is not None:
+        vb0 = vbias_s if vbias_s is not None else vbias_e
+        vb1 = vbias_e if vbias_e is not None else vbias_s
+        vbias_s = float(vb0) if vb0 is not None else None
+        vbias_e = float(vb1) if vb1 is not None else None
+        if vbias_s is not None and vbias_e is not None:
+            vbias_points = np.linspace(vbias_s, vbias_e, point_count, dtype=float).tolist()
+
+    if not vbg_points or not vtg_points or len(vbg_points) != len(vtg_points):
+        raise ValueError("Invalid gate sweep vectors.")
+    if vbias_points is not None and len(vbias_points) != len(vbg_points):
+        raise ValueError("Invalid bias sweep vector.")
+
+    def _step_size(start: Optional[float], stop: Optional[float], points: int) -> Optional[float]:
+        if start is None or stop is None:
+            return None
+        return abs(float(stop) - float(start)) / max(int(points) - 1, 1)
+
+    return {
+        "frames": point_count,
+        "point_count": point_count,
+        "vbg_start": vbg_s,
+        "vbg_stop": vbg_e,
+        "vtg_start": vtg_s,
+        "vtg_stop": vtg_e,
+        "vbias_start": vbias_s,
+        "vbias_stop": vbias_e,
+        "vbg_step": _step_size(vbg_s, vbg_e, point_count),
+        "vtg_step": _step_size(vtg_s, vtg_e, point_count),
+        "vbias_step": _step_size(vbias_s, vbias_e, point_count) if vbias_s is not None and vbias_e is not None else None,
+        "vbg_points": vbg_points,
+        "vtg_points": vtg_points,
+        "vbias_points": vbias_points,
+    }
+
+
+def _validate_safe_jumps(final_sequence: Sequence[Dict[str, Any]], batch_df: pd.DataFrame, safe_jump_v: float) -> List[str]:
+    issues: List[str] = []
+    limit = float(safe_jump_v)
+    for seq_i, ctx in enumerate(final_sequence, start=1):
+        outer = _outer_ctx(ctx)
+        for row_i, row in batch_df.iterrows():
+            row_dict = row.to_dict()
+            if not _when_ok(row_dict.get("When", ""), outer):
+                continue
+            label = build_condition_display_label(
+                row_dict.get("condition_label", ""),
+                row_dict.get("Vbias_start"),
+                row_dict.get("Vbias_stop"),
+            ) or clean_condition_label(row_dict.get("condition_label", "")) or f"row {row_i + 1}"
+            sweep = _resolve_sweep_vectors(row_dict)
+            frames = int(sweep["frames"])
+            for channel, start_key, stop_key, step_key in (
+                ("Vtg", "vtg_start", "vtg_stop", "vtg_step"),
+                ("Vbg", "vbg_start", "vbg_stop", "vbg_step"),
+                ("Vbias", "vbias_start", "vbias_stop", "vbias_step"),
+            ):
+                start = sweep[start_key]
+                stop = sweep[stop_key]
+                step = sweep[step_key]
+                if start is None or stop is None or step is None:
+                    continue
+                if step > limit + 1e-12:
+                    issues.append(
+                        f"Unsafe {channel} sweep in Seq {seq_i}, {label}: "
+                        f"start={float(start):g} V, stop={float(stop):g} V, frames={frames} "
+                        f"-> step size={float(step):g} V, which exceeds the safe jump limit of {limit:g} V. "
+                        f"Increase frames or reduce the sweep range."
+                    )
+    return issues
+
+
+def _safe_float(value) -> Optional[float]:
+    try:
+        x = float(value)
+    except Exception:
+        return None
+    return x if np.isfinite(x) else None
+
+
+def _valid_bias_value(value) -> Optional[float]:
+    x = _safe_float(value)
+    return x if x is not None else None
+
+
+def _solve_condition_line(
+    op: str,
+    ratio: float,
+    constant: float,
+    vtg_min: float,
+    vtg_max: float,
+    vbg_min: float,
+    vbg_max: float,
+) -> Optional[Tuple[float, float, float, float]]:
+    eff = float(ratio) if op == "−" else -float(ratio)
+    C = float(constant)
+    if vtg_min >= vtg_max or vbg_min >= vbg_max:
+        return None
+    if abs(eff) < 1e-12:
+        if not (vtg_min <= C <= vtg_max):
+            return None
+        return float(vbg_min), float(vbg_max), C, C
+
+    if eff > 0:
+        t_lo_vtg = (vtg_min - C) / eff
+        t_hi_vtg = (vtg_max - C) / eff
+    else:
+        t_lo_vtg = (vtg_max - C) / eff
+        t_hi_vtg = (vtg_min - C) / eff
+
+    t_lo = max(float(vbg_min), float(t_lo_vtg))
+    t_hi = min(float(vbg_max), float(t_hi_vtg))
+    if t_lo >= t_hi - 1e-12:
+        return None
+    return t_lo, t_hi, C + eff * t_lo, C + eff * t_hi
+
+
+def _compute_frames_from_step(vbg_start: float, vbg_stop: float, vbg_step: float) -> int:
+    vbg_range = abs(float(vbg_stop) - float(vbg_start))
+    return max(2, int(round(vbg_range / max(float(vbg_step), 1e-12))) + 1)
+
+
+def _format_condition_label(op: str, ratio: float, constant: float) -> str:
+    def _fmt(x: float) -> str:
+        if abs(x - round(x)) < 1e-12:
+            return str(int(round(x)))
+        return f"{x:.4g}".rstrip("0").rstrip(".")
+    return f"TG{op}{_fmt(float(ratio))}BG={_fmt(float(constant))}"
+
+
+class _RunFlowError(RuntimeError):
+    def __init__(self, stage: str, message: str):
+        super().__init__(message)
+        self.stage = stage
+        self.message = message
+
+
+def _enabled_filename_parts() -> List[str]:
+    parts = list(cfg.filename.enabled_parts or [])
+    return parts or ["device_id", "temp_mode", "center", "exposure", "condition"]
+
+
+_AUTO_ROTATION_FILENAME_PARTS: Tuple[Tuple[str, str], ...] = (
+    ("Rotation1 Angle (deg)", "rotation1"),
+    ("Rotation2 Angle (deg)", "rotation2"),
+)
+
+
+def _effective_filename_parts(selected_parts: Sequence[str], ctx: Dict[str, Any]) -> List[str]:
+    effective = set(selected_parts or [])
+    for param_name, part_key in _AUTO_ROTATION_FILENAME_PARTS:
+        if _safe_float(ctx.get(param_name)) is not None:
+            effective.add(part_key)
+    return [key for key, _label in PART_SPECS if key in effective]
+
+
+def _first_applicable_seq_ctx(seq: Sequence[Dict[str, Any]], row: Dict[str, Any]) -> Dict[str, Any]:
+    when_expr = row.get("When", "")
+    for seq_ctx in seq:
+        if _when_ok(when_expr, _outer_ctx(seq_ctx)):
+            return seq_ctx
+    return dict(seq[0]) if seq else {}
+
+
+def _filename_context_from_row(
+    meta: Dict[str, Any],
+    ctx: Dict[str, Any],
+    row: Dict[str, Any],
+    *,
+    measured_power_uw: Optional[float] = None,
+) -> FilenameContext:
+    cond_label = build_condition_display_label(
+        row.get("condition_label", ""),
+        row.get("Vbias_start"),
+        row.get("Vbias_stop"),
+    )
+    return FilenameContext(
+        device_id=meta.get("device_id", ""),
+        tag=meta.get("tag", ""),
+        temperature=meta.get("temperature", ""),
+        mode=meta.get("measurement_mode", ""),
+        laser_nm=meta.get("laser_nm", ""),
+        nominal_power_uw=meta.get("power_uw"),
+        center_nm=ctx.get("Center Wavelength (nm)", cfg.lf6.center_nm),
+        exposure_ms=ctx.get("Exposure Time (ms)", cfg.lf6.exposure_ms),
+        accumulations=ctx.get("Accumulations (EPF)", cfg.lf6.accumulations),
+        rotation1_deg=ctx.get("Rotation1 Angle (deg)"),
+        rotation2_deg=ctx.get("Rotation2 Angle (deg)"),
+        condition_label=cond_label,
+        measure_power=_to_bool(row.get("MeasurePower", False)),
+        measured_power_uw=measured_power_uw,
+        power_coefficient=float(meta.get("power_coefficient", 1.0) or 1.0),
+    )
+
+
+def _build_run_filename_base(
+    meta: Dict[str, Any],
+    ctx: Dict[str, Any],
+    row: Dict[str, Any],
+    *,
+    measured_power_uw: Optional[float] = None,
+    enabled_parts: Optional[List[str]] = None,
+) -> Tuple[str, FilenameContext, List[Tuple[str, str]]]:
+    fname_ctx = _filename_context_from_row(
+        meta,
+        ctx,
+        row,
+        measured_power_uw=measured_power_uw,
+    )
+    parts = _effective_filename_parts(enabled_parts or _enabled_filename_parts(), ctx)
+    tokens = build_filename_tokens(fname_ctx, parts)
+    base = build_base_filename(fname_ctx, parts)
+    return base, fname_ctx, tokens
 
 
 # ── Cell-widget helpers for the loop table ─────────────────────────────────────
@@ -394,13 +644,458 @@ class _WhenDelegate(QStyledItemDelegate):
         model.setData(index, editor.text())
 
 
+class _IntSpinDelegate(QStyledItemDelegate):
+    def __init__(self, minimum: int = 1, maximum: int = 100000, parent=None):
+        super().__init__(parent)
+        self._minimum = int(minimum)
+        self._maximum = int(maximum)
+
+    def createEditor(self, parent, option, index):
+        editor = QSpinBox(parent)
+        editor.setRange(self._minimum, self._maximum)
+        editor.setFrame(False)
+        editor.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        editor.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        editor.setKeyboardTracking(False)
+        return editor
+
+    def setEditorData(self, editor, index):
+        try:
+            value = int(float(index.data() or self._minimum))
+        except Exception:
+            value = self._minimum
+        editor.setValue(max(self._minimum, min(self._maximum, value)))
+        editor.lineEdit().selectAll()
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, str(editor.value()))
+
+
+class _OptionalFloatDelegate(QStyledItemDelegate):
+    def __init__(self, minimum: float = -1e6, maximum: float = 1e6, decimals: int = 4, parent=None):
+        super().__init__(parent)
+        self._minimum = float(minimum)
+        self._maximum = float(maximum)
+        self._decimals = int(decimals)
+
+    def createEditor(self, parent, option, index):
+        editor = QDoubleSpinBox(parent)
+        editor.setRange(self._minimum, self._maximum)
+        editor.setDecimals(self._decimals)
+        editor.setSingleStep(0.1)
+        editor.setFrame(False)
+        editor.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        editor.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        editor.setKeyboardTracking(False)
+        editor.setSpecialValueText("")
+        return editor
+
+    def setEditorData(self, editor, index):
+        text = str(index.data() or "").strip()
+        if text == "":
+            editor.lineEdit().selectAll()
+            return
+        try:
+            editor.setValue(float(text))
+        except Exception:
+            editor.lineEdit().selectAll()
+            return
+        editor.lineEdit().selectAll()
+
+    def setModelData(self, editor, model, index):
+        text = editor.text().strip()
+        if text == "":
+            model.setData(index, "")
+            return
+        model.setData(index, f"{editor.value():g}")
+
+
+class _SweepLineCalculator(QGroupBox):
+    add_row_requested = Signal(dict)
+
+    def __init__(self, smu_ctrl=None, safe_jump_spin=None, parent=None):
+        super().__init__("Sweep Line Calculator", parent)
+        self._smu = smu_ctrl
+        self._safe_jump_spin = safe_jump_spin
+        self._label_auto = True
+        self._body_visible = False
+        self._calc_timer = QTimer(self)
+        self._calc_timer.setSingleShot(True)
+        self._calc_timer.setInterval(50)
+        self._calc_timer.timeout.connect(self._recalculate)
+        self._build()
+        self._wire()
+        self._recalculate()
+
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        hdr = QHBoxLayout()
+        self._toggle = QToolButton()
+        self._toggle.setCheckable(True)
+        self._toggle.setChecked(False)
+        self._toggle.setArrowType(Qt.RightArrow)
+        self._toggle.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        hdr.addWidget(self._toggle)
+        hdr.addWidget(QLabel("Sweep Line Calculator"))
+        hdr.addStretch()
+        root.addLayout(hdr)
+
+        self._body = QWidget()
+        self._body.setVisible(False)
+        body = QVBoxLayout(self._body)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(6)
+
+        eq = QHBoxLayout()
+        cond_lbl = QLabel("Condition:")
+        cond_lbl.setFixedWidth(75)
+        tg_lbl = QLabel("TG")
+        tg_lbl.setStyleSheet("font-weight: 600;")
+        self._op_combo = QComboBox()
+        self._op_combo.addItems(["−", "+"])
+        self._op_combo.setFixedWidth(50)
+        self._ratio_spin = QDoubleSpinBox()
+        self._ratio_spin.setRange(0.0, 100.0)
+        self._ratio_spin.setDecimals(4)
+        self._ratio_spin.setValue(0.9)
+        self._ratio_spin.setFixedWidth(90)
+        bg_lbl = QLabel("× BG =")
+        bg_lbl.setStyleSheet("font-weight: 600;")
+        self._constant_spin = QDoubleSpinBox()
+        self._constant_spin.setRange(-200.0, 200.0)
+        self._constant_spin.setDecimals(4)
+        self._constant_spin.setValue(0.0)
+        self._constant_spin.setFixedWidth(90)
+        eq.addWidget(cond_lbl)
+        eq.addWidget(tg_lbl)
+        eq.addSpacing(4)
+        eq.addWidget(self._op_combo)
+        eq.addSpacing(4)
+        eq.addWidget(self._ratio_spin)
+        eq.addSpacing(2)
+        eq.addWidget(bg_lbl)
+        eq.addSpacing(4)
+        eq.addWidget(self._constant_spin)
+        eq.addStretch()
+        body.addLayout(eq)
+
+        hint = QLabel("e.g.   TG − 0.9 × BG = 0   or   TG + 1 × BG = 0.5")
+        hint.setStyleSheet("color: #888888; font-size: 10px; font-style: italic;")
+        body.addWidget(hint)
+
+        step_row = QHBoxLayout()
+        step_lbl = QLabel("Vbg step:")
+        step_lbl.setFixedWidth(75)
+        self._vbg_step_spin = QDoubleSpinBox()
+        self._vbg_step_spin.setRange(0.001, 10.0)
+        self._vbg_step_spin.setDecimals(4)
+        self._vbg_step_spin.setValue(0.1)
+        self._vbg_step_spin.setFixedWidth(90)
+        self._vbg_step_spin.setSuffix(" V")
+        self._vbg_step_spin.setToolTip("Spacing between consecutive Vbg values. Sets the frames count. The Vtg step is derived: Vtg step = ratio × Vbg step.")
+        step_row.addWidget(step_lbl)
+        step_row.addWidget(self._vbg_step_spin)
+        step_row.addStretch()
+        body.addLayout(step_row)
+
+        def _limit_row(title: str, v0: float, v1: float):
+            row = QHBoxLayout()
+            lbl = QLabel(title)
+            lbl.setFixedWidth(75)
+            s0 = QDoubleSpinBox()
+            s1 = QDoubleSpinBox()
+            for s, dv in ((s0, v0), (s1, v1)):
+                s.setRange(-200.0, 200.0)
+                s.setDecimals(2)
+                s.setValue(dv)
+                s.setFixedWidth(90)
+                s.setSuffix(" V")
+            row.addWidget(lbl)
+            row.addWidget(s0)
+            row.addWidget(QLabel("to"))
+            row.addWidget(s1)
+            row.addStretch()
+            body.addLayout(row)
+            return s0, s1
+
+        self._vtg_min_spin, self._vtg_max_spin = _limit_row("Vtg limits:", -10.0, 10.0)
+        self._vbg_min_spin, self._vbg_max_spin = _limit_row("Vbg limits:", -10.0, 10.0)
+
+        vb_row = QHBoxLayout()
+        vb_lbl = QLabel("Fixed Vbias:")
+        vb_lbl.setFixedWidth(75)
+        self._vbias_spin = QDoubleSpinBox()
+        self._vbias_spin.setRange(-200.0, 200.0)
+        self._vbias_spin.setDecimals(4)
+        self._vbias_spin.setValue(0.0)
+        self._vbias_spin.setFixedWidth(90)
+        self._vbias_spin.setSuffix(" V")
+        self._include_vbias_chk = QCheckBox("Include in row")
+        self._vbias_badge = QLabel("SMU not connected")
+        self._vbias_badge.setStyleSheet("color: #c26a00; font-style: italic;")
+        vb_row.addWidget(vb_lbl)
+        vb_row.addWidget(self._vbias_spin)
+        vb_row.addWidget(self._include_vbias_chk)
+        vb_row.addWidget(self._vbias_badge)
+        vb_row.addStretch()
+        body.addLayout(vb_row)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        body.addWidget(line)
+
+        calc_hdr = QLabel("Calculated row:")
+        calc_hdr.setStyleSheet("color: #666666; font-size: 9pt; font-weight: 600;")
+        body.addWidget(calc_hdr)
+
+        def _res_spin():
+            s = QDoubleSpinBox()
+            s.setRange(-200.0, 200.0)
+            s.setDecimals(4)
+            s.setFixedWidth(100)
+            return s
+
+        row_a = QHBoxLayout()
+        row_a.addWidget(QLabel("Vtg start"))
+        self._vtg_start_spin = _res_spin()
+        row_a.addWidget(self._vtg_start_spin)
+        row_a.addSpacing(12)
+        row_a.addWidget(QLabel("Vtg stop"))
+        self._vtg_stop_spin = _res_spin()
+        row_a.addWidget(self._vtg_stop_spin)
+        row_a.addStretch()
+        body.addLayout(row_a)
+
+        row_b = QHBoxLayout()
+        row_b.addWidget(QLabel("Vbg start"))
+        self._vbg_start_spin = _res_spin()
+        row_b.addWidget(self._vbg_start_spin)
+        row_b.addSpacing(12)
+        row_b.addWidget(QLabel("Vbg stop"))
+        self._vbg_stop_spin = _res_spin()
+        row_b.addWidget(self._vbg_stop_spin)
+        row_b.addStretch()
+        body.addLayout(row_b)
+
+        row_c = QHBoxLayout()
+        row_c.addWidget(QLabel("frames"))
+        self._frames_spin = QSpinBox()
+        self._frames_spin.setRange(2, 1_000_000)
+        self._frames_spin.setFixedWidth(90)
+        row_c.addWidget(self._frames_spin)
+        self._vtg_step_lbl = QLabel("Vtg step ≈ 0.0000 V")
+        self._vbg_step_lbl = QLabel("Vbg step ≈ 0.0000 V")
+        row_c.addSpacing(12)
+        row_c.addWidget(self._vtg_step_lbl)
+        row_c.addSpacing(12)
+        row_c.addWidget(self._vbg_step_lbl)
+        row_c.addStretch()
+        body.addLayout(row_c)
+
+        row_d = QHBoxLayout()
+        row_d.addWidget(QLabel("Condition label"))
+        self._condition_edit = QLineEdit()
+        row_d.addWidget(self._condition_edit, stretch=1)
+        body.addLayout(row_d)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setWordWrap(True)
+        body.addWidget(self._status_lbl)
+
+        self._add_btn = QPushButton("Add to Batch Table  ▸")
+        self._add_btn.setFixedHeight(28)
+        body.addWidget(self._add_btn)
+
+        root.addWidget(self._body)
+
+    def _wire(self):
+        self._toggle.toggled.connect(self._on_toggle)
+        for w in (
+            self._op_combo,
+            self._ratio_spin,
+            self._constant_spin,
+            self._vbg_step_spin,
+            self._vtg_min_spin,
+            self._vtg_max_spin,
+            self._vbg_min_spin,
+            self._vbg_max_spin,
+        ):
+            if hasattr(w, "valueChanged"):
+                w.valueChanged.connect(self._schedule_recalc)
+            else:
+                w.currentTextChanged.connect(self._on_equation_changed)
+        self._op_combo.currentTextChanged.connect(self._on_equation_changed)
+        self._ratio_spin.valueChanged.connect(self._on_equation_changed)
+        self._constant_spin.valueChanged.connect(self._on_equation_changed)
+        self._condition_edit.textEdited.connect(self._on_label_edited)
+        self._frames_spin.valueChanged.connect(self._update_result_step_labels)
+        for w in (self._vtg_start_spin, self._vtg_stop_spin, self._vbg_start_spin, self._vbg_stop_spin):
+            w.valueChanged.connect(self._update_result_step_labels)
+        self._include_vbias_chk.toggled.connect(self._recalculate)
+        self._vbias_spin.valueChanged.connect(self._recalculate)
+        self._add_btn.clicked.connect(self._on_add_clicked)
+        self.set_vbias_available(bool(self._smu is not None and getattr(self._smu, "is_connected", False)))
+
+    def _on_toggle(self, checked: bool):
+        self._body.setVisible(checked)
+        self._toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+
+    def _schedule_recalc(self, *_args):
+        self._calc_timer.start()
+
+    def _on_equation_changed(self, *_args):
+        self._label_auto = True
+        self._schedule_recalc()
+
+    def _on_label_edited(self, *_args):
+        self._label_auto = False
+
+    def _set_status(self, text: str = "", color: str = "#666666"):
+        self._status_lbl.setText(text)
+        self._status_lbl.setStyleSheet(f"color: {color};")
+        self._status_lbl.setVisible(bool(text))
+
+    def _update_result(self, result_tuple, frames: int):
+        vbg_start, vbg_stop, vtg_start, vtg_stop = result_tuple
+        for spin, value in (
+            (self._vtg_start_spin, vtg_start),
+            (self._vtg_stop_spin, vtg_stop),
+            (self._vbg_start_spin, vbg_start),
+            (self._vbg_stop_spin, vbg_stop),
+        ):
+            if not spin.hasFocus():
+                spin.blockSignals(True)
+                spin.setValue(float(value))
+                spin.blockSignals(False)
+        if not self._frames_spin.hasFocus():
+            self._frames_spin.blockSignals(True)
+            self._frames_spin.setValue(max(2, int(frames)))
+            self._frames_spin.blockSignals(False)
+        self._update_result_step_labels()
+
+    def _update_result_step_labels(self):
+        frames = max(int(self._frames_spin.value()), 2)
+        vtg_step = abs(self._vtg_stop_spin.value() - self._vtg_start_spin.value()) / max(frames - 1, 1)
+        vbg_step = abs(self._vbg_stop_spin.value() - self._vbg_start_spin.value()) / max(frames - 1, 1)
+        self._vtg_step_lbl.setText(f"Vtg step ≈ {vtg_step:.4f} V")
+        self._vbg_step_lbl.setText(f"Vbg step ≈ {vbg_step:.4f} V")
+
+    def set_vbias_available(self, available: bool):
+        self._vbias_badge.setVisible(not available)
+        self._recalculate()
+
+    def _recalculate(self):
+        op = self._op_combo.currentText()
+        ratio = float(self._ratio_spin.value())
+        constant = float(self._constant_spin.value())
+        vbg_step = float(self._vbg_step_spin.value())
+        vtg_min = float(self._vtg_min_spin.value())
+        vtg_max = float(self._vtg_max_spin.value())
+        vbg_min = float(self._vbg_min_spin.value())
+        vbg_max = float(self._vbg_max_spin.value())
+
+        if vtg_min >= vtg_max:
+            self._set_status("✗ Vtg limit: min must be less than max.", "#b42318")
+            self._add_btn.setEnabled(False)
+            return
+        if vbg_min >= vbg_max:
+            self._set_status("✗ Vbg limit: min must be less than max.", "#b42318")
+            self._add_btn.setEnabled(False)
+            return
+
+        result = _solve_condition_line(op, ratio, constant, vtg_min, vtg_max, vbg_min, vbg_max)
+        if result is None:
+            if ratio < 1e-9 and not (vtg_min <= constant <= vtg_max):
+                self._set_status(f"✗ Vtg = {constant:.4f} V is outside the Vtg limits.", "#b42318")
+            else:
+                self._set_status("✗ No valid segment: the condition line does not cross the Vtg/Vbg limits.", "#b42318")
+            self._add_btn.setEnabled(False)
+            return
+
+        frames = _compute_frames_from_step(result[0], result[1], vbg_step)
+        if frames < 2:
+            self._set_status("✗ Segment too short for one step: reduce Vbg step or widen limits.", "#b42318")
+            self._add_btn.setEnabled(False)
+            return
+
+        self._update_result(result, frames)
+        if self._label_auto:
+            self._condition_edit.blockSignals(True)
+            self._condition_edit.setText(_format_condition_label(op, ratio, constant))
+            self._condition_edit.blockSignals(False)
+
+        frames_now = max(int(self._frames_spin.value()), 2)
+        vtg_step = abs(self._vtg_stop_spin.value() - self._vtg_start_spin.value()) / max(frames_now - 1, 1)
+        vbg_step_actual = abs(self._vbg_stop_spin.value() - self._vbg_start_spin.value()) / max(frames_now - 1, 1)
+        safe_jump = float(self._safe_jump_spin.value()) if self._safe_jump_spin is not None else float("inf")
+        msg = ""
+        color = "#666666"
+        if ratio < 1e-9:
+            msg = f"ℹ Ratio ≈ 0: sweeping Vbg across limits at fixed Vtg = {constant:.4f} V."
+        elif not np.isfinite(vtg_step) or not np.isfinite(vbg_step_actual):
+            msg = "✗ Calculation produced invalid values — check inputs."
+            color = "#b42318"
+            self._add_btn.setEnabled(False)
+            self._set_status(msg, color)
+            return
+        elif vtg_step > safe_jump + 1e-12:
+            max_vbg = safe_jump / max(ratio, 1e-12)
+            msg = f"⚠ Vtg step ≈ {vtg_step:.4f} V exceeds safe jump {safe_jump:.3f} V. Reduce Vbg step to ≤ {max_vbg:.4f} V."
+            color = "#c26a00"
+        elif vbg_step_actual > safe_jump + 1e-12:
+            needed = int(np.ceil(abs(self._vbg_stop_spin.value() - self._vbg_start_spin.value()) / safe_jump)) + 1
+            msg = f"⚠ Vbg step ≈ {vbg_step_actual:.4f} V exceeds safe jump {safe_jump:.3f} V. Increase frames to ≥ {needed}."
+            color = "#c26a00"
+        elif frames_now > 10000:
+            msg = f"⚠ Large sweep: {frames_now} points."
+            color = "#c26a00"
+        elif abs(self._vbg_stop_spin.value() - self._vbg_start_spin.value()) < 2.0 * vbg_step:
+            msg = f"⚠ Only {frames_now} point(s) will be sampled. Reduce step size."
+            color = "#c26a00"
+        elif self._include_vbias_chk.isChecked() and not (self._smu is not None and getattr(self._smu, 'is_connected', False)):
+            msg = f"⚠ Vbias set to {self._vbias_spin.value():.4f} V, but SMU is not connected."
+            color = "#c26a00"
+        self._set_status(msg, color)
+        self._add_btn.setEnabled(True)
+
+    def _on_add_clicked(self):
+        frames = int(self._frames_spin.value())
+        if frames < 2:
+            return
+        row = {
+            "Run": True,
+            "When": "",
+            "MeasurePower": False,
+            "condition_label": self._condition_edit.text().strip() or _format_condition_label(self._op_combo.currentText(), self._ratio_spin.value(), self._constant_spin.value()),
+            "repeat": 1,
+            "frames": frames,
+            "Vbg_start": float(self._vbg_start_spin.value()),
+            "Vbg_stop": float(self._vbg_stop_spin.value()),
+            "Vtg_start": float(self._vtg_start_spin.value()),
+            "Vtg_stop": float(self._vtg_stop_spin.value()),
+            "Vbias_start": float(self._vbias_spin.value()) if self._include_vbias_chk.isChecked() else "",
+            "Vbias_stop": float(self._vbias_spin.value()) if self._include_vbias_chk.isChecked() else "",
+        }
+        if self._include_vbias_chk.isChecked() and not (self._smu is not None and getattr(self._smu, "is_connected", False)):
+            QMessageBox.information(
+                self,
+                "SMU not connected",
+                f"The generated row includes Vbias = {self._vbias_spin.value():.4f} V. The SMU is not currently connected, so Vbias will not be applied until the SMU is connected and the row is run.",
+            )
+        self.add_row_requested.emit(row)
+
+
 # ── Run worker ────────────────────────────────────────────────────────────────
 
 class _RunWorker(QObject):
     log         = Signal(str)
     progress    = Signal(int, int)
     tree_update = Signal(int, str, int)
-    finished    = Signal()
+    finished    = Signal(bool, str)
     error       = Signal(str)
 
     def __init__(
@@ -411,8 +1106,8 @@ class _RunWorker(QObject):
         lf6_ctrl=None, smu_ctrl=None,
         rotation_ctrl=None, stage_ctrl=None, pm_ctrl=None,
         out_dir: Path,
-        filename_pattern: str,
-        sample: str, tag: str, laser_nm: str, power_uw: str,
+        run_meta: Dict[str, Any],
+        filename_parts: List[str],
         stop_event: threading.Event,
     ) -> None:
         super().__init__()
@@ -424,11 +1119,8 @@ class _RunWorker(QObject):
         self._stage    = stage_ctrl
         self._pm       = pm_ctrl
         self._out_dir  = out_dir
-        self._pattern  = filename_pattern
-        self._sample   = sample
-        self._tag      = tag
-        self._laser_nm = laser_nm
-        self._power_uw = power_uw
+        self._meta     = dict(run_meta)
+        self._parts    = list(filename_parts)
         self._stop     = stop_event
 
     @Slot()
@@ -441,11 +1133,23 @@ class _RunWorker(QObject):
             for _, r in self._batch.iterrows()
             if _when_ok(r.get("When", ""), _outer_ctx(ctx))
         )
+        total_points = _count_total_points(self._seq, self._batch)
         done = 0
+        failed = False
+        summary = "Run complete."
 
         try:
+            self.log.emit(
+                f"Resolved run plan: {len(self._seq)} sequence(s), "
+                f"{total_acq} acquisition file(s), {total_points} sweep point(s)."
+            )
+            self.log.emit(
+                f"Direct-jump mode active. Safe jump limit={float(cfg.ramp.safe_jump_V):g} V. "
+                f"Ramp-to-zero runs after measurement only and at 2x slower speed."
+            )
             for seq_i, ctx in enumerate(self._seq):
                 if self._stop.is_set():
+                    summary = "Run stopped by user."
                     break
 
                 center   = float(ctx.get("Center Wavelength (nm)", cfg.lf6.center_nm))
@@ -454,6 +1158,15 @@ class _RunWorker(QObject):
                 val_rot1  = ctx.get("Rotation1 Angle (deg)")
                 val_rot2  = ctx.get("Rotation2 Angle (deg)")
                 val_stage = ctx.get("Stage Position")
+
+                ctx_bits = []
+                for key in ("Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)", "Rotation1 Angle (deg)", "Rotation2 Angle (deg)", "Stage Position"):
+                    if key in ctx and ctx.get(key) is not None:
+                        ctx_bits.append(f"{key}={ctx.get(key)}")
+                self.log.emit(
+                    f"Sequence {seq_i+1}/{len(self._seq)} resolved: "
+                    + (", ".join(ctx_bits) if ctx_bits else "(defaults only)")
+                )
 
                 if self._lf6 and self._lf6.is_connected:
                     self._lf6.apply_settings(exp_ms, center, accum)
@@ -471,24 +1184,54 @@ class _RunWorker(QObject):
                     if not _when_ok(row.get("When", ""), outer):
                         continue
                     if self._stop.is_set():
+                        summary = "Run stopped by user."
                         break
 
-                    cond_label = _sanitize(str(row.get("condition_label", "")))
+                    row_dict = row.to_dict()
+                    cond_label = build_condition_display_label(
+                        row_dict.get("condition_label", ""),
+                        row_dict.get("Vbias_start"),
+                        row_dict.get("Vbias_stop"),
+                    ) or clean_condition_label(row_dict.get("condition_label", "")) or "condition"
                     n_rep    = max(int(row.get("repeat", 1)), 1)
-                    n_frames = max(int(row.get("frames",  1)), 1)
                     try:
-                        vbg_s = float(row["Vbg_start"]); vbg_e = float(row["Vbg_stop"])
-                        vtg_s = float(row["Vtg_start"]); vtg_e = float(row["Vtg_stop"])
-                    except Exception:
-                        vbg_s = vbg_e = vtg_s = vtg_e = 0.0
+                        sweep = _resolve_sweep_vectors(row_dict)
+                    except Exception as e:
+                        raise _RunFlowError("planning", f"Sweep parse error for '{cond_label}': {e}") from e
 
-                    vbias_s = None if pd.isna(row.get("Vbias_start")) else float(row["Vbias_start"])
-                    vbias_e = None if pd.isna(row.get("Vbias_stop"))  else float(row["Vbias_stop"])
+                    n_points = int(sweep["frames"])
+                    point_count = int(sweep["point_count"])
+                    vbg_s = float(sweep["vbg_start"]); vbg_e = float(sweep["vbg_stop"])
+                    vtg_s = float(sweep["vtg_start"]); vtg_e = float(sweep["vtg_stop"])
+                    vbias_s = sweep["vbias_start"]
+                    vbias_e = sweep["vbias_stop"]
+                    vbg_step = sweep["vbg_step"]
+                    vtg_step = sweep["vtg_step"]
+                    vbias_step = sweep["vbias_step"]
+                    vbg_points = sweep["vbg_points"]
+                    vtg_points = sweep["vtg_points"]
+                    vbias_points = sweep["vbias_points"]
+
+                    self.log.emit(
+                        f"  Sweep plan | {cond_label}: "
+                        f"Vbg {vbg_s:g}->{vbg_e:g} V, "
+                        f"Vtg {vtg_s:g}->{vtg_e:g} V, "
+                        + (
+                            f"Vbias {vbias_s:g}->{vbias_e:g} V, "
+                            if vbias_s is not None and vbias_e is not None else ""
+                        )
+                        + f"frames={n_points}, points={point_count}, "
+                        + f"step(Vbg)={float(vbg_step):g} V, step(Vtg)={float(vtg_step):g} V, "
+                        + (f"step(Vbias)={float(vbias_step):g} V, " if vbias_step is not None else "")
+                        + "mode=direct-jump, zero-ramp=post-run only, "
+                        + f"repeat={n_rep}"
+                    )
 
                     self.tree_update.emit(seq_i, cond_label, 0)
 
                     for r_i in range(n_rep):
                         if self._stop.is_set():
+                            summary = "Run stopped by user."
                             break
 
                         self.tree_update.emit(seq_i, cond_label, r_i)
@@ -496,136 +1239,180 @@ class _RunWorker(QObject):
                             f"Seq {seq_i+1}/{len(self._seq)} | {cond_label} rep {r_i+1}/{n_rep}"
                         )
 
-                        pwr_str = self._power_uw
+                        measured_power_uw = None
                         if _to_bool(row.get("MeasurePower", False)):
                             if self._pm and self._pm.is_connected:
                                 try:
                                     p_w = self._pm.adapter.get_power()
-                                    pwr_str = f"{float(p_w)*1e6:.3f}"
-                                    self.log.emit(f"  Power: {pwr_str} uW")
+                                    measured_power_uw = float(p_w) * 1e6
+                                    corrected, _source = resolve_power_uw(
+                                        _filename_context_from_row(
+                                            self._meta,
+                                            ctx,
+                                            row_dict,
+                                            measured_power_uw=measured_power_uw,
+                                        )
+                                    )
+                                    if corrected is not None:
+                                        self.log.emit(f"  Measured power: {corrected:g} uW")
                                 except Exception as e:
-                                    self.log.emit(f"  Power read failed: {e}")
+                                    raise _RunFlowError("power", f"Power read failed: {e}") from e
 
-                        rot1_s = _fmt_deg(val_rot1)
-                        rot2_s = _fmt_deg(val_rot2)
-                        rot_parts = []
-                        if rot1_s: rot_parts.append(f"R1_{rot1_s}deg")
-                        if rot2_s: rot_parts.append(f"R2_{rot2_s}deg")
-                        rot_block = "_".join(rot_parts)
-
-                        vb_block = ""
-                        if vbias_s is not None and vbias_e is not None:
-                            vb_block = f"Vb{vbias_s:+.2g}to{vbias_e:+.2g}"
-                        cond_full  = cond_label + (f"_{vb_block}" if vb_block else "")
                         rep_suffix = f"_rep{r_i+1:02d}" if n_rep > 1 else ""
 
-                        fname_ctx = _SafeDict(**ctx)
-                        fname_ctx.update({
-                            "sample":    self._sample,    "tag":       self._tag,
-                            "laser_nm":  self._laser_nm,  "power_uw":  pwr_str,
-                            "exp_s":     _exp_s_str(exp_ms), "epf":    str(accum),
-                            "center_nm": f"{center:.0f}", "rot1_deg":  rot1_s,
-                            "rot2_deg":  rot2_s,          "rot_block": rot_block,
-                            "cond_block": cond_full,
-                        })
-
                         try:
-                            stem_base = _sanitize(self._pattern.format_map(fname_ctx)) + rep_suffix
+                            stem_base, _resolved_ctx, _tokens = _build_run_filename_base(
+                                self._meta,
+                                ctx,
+                                row_dict,
+                                measured_power_uw=measured_power_uw,
+                                enabled_parts=self._parts,
+                            )
+                            stem_final = make_unique_stem(self._out_dir, stem_base + rep_suffix)
+                            self.log.emit(f"  -> {stem_final}.csv")
                         except Exception as e:
-                            stem_base = f"ERR_{cond_full}{rep_suffix}"
-                            self.log.emit(f"  Filename error: {e}")
+                            raise _RunFlowError("metadata", f"Filename error: {e}") from e
 
-                        stem_final = self._unique_stem(self._out_dir, stem_base)
-                        self.log.emit(f"  -> {stem_final}.csv")
+                        writer = None
+                        try:
+                            csv_path = self._out_dir / f"{stem_final}.csv"
+                            writer = CSVWriter(
+                                out_dir=str(csv_path.parent),
+                                file_base=csv_path.stem,
+                                wavelength_headers=[],
+                                scalar_fields_order=[
+                                    "Vbg_set", "Vbg_meas",
+                                    "Vtg_set", "Vtg_meas",
+                                    "Vbias_set", "Vbias_meas",
+                                    "Ibg", "Itg", "Ibias",
+                                ],
+                            )
+                            for frame_i, (vbg_set, vtg_set) in enumerate(zip(vbg_points, vtg_points), start=1):
+                                if self._stop.is_set():
+                                    summary = "Run stopped by user."
+                                    break
 
-                        if self._smu and self._smu.is_connected:
-                            dev = self._smu.device
-                            try:
-                                dev.set_gates(
-                                    Vbg=vbg_s, Vtg=vtg_s,
-                                    ramp_step=cfg.ramp.step_V,
-                                    delay_s=cfg.ramp.delay_s,
-                                    stop_cb=self._stop.is_set,
+                                vbias_set = vbias_points[frame_i - 1] if vbias_points is not None else None
+                                is_start_point = (frame_i == 1)
+                                self.log.emit(
+                                    f"    Point {frame_i}/{point_count}: "
+                                    f"Vbg={float(vbg_set):g} V, Vtg={float(vtg_set):g} V"
+                                    + (f", Vbias={float(vbias_set):g} V" if vbias_set is not None else "")
+                                    + (" | ramp to sweep start" if is_start_point else " | direct setpoint jump")
                                 )
-                                if vbias_s is not None:
-                                    dev.set_bias(
-                                        Vbias=vbias_s,
-                                        ramp_step=cfg.ramp.vbias_step_V,
-                                        delay_s=cfg.ramp.delay_s,
-                                        stop_cb=self._stop.is_set,
-                                    )
-                            except Exception as e:
-                                self.log.emit(f"  Gate set error: {e}")
-                            time.sleep(cfg.ramp.settle_s)
 
-                        if self._stop.is_set():
-                            break
+                                if self._smu and self._smu.is_connected:
+                                    dev = self._smu.device
+                                    try:
+                                        dev.set_gates(
+                                            Vbg=float(vbg_set), Vtg=float(vtg_set),
+                                            ramp_step=(cfg.ramp.step_V if is_start_point else 0.0),
+                                            delay_s=(cfg.ramp.delay_s if is_start_point else 0.0),
+                                            stop_cb=self._stop.is_set,
+                                        )
+                                        if vbias_set is not None:
+                                            dev.set_bias(
+                                                Vbias=float(vbias_set),
+                                                ramp_step=(cfg.ramp.vbias_step_V if is_start_point else 0.0),
+                                                delay_s=(cfg.ramp.delay_s if is_start_point else 0.0),
+                                                stop_cb=self._stop.is_set,
+                                            )
+                                    except Exception as e:
+                                        raise _RunFlowError("hardware", f"Gate set error: {e}") from e
+                                    time.sleep(cfg.ramp.settle_s)
 
-                        wl = np.array([]); cts = np.array([])
-                        if self._lf6 and self._lf6.is_connected:
-                            try:
-                                wl, cts = self._lf6.adapter.acquire()
-                            except Exception as e:
-                                self.log.emit(f"  Acquire error: {e}")
-                        else:
-                            self.log.emit("  LF6 not connected — skipping acquire")
+                                if self._stop.is_set():
+                                    summary = "Run stopped by user."
+                                    break
 
-                        Ibg = Itg = Ib = None
-                        Vbg_meas = Vtg_meas = float("nan")
-                        if self._smu and self._smu.is_connected:
-                            dev = self._smu.device
-                            try:
-                                Ibg, Itg, Ib = dev.read_currents()
-                                Vbg_meas, Vtg_meas = dev.read_current_gates()
-                            except Exception:
-                                pass
+                                wl = np.array([]); cts = np.array([])
+                                if self._lf6 and self._lf6.is_connected:
+                                    try:
+                                        wl, cts = self._lf6.adapter.acquire()
+                                    except Exception as e:
+                                        raise _RunFlowError("acquisition", f"Acquire error: {e}") from e
+                                else:
+                                    raise _RunFlowError("acquisition", "LF6 is not connected.")
 
-                        if wl.size > 0:
-                            try:
-                                csv_path = self._out_dir / f"{stem_final}.csv"
-                                csv_path.parent.mkdir(parents=True, exist_ok=True)
-                                writer = CSVWriter(str(csv_path))
-                                writer.set_wavelength_headers(wl.tolist())
+                                Ibg = Itg = Ib = None
+                                Vbg_meas = Vtg_meas = float("nan")
+                                Vbias_meas = float(vbias_set) if vbias_set is not None else None
+                                if self._smu and self._smu.is_connected:
+                                    dev = self._smu.device
+                                    try:
+                                        Ibg, Itg, Ib = dev.read_currents()
+                                        Vbg_meas, Vtg_meas = dev.read_current_gates()
+                                        if vbias_set is not None and hasattr(dev, "read_current_bias"):
+                                            vb_read = dev.read_current_bias()
+                                            if vb_read is not None:
+                                                Vbias_meas = float(vb_read)
+                                    except Exception:
+                                        pass
+
+                                if wl.size == 0:
+                                    raise _RunFlowError("acquisition", "No wavelength headers were returned by the spectrometer.")
+                                if getattr(writer, "_data_rows_written", 0) == 0 and hasattr(writer, "set_wavelength_headers"):
+                                    writer.set_wavelength_headers(wl.tolist())
+
                                 row_data = {
-                                    "Vbg_set": vbg_s, "Vbg_meas": Vbg_meas,
-                                    "Vtg_set": vtg_s, "Vtg_meas": Vtg_meas,
+                                    "Vbg_set": float(vbg_set), "Vbg_meas": Vbg_meas,
+                                    "Vtg_set": float(vtg_set), "Vtg_meas": Vtg_meas,
                                     "Ibg": Ibg, "Itg": Itg, "Ibias": Ib,
                                 }
-                                if vbias_s is not None:
-                                    row_data["Vbias_set"] = vbias_s
+                                if vbias_set is not None:
+                                    row_data["Vbias_set"] = float(vbias_set)
+                                    row_data["Vbias_meas"] = Vbias_meas
                                 writer.write_row(row_data, cts.tolist())
+                        except _RunFlowError:
+                            raise
+                        except Exception as e:
+                            raise _RunFlowError("save", f"CSV write error: {e}") from e
+                        finally:
+                            if writer is not None:
                                 writer.close()
-                            except Exception as e:
-                                self.log.emit(f"  CSV write error: {e}")
+
+                        if self._stop.is_set():
+                            summary = "Run stopped by user."
+                            break
 
                         done += 1
                         self.progress.emit(done, total_acq)
 
-            if self._smu and self._smu.is_connected:
-                self.log.emit("Ramping all to zero…")
-                try:
-                    self._smu.device.ramp_all_to_zero(
-                        ramp_step=cfg.ramp.step_V, delay_s=cfg.ramp.delay_s,
-                    )
-                except Exception as e:
-                    self.log.emit(f"Ramp-to-zero error: {e}")
+                    if failed or self._stop.is_set():
+                        break
 
-            self.log.emit("Run complete.")
+                if failed or self._stop.is_set():
+                    break
+
+        except _RunFlowError as exc:
+            failed = True
+            summary = f"{exc.stage.capitalize()} failed: {exc.message}"
+            self.log.emit(summary)
+            self.error.emit(summary)
 
         except Exception as exc:
-            self.error.emit(str(exc))
+            failed = True
+            summary = f"Unexpected failure: {exc}"
+            self.log.emit(summary)
+            self.error.emit(summary)
         finally:
-            self.finished.emit()
+            if self._smu and self._smu.is_connected:
+                self.log.emit("Ramping all channels to zero (2x slower than sweep settings)...")
+                try:
+                    self._smu.device.ramp_all_to_zero(
+                        ramp_step=max(float(cfg.ramp.step_V) * 0.5, 1e-6),
+                        delay_s=float(cfg.ramp.delay_s) * 2.0,
+                    )
+                except Exception as e:
+                    self.log.emit(f"Cleanup warning: ramp-to-zero error: {e}")
 
-    @staticmethod
-    def _unique_stem(out_dir: Path, stem: str) -> str:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        if not (out_dir / f"{stem}.csv").exists():
-            return stem
-        n = 1
-        while (out_dir / f"{stem}_{n:03d}.csv").exists():
-            n += 1
-        return f"{stem}_{n:03d}"
+            if failed:
+                self.log.emit("Run failed.")
+            elif self._stop.is_set():
+                self.log.emit("Run stopped.")
+            else:
+                self.log.emit("Run complete.")
+            self.finished.emit(not failed and not self._stop.is_set(), summary)
 
 
 # ── Loop table read / write ────────────────────────────────────────────────────
@@ -667,14 +1454,33 @@ def _populate_batch_table(table: QTableWidget, df: pd.DataFrame) -> None:
     for r, row in df.iterrows():
         for c, col in enumerate(BATCH_SCHEMA):
             val = row[col]
-            text = "" if (isinstance(val, float) and pd.isna(val)) else str(val)
-            table.setItem(r, c, QTableWidgetItem(text))
-    # Apply column widths
+            if col in _BATCH_BOOL_COLUMNS:
+                item = QTableWidgetItem("")
+                item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                )
+                item.setCheckState(Qt.CheckState.Checked if _to_bool(val) else Qt.CheckState.Unchecked)
+                item.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
+            else:
+                text = "" if (isinstance(val, float) and pd.isna(val)) else str(val)
+                item = QTableWidgetItem(text)
+                if col in _BATCH_INT_COLUMNS or col in _BATCH_FLOAT_COLUMNS:
+                    item.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
+            table.setItem(r, c, item)
+    _configure_batch_table_columns(table)
+
+
+def _configure_batch_table_columns(table: QTableWidget) -> None:
+    """Use predictable widths for dense numeric editing and only stretch low-risk text."""
     hdr = table.horizontalHeader()
+    hdr.setStretchLastSection(False)
     for c, col in enumerate(BATCH_SCHEMA):
-        w = _BATCH_COL_WIDTHS.get(col, 80)
-        hdr.resizeSection(c, w)
-    hdr.setSectionResizeMode(len(BATCH_SCHEMA) - 1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+        hdr.resizeSection(c, _BATCH_COL_WIDTHS.get(col, 80))
+    for col_name in _BATCH_STRETCH_COLUMNS:
+        hdr.setSectionResizeMode(BATCH_SCHEMA.index(col_name), QHeaderView.ResizeMode.Stretch)
 
 
 def _read_batch_table(table: QTableWidget) -> pd.DataFrame:
@@ -683,7 +1489,10 @@ def _read_batch_table(table: QTableWidget) -> pd.DataFrame:
         row = {}
         for c, col in enumerate(BATCH_SCHEMA):
             item = table.item(r, c)
-            row[col] = item.text() if item else ""
+            if col in _BATCH_BOOL_COLUMNS:
+                row[col] = bool(item and item.checkState() == Qt.CheckState.Checked)
+            else:
+                row[col] = item.text() if item else ""
         rows.append(row)
     return pd.DataFrame(rows, columns=BATCH_SCHEMA) if rows else pd.DataFrame(columns=BATCH_SCHEMA)
 
@@ -692,7 +1501,7 @@ def _read_batch_table(table: QTableWidget) -> pd.DataFrame:
 
 class PresetsPanel(QWidget):
     """
-    Presets sweep panel.
+    Dual Gate sweep panel.
 
     Usage:
         panel = PresetsPanel(lf6_ctrl=lf6, smu_ctrl=smu, ...)
@@ -730,32 +1539,70 @@ class PresetsPanel(QWidget):
 
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(4)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
 
         # ── top meta row ───────────────────────────────────────────────────
         meta = QHBoxLayout()
-        self._sample_edit    = QLineEdit(); self._sample_edit.setPlaceholderText("Sample")
+        meta.setSpacing(6)
+        self._sample_edit    = QLineEdit(); self._sample_edit.setPlaceholderText("Device ID")
         self._sample_edit.setToolTip("Sample name — included in saved filenames.")
-        self._tag_edit       = QLineEdit(); self._tag_edit.setPlaceholderText("Tag")
+        self._sample_edit.setMaximumWidth(160)
+        self._tag_edit       = QLineEdit(); self._tag_edit.setPlaceholderText("")
+        self._tag_label = QLabel("Run note:")
         self._tag_edit.setToolTip("Short run tag or note — appended to filenames.")
         self._laser_edit     = QLineEdit(); self._laser_edit.setPlaceholderText("Laser nm")
-        self._laser_edit.setFixedWidth(80)
+        self._laser_edit.setFixedWidth(76)
         self._laser_edit.setToolTip("Excitation laser wavelength in nm — recorded in filename.")
         self._power_edit     = QLineEdit(); self._power_edit.setPlaceholderText("Power µW")
-        self._power_edit.setFixedWidth(90)
+        self._power_edit.setFixedWidth(80)
         self._power_edit.setToolTip(
             "Laser power in µW — recorded in filename.\n"
             "Overwritten by a live PM100D reading when MeasurePower is enabled."
         )
-        self._subfolder_edit = QLineEdit(); self._subfolder_edit.setPlaceholderText("Subfolder")
+        self._subfolder_edit = QLineEdit(); self._subfolder_edit.setPlaceholderText("Initial Data")
         self._subfolder_edit.setToolTip("Optional subfolder created under the base output directory.")
-        meta.addWidget(QLabel("Sample:")); meta.addWidget(self._sample_edit)
-        meta.addWidget(QLabel("Tag:"));    meta.addWidget(self._tag_edit)
+        self._subfolder_edit.setMaximumWidth(130)
+        meta.addWidget(QLabel("Device ID:")); meta.addWidget(self._sample_edit)
+        meta.addWidget(self._tag_label);      meta.addWidget(self._tag_edit)
         meta.addWidget(QLabel("Laser:"));  meta.addWidget(self._laser_edit)
         meta.addWidget(QLabel("Power:"));  meta.addWidget(self._power_edit)
-        meta.addWidget(QLabel("Sub:"));    meta.addWidget(self._subfolder_edit)
-        root.addLayout(meta)
+        meta.addWidget(QLabel("Subfolder:")); meta.addWidget(self._subfolder_edit)
+        self._temp_edit = QLineEdit()
+        self._temp_edit.setPlaceholderText("Temp (K)")
+        self._temp_edit.setFixedWidth(66)
+        self._temp_edit.setText(str(cfg.filename.temperature))
+        self._temp_edit.setToolTip("Temperature token used in filenames, for example 6 or 1.8.")
+        self._mode_combo_name = QComboBox()
+        self._mode_combo_name.addItems(["PL", "Ref"])
+        self._mode_combo_name.setCurrentText(str(cfg.filename.measurement_mode or "PL"))
+        self._mode_combo_name.setFixedWidth(60)
+        self._mode_combo_name.setToolTip("Measurement mode token used in filenames.")
+        self._power_coeff_edit = QLineEdit()
+        self._power_coeff_edit.setFixedWidth(66)
+        self._power_coeff_edit.setText(f"{float(cfg.filename.power_coefficient):g}")
+        self._power_coeff_edit.setToolTip(
+            "Multiplier applied to measured power before it is written into filenames."
+        )
+        self._tag_edit.hide()
+        self._tag_label.hide()
+        self._subfolder_edit.setText("Initial Data")
+        meta.insertWidget(4, QLabel("Temp:"))
+        meta.insertWidget(5, self._temp_edit)
+        meta.insertWidget(6, QLabel("Mode:"))
+        meta.insertWidget(7, self._mode_combo_name)
+        meta.insertWidget(meta.count() - 2, QLabel("Coeff:"))
+        meta.insertWidget(meta.count() - 2, self._power_coeff_edit)
+
+        # Wrap meta row in a styled frame
+        meta_frame = QFrame()
+        meta_frame.setFrameShape(QFrame.Shape.NoFrame)
+        meta_frame.setStyleSheet(
+            "QFrame { background: #f5f5f7; border: 1px solid #d8d8d8;"
+            " border-radius: 4px; padding: 2px; }"
+        )
+        meta_frame.setLayout(meta)
+        root.addWidget(meta_frame)
 
         # ── main splitter ──────────────────────────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -769,6 +1616,8 @@ class PresetsPanel(QWidget):
         # Loop table group
         loop_grp = QGroupBox("Loop table")
         loop_lay = QVBoxLayout(loop_grp)
+        loop_lay.setContentsMargins(6, 8, 6, 6)
+        loop_lay.setSpacing(4)
 
         # Mode selector row
         mode_row = QHBoxLayout()
@@ -829,9 +1678,10 @@ class PresetsPanel(QWidget):
             2, QHeaderView.ResizeMode.Stretch
         )
         loop_btn_row = QHBoxLayout()
-        self._loop_add_btn = QPushButton("+ Row"); self._loop_add_btn.setFixedWidth(60)
+        loop_btn_row.setSpacing(4)
+        self._loop_add_btn = QPushButton("+ Row"); self._loop_add_btn.setFixedWidth(64)
         self._loop_add_btn.setToolTip("Append a new empty row to the loop table.")
-        self._loop_del_btn = QPushButton("- Row"); self._loop_del_btn.setFixedWidth(60)
+        self._loop_del_btn = QPushButton("− Row"); self._loop_del_btn.setFixedWidth(64)
         self._loop_del_btn.setToolTip("Delete the selected row(s) from the loop table.")
         loop_btn_row.addWidget(self._loop_add_btn)
         loop_btn_row.addWidget(self._loop_del_btn)
@@ -843,11 +1693,17 @@ class PresetsPanel(QWidget):
         # Batch table group
         batch_grp = QGroupBox("Batch table")
         batch_lay = QVBoxLayout(batch_grp)
+        batch_lay.setContentsMargins(6, 8, 6, 6)
+        batch_lay.setSpacing(4)
         self._batch_table = QTableWidget(0, len(BATCH_SCHEMA))
         self._batch_table.setHorizontalHeaderLabels(BATCH_SCHEMA)
         self._batch_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._batch_table.verticalHeader().setVisible(False)
-        self._batch_table.setMinimumHeight(90)
+        self._batch_table.verticalHeader().setDefaultSectionSize(30)
+        self._batch_table.setMinimumHeight(100)
+        self._batch_table.setStyleSheet(
+            "QTableWidget::item { padding: 2px 4px; }"
+        )
         # Batch column header tooltips
         _batch_hdr_tips = {
             "Run":             "Check to include this row in the batch.",
@@ -860,15 +1716,15 @@ class PresetsPanel(QWidget):
                 "If checked, the PM100D reads laser power just before acquisition.\n"
                 "The measured value overwrites the manual Power field in the filename."
             ),
-            "condition_label": "Short label appended to the filename to identify this batch condition.",
-            "repeat":          "Number of times to repeat this acquisition (repetitions).",
-            "frames":          "Number of frames per single acquisition call.",
-            "Vbg_start":       "Back-gate voltage to ramp to at the start of this row (V).",
-            "Vbg_stop":        "Back-gate voltage to ramp to at the end / for reset (V).",
-            "Vtg_start":       "Top-gate voltage to ramp to at the start of this row (V).",
-            "Vtg_stop":        "Top-gate voltage to ramp to at the end / for reset (V).",
-            "Vbias_start":     "Source–drain bias at the start of the acquisition (V). Leave blank to skip.",
-            "Vbias_stop":      "Source–drain bias ramp end value (V). Leave blank to skip.",
+            "condition_label": "Short label appended to the filename to identify this Dual Gate condition.",
+            "repeat":          "Number of times to repeat this file acquisition.",
+            "frames":          "Number of measured sweep points. Example: 0->1 V with frames=11 measures 11 points spaced by 0.1 V.",
+            "Vbg_start":       "Back-gate voltage at the first Dual Gate sweep point (V).",
+            "Vbg_stop":        "Back-gate voltage at the final Dual Gate sweep point (V).",
+            "Vtg_start":       "Top-gate voltage at the first Dual Gate sweep point (V).",
+            "Vtg_stop":        "Top-gate voltage at the final Dual Gate sweep point (V).",
+            "Vbias_start":     "Source-drain bias at the first sweep point (V). Leave blank to skip.",
+            "Vbias_stop":      "Source-drain bias at the final sweep point (V). Leave blank to skip.",
         }
         for i, col in enumerate(BATCH_SCHEMA):
             item = self._batch_table.horizontalHeaderItem(i)
@@ -878,11 +1734,25 @@ class PresetsPanel(QWidget):
         self._when_delegate = _WhenDelegate(self._loop_table, self._batch_table)
         _when_col = BATCH_SCHEMA.index("When")
         self._batch_table.setItemDelegateForColumn(_when_col, self._when_delegate)
+        self._batch_int_delegate = _IntSpinDelegate(parent=self._batch_table)
+        self._batch_float_delegate = _OptionalFloatDelegate(parent=self._batch_table)
+        for col_name in _BATCH_INT_COLUMNS:
+            self._batch_table.setItemDelegateForColumn(BATCH_SCHEMA.index(col_name), self._batch_int_delegate)
+        for col_name in _BATCH_FLOAT_COLUMNS:
+            self._batch_table.setItemDelegateForColumn(BATCH_SCHEMA.index(col_name), self._batch_float_delegate)
+        self._batch_table.setAlternatingRowColors(True)
+        self._batch_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        _configure_batch_table_columns(self._batch_table)
 
         batch_btn_row = QHBoxLayout()
-        self._batch_add_btn = QPushButton("+ Row"); self._batch_add_btn.setFixedWidth(60)
+        batch_btn_row.setSpacing(4)
+        self._batch_add_btn = QPushButton("+ Row"); self._batch_add_btn.setFixedWidth(64)
         self._batch_add_btn.setToolTip("Append a new empty row to the batch table.")
-        self._batch_del_btn = QPushButton("- Row"); self._batch_del_btn.setFixedWidth(60)
+        self._batch_del_btn = QPushButton("− Row"); self._batch_del_btn.setFixedWidth(64)
         self._batch_del_btn.setToolTip("Delete the selected row(s) from the batch table.")
         batch_btn_row.addWidget(self._batch_add_btn)
         batch_btn_row.addWidget(self._batch_del_btn)
@@ -891,12 +1761,27 @@ class PresetsPanel(QWidget):
         batch_lay.addLayout(batch_btn_row)
         lay_left.addWidget(batch_grp, stretch=1)
 
+        self._sweep_calc = _SweepLineCalculator(
+            smu_ctrl=self._smu,
+            safe_jump_spin=self._safe_jump_spin if hasattr(self, "_safe_jump_spin") else None,
+        )
+        self._sweep_calc.add_row_requested.connect(self._on_calculator_add_row)
+        lay_left.addWidget(self._sweep_calc)
+
         apply_row = QHBoxLayout()
+        apply_row.setSpacing(6)
         self._apply_btn   = QPushButton("Apply")
+        self._apply_btn.setMinimumHeight(26)
+        self._apply_btn.setMinimumWidth(80)
         self._apply_btn.setToolTip(
             "Commit the current table edits and rebuild the run plan preview."
         )
+        self._apply_btn.setStyleSheet(
+            "QPushButton { font-weight: 600; border-color: #90a8c0; }"
+            "QPushButton:hover { border-color: #5a82a8; }"
+        )
         self._discard_btn = QPushButton("Discard")
+        self._discard_btn.setMinimumHeight(26)
         self._discard_btn.setToolTip("Revert the tables to the last applied state.")
         apply_row.addWidget(self._apply_btn)
         apply_row.addWidget(self._discard_btn)
@@ -908,11 +1793,58 @@ class PresetsPanel(QWidget):
         # ── right: tree + progress + run/stop + log ───────────────────────
         right = QWidget()
         lay_right = QVBoxLayout(right)
-        lay_right.setContentsMargins(0, 0, 0, 0)
+        lay_right.setContentsMargins(4, 0, 0, 0)
+        lay_right.setSpacing(6)
 
-        self._summary_lbl = QLabel("Apply tables to update preview.")
+        self._summary_lbl = QLabel("Apply tables to update the Dual Gate plan.")
         self._summary_lbl.setWordWrap(True)
         lay_right.addWidget(self._summary_lbl)
+
+        safety_grp = QGroupBox("Dual Gate Safety")
+        safety_form = QFormLayout(safety_grp)
+        self._safe_jump_spin = QDoubleSpinBox()
+        self._safe_jump_spin.setRange(0.01, 100.0)
+        self._safe_jump_spin.setDecimals(3)
+        self._safe_jump_spin.setSingleStep(0.1)
+        self._safe_jump_spin.setValue(float(cfg.ramp.safe_jump_V))
+        self._safe_jump_spin.setSuffix(" V")
+        self._safe_jump_spin.setToolTip(
+            "Maximum allowed direct voltage jump between Dual Gate sweep points. "
+            "Runs are blocked if any resolved Vtg, Vbg, or Vbias jump exceeds this limit."
+        )
+        safety_form.addRow("Max jump / step:", self._safe_jump_spin)
+        lay_right.addWidget(safety_grp)
+
+        file_grp = QGroupBox("Filename preview")
+        file_lay = QVBoxLayout(file_grp)
+        self._filename_parts_table = QTableWidget(len(PART_SPECS), 3)
+        self._filename_parts_table.setHorizontalHeaderLabels(["Use", "Part", "Preview"])
+        self._filename_parts_table.verticalHeader().setVisible(False)
+        self._filename_parts_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._filename_parts_table.horizontalHeader().resizeSection(0, 40)
+        self._filename_parts_table.horizontalHeader().resizeSection(1, 108)
+        self._filename_parts_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self._filename_parts_table.setMaximumHeight(200)
+        self._filename_parts_table.setAlternatingRowColors(True)
+        self._filename_preview_lbl = QLabel("Filename: -")
+        self._filename_preview_lbl.setWordWrap(True)
+        self._filename_preview_lbl.setStyleSheet("font-family: monospace;")
+        self._save_path_preview_lbl = QLabel("Folder: -")
+        self._save_path_preview_lbl.setWordWrap(True)
+        self._save_path_preview_lbl.setStyleSheet("color: gray;")
+        self._preview_note_lbl = QLabel("")
+        self._preview_note_lbl.setWordWrap(True)
+        self._preview_note_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        self._upcoming_preview = QTextEdit()
+        self._upcoming_preview.setReadOnly(True)
+        self._upcoming_preview.setMaximumHeight(72)
+        self._upcoming_preview.setStyleSheet("font-family: monospace; font-size: 11px;")
+        file_lay.addWidget(self._filename_parts_table)
+        file_lay.addWidget(self._filename_preview_lbl)
+        file_lay.addWidget(self._save_path_preview_lbl)
+        file_lay.addWidget(self._preview_note_lbl)
+        file_lay.addWidget(self._upcoming_preview)
+        lay_right.addWidget(file_grp)
 
         self._tree = RunPlanTree()
         self._tree.setMinimumHeight(150)
@@ -921,26 +1853,52 @@ class PresetsPanel(QWidget):
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
-        self._progress.setFormat("%v/%m acquisitions")
+        self._progress.setFormat("%v/%m files")
         lay_right.addWidget(self._progress)
 
         self._status_lbl = QLabel("Idle")
-        self._status_lbl.setStyleSheet("color: gray;")
+        self._status_lbl.setStyleSheet("color: #707070; font-size: 11px;")
         lay_right.addWidget(self._status_lbl)
 
         run_row = QHBoxLayout()
-        self._run_btn  = QPushButton("Run")
+        run_row.setSpacing(8)
+        self._run_btn  = QPushButton("▶  Run")
+        self._run_btn.setMinimumHeight(32)
+        self._run_btn.setMinimumWidth(110)
+        self._run_btn.setStyleSheet(
+            "QPushButton { font-weight: 700; font-size: 12px;"
+            " border-color: #5a9060; color: #1a4020;"
+            " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            " stop:0 #d8f0d8, stop:1 #b8e0b8); }"
+            "QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            " stop:0 #e8f8e8, stop:1 #c8ecc8); }"
+            "QPushButton:pressed { background: #a8d8a8; }"
+            "QPushButton:disabled { color: #aaaaaa; border-color: #d0d0d0;"
+            " background: #f0f0f0; }"
+        )
         self._run_btn.setToolTip(
             "Start the sweep.\n"
             "Click Apply first to lock in any table edits."
         )
-        self._stop_btn = QPushButton("Stop")
+        self._stop_btn = QPushButton("■  Stop")
+        self._stop_btn.setMinimumHeight(32)
+        self._stop_btn.setMinimumWidth(90)
+        self._stop_btn.setStyleSheet(
+            "QPushButton { font-weight: 700; font-size: 12px;"
+            " border-color: #a05050; color: #6a1010;"
+            " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            " stop:0 #f8dada, stop:1 #eec0c0); }"
+            "QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            " stop:0 #ffe8e8, stop:1 #f4cccc); }"
+            "QPushButton:pressed { background: #e0a8a8; }"
+            "QPushButton:disabled { color: #aaaaaa; border-color: #d0d0d0;"
+            " background: #f0f0f0; }"
+        )
         self._stop_btn.setToolTip(
             "Request a graceful stop after the current acquisition finishes.\n"
             "Voltages are ramped back to zero before the run exits."
         )
         self._stop_btn.setEnabled(False)
-        self._stop_btn.setStyleSheet("color: red;")
         run_row.addWidget(self._run_btn)
         run_row.addWidget(self._stop_btn)
         run_row.addStretch()
@@ -950,8 +1908,13 @@ class PresetsPanel(QWidget):
         log_lay = QVBoxLayout(log_grp)
         self._log_text = QTextEdit()
         self._log_text.setReadOnly(True)
-        self._log_text.setMaximumHeight(180)
-        self._log_text.setStyleSheet("font-family: monospace; font-size: 11px;")
+        self._log_text.setMaximumHeight(190)
+        self._log_text.setMinimumHeight(80)
+        self._log_text.setStyleSheet(
+            "QTextEdit { font-family: 'Consolas', 'Courier New', monospace;"
+            " font-size: 11px; background: #fafafa; border: 1px solid #d0d0d0;"
+            " border-radius: 3px; }"
+        )
         clear_log_btn = QPushButton("Clear")
         clear_log_btn.setFixedWidth(55)
         clear_log_btn.clicked.connect(self._log_text.clear)
@@ -964,7 +1927,11 @@ class PresetsPanel(QWidget):
         lay_right.addWidget(log_grp)
 
         splitter.addWidget(right)
-        splitter.setSizes([540, 460])
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 11)
+        splitter.setStretchFactor(1, 7)
+        right.setMinimumWidth(430)
+        splitter.setSizes([880, 500])
 
         # ── wire ──────────────────────────────────────────────────────────
         self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
@@ -976,9 +1943,32 @@ class PresetsPanel(QWidget):
         self._batch_del_btn.clicked.connect(self._del_batch_row)
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn.clicked.connect(self._on_stop)
+        self._loop_table.itemChanged.connect(lambda _item: self._update_filename_preview())
+        self._batch_table.itemChanged.connect(lambda _item: self._update_filename_preview())
+        self._batch_table.itemSelectionChanged.connect(self._update_filename_preview)
+        self._loop_table.itemSelectionChanged.connect(self._update_filename_preview)
+        self._mode_combo.currentTextChanged.connect(lambda _mode: self._update_filename_preview())
+        self._mode_combo_name.currentTextChanged.connect(self._update_filename_preview)
+        self._safe_jump_spin.valueChanged.connect(self._on_safety_changed)
+        for widget in (
+            self._sample_edit,
+            self._tag_edit,
+            self._temp_edit,
+            self._laser_edit,
+            self._power_edit,
+            self._power_coeff_edit,
+            self._subfolder_edit,
+        ):
+            widget.textChanged.connect(self._update_filename_preview)
 
         # Initialise mode UI (sets hint label + Group column visibility)
+        self._populate_filename_parts()
         self._on_mode_changed(self._mode_combo.currentText())
+        self._sweep_calc._safe_jump_spin = self._safe_jump_spin
+        self._sweep_calc._recalculate()
+        if self._smu is not None:
+            self._smu.connected.connect(lambda *_: self._sweep_calc.set_vbias_available(self._smu.is_connected))
+            self._smu.disconnected.connect(lambda: self._sweep_calc.set_vbias_available(False))
 
     # ── mode ──────────────────────────────────────────────────────────────────
 
@@ -1004,6 +1994,205 @@ class PresetsPanel(QWidget):
         _populate_batch_table(self._batch_table, self._batch_src)
         # Reapply mode (column visibility may have changed)
         self._on_mode_changed(self._mode_combo.currentText())
+        self._connect_loop_param_signals()
+        self._update_filename_preview()
+
+    def _connect_loop_param_signals(self):
+        for r in range(self._loop_table.rowCount()):
+            combo = self._loop_table.cellWidget(r, 1)
+            if combo is not None and not combo.property("preview_connected"):
+                combo.currentTextChanged.connect(self._update_filename_preview)
+                combo.setProperty("preview_connected", True)
+
+    def _populate_filename_parts(self):
+        enabled = set(_enabled_filename_parts())
+        self._filename_parts_table.setRowCount(len(PART_SPECS))
+        for r, (key, label) in enumerate(PART_SPECS):
+            self._filename_parts_table.setCellWidget(r, 0, _make_check_cell(key in enabled))
+            self._filename_parts_table.setItem(r, 1, QTableWidgetItem(label))
+            self._filename_parts_table.setItem(r, 2, QTableWidgetItem(""))
+            cb = self._filename_parts_table.cellWidget(r, 0).findChild(QCheckBox)
+            if cb and not cb.property("preview_connected"):
+                cb.toggled.connect(self._on_filename_parts_changed)
+                cb.setProperty("preview_connected", True)
+
+    def _selected_filename_parts(self) -> List[str]:
+        parts: List[str] = []
+        for r, (key, _label) in enumerate(PART_SPECS):
+            if _cell_checked(self._filename_parts_table.cellWidget(r, 0)):
+                parts.append(key)
+        return parts
+
+    def _on_filename_parts_changed(self, *_args):
+        cfg.filename.enabled_parts = self._selected_filename_parts()
+        cfg.filename.temperature = self._temp_edit.text().strip() or cfg.filename.temperature
+        cfg.filename.measurement_mode = self._mode_combo_name.currentText()
+        coeff = _safe_float(self._power_coeff_edit.text())
+        cfg.filename.power_coefficient = coeff if coeff is not None else 1.0
+        self._update_filename_preview()
+
+    def _on_safety_changed(self, value: float):
+        cfg.ramp.safe_jump_V = float(value)
+        if hasattr(self, "_sweep_calc"):
+            self._sweep_calc._recalculate()
+        self._update_plan()
+
+    def _draft_loop_and_batch(self) -> Tuple[pd.DataFrame, pd.DataFrame, List[dict], pd.DataFrame]:
+        loop_df = _normalize_loop(_read_loop_table(self._loop_table))
+        batch_df = _normalize_batch(_read_batch_table(self._batch_table))
+        seq, batch, _total = _build_plan(loop_df, batch_df, mode=self._mode_combo.currentText())
+        return loop_df, batch_df, seq, batch
+
+    def _current_run_meta(self) -> Dict[str, Any]:
+        coeff = _safe_float(self._power_coeff_edit.text())
+        return {
+            "device_id": self._sample_edit.text().strip(),
+            "tag": "",
+            "temperature": self._temp_edit.text().strip(),
+            "measurement_mode": self._mode_combo_name.currentText(),
+            "laser_nm": self._laser_edit.text().strip(),
+            "power_uw": self._power_edit.text().strip(),
+            "power_coefficient": coeff if coeff is not None else 1.0,
+            "subfolder": self._subfolder_edit.text().strip() or "Initial Data",
+        }
+
+    def _current_output_dir(self, run_meta: Dict[str, Any]) -> Path:
+        device_id = run_meta["device_id"].strip() or "DeviceID"
+        subfolder = run_meta["subfolder"].strip() or "Initial Data"
+        return cfg.base_out / device_id / subfolder
+
+    def _selected_batch_row_dict(self, batch_df: pd.DataFrame) -> Dict[str, Any]:
+        rows = self._batch_table.selectionModel().selectedRows() if self._batch_table.selectionModel() else []
+        if rows:
+            row_idx = rows[0].row()
+            if 0 <= row_idx < len(batch_df):
+                return batch_df.iloc[row_idx].to_dict()
+        if len(batch_df):
+            return batch_df.iloc[0].to_dict()
+        return {c: "" for c in BATCH_SCHEMA}
+
+    @Slot()
+    def _update_filename_preview(self, *_args):
+        if not hasattr(self, "_filename_preview_lbl"):
+            return
+
+        try:
+            loop_df, batch_df, seq, _batch = self._draft_loop_and_batch()
+        except Exception as exc:
+            self._filename_preview_lbl.setText(f"Filename: invalid draft ({exc})")
+            self._save_path_preview_lbl.setText("Folder: -")
+            self._preview_note_lbl.setText("Fix table errors to update the filename preview.")
+            self._upcoming_preview.setPlainText("")
+            return
+
+        run_meta = self._current_run_meta()
+        out_dir = self._current_output_dir(run_meta)
+        selected_row = self._selected_batch_row_dict(batch_df)
+        ctx = _first_applicable_seq_ctx(seq, selected_row)
+        measured_preview_power = None
+        if _to_bool(selected_row.get("MeasurePower", False)) and self._pm and self._pm.is_connected:
+            try:
+                measured_preview_power = float(self._pm.adapter.get_power()) * 1e6
+            except Exception:
+                measured_preview_power = None
+
+        try:
+            base_name, fname_ctx, _tokens = _build_run_filename_base(
+                run_meta,
+                ctx,
+                selected_row,
+                measured_power_uw=measured_preview_power,
+                enabled_parts=self._selected_filename_parts(),
+            )
+            self._filename_preview_lbl.setText(f"Filename: {base_name}.csv")
+            self._save_path_preview_lbl.setText(f"Folder: {out_dir}")
+            note = (
+                "Files are saved under output_root / Device ID / Subfolder. "
+                "Numeric suffixes like _001 are added only when a name collision exists."
+            )
+            if _to_bool(selected_row.get("MeasurePower", False)):
+                note = (
+                    "MeasurePower is enabled. The power token uses corrected measured power when available; "
+                    "preview uses the current PM100D reading if it can be read."
+                )
+            self._preview_note_lbl.setText(note)
+            part_values = build_part_values(fname_ctx)
+            for r, (key, _label) in enumerate(PART_SPECS):
+                item = self._filename_parts_table.item(r, 2)
+                if item is not None:
+                    item.setText(part_values.get(key, ""))
+        except Exception as exc:
+            self._filename_preview_lbl.setText(f"Filename: invalid ({exc})")
+            self._save_path_preview_lbl.setText("Folder: -")
+            self._preview_note_lbl.setText("Fix the filename inputs before running.")
+
+        upcoming: List[str] = []
+        for seq_ctx in seq[:3]:
+            for _, row in batch_df.iterrows():
+                row_dict = row.to_dict()
+                if not _to_bool(row_dict.get("Run", True)):
+                    continue
+                if not _when_ok(row_dict.get("When", ""), _outer_ctx(seq_ctx)):
+                    continue
+                try:
+                    base_name, _fc, _tokens = _build_run_filename_base(
+                        run_meta,
+                        seq_ctx,
+                        row_dict,
+                        enabled_parts=self._selected_filename_parts(),
+                    )
+                    upcoming.append(base_name)
+                except Exception:
+                    continue
+                if len(upcoming) >= 4:
+                    break
+            if len(upcoming) >= 4:
+                break
+        self._upcoming_preview.setPlainText("\n".join(upcoming) if upcoming else "No upcoming filenames yet.")
+
+    def _validate_before_run(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        self._loop_src = _normalize_loop(_read_loop_table(self._loop_table))
+        self._batch_src = _normalize_batch(_read_batch_table(self._batch_table))
+        try:
+            self._update_plan()
+        except Exception:
+            pass
+
+        run_meta = self._current_run_meta()
+        if not run_meta["device_id"].strip():
+            return None, "Device ID is required before running."
+        if not run_meta["temperature"].strip():
+            return None, "Temperature is required before running."
+        if not self._selected_filename_parts():
+            return None, "Enable at least one filename part."
+        if not self._lf6 or not self._lf6.is_connected:
+            return None, "LF6 must be connected or running in mock mode before a sweep can start."
+        if self._df_batch.empty or not self._final_seq:
+            return None, "No runnable plan is available."
+        if any(_to_bool(row.get("MeasurePower", False)) for _, row in self._df_batch.iterrows()):
+            if not self._pm or not self._pm.is_connected:
+                return None, "MeasurePower rows require a connected PM100D."
+        jump_issues = _validate_safe_jumps(self._final_seq, self._df_batch, float(self._safe_jump_spin.value()))
+        if jump_issues:
+            for issue in jump_issues:
+                self._log(issue)
+            return None, jump_issues[0]
+        out_dir = self._current_output_dir(run_meta)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            return None, f"Save path is invalid: {exc}"
+        try:
+            first_row = self._df_batch.iloc[0].to_dict()
+            _build_run_filename_base(
+                run_meta,
+                _first_applicable_seq_ctx(self._final_seq, first_row),
+                first_row,
+                enabled_parts=self._selected_filename_parts(),
+            )
+        except Exception as exc:
+            return None, f"Filename metadata is incomplete: {exc}"
+        return run_meta, None
 
     @Slot()
     def _add_loop_row(self):
@@ -1013,32 +2202,59 @@ class PresetsPanel(QWidget):
         self._loop_table.setCellWidget(r, 1, _make_param_combo(LOOP_PARAMS[0]))
         self._loop_table.setItem(r, 2, QTableWidgetItem(""))
         self._loop_table.setItem(r, 3, QTableWidgetItem("1"))
+        self._connect_loop_param_signals()
+        self._update_filename_preview()
 
     @Slot()
     def _del_loop_row(self):
         rows = {i.row() for i in self._loop_table.selectedIndexes()}
         for r in sorted(rows, reverse=True):
             self._loop_table.removeRow(r)
+        self._update_filename_preview()
 
     @Slot()
     def _add_batch_row(self):
         r = self._batch_table.rowCount()
         self._batch_table.insertRow(r)
         defaults = {
-            "Run": "True", "When": "", "MeasurePower": "False",
-            "condition_label": "", "repeat": "1", "frames": "1",
+            "Run": True, "When": "", "MeasurePower": False,
+            "condition_label": "baseline", "repeat": "1", "frames": "1",
             "Vbg_start": "0", "Vbg_stop": "0",
             "Vtg_start": "0", "Vtg_stop": "0",
             "Vbias_start": "", "Vbias_stop": "",
         }
         for c, col in enumerate(BATCH_SCHEMA):
             self._batch_table.setItem(r, c, QTableWidgetItem(defaults.get(col, "")))
+        self._update_filename_preview()
 
     @Slot()
     def _del_batch_row(self):
         rows = {i.row() for i in self._batch_table.selectedIndexes()}
         for r in sorted(rows, reverse=True):
             self._batch_table.removeRow(r)
+        self._update_filename_preview()
+
+    @Slot(dict)
+    def _on_calculator_add_row(self, row_dict: dict):
+        selected = [idx.row() for idx in self._batch_table.selectionModel().selectedRows()] if self._batch_table.selectionModel() else []
+        insert_after = max(selected) if selected else self._batch_table.rowCount() - 1
+        current_df = _read_batch_table(self._batch_table)
+        new_row_df = _normalize_batch(pd.DataFrame([row_dict]))
+        if current_df.empty:
+            updated_df = new_row_df
+        else:
+            top = current_df.iloc[:insert_after + 1]
+            bottom = current_df.iloc[insert_after + 1:]
+            updated_df = pd.concat([top, new_row_df, bottom], ignore_index=True)
+        _populate_batch_table(self._batch_table, updated_df)
+        new_row_idx = insert_after + 1 if not current_df.empty else 0
+        self._batch_table.selectRow(new_row_idx)
+        self._batch_table.scrollTo(self._batch_table.model().index(new_row_idx, 0))
+        self._log(
+            f"Added row \"{row_dict.get('condition_label', '')}\" "
+            f"at position {new_row_idx + 1} from Sweep Line Calculator."
+        )
+        self._update_filename_preview()
 
     # ── apply / plan ──────────────────────────────────────────────────────────
 
@@ -1046,7 +2262,18 @@ class PresetsPanel(QWidget):
     def _on_apply(self):
         self._loop_src  = _normalize_loop(_read_loop_table(self._loop_table))
         self._batch_src = _normalize_batch(_read_batch_table(self._batch_table))
+        cfg.filename.enabled_parts = self._selected_filename_parts()
+        cfg.filename.temperature = self._temp_edit.text().strip() or cfg.filename.temperature
+        cfg.filename.measurement_mode = self._mode_combo_name.currentText()
+        coeff = _safe_float(self._power_coeff_edit.text())
+        cfg.filename.power_coefficient = coeff if coeff is not None else 1.0
         self._update_plan()
+        jump_issues = _validate_safe_jumps(self._final_seq, self._df_batch, float(self._safe_jump_spin.value()))
+        if jump_issues:
+            for issue in jump_issues:
+                self._log(issue)
+            QMessageBox.warning(self, "Unsafe Dual Gate sweep", jump_issues[0])
+        self._update_filename_preview()
 
     def _update_plan(self):
         mode = self._mode_combo.currentText()
@@ -1061,11 +2288,13 @@ class PresetsPanel(QWidget):
         self._df_batch   = batch
         self._total_acq  = total
         self._progress.setMaximum(max(total, 1))
+        total_points = _count_total_points(seq, batch)
         self._summary_lbl.setText(
-            f"{len(seq)} sequence(s) × batch → {total} acquisition(s)  "
-            f"[mode: {mode}]"
+            f"{len(seq)} sequence(s) x batch -> {total} file(s), "
+            f"{total_points} sweep point(s)  [mode: {mode}]"
         )
         self._tree.update_plan(seq, batch, done=0, total_acq=total)
+        self._update_filename_preview()
 
     # ── run / stop ────────────────────────────────────────────────────────────
 
@@ -1077,12 +2306,12 @@ class PresetsPanel(QWidget):
             self._log("No plan — click Apply first.")
             return
 
-        sample    = self._sample_edit.text().strip() or "Sample"
-        tag       = self._tag_edit.text().strip()
-        subfolder = self._subfolder_edit.text().strip()
-        laser_nm  = self._laser_edit.text().strip() or "0"
-        power_uw  = self._power_edit.text().strip()  or "1"
-        out_dir   = cfg.base_out / sample / subfolder if subfolder else cfg.base_out / sample
+        run_meta, err = self._validate_before_run()
+        if err:
+            QMessageBox.warning(self, "Cannot start run", err)
+            self._log(err)
+            return
+        out_dir = self._current_output_dir(run_meta)
 
         self._stop_event.clear()
         self._run_thread = QThread(self)
@@ -1091,8 +2320,8 @@ class PresetsPanel(QWidget):
             lf6_ctrl=self._lf6, smu_ctrl=self._smu,
             rotation_ctrl=self._rot, stage_ctrl=self._stage, pm_ctrl=self._pm,
             out_dir=out_dir,
-            filename_pattern=cfg.filename.pattern,
-            sample=sample, tag=tag, laser_nm=laser_nm, power_uw=power_uw,
+            run_meta=run_meta,
+            filename_parts=self._selected_filename_parts(),
             stop_event=self._stop_event,
         )
         self._run_worker.moveToThread(self._run_thread)
@@ -1135,12 +2364,19 @@ class PresetsPanel(QWidget):
             current_seq_i=seq_i, current_label=label, current_rep_i=rep_i,
         )
 
-    @Slot()
-    def _on_finished(self):
+    @Slot(bool, str)
+    def _on_finished(self, success: bool, message: str):
         self._run_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
-        self._status_lbl.setText("Idle")
-        self._status_lbl.setStyleSheet("color: gray;")
+        if success:
+            self._status_lbl.setText("Completed")
+            self._status_lbl.setStyleSheet("color: green;")
+        elif self._stop_event.is_set():
+            self._status_lbl.setText("Stopped")
+            self._status_lbl.setStyleSheet("color: gray;")
+        else:
+            self._status_lbl.setText("Failed")
+            self._status_lbl.setStyleSheet("color: red;")
 
     def _log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")

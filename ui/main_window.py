@@ -4,7 +4,7 @@
 #
 # Layout:
 #   Left dock  : InstrumentPanel (connection controls, always visible)
-#   Right tabs : Presets | MegaSweep | BFP | Spectrum | Settings
+#   Right tabs : Dual Gate | 2D Sweep | BFP | Spectrum | Settings
 #
 # Controllers are created once here and injected into all panels.
 # Reload of UI modules is possible without dropping controller connections.
@@ -21,10 +21,118 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSettings
-from PySide6.QtGui  import QCloseEvent
+from PySide6.QtGui  import QCloseEvent, QFont
 from PySide6.QtWidgets import (
-    QMainWindow, QDockWidget, QTabWidget, QWidget, QStatusBar,
+    QMainWindow, QDockWidget, QTabWidget, QWidget, QStatusBar, QApplication,
 )
+
+# ── Global stylesheet ──────────────────────────────────────────────────────────
+_STYLESHEET = """
+/* Buttons */
+QPushButton {
+    padding: 4px 12px;
+    min-height: 22px;
+    border: 1px solid #b8b8b8;
+    border-radius: 4px;
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #f9f9f9, stop:1 #e9e9e9);
+}
+QPushButton:hover {
+    border-color: #9090a8;
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #ffffff, stop:1 #f0f0f0);
+}
+QPushButton:pressed {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                    stop:0 #dcdcdc, stop:1 #e8e8e8);
+}
+QPushButton:disabled {
+    color: #aaaaaa;
+    border-color: #d4d4d4;
+    background: #f2f2f2;
+}
+
+/* GroupBox */
+QGroupBox {
+    font-weight: 600;
+    border: 1px solid #cccccc;
+    border-radius: 5px;
+    margin-top: 10px;
+    padding-top: 2px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 8px;
+    top: -1px;
+    padding: 0 4px;
+    color: #3a3a3a;
+    background: transparent;
+}
+
+/* Tab bar */
+QTabBar::tab {
+    padding: 5px 16px;
+    border: 1px solid #c0c0c0;
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+    background: #e8e8e8;
+    color: #555555;
+    min-width: 72px;
+}
+QTabBar::tab:selected {
+    background: palette(window);
+    color: #111111;
+    font-weight: 600;
+    border-bottom: 1px solid palette(window);
+}
+QTabBar::tab:hover:!selected {
+    background: #f0f0f0;
+}
+
+/* Table header */
+QHeaderView::section {
+    background: #f0f0f0;
+    border: none;
+    border-right: 1px solid #d4d4d4;
+    border-bottom: 1px solid #d4d4d4;
+    padding: 3px 6px;
+    font-weight: 600;
+    color: #333333;
+}
+QHeaderView::section:first {
+    border-left: none;
+}
+
+/* Progress bar */
+QProgressBar {
+    border: 1px solid #bbbbbb;
+    border-radius: 4px;
+    text-align: center;
+    background: #eeeeee;
+    min-height: 16px;
+    font-size: 11px;
+}
+QProgressBar::chunk {
+    background: #5a8fc4;
+    border-radius: 3px;
+}
+
+/* Status bar */
+QStatusBar {
+    border-top: 1px solid #cccccc;
+    font-size: 11px;
+    color: #505050;
+}
+
+/* Dock widget title */
+QDockWidget::title {
+    font-weight: 600;
+    padding: 4px 6px;
+    background: #ececec;
+    border-bottom: 1px solid #c8c8c8;
+}
+"""
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -61,6 +169,13 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("SpectralSweep — PySide6")
         self.resize(1400, 900)
 
+        # Apply global stylesheet once (on the QApplication so all windows share it)
+        app = QApplication.instance()
+        if app and not app.styleSheet():
+            app.setStyleSheet(_STYLESHEET)
+            base_font = QFont("Segoe UI", 9)
+            app.setFont(base_font)
+
         # ── create controllers (one per instrument family) ────────────────────
         self._lf6  = LF6Controller(parent=self)
         self._smu  = SMUController(parent=self)
@@ -76,7 +191,7 @@ class MainWindow(QMainWindow):
         self._lf6.connected.connect(lambda _: self._status.showMessage("LF6 connected"))
         self._lf6.disconnected.connect(lambda: self._status.showMessage("LF6 disconnected"))
         self._lf6.error.connect(lambda m: self._status.showMessage(f"LF6 error: {m[:80]}"))
-        self._smu.connected.connect(lambda: self._status.showMessage("SMU connected"))
+        self._smu.connected.connect(lambda *_: self._status.showMessage("SMU connected"))
         self._smu.disconnected.connect(lambda: self._status.showMessage("SMU disconnected"))
 
         # ── instrument panel dock (left) ──────────────────────────────────────
@@ -102,21 +217,21 @@ class MainWindow(QMainWindow):
         self._tabs.setDocumentMode(True)
         self.setCentralWidget(self._tabs)
 
-        # Presets
+        # Dual Gate
         self._presets = PresetsPanel(
             lf6_ctrl=self._lf6,
             smu_ctrl=self._smu,
             rotation_ctrl=self._rot,
             stage_ctrl=self._stg,
         )
-        self._tabs.addTab(self._presets, "Presets")
+        self._tabs.addTab(self._presets, "Dual Gate")
 
-        # MegaSweep
+        # 2D Sweep
         self._mega = MegaSweepPanel(
             smu_ctrl=self._smu,
             lf6_ctrl=self._lf6,
         )
-        self._tabs.addTab(self._mega, "MegaSweep")
+        self._tabs.addTab(self._mega, "2D Sweep")
 
         # BFP
         self._bfp = BFPPanel(lf6_ctrl=self._lf6)

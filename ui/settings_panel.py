@@ -1,11 +1,13 @@
 # ui/settings_panel.py
 # ──────────────────────────────────────────────────────────────────────────────
-# LF6 settings + output path + filename pattern panel.
+# LF6 settings + output path + filename defaults panel.
 #
 # Responsibilities:
 #   - Exposure, centre wavelength, accumulations  →  lf6_ctrl.apply_settings()
 #   - BASE_OUT folder picker                       →  cfg.filename.base_out
-#   - Filename pattern editor                      →  cfg.filename.pattern
+#   - Filename defaults                            →  cfg.filename.temperature /
+#                                                    cfg.filename.measurement_mode /
+#                                                    cfg.filename.power_coefficient
 #   - "Save config" button                         →  cfg.save()
 #
 # Rules:
@@ -22,7 +24,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
-    QDoubleSpinBox, QSpinBox, QLineEdit, QFileDialog, QFormLayout,
+    QDoubleSpinBox, QSpinBox, QLineEdit, QFileDialog, QFormLayout, QComboBox,
     QSizePolicy,
 )
 
@@ -54,7 +56,8 @@ class SettingsPanel(QWidget):
     def _build(self):
         root = QVBoxLayout(self)
         root.setAlignment(Qt.AlignmentFlag.AlignTop)
-        root.setSpacing(8)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(10)
 
         root.addWidget(self._build_lf6_group())
         root.addWidget(self._build_output_group())
@@ -63,10 +66,17 @@ class SettingsPanel(QWidget):
         # Save config button
         self._save_btn = QPushButton("Save config to disk")
         self._save_btn.setToolTip("Persists all settings to config.json")
+        self._save_btn.setMinimumHeight(28)
+        self._save_btn.setMaximumWidth(200)
+        self._save_btn.setStyleSheet(
+            "QPushButton { font-weight: 600; border-color: #90a8c0; }"
+            "QPushButton:hover { border-color: #5a82a8; }"
+        )
         root.addWidget(self._save_btn)
 
         self._status_lbl = QLabel("")
-        self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._status_lbl.setStyleSheet("font-size: 11px;")
         root.addWidget(self._status_lbl)
 
         root.addStretch()
@@ -74,12 +84,16 @@ class SettingsPanel(QWidget):
     def _build_lf6_group(self) -> QGroupBox:
         grp = QGroupBox("LF6 Spectrometer Settings")
         form = QFormLayout(grp)
+        form.setContentsMargins(8, 10, 8, 8)
+        form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self._exposure = QDoubleSpinBox()
         self._exposure.setRange(1.0, 600_000.0)
         self._exposure.setDecimals(1)
         self._exposure.setSingleStep(100.0)
         self._exposure.setSuffix(" ms")
+        self._exposure.setFixedWidth(130)
         form.addRow("Exposure:", self._exposure)
 
         self._center = QDoubleSpinBox()
@@ -87,18 +101,22 @@ class SettingsPanel(QWidget):
         self._center.setDecimals(1)
         self._center.setSingleStep(1.0)
         self._center.setSuffix(" nm")
+        self._center.setFixedWidth(130)
         form.addRow("Centre λ:", self._center)
 
         self._accum = QSpinBox()
         self._accum.setRange(1, 1000)
         self._accum.setSuffix(" frame(s)")
+        self._accum.setFixedWidth(130)
         form.addRow("Accumulations:", self._accum)
 
         self._apply_btn = QPushButton("Apply to LF6")
         self._apply_btn.setEnabled(False)
+        self._apply_btn.setMaximumWidth(130)
         form.addRow("", self._apply_btn)
 
         self._lf6_status = QLabel("")
+        self._lf6_status.setStyleSheet("font-size: 11px;")
         form.addRow("", self._lf6_status)
 
         return grp
@@ -106,12 +124,14 @@ class SettingsPanel(QWidget):
     def _build_output_group(self) -> QGroupBox:
         grp = QGroupBox("Output Path")
         lay = QVBoxLayout(grp)
+        lay.setContentsMargins(8, 10, 8, 8)
 
         row = QHBoxLayout()
+        row.setSpacing(6)
         self._base_out_edit = QLineEdit()
         self._base_out_edit.setPlaceholderText("Base output folder…")
         self._browse_btn = QPushButton("Browse…")
-        self._browse_btn.setFixedWidth(72)
+        self._browse_btn.setFixedWidth(80)
         row.addWidget(self._base_out_edit)
         row.addWidget(self._browse_btn)
         lay.addLayout(row)
@@ -119,24 +139,39 @@ class SettingsPanel(QWidget):
         return grp
 
     def _build_filename_group(self) -> QGroupBox:
-        grp = QGroupBox("Filename Pattern")
-        lay = QVBoxLayout(grp)
+        grp = QGroupBox("Filename Defaults")
+        form = QFormLayout(grp)
+        form.setContentsMargins(8, 10, 8, 8)
+        form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
-        self._pattern_edit = QLineEdit()
-        self._pattern_edit.setPlaceholderText("${sample}$~${tag}$~…")
-        lay.addWidget(self._pattern_edit)
+        self._temp_edit = QLineEdit()
+        self._temp_edit.setPlaceholderText("e.g. 6 or 1.8")
+        self._temp_edit.setFixedWidth(130)
+        form.addRow("Temperature:", self._temp_edit)
+
+        self._measurement_mode = QComboBox()
+        self._measurement_mode.addItems(["PL", "Ref"])
+        self._measurement_mode.setFixedWidth(130)
+        form.addRow("Mode:", self._measurement_mode)
+
+        self._power_coeff = QDoubleSpinBox()
+        self._power_coeff.setRange(0.000001, 1_000_000.0)
+        self._power_coeff.setDecimals(6)
+        self._power_coeff.setSingleStep(0.1)
+        self._power_coeff.setFixedWidth(130)
+        form.addRow("Power coefficient:", self._power_coeff)
 
         hint = QLabel(
-            "Vars: {sample} {tag} {laser_nm} {power_uw} {exp_s} "
-            "{epf} {center_nm} {rot_block} {cond_block}"
+            "These values are the defaults used by the structured filename builder in the Dual Gate tab."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray; font-size: 10px;")
-        lay.addWidget(hint)
+        hint.setStyleSheet("color: #888888; font-size: 10px;")
+        form.addRow("", hint)
 
-        self._reset_pattern_btn = QPushButton("Reset to default")
-        lay.addWidget(self._reset_pattern_btn)
-
+        self._reset_filename_btn = QPushButton("Reset filename defaults")
+        self._reset_filename_btn.setMaximumWidth(180)
+        form.addRow("", self._reset_filename_btn)
         return grp
 
     # ── wire ──────────────────────────────────────────────────────────────────
@@ -145,7 +180,7 @@ class SettingsPanel(QWidget):
         self._apply_btn.clicked.connect(self._on_apply_lf6)
         self._browse_btn.clicked.connect(self._on_browse)
         self._save_btn.clicked.connect(self._on_save)
-        self._reset_pattern_btn.clicked.connect(self._on_reset_pattern)
+        self._reset_filename_btn.clicked.connect(self._on_reset_filename_defaults)
 
         # Enable Apply button only when LF6 connects
         if self._ctrl is not None:
@@ -175,8 +210,14 @@ class SettingsPanel(QWidget):
         self._base_out_edit.textChanged.connect(
             lambda t: setattr(cfg.filename, "base_out", t)
         )
-        self._pattern_edit.textChanged.connect(
-            lambda t: setattr(cfg.filename, "pattern", t)
+        self._temp_edit.textChanged.connect(
+            lambda t: setattr(cfg.filename, "temperature", t)
+        )
+        self._measurement_mode.currentTextChanged.connect(
+            lambda t: setattr(cfg.filename, "measurement_mode", t)
+        )
+        self._power_coeff.valueChanged.connect(
+            lambda v: setattr(cfg.filename, "power_coefficient", float(v))
         )
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -187,7 +228,9 @@ class SettingsPanel(QWidget):
         self._center.setValue(cfg.lf6.center_nm)
         self._accum.setValue(cfg.lf6.accumulations)
         self._base_out_edit.setText(cfg.filename.base_out)
-        self._pattern_edit.setText(cfg.filename.pattern)
+        self._temp_edit.setText(cfg.filename.temperature)
+        self._measurement_mode.setCurrentText(cfg.filename.measurement_mode)
+        self._power_coeff.setValue(float(cfg.filename.power_coefficient))
 
     # ── slots ─────────────────────────────────────────────────────────────────
 
@@ -219,8 +262,9 @@ class SettingsPanel(QWidget):
         self._status_lbl.setStyleSheet("color: green;")
 
     @Slot()
-    def _on_reset_pattern(self):
-        from dataclasses import fields
+    def _on_reset_filename_defaults(self):
         from utils.config import FilenameConfig
-        default = FilenameConfig().pattern
-        self._pattern_edit.setText(default)
+        default = FilenameConfig()
+        self._temp_edit.setText(default.temperature)
+        self._measurement_mode.setCurrentText(default.measurement_mode)
+        self._power_coeff.setValue(float(default.power_coefficient))

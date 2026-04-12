@@ -1,6 +1,9 @@
 .venv-311/
 .venv-312/
 .venv-313/
+.venv-pyside6-311/
+.venv-pyside6-312/
+.venv-pyside6-313/
 __pycache__/
 *.pyc
 config.local.json

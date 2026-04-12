@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 
 # ── Location of the persisted config file ─────────────────────────────────────
@@ -61,16 +61,23 @@ class RampConfig:
     delay_s: float = 0.02             # s   — go_delay default
     settle_s: float = 0.05            # s   — settle_delay default
     vbias_step_V: float = 0.1         # V   — vbias_ramp_step default
+    safe_jump_V: float = 0.5          # V   — max allowed direct jump during Dual Gate sweeps
 
 
 @dataclass
 class FilenameConfig:
-    """Filename pattern and output path."""
+    """Filename settings and output path."""
     base_out: str = r"D:\instrument_control_v3_1"
-    pattern: str = (
-        "${sample}$~${tag}$~$1.8KPL{laser_nm}nm{power_uw}uw{exp_s}sx{epf}$~"
-        "${center_nm}nmc$~${rot_block}$~${cond_block}$"
-    )
+    temperature: str = "1.8"
+    measurement_mode: str = "PL"
+    power_coefficient: float = 1.0
+    enabled_parts: List[str] = field(default_factory=lambda: [
+        "temp_mode",
+        "laser_power",
+        "center",
+        "exposure",
+        "condition",
+    ])
     # Characters forbidden in Windows filenames — kept here so UI can validate
     invalid_chars: str = r'<>:"/\|?*'
 

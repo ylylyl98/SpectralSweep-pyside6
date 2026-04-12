@@ -1,0 +1,14 @@
+# SpectralSweep desktop app requirements
+# Current supported product: PySide6 desktop application
+
+PySide6>=6.7
+pyqtgraph>=0.13
+numpy
+pandas
+matplotlib
+pyvisa
+pyvisa-py
+pyserial
+pylablib
+pythonnet
+nidaqmx

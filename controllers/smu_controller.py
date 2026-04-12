@@ -279,6 +279,19 @@ class SMUController(QObject):
         """IVDevice instance; None if not connected. Used directly by sweep steps."""
         return self._worker.device
 
+    @property
+    def has_vbias(self) -> bool:
+        """Whether a connected SMU exposes a usable Vbias channel."""
+        if not self.is_connected:
+            return False
+        device = self._worker.device
+        role_map = getattr(device, "_role_map", None)
+        if isinstance(role_map, dict):
+            vbias_role = role_map.get("Vbias")
+            if vbias_role is not None:
+                return True
+        return True
+
     # ── cleanup ───────────────────────────────────────────────────────────────
 
     def shutdown(self) -> None:

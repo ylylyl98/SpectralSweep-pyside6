@@ -1,11 +1,11 @@
 # ui/preview_widget.py
 # ──────────────────────────────────────────────────────────────────────────────
-# Reusable run-plan tree widget.
+# Reusable run-plan tree widget for the PySide6 presets workflow.
 #
-# Mirrors build_run_status_tree_html() from app/ui_streamlit/views/presets.py
-# but rendered as a QTreeWidget instead of an HTML string.
+# It renders the planned acquisition sequence directly in Qt so operators can
+# track pending, active, and completed runs from the desktop UI.
 #
-# Three visual states (match Streamlit colours):
+# Three visual states:
 #   done  → gray, ✓ prefix
 #   now   → amber background, ▶ prefix, bold
 #   todo  → light text, • prefix
@@ -34,6 +34,7 @@ from typing import List, Optional, Tuple
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush, QFont
 from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QWidget
+from utils.filename_builder import build_condition_display_label
 
 try:
     import pandas as pd
@@ -92,18 +93,6 @@ def _outer_ctx_alias(ctx: dict) -> dict:
         if simple not in out:
             out[simple] = v
     return out
-
-
-def _vbias_block(row) -> str:
-    """Derive a vbias filename component from a batch row."""
-    try:
-        vs = float(row.get("Vbias_start", 0) or 0)
-        ve = float(row.get("Vbias_stop",  0) or 0)
-        if vs != 0 or ve != 0:
-            return f"Vb{vs:+.2g}to{ve:+.2g}"
-    except Exception:
-        pass
-    return ""
 
 
 def _fmt_ctx(ctx: dict, param_order: Optional[List[str]] = None) -> str:
@@ -274,8 +263,12 @@ class RunPlanTree(QTreeWidget):
 
             for b_i, (lab, reps, row_i) in enumerate(plan):
                 r = _row(row_i)
-                vb = _vbias_block(r) if isinstance(r, dict) else ""
-                cond_name = lab + (f"_{vb}" if vb else "")
+                cond_name = build_condition_display_label(
+                    lab,
+                    r.get("Vbias_start") if isinstance(r, dict) else None,
+                    r.get("Vbias_stop") if isinstance(r, dict) else None,
+                )
+                cond_name = cond_name or f"cond{row_i}"
 
                 for r_i in range(reps):
                     if acq_abs < done:

@@ -1,47 +1,118 @@
-# 🧪 Lab Runner Streamlit
+# SpectralSweep
 
-**Lab Runner** is a dashboard for automating physics optical experiments with LightField software from Princeton Instruments. It lets you control Keithley 2400/2401 SMUs, manage voltage sweeps, and collect spectroscopic data in a single interface.
+SpectralSweep is a PySide6 desktop application for spectra acquisition and sweep-driven optical measurement workflows. The repository is now organized around the current desktop UI and its instrument-control runtime. The older LabRunner/Streamlit implementation is no longer a supported product.
 
-## ⚡ What It Does
+The application is intended for lab setups that combine Princeton Instruments LightField spectroscopy with voltage control, motion control, and optional optical power measurements. The desktop UI keeps instrument connections, sweep setup, live preview, and data capture in one operator-facing workflow.
 
-* **Unified Control:** Manage Spectrometers, CCD cameras, Motion Stages (e.g., for ND filter control), Rotators (e.g., for waveplate angles), and SMUs from one screen.
-* **Dual Gate Sweep:** Run loops either Nested or Synchronized (setting center wavelength, exposure times, motion stage positions, rotator angles) and complex sequences (TG ± BG) with automatic safety checks.
-* **MegaSweep:** Perform advanced high-dimensional voltage mapping (Vtg stripes vs. Vbg) with "Snake" routing for efficiency.
+## Main Features
 
-## 🔌 Supported Hardware
+- PySide6 desktop interface with a docked instrument-control panel and dedicated workflow tabs
+- Live spectrum viewing for the LF6 / LightField spectrometer path
+- Presets-based spectra sweep planning with loop tables, batch conditions, and CSV export
+- MegaSweep voltage-mapping workflow for Vtg/Vbg and D/Vbias acquisition patterns
+- BFP viewing and export tools
+- Hardware-controller wrappers for LF6, Keithley SMU workflows, rotation stages, linear stage, and Thorlabs PM100D
+- Mock LF6 mode for UI development without live spectrometer hardware
 
-* **Spectrometers:** Princeton Instruments LightField.
-* **Electronics (IV):** VISA-compatible Keithley 2400/2401.
-* **Motion:** Thorlabs Elliptec & Newport ESP300 (Stages and Rotators).
-* **Power:** Thorlabs PM100D Power Meters.
+## Supported Launch Path
 
-## 🛠️ Installation
+The only supported application entrypoint is:
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/ylylyl98/lab_runner_streamlit.git
-    cd lab_runner_streamlit
-    ```
+```bash
+python main.py
+```
 
-2.  **Switch to the Stable Branch:**
-    **Important:** Please ensure you are using the stable release for all experiments.
-    ```bash
-    git checkout stable
-    ```
+For Windows lab machines, the supported launcher is:
 
-3.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+```bat
+launch.bat
+```
 
-    ## 🚀 Quick Start
+To force mock LF6 mode:
 
-1.  **Run the App:**
-    ```bash
-    double click run_stable.cmd
-    ```
-    *Note: This script automatically syncs your code to the `stable` branch to ensure reliability. Do not use `run_dev.cmd` for actual experiments.*
+```bash
+python main.py --mock
+```
 
-2.  **Usage:**
-    * Use the **Sidebar** to connect devices and select your mode ("Dual Gate" or "MegaSweep").
-    * Set your **Voltage Limits** and **Sample Name** before starting.
+## Installation
+
+1. Create and activate a Python 3.11-3.13 virtual environment.
+2. Install the desktop-app dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+3. Ensure vendor hardware software is installed as needed for your lab setup:
+   Princeton Instruments LightField for LF6 automation, VISA support for Keithley / Newport communication, and Thorlabs PM100D driver files where applicable.
+
+## Project Structure
+
+```text
+SpectralSweep-pyside6/
+|-- app/
+|   |-- devices/
+|   |-- engine/
+|   `-- steps/
+|-- archive_streamlit_labrunner/
+|   |-- app/
+|   |-- docs/
+|   |-- misc/
+|   |-- requirements/
+|   `-- scripts/
+|-- controllers/
+|-- ui/
+|-- utils/
+|-- iv_automation.py
+|-- lf6_automation.py
+|-- launch.bat
+|-- main.py
+|-- requirements.txt
+|-- TLPM.py
+|-- TLPMX.py
+|-- TLPM_64.dll
+`-- TLPMX_64.dll
+```
+
+## Folder Guide
+
+- `app/`
+  Shared runtime pieces used by the desktop UI: hardware adapters, sweep engine helpers, CSV writing, and recipe/step definitions.
+- `controllers/`
+  Qt-facing controller layer that owns live instrument connections and exposes them to the UI panels.
+- `ui/`
+  PySide6 widgets, tabs, and the main application window.
+- `utils/`
+  Non-UI support code such as persistent config handling and LF6 mocking.
+- `archive_streamlit_labrunner/`
+  Archived LabRunner / Streamlit files retained for reference only. They are not part of the supported application.
+
+## Main Runtime Modules
+
+- `main.py`
+  Desktop entrypoint that initializes Qt and opens the main window.
+- `ui/main_window.py`
+  Builds the application shell and wires all instrument controllers into the tabbed UI.
+- `ui/presets_panel.py`
+  Presets-driven spectra sweep workflow and CSV acquisition runner.
+- `ui/megasweep_panel.py`
+  Voltage sweep planning, live path preview, and measurement export.
+- `controllers/lf6_controller.py`
+  LF6 / LightField connection and acquisition control.
+- `controllers/smu_controller.py`
+  Keithley / IV workflow integration used by sweep panels.
+
+## Hardware Notes
+
+Some modules depend on lab-specific hardware and vendor runtimes:
+
+- `lf6_automation.py` integrates with Princeton Instruments LightField through `pythonnet`.
+- `iv_automation.py` uses VISA and NI-DAQ related interfaces for supported measurement workflows.
+- `TLPMX.py` and the bundled DLLs support Thorlabs PM100D discovery and readout.
+- Motion-stage adapters under `app/devices/` rely on the corresponding device libraries and connection paths available on the host machine.
+
+If you are working on the UI without hardware access, start with `python main.py --mock`.
+
+## Legacy Cleanup Note
+
+The previous Streamlit/LabRunner implementation has been moved into `archive_streamlit_labrunner/` instead of being kept in the active application path. Those files are preserved only as a legacy reference and are no longer maintained as a supported workflow.

@@ -19,6 +19,7 @@ class CSVWriter:
         file_base: str,
         wavelength_headers: List[float],
         extra_scalar_fields_order: Optional[List[str]] = None,
+        scalar_fields_order: Optional[List[str]] = None,
         sample_dir: Optional[str] = None,
         sub_dir: Optional[str] = None,
     ):
@@ -32,9 +33,12 @@ class CSVWriter:
         # keep reference; snapshot later when writing header
         self.wavelength_headers = wavelength_headers or []
 
-        base_scalars = ["Vbg", "Vtg"]
-        extra = list(extra_scalar_fields_order or [])
-        self.scalar_fields = base_scalars + extra
+        if scalar_fields_order is not None:
+            self.scalar_fields = list(scalar_fields_order)
+        else:
+            base_scalars = ["Vbg", "Vtg"]
+            extra = list(extra_scalar_fields_order or [])
+            self.scalar_fields = base_scalars + extra
 
         self.fp = None
         self.writer = None
