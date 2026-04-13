@@ -75,16 +75,11 @@ class _RotationWorker(QObject):
     def connect_esp300(self, slot: str, visa_resource: str, axis: int) -> None:
         self._close_slot(slot)
         try:
-            import pyvisa
-            from app.devices.rotation_eps300_adapter import NewportEPS300
-            rm = pyvisa.ResourceManager()
-            adapter = NewportEPS300(visa_resource, rm=rm, axis=axis)
-            # Motor ON for the selected axis
-            try:
-                adapter.motor_on(axis=axis)
-            except Exception:
-                pass
+            from app.devices.rotation_esp300_shared_adapter import SharedESP300Rotation
+
+            adapter = SharedESP300Rotation(visa_resource, axis=axis, role=slot)
             self._adapters[slot] = adapter
+            print(f"[Rotation] {slot} mapped to shared ESP300 {visa_resource} axis {axis}")
             self.connected.emit(slot, "esp300")
         except Exception as exc:
             self.error.emit(
@@ -144,15 +139,9 @@ class _RotationWorker(QObject):
         Does NOT affect the persistent slot state.
         """
         try:
-            import pyvisa
-            from app.devices.rotation_eps300_adapter import NewportEPS300
-            rm = pyvisa.ResourceManager()
-            tmp = NewportEPS300(visa_resource, rm=rm, connect_only=True)
-            axes = tmp.get_axes(conservative=True) or [1]
-            try:
-                tmp.close()
-            except Exception:
-                pass
+            from app.devices.esp300_shared import scan_shared_esp300_axes
+
+            axes = scan_shared_esp300_axes(visa_resource, default_axis=1) or [1]
             self.axes_scanned.emit(slot, axes)
         except Exception as exc:
             self.error.emit(f"Rotation {slot} axis scan failed: {exc}")

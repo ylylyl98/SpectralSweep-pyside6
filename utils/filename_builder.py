@@ -34,6 +34,7 @@ class FilenameContext:
     rotation1_deg: Any = None
     rotation2_deg: Any = None
     condition_label: str = ""
+    point: str = ""
     measure_power: bool = False
     measured_power_uw: Optional[float] = None
     power_coefficient: float = 1.0
@@ -154,6 +155,11 @@ def resolve_power_uw(ctx: FilenameContext) -> Tuple[Optional[float], str]:
     return nominal, "nominal"
 
 
+def format_power_uw_decimal(value: float) -> str:
+    """Format a power value as decimal uW, e.g. 5.19uW or 12.00uW."""
+    return f"{value:.2f}uW"
+
+
 def format_laser_power_token(ctx: FilenameContext) -> str:
     mode_txt = sanitize_token(ctx.mode).upper()
     if mode_txt == "REF":
@@ -161,13 +167,13 @@ def format_laser_power_token(ctx: FilenameContext) -> str:
 
     laser = sanitize_token(ctx.laser_nm)
     power_uw, _source = resolve_power_uw(ctx)
-    power_txt = format_compact_number(power_uw, decimals=3) if power_uw is not None else ""
+    power_txt = format_power_uw_decimal(power_uw) if power_uw is not None else ""
 
     parts = []
     if laser:
         parts.append(f"{laser}nm")
     if power_txt:
-        parts.append(f"{power_txt}uw")
+        parts.append(power_txt)
     return "".join(parts)
 
 
@@ -194,8 +200,18 @@ def build_filename_tokens(ctx: FilenameContext, enabled_parts: Sequence[str]) ->
 
 
 def build_base_filename(ctx: FilenameContext, enabled_parts: Sequence[str]) -> str:
+    # Device ID and Point always lead the filename, in that order.
+    prefix = []
+    dev = sanitize_token(ctx.device_id)
+    if dev:
+        prefix.append(dev)
+    pt = sanitize_token(ctx.point)
+    if pt:
+        prefix.append(pt)
+
     tokens = build_filename_tokens(ctx, enabled_parts)
-    parts = [value for _key, value in tokens if value]
+    body = [value for _key, value in tokens if value]
+    parts = prefix + body
     if not parts:
         raise ValueError("Filename preview is empty. Enable at least one non-empty filename part.")
     return "_".join(parts)

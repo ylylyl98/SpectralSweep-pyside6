@@ -223,6 +223,7 @@ class MainWindow(QMainWindow):
             smu_ctrl=self._smu,
             rotation_ctrl=self._rot,
             stage_ctrl=self._stg,
+            pm_ctrl=self._pm,
         )
         self._tabs.addTab(self._presets, "Dual Gate")
 

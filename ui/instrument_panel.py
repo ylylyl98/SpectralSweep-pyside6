@@ -37,6 +37,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
+from app.devices.stage_adapter import get_linear_stage_profile
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -106,6 +107,16 @@ def _separator() -> QFrame:
     line.setFrameShape(QFrame.Shape.HLine)
     line.setFrameShadow(QFrame.Shadow.Sunken)
     return line
+
+
+_SIDEBAR_ACTION_BUTTON_MIN_WIDTH = 64
+_SIDEBAR_COMPACT_BUTTON_WIDTH = 32
+
+
+def _set_sidebar_action_button_width(button: QPushButton, *, compact: bool = False) -> None:
+    width = _SIDEBAR_COMPACT_BUTTON_WIDTH if compact else _SIDEBAR_ACTION_BUTTON_MIN_WIDTH
+    button.setMinimumWidth(width)
+    button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
 
 
 # ── Collapsible expander ──────────────────────────────────────────────────────
@@ -875,6 +886,8 @@ class _RotationBlock(QWidget):
         self._slot = slot
         self._ctrl = rot_ctrl
         self._axes: list[int] = [1]
+        self._cfg = getattr(cfg.rotation, slot)
+        self._rot_worker: Optional[object] = None   # keep Python ref so GC can't destroy it
         self._build()
         self._wire()
 
@@ -884,7 +897,13 @@ class _RotationBlock(QWidget):
         type_row = QHBoxLayout()
         type_row.addWidget(QLabel("Type:"))
         self._type_combo = QComboBox()
-        self._type_combo.addItems(["<none>", "Thorlabs Elliptec", "Newport ESP300"])
+        self._type_combo.addItems(["<none>", "Thorlabs Elliptec", "Newport ESP300 (shared)"])
+        type_map = {
+            "none": "<none>",
+            "elliptec": "Thorlabs Elliptec",
+            "esp300": "Newport ESP300 (shared)",
+        }
+        self._type_combo.setCurrentText(type_map.get((self._cfg.backend or "none").lower(), "<none>"))
         type_row.addWidget(self._type_combo)
         lay.addLayout(type_row)
 
@@ -909,7 +928,7 @@ class _RotationBlock(QWidget):
         axis_row.setContentsMargins(0, 0, 0, 0)
         self._scan_axes_btn = QPushButton("Scan Axes")
         self._axis_combo = QComboBox()
-        self._axis_combo.addItem("1")
+        self._axis_combo.addItem(str(int(self._cfg.esp300_axis or (1 if self._slot == "rot1" else 2))))
         axis_row.addWidget(self._scan_axes_btn)
         axis_row.addWidget(QLabel("Axis:"))
         axis_row.addWidget(self._axis_combo)
@@ -927,6 +946,11 @@ class _RotationBlock(QWidget):
         self._status = _status_label("Disconnected", "gray")
         lay.addWidget(self._status)
 
+        self._mapping_hint = QLabel("")
+        self._mapping_hint.setWordWrap(True)
+        self._mapping_hint.setStyleSheet("color: #666666; font-size: 10px;")
+        lay.addWidget(self._mapping_hint)
+
         lay.addWidget(_separator())
 
         # ── position / control (enabled after connect) ────────────────────
@@ -938,7 +962,7 @@ class _RotationBlock(QWidget):
         self._pos_lbl.setMinimumWidth(72)
         pos_row.addWidget(self._pos_lbl)
         self._read_pos_btn = QPushButton("Read")
-        self._read_pos_btn.setFixedWidth(48)
+        _set_sidebar_action_button_width(self._read_pos_btn)
         self._read_pos_btn.setToolTip("Read the current angle from the motor.")
         self._read_pos_btn.setEnabled(False)
         pos_row.addWidget(self._read_pos_btn)
@@ -954,11 +978,11 @@ class _RotationBlock(QWidget):
         self._target_spn.setEnabled(False)
         move_row.addWidget(self._target_spn)
         self._move_btn = QPushButton("Move")
-        self._move_btn.setFixedWidth(48)
+        _set_sidebar_action_button_width(self._move_btn)
         self._move_btn.setToolTip("Move to the target angle.")
         self._move_btn.setEnabled(False)
         self._home_btn = QPushButton("Home")
-        self._home_btn.setFixedWidth(48)
+        _set_sidebar_action_button_width(self._home_btn)
         self._home_btn.setToolTip("Move to the home (0°) position.")
         self._home_btn.setEnabled(False)
         move_row.addWidget(self._move_btn)
@@ -976,11 +1000,11 @@ class _RotationBlock(QWidget):
         self._jog_spn.setEnabled(False)
         jog_row.addWidget(self._jog_spn)
         self._jog_neg_btn = QPushButton("−")
-        self._jog_neg_btn.setFixedWidth(32)
+        _set_sidebar_action_button_width(self._jog_neg_btn, compact=True)
         self._jog_neg_btn.setToolTip("Jog by −step.")
         self._jog_neg_btn.setEnabled(False)
         self._jog_pos_btn = QPushButton("+")
-        self._jog_pos_btn.setFixedWidth(32)
+        _set_sidebar_action_button_width(self._jog_pos_btn, compact=True)
         self._jog_pos_btn.setToolTip("Jog by +step.")
         self._jog_pos_btn.setEnabled(False)
         jog_row.addWidget(self._jog_neg_btn)
@@ -996,9 +1020,11 @@ class _RotationBlock(QWidget):
     def _wire(self):
         self._type_combo.currentTextChanged.connect(self._on_type_changed)
         self._refresh_btn.clicked.connect(self._on_refresh)
+        self._addr_combo.currentTextChanged.connect(self._on_addr_changed)
         self._connect_btn.clicked.connect(self._on_connect)
         self._disconnect_btn.clicked.connect(self._on_disconnect)
         self._scan_axes_btn.clicked.connect(self._on_scan_axes)
+        self._axis_combo.currentTextChanged.connect(self._on_axis_changed)
         self._ctrl.connected.connect(self._on_connected)
         self._ctrl.disconnected.connect(self._on_disconnected)
         self._ctrl.error.connect(lambda msg: self._status.setText(f"Error: {msg[:60]}"))
@@ -1009,6 +1035,9 @@ class _RotationBlock(QWidget):
         self._home_btn.clicked.connect(lambda: self._launch_rot("home"))
         self._jog_neg_btn.clicked.connect(lambda: self._on_jog(-1))
         self._jog_pos_btn.clicked.connect(lambda: self._on_jog(+1))
+        self._on_type_changed(self._type_combo.currentText())
+        self._apply_saved_address()
+        self._apply_mapping_hint()
 
     def _set_ctrl_enabled(self, enabled: bool):
         for w in self._ctrl_widgets:
@@ -1023,11 +1052,23 @@ class _RotationBlock(QWidget):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.position.connect(self._on_position)
-        worker.error.connect(lambda m: self._status.setText(f"Error: {m[:60]}"))
+        # Use proper @Slot methods (not lambdas) so Qt AutoConnection queues
+        # delivery to the GUI thread instead of executing on the worker thread.
+        worker.error.connect(self._on_rot_error)
         worker.finished.connect(thread.quit)
-        worker.finished.connect(lambda: self._set_ctrl_enabled(True))
+        thread.finished.connect(self._on_rot_done)
+        self._rot_worker = worker   # prevent Python GC from destroying the worker
         self._rot_thread = thread
         thread.start()
+
+    @Slot(str)
+    def _on_rot_error(self, msg: str):
+        self._status.setText(f"Error: {msg[:60]}")
+
+    @Slot()
+    def _on_rot_done(self):
+        self._rot_worker = None   # allow GC now that the thread is done
+        self._set_ctrl_enabled(True)
 
     @Slot()
     def _on_move(self):
@@ -1053,8 +1094,14 @@ class _RotationBlock(QWidget):
 
     @Slot(str)
     def _on_type_changed(self, type_str: str):
-        is_esp = type_str == "Newport ESP300"
+        self._cfg.backend = {
+            "<none>": "none",
+            "Thorlabs Elliptec": "elliptec",
+            "Newport ESP300 (shared)": "esp300",
+        }.get(type_str, "none")
+        is_esp = type_str == "Newport ESP300 (shared)"
         self._axis_row_widget.setVisible(is_esp)
+        self._apply_mapping_hint()
 
     @Slot()
     def _on_refresh(self):
@@ -1062,7 +1109,8 @@ class _RotationBlock(QWidget):
         if t == "Thorlabs Elliptec":
             self._addr_combo.clear()
             self._addr_combo.addItems(_list_com_ports())
-        elif t == "Newport ESP300":
+            self._apply_saved_address()
+        elif t == "Newport ESP300 (shared)":
             if self._rot_scan_thread and self._rot_scan_thread.isRunning():
                 return
             # Build COM-port-derived ASRL addresses instantly (no VISA timeout)
@@ -1082,6 +1130,9 @@ class _RotationBlock(QWidget):
             self._rot_scan_worker.finished.connect(self._on_rot_scan_done)
             self._rot_scan_worker.finished.connect(self._rot_scan_thread.quit)
             self._rot_scan_thread.start()
+        else:
+            self._addr_combo.clear()
+            self._apply_mapping_hint()
 
     @Slot(list)
     def _on_rot_scan_done(self, resources: list):
@@ -1091,6 +1142,7 @@ class _RotationBlock(QWidget):
         ))
         self._addr_combo.clear()
         self._addr_combo.addItems(combined)
+        self._apply_saved_address()
         self._refresh_btn.setEnabled(True)
         self._status.setText("Disconnected")
         self._status.setStyleSheet("color: gray; font-weight: bold;")
@@ -1110,6 +1162,51 @@ class _RotationBlock(QWidget):
         self._axis_combo.clear()
         for ax in axes:
             self._axis_combo.addItem(str(ax))
+        idx = self._axis_combo.findText(str(int(self._cfg.esp300_axis or 1)))
+        self._axis_combo.setCurrentIndex(max(idx, 0))
+        self._apply_mapping_hint()
+
+    def _apply_saved_address(self):
+        saved = (
+            self._cfg.visa_resource
+            if self._type_combo.currentText() == "Newport ESP300 (shared)"
+            else self._cfg.com_port
+        )
+        if not saved:
+            return
+        idx = self._addr_combo.findText(saved)
+        if idx >= 0:
+            self._addr_combo.setCurrentIndex(idx)
+
+    def _apply_mapping_hint(self):
+        type_text = self._type_combo.currentText()
+        if type_text == "Newport ESP300 (shared)":
+            addr = self._addr_combo.currentText().strip() or self._cfg.visa_resource or "<select VISA>"
+            axis = self._axis_combo.currentText().strip() or str(int(self._cfg.esp300_axis or 1))
+            self._mapping_hint.setText(
+                f"{self._slot.upper()} uses shared Newport ESP300 at {addr}, axis {axis}."
+            )
+        elif type_text == "Thorlabs Elliptec":
+            addr = self._addr_combo.currentText().strip() or self._cfg.com_port or "<select COM>"
+            self._mapping_hint.setText(f"{self._slot.upper()} uses an independent Elliptec controller on {addr}.")
+        else:
+            self._mapping_hint.setText(f"{self._slot.upper()} is not connected.")
+
+    @Slot(str)
+    def _on_addr_changed(self, value: str):
+        if self._type_combo.currentText() == "Newport ESP300 (shared)":
+            self._cfg.visa_resource = value.strip()
+        elif self._type_combo.currentText() == "Thorlabs Elliptec":
+            self._cfg.com_port = value.strip()
+        self._apply_mapping_hint()
+
+    @Slot(str)
+    def _on_axis_changed(self, value: str):
+        try:
+            self._cfg.esp300_axis = int(value)
+        except ValueError:
+            pass
+        self._apply_mapping_hint()
 
     @Slot()
     def _on_connect(self):
@@ -1121,12 +1218,15 @@ class _RotationBlock(QWidget):
         self._status.setText("Connecting…")
         self._status.setStyleSheet("color: orange; font-weight: bold;")
         if t == "Thorlabs Elliptec":
+            self._cfg.com_port = addr
             self._ctrl.connect_elliptec(self._slot, addr)
         else:
             try:
                 axis = int(self._axis_combo.currentText())
             except ValueError:
-                axis = 1
+                axis = 1 if self._slot == "rot1" else 2
+            self._cfg.visa_resource = addr
+            self._cfg.esp300_axis = axis
             self._ctrl.connect_esp300(self._slot, addr, axis)
 
     @Slot()
@@ -1137,11 +1237,17 @@ class _RotationBlock(QWidget):
     def _on_connected(self, slot: str, adapter_type: str):
         if slot != self._slot:
             return
-        self._status.setText(f"Connected ({adapter_type})")
+        if adapter_type == "esp300":
+            self._status.setText(
+                f"Connected (shared ESP300 axis {int(self._cfg.esp300_axis or 1)})"
+            )
+        else:
+            self._status.setText(f"Connected ({adapter_type})")
         self._status.setStyleSheet("color: green; font-weight: bold;")
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._set_ctrl_enabled(True)
+        self._apply_mapping_hint()
         self._launch_rot("read")   # auto-read position on connect
 
     @Slot(str)
@@ -1164,21 +1270,40 @@ class _StageSection(QWidget):
         super().__init__(parent)
         self._ctrl = stage_ctrl
         self._stage_thread: Optional[QThread] = None
+        self._stage_worker: Optional[object] = None   # keep Python ref so GC can't destroy it
+        self._stage_axes: list[int] = [int(cfg.stage.esp300_axis or 3)]
         self._build()
         self._wire()
 
     def _build(self):
         lay = QVBoxLayout(self)
 
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("Controller:"))
+        self._type_combo = QComboBox()
+        self._type_combo.addItem("Thorlabs Elliptec", "elliptec")
+        self._type_combo.addItem("Newport ESP300", "esp300")
+        idx = self._type_combo.findData((cfg.stage.backend or "elliptec").lower())
+        self._type_combo.setCurrentIndex(max(idx, 0))
+        type_row.addWidget(self._type_combo)
+        lay.addLayout(type_row)
+
         addr_row = QHBoxLayout()
-        self._refresh_btn = QPushButton("Refresh COMs")
+        self._refresh_btn = QPushButton("Refresh")
         self._addr_combo = QComboBox()
         addr_row.addWidget(self._refresh_btn)
         addr_row.addWidget(self._addr_combo)
         lay.addLayout(addr_row)
 
+        self._axis_row = QHBoxLayout()
+        self._scan_axes_btn = QPushButton("Scan Axes")
+        self._axis_combo = QComboBox()
+        self._axis_row.addWidget(self._scan_axes_btn)
+        self._axis_row.addWidget(self._axis_combo)
+        lay.addLayout(self._axis_row)
+
         btn_row = QHBoxLayout()
-        self._connect_btn    = QPushButton("Connect")
+        self._connect_btn = QPushButton("Connect")
         self._disconnect_btn = QPushButton("Disconnect")
         self._disconnect_btn.setEnabled(False)
         btn_row.addWidget(self._connect_btn)
@@ -1188,19 +1313,22 @@ class _StageSection(QWidget):
         self._status = _status_label("Disconnected", "gray")
         lay.addWidget(self._status)
 
+        self._range_hint = QLabel("")
+        self._range_hint.setWordWrap(True)
+        self._range_hint.setStyleSheet("color: #666666; font-size: 10px;")
+        lay.addWidget(self._range_hint)
+
         lay.addWidget(_separator())
 
-        # ── position / control ────────────────────────────────────────────
         pos_row = QHBoxLayout()
         pos_row.addWidget(QLabel("Position:"))
-        self._pos_lbl = QLabel("— mm")
+        self._pos_lbl = QLabel("-")
         self._pos_lbl.setStyleSheet("color: gray;")
         self._pos_lbl.setToolTip("Last read stage position. Click Read to refresh.")
         self._pos_lbl.setMinimumWidth(72)
         pos_row.addWidget(self._pos_lbl)
         self._read_pos_btn = QPushButton("Read")
-        self._read_pos_btn.setFixedWidth(48)
-        self._read_pos_btn.setToolTip("Read the current stage position.")
+        _set_sidebar_action_button_width(self._read_pos_btn)
         self._read_pos_btn.setEnabled(False)
         pos_row.addWidget(self._read_pos_btn)
         lay.addLayout(pos_row)
@@ -1208,19 +1336,14 @@ class _StageSection(QWidget):
         move_row = QHBoxLayout()
         move_row.addWidget(QLabel("Target:"))
         self._target_spn = QDoubleSpinBox()
-        self._target_spn.setRange(-1000.0, 1000.0)
         self._target_spn.setDecimals(3)
-        self._target_spn.setSuffix(" mm")
-        self._target_spn.setToolTip("Absolute position to move to (mm).")
         self._target_spn.setEnabled(False)
         move_row.addWidget(self._target_spn)
         self._move_btn = QPushButton("Move")
-        self._move_btn.setFixedWidth(48)
-        self._move_btn.setToolTip("Move stage to the target position.")
+        _set_sidebar_action_button_width(self._move_btn)
         self._move_btn.setEnabled(False)
         self._home_btn = QPushButton("Home")
-        self._home_btn.setFixedWidth(48)
-        self._home_btn.setToolTip("Move stage to home (0 mm) position.")
+        _set_sidebar_action_button_width(self._home_btn)
         self._home_btn.setEnabled(False)
         move_row.addWidget(self._move_btn)
         move_row.addWidget(self._home_btn)
@@ -1229,33 +1352,103 @@ class _StageSection(QWidget):
         jog_row = QHBoxLayout()
         jog_row.addWidget(QLabel("Jog:"))
         self._jog_spn = QDoubleSpinBox()
-        self._jog_spn.setRange(0.001, 100.0)
         self._jog_spn.setDecimals(3)
         self._jog_spn.setValue(1.0)
-        self._jog_spn.setSuffix(" mm")
-        self._jog_spn.setToolTip("Step size for jog buttons.")
         self._jog_spn.setEnabled(False)
         jog_row.addWidget(self._jog_spn)
-        self._jog_neg_btn = QPushButton("−")
-        self._jog_neg_btn.setFixedWidth(32)
-        self._jog_neg_btn.setToolTip("Jog by −step.")
+        self._jog_neg_btn = QPushButton("-")
+        _set_sidebar_action_button_width(self._jog_neg_btn, compact=True)
         self._jog_neg_btn.setEnabled(False)
         self._jog_pos_btn = QPushButton("+")
-        self._jog_pos_btn.setFixedWidth(32)
-        self._jog_pos_btn.setToolTip("Jog by +step.")
+        _set_sidebar_action_button_width(self._jog_pos_btn, compact=True)
         self._jog_pos_btn.setEnabled(False)
         jog_row.addWidget(self._jog_neg_btn)
         jog_row.addWidget(self._jog_pos_btn)
         lay.addLayout(jog_row)
 
         self._ctrl_widgets = [
-            self._read_pos_btn, self._target_spn, self._move_btn,
-            self._home_btn, self._jog_spn, self._jog_neg_btn, self._jog_pos_btn,
+            self._read_pos_btn,
+            self._target_spn,
+            self._move_btn,
+            self._home_btn,
+            self._jog_spn,
+            self._jog_neg_btn,
+            self._jog_pos_btn,
         ]
 
     def _set_ctrl_enabled(self, enabled: bool):
         for w in self._ctrl_widgets:
             w.setEnabled(enabled)
+
+    def _current_backend(self) -> str:
+        return str(self._type_combo.currentData() or "elliptec")
+
+    def _current_profile(self):
+        return get_linear_stage_profile(self._current_backend())
+
+    def _load_axis_options(self, axes: list[int]):
+        selected = int(cfg.stage.esp300_axis or 3)
+        self._stage_axes = [int(ax) for ax in axes] or [selected]
+        self._axis_combo.blockSignals(True)
+        self._axis_combo.clear()
+        for ax in self._stage_axes:
+            self._axis_combo.addItem(str(ax), int(ax))
+        idx = self._axis_combo.findData(selected)
+        if idx < 0 and self._stage_axes:
+            idx = self._axis_combo.findData(self._stage_axes[0])
+        self._axis_combo.setCurrentIndex(max(idx, 0))
+        self._axis_combo.blockSignals(False)
+
+    def _sync_backend_widgets(self):
+        is_esp300 = self._current_backend() == "esp300"
+        self._refresh_btn.setText("Refresh VISA" if is_esp300 else "Refresh COMs")
+        self._addr_combo.setToolTip(
+            "Select the VISA resource for the Newport ESP300 controller."
+            if is_esp300
+            else "Select the COM port for the Thorlabs Elliptec linear stage."
+        )
+        for w in (self._scan_axes_btn, self._axis_combo):
+            w.setVisible(is_esp300)
+        self._on_refresh()
+        self._load_axis_options(self._stage_axes)
+
+    def _apply_stage_profile(self):
+        profile = self._current_profile()
+        low = float(profile.minimum_position)
+        high = float(profile.maximum_position)
+        unit = profile.position_unit
+        self._target_spn.setRange(low, high)
+        self._target_spn.setSingleStep(max((high - low) / 100.0, 0.001))
+        self._target_spn.setSuffix(f" {unit}" if unit else "")
+        self._target_spn.setValue(min(max(self._target_spn.value(), low), high))
+        jog_max = max(high - low, 0.001)
+        self._jog_spn.setRange(0.001, jog_max)
+        self._jog_spn.setSingleStep(max(jog_max / 100.0, 0.001))
+        self._jog_spn.setSuffix(f" {unit}" if unit else "")
+        self._jog_spn.setValue(min(max(self._jog_spn.value(), 0.001), jog_max))
+        self._read_pos_btn.setToolTip(f"Read the current {profile.display_name} position.")
+        self._move_btn.setToolTip(
+            f"Move the {profile.display_name} to a position from {low:g} to {high:g} {unit}."
+        )
+        self._home_btn.setToolTip(
+            f"Move the {profile.display_name} to home ({low:g} {unit})."
+        )
+        axis_hint = ""
+        if profile.backend_key == "esp300":
+            axis_hint = f" on axis {int(self._axis_combo.currentData() or cfg.stage.esp300_axis or 3)}"
+        self._range_hint.setText(
+            f"{profile.display_name}{axis_hint} valid range: {low:g} to {high:g} {unit}."
+        )
+        self._set_position_label(None)
+
+    def _set_position_label(self, value: Optional[float]):
+        unit = self._current_profile().position_unit
+        if value is None:
+            self._pos_lbl.setText(f"- {unit}".strip())
+            self._pos_lbl.setStyleSheet("color: gray;")
+            return
+        self._pos_lbl.setText(f"{float(value):.3f} {unit}".strip())
+        self._pos_lbl.setStyleSheet("color: black;")
 
     def _launch_stage(self, mode: str, target: float = 0.0):
         if self._stage_thread and self._stage_thread.isRunning():
@@ -1266,65 +1459,146 @@ class _StageSection(QWidget):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.position.connect(self._on_position)
-        worker.error.connect(lambda m: self._status.setText(f"Error: {m[:60]}"))
+        # Use proper @Slot methods (not lambdas) so Qt AutoConnection queues
+        # delivery to the GUI thread instead of executing on the worker thread.
+        worker.error.connect(self._on_stage_error)
         worker.finished.connect(thread.quit)
-        worker.finished.connect(lambda: self._set_ctrl_enabled(True))
+        thread.finished.connect(self._on_stage_done)
+        self._stage_worker = worker   # prevent Python GC from destroying the worker
         self._stage_thread = thread
         thread.start()
 
+    @Slot(str)
+    def _on_stage_error(self, msg: str):
+        self._status.setText(f"Error: {msg[:60]}")
+
+    @Slot()
+    def _on_stage_done(self):
+        self._stage_worker = None   # allow GC now that the thread is done
+        self._set_ctrl_enabled(True)
+
     def _wire(self):
+        self._type_combo.currentIndexChanged.connect(self._on_backend_changed)
         self._refresh_btn.clicked.connect(self._on_refresh)
+        self._scan_axes_btn.clicked.connect(self._on_scan_axes)
+        self._axis_combo.currentIndexChanged.connect(self._on_axis_changed)
+        self._addr_combo.currentTextChanged.connect(self._on_address_changed)
         self._connect_btn.clicked.connect(self._on_connect)
         self._disconnect_btn.clicked.connect(self._ctrl.disconnect_instrument)
         self._ctrl.connected.connect(self._on_connected)
         self._ctrl.disconnected.connect(self._on_disconnected)
         self._ctrl.error.connect(lambda msg: self._status.setText(f"Error: {msg[:60]}"))
+        self._ctrl.axes_scanned.connect(self._on_axes_scanned)
         self._read_pos_btn.clicked.connect(lambda: self._launch_stage("read"))
         self._move_btn.clicked.connect(lambda: self._launch_stage("move", self._target_spn.value()))
         self._home_btn.clicked.connect(lambda: self._launch_stage("home"))
         self._jog_neg_btn.clicked.connect(lambda: self._on_jog(-1))
         self._jog_pos_btn.clicked.connect(lambda: self._on_jog(+1))
+        self._sync_backend_widgets()
+        self._apply_stage_profile()
 
     @Slot(int)
     def _on_jog(self, sign: int):
-        cur_text = self._pos_lbl.text().replace("mm", "").strip()
+        unit = self._current_profile().position_unit
+        cur_text = self._pos_lbl.text().replace(unit, "").strip()
         try:
             cur = float(cur_text)
         except ValueError:
             cur = 0.0
         target = cur + sign * self._jog_spn.value()
         self._target_spn.setValue(target)
-        self._launch_stage("move", target)
+        self._launch_stage("move", self._target_spn.value())
 
     @Slot(float)
     def _on_position(self, pos: float):
-        self._pos_lbl.setText(f"{pos:.3f} mm")
-        self._pos_lbl.setStyleSheet("color: black;")
+        self._set_position_label(pos)
         self._target_spn.setValue(pos)
 
     @Slot()
     def _on_refresh(self):
+        backend = self._current_backend()
+        saved_addr = cfg.stage.visa_resource if backend == "esp300" else cfg.stage.com_port
         self._addr_combo.clear()
-        self._addr_combo.addItems(_list_com_ports())
+        if backend == "esp300":
+            self._addr_combo.addItems(_list_visa_resources(("ASRL", "GPIB", "USB")))
+        else:
+            self._addr_combo.addItems(_list_com_ports())
+        if saved_addr:
+            idx = self._addr_combo.findText(saved_addr)
+            if idx >= 0:
+                self._addr_combo.setCurrentIndex(idx)
+
+    @Slot()
+    def _on_scan_axes(self):
+        visa_resource = self._addr_combo.currentText().strip()
+        if not visa_resource:
+            self._status.setText("Select a VISA resource first.")
+            return
+        self._status.setText("Scanning axes...")
+        self._status.setStyleSheet("color: orange; font-weight: bold;")
+        self._ctrl.scan_axes(visa_resource)
+
+    @Slot(list)
+    def _on_axes_scanned(self, axes: list):
+        axes = [int(ax) for ax in axes] or [3]
+        self._load_axis_options(axes)
+        self._apply_stage_profile()
+        self._status.setText(f"Axes found: {', '.join(map(str, axes))}")
+        self._status.setStyleSheet("color: green; font-weight: bold;")
+
+    @Slot()
+    def _on_axis_changed(self):
+        cfg.stage.esp300_axis = int(self._axis_combo.currentData() or cfg.stage.esp300_axis or 3)
+        self._apply_stage_profile()
+
+    @Slot(str)
+    def _on_address_changed(self, value: str):
+        if self._current_backend() == "esp300":
+            cfg.stage.visa_resource = value.strip()
+        else:
+            cfg.stage.com_port = value.strip()
+
+    @Slot()
+    def _on_backend_changed(self):
+        cfg.stage.backend = self._current_backend()
+        self._sync_backend_widgets()
+        self._apply_stage_profile()
+        if self._ctrl.is_connected:
+            self._status.setText("Controller changed. Reconnect to apply.")
+            self._status.setStyleSheet("color: orange; font-weight: bold;")
 
     @Slot()
     def _on_connect(self):
-        port = self._addr_combo.currentText()
-        if not port:
-            self._status.setText("Select a COM port first.")
+        backend = self._current_backend()
+        address = self._addr_combo.currentText().strip()
+        if not address:
+            self._status.setText(
+                "Select a VISA resource first." if backend == "esp300" else "Select a COM port first."
+            )
             return
-        self._status.setText("Connecting…")
+        self._status.setText("Connecting...")
         self._status.setStyleSheet("color: orange; font-weight: bold;")
-        self._ctrl.connect_instrument(port)
+        cfg.stage.backend = backend
+        if backend == "esp300":
+            cfg.stage.visa_resource = address
+            cfg.stage.esp300_axis = int(self._axis_combo.currentData() or cfg.stage.esp300_axis or 3)
+            self._ctrl.connect_esp300(address, axis=cfg.stage.esp300_axis)
+        else:
+            cfg.stage.com_port = address
+            self._ctrl.connect_elliptec(address)
 
-    @Slot()
-    def _on_connected(self):
-        self._status.setText("Connected")
+    @Slot(str)
+    def _on_connected(self, backend_key: str):
+        profile = get_linear_stage_profile(backend_key)
+        extra = ""
+        if backend_key == "esp300":
+            extra = f" on axis {int(self._axis_combo.currentData() or cfg.stage.esp300_axis or 3)}"
+        self._status.setText(f"Connected: {profile.display_name}{extra}")
         self._status.setStyleSheet("color: green; font-weight: bold;")
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._set_ctrl_enabled(True)
-        self._launch_stage("read")   # auto-read position on connect
+        self._launch_stage("read")
 
     @Slot()
     def _on_disconnected(self):
@@ -1333,17 +1607,17 @@ class _StageSection(QWidget):
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._set_ctrl_enabled(False)
-        self._pos_lbl.setText("— mm")
-        self._pos_lbl.setStyleSheet("color: gray;")
+        self._set_position_label(None)
 
 
-# ── PM100D Section ────────────────────────────────────────────────────────────
+# PM100D Section ────────────────────────────────────────────────────────────
 
 class _PM100DSection(QWidget):
     def __init__(self, pm_ctrl, parent=None):
         super().__init__(parent)
         self._ctrl = pm_ctrl
         self._pm_thread: Optional[QThread] = None
+        self._pm_worker: Optional[object] = None   # keep Python ref so GC can't destroy it
         self._poll_timer = QTimer()
         self._poll_timer.timeout.connect(self._do_read)
         self._build()
@@ -1387,7 +1661,7 @@ class _PM100DSection(QWidget):
         )
         self._wl_spn.setEnabled(False)
         self._set_wl_btn = QPushButton("Set")
-        self._set_wl_btn.setFixedWidth(40)
+        _set_sidebar_action_button_width(self._set_wl_btn)
         self._set_wl_btn.setToolTip("Send the wavelength to the PM100D.")
         self._set_wl_btn.setEnabled(False)
         wl_row.addWidget(self._wl_spn)
@@ -1402,7 +1676,7 @@ class _PM100DSection(QWidget):
         self._pwr_lbl.setMinimumWidth(110)
         pwr_row.addWidget(self._pwr_lbl)
         self._read_pwr_btn = QPushButton("Read")
-        self._read_pwr_btn.setFixedWidth(48)
+        _set_sidebar_action_button_width(self._read_pwr_btn)
         self._read_pwr_btn.setToolTip("Take a single power reading.")
         self._read_pwr_btn.setEnabled(False)
         pwr_row.addWidget(self._read_pwr_btn)
@@ -1444,8 +1718,10 @@ class _PM100DSection(QWidget):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.reading.connect(self._on_reading)
-        worker.error.connect(lambda m: self._status.setText(f"Error: {m[:60]}"))
+        worker.error.connect(self._on_pm_error)
         worker.finished.connect(thread.quit)
+        thread.finished.connect(self._on_pm_done)
+        self._pm_worker = worker   # prevent Python GC from destroying the worker
         self._pm_thread = thread
         thread.start()
 
@@ -1486,6 +1762,14 @@ class _PM100DSection(QWidget):
     def _on_interval_changed(self, val: float):
         if self._poll_timer.isActive():
             self._poll_timer.setInterval(int(val * 1000))
+
+    @Slot(str)
+    def _on_pm_error(self, msg: str):
+        self._status.setText(f"Error: {msg[:60]}")
+
+    @Slot()
+    def _on_pm_done(self):
+        self._pm_worker = None   # allow GC now that the thread is done
 
     @Slot(float)
     def _on_reading(self, p_w: float):
@@ -1620,7 +1904,7 @@ class InstrumentPanel(QScrollArea):
             ))
 
         if stage_ctrl is not None:
-            lay.addWidget(_Expander("Linear Stage (Elliptec)", _StageSection(stage_ctrl)))
+            lay.addWidget(_Expander("Linear Stage", _StageSection(stage_ctrl)))
 
         if pm_ctrl is not None:
             lay.addWidget(_Expander("PM100D Power Meter", _PM100DSection(pm_ctrl)))

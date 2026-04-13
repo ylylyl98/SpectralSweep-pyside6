@@ -175,17 +175,34 @@ class NewportEPS300:
 
     def get_position(self, *, axis: Optional[int] = None) -> float:
         ax = int(self._axis if axis is None else axis)
-        resp = self._query(f"{ax}TP")
-        try:
-            return float(str(resp).strip())
-        except Exception as e:
-            txt = str(resp).strip()
-            for token in txt.replace(",", " ").split():
-                try:
-                    return float(token)
-                except Exception:
+        attempts = []
+        for cmd in (f"{ax}TP", f"{ax}TP?"):
+            try:
+                resp = self._query(cmd)
+            except Exception as exc:
+                attempts.append(f"{cmd} -> {exc}")
+                continue
+
+            raw = str(resp).strip()
+            cleaned = self._clean_resp(raw)
+            for candidate in (cleaned, raw):
+                if not candidate:
                     continue
-            raise RuntimeError(f"Unexpected TP response for axis {ax}: {txt}") from e
+                compact = candidate.replace(",", " ").strip()
+                try:
+                    return float(compact)
+                except Exception:
+                    pass
+                for token in compact.split():
+                    try:
+                        return float(token)
+                    except Exception:
+                        continue
+            attempts.append(f"{cmd} -> {raw!r}")
+
+        raise RuntimeError(
+            f"Unexpected TP response for axis {ax}: {'; '.join(attempts)}"
+        )
 
     # ---------------------------
     # Discovery Helpers

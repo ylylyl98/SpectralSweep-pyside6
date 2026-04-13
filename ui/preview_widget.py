@@ -95,6 +95,37 @@ def _outer_ctx_alias(ctx: dict) -> dict:
     return out
 
 
+def _fmt_sweep_range(r: dict) -> str:
+    """Compact sweep-range string for a batch row, e.g. 'Vbg:-10→10  Vtg:0  Vbias:-0.5→0.5  20pts'."""
+    parts = []
+    for axis, start_key, stop_key in (
+        ("Vbg",   "Vbg_start",   "Vbg_stop"),
+        ("Vtg",   "Vtg_start",   "Vtg_stop"),
+        ("Vbias", "Vbias_start", "Vbias_stop"),
+    ):
+        try:
+            sv = r.get(start_key)
+            ev = r.get(stop_key)
+            if sv is None or str(sv).strip() in ("", "nan"):
+                continue
+            s = float(sv)
+            e = float(ev) if ev is not None and str(ev).strip() not in ("", "nan") else s
+            if axis == "Vbias" and abs(s) < 1e-12 and abs(e) < 1e-12:
+                continue   # skip zero-bias (usually unused)
+            if abs(s - e) < 1e-12:
+                parts.append(f"{axis}:{s:g}")
+            else:
+                parts.append(f"{axis}:{s:g}→{e:g}")
+        except Exception:
+            pass
+    try:
+        frames = int(r.get("frames", 1) or 1)
+        parts.append(f"{frames}pt{'s' if frames != 1 else ''}")
+    except Exception:
+        pass
+    return "  ".join(parts)
+
+
 def _fmt_ctx(ctx: dict, param_order: Optional[List[str]] = None) -> str:
     default_keys = ["Center Wavelength (nm)", "Exposure Time (ms)", "Stage Position"]
     keys = param_order or default_keys
@@ -269,6 +300,7 @@ class RunPlanTree(QTreeWidget):
                     r.get("Vbias_stop") if isinstance(r, dict) else None,
                 )
                 cond_name = cond_name or f"cond{row_i}"
+                rng = _fmt_sweep_range(r) if isinstance(r, dict) else ""
 
                 for r_i in range(reps):
                     if acq_abs < done:
@@ -278,7 +310,8 @@ class RunPlanTree(QTreeWidget):
                     else:
                         acq_state = "todo"
 
-                    leaf_text = f"{cond_name}  ({r_i + 1}/{reps})"
+                    rep_tag = f"({r_i + 1}/{reps})"
+                    leaf_text = f"{cond_name}  {rep_tag}" if not rng else f"{cond_name}  {rep_tag}  [{rng}]"
                     _make_item(leaf_text, acq_state, seq_item)
                     acq_abs += 1
 

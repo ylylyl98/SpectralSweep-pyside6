@@ -53,6 +53,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
+from app.devices.stage_adapter import get_linear_stage_profile
 from utils.filename_builder import (
     FilenameContext,
     PART_SPECS,
@@ -237,6 +238,21 @@ def _outer_ctx(ctx: dict) -> dict:
     return out
 
 
+def _active_stage_profile():
+    return get_linear_stage_profile(getattr(cfg.stage, "backend", "elliptec"))
+
+
+def _validate_stage_position_value(value: Any) -> float:
+    profile = _active_stage_profile()
+    pos = float(value)
+    if not (profile.minimum_position <= pos <= profile.maximum_position):
+        raise ValueError(
+            f"Stage Position {pos:g} is outside the active {profile.display_name} range "
+            f"({profile.minimum_position:g} to {profile.maximum_position:g} {profile.position_unit})."
+        )
+    return pos
+
+
 def _build_plan(loop_df: pd.DataFrame, batch_df: pd.DataFrame,
                 mode: str = "Synchronize"):
     """
@@ -261,6 +277,8 @@ def _build_plan(loop_df: pd.DataFrame, batch_df: pd.DataFrame,
     levels: Dict[int, List[dict]] = {}
     for _, row in active.iterrows():
         vals = _parse_values(str(row["Values"]), str(row["Parameter"]))
+        if vals and str(row["Parameter"]).startswith("Stage Position"):
+            vals = [_validate_stage_position_value(v) for v in vals]
         if vals:
             levels.setdefault(int(row["Level"]), []).append(
                 {"p": row["Parameter"], "v": vals}
@@ -521,6 +539,7 @@ def _filename_context_from_row(
         rotation1_deg=ctx.get("Rotation1 Angle (deg)"),
         rotation2_deg=ctx.get("Rotation2 Angle (deg)"),
         condition_label=cond_label,
+        point=meta.get("point", ""),
         measure_power=_to_bool(row.get("MeasurePower", False)),
         measured_power_uw=measured_power_uw,
         power_coefficient=float(meta.get("power_coefficient", 1.0) or 1.0),
@@ -1092,11 +1111,12 @@ class _SweepLineCalculator(QGroupBox):
 # ── Run worker ────────────────────────────────────────────────────────────────
 
 class _RunWorker(QObject):
-    log         = Signal(str)
-    progress    = Signal(int, int)
-    tree_update = Signal(int, str, int)
-    finished    = Signal(bool, str)
-    error       = Signal(str)
+    log            = Signal(str)
+    progress       = Signal(int, int)          # (done_files, total_files) — drives tree
+    frame_progress = Signal(int, int)          # (done_frames, total_frames) — drives progress bar
+    tree_update    = Signal(int, str, int)
+    finished       = Signal(bool, str)
+    error          = Signal(str)
 
     def __init__(
         self,
@@ -1135,6 +1155,7 @@ class _RunWorker(QObject):
         )
         total_points = _count_total_points(self._seq, self._batch)
         done = 0
+        done_frames = 0
         failed = False
         summary = "Run complete."
 
@@ -1177,7 +1198,15 @@ class _RunWorker(QObject):
                 if val_rot2 is not None and self._rot and self._rot.is_connected("rot2"):
                     self._rot.move_to("rot2", float(val_rot2))
                 if val_stage is not None and self._stage and self._stage.is_connected:
-                    self._stage.adapter.move_to(float(val_stage))
+                    stage_target = _validate_stage_position_value(val_stage)
+                    stage_profile = _active_stage_profile()
+                    stage_axis = getattr(self._stage.adapter, "axis", None)
+                    axis_text = f", axis {stage_axis}" if stage_axis is not None else ""
+                    self.log.emit(
+                        f"Linear stage ({stage_profile.display_name}{axis_text}) -> {stage_target:g} "
+                        f"{stage_profile.position_unit}"
+                    )
+                    self._stage.move_to(stage_target)
 
                 outer = _outer_ctx(ctx)
                 for _, row in self._batch.iterrows():
@@ -1363,6 +1392,8 @@ class _RunWorker(QObject):
                                     row_data["Vbias_set"] = float(vbias_set)
                                     row_data["Vbias_meas"] = Vbias_meas
                                 writer.write_row(row_data, cts.tolist())
+                                done_frames += 1
+                                self.frame_progress.emit(done_frames, total_points)
                         except _RunFlowError:
                             raise
                         except Exception as e:
@@ -1527,9 +1558,10 @@ class PresetsPanel(QWidget):
         self._run_worker: Optional[_RunWorker]   = None
         self._stop_event = threading.Event()
 
-        self._final_seq: List[dict] = []
-        self._df_batch:  pd.DataFrame = self._batch_src.copy()
-        self._total_acq: int = 0
+        self._final_seq:   List[dict] = []
+        self._df_batch:    pd.DataFrame = self._batch_src.copy()
+        self._total_acq:   int = 0
+        self._total_points: int = 0
 
         self._build()
         self._refresh_tables()
@@ -1546,8 +1578,11 @@ class PresetsPanel(QWidget):
         meta = QHBoxLayout()
         meta.setSpacing(6)
         self._sample_edit    = QLineEdit(); self._sample_edit.setPlaceholderText("Device ID")
-        self._sample_edit.setToolTip("Sample name — included in saved filenames.")
-        self._sample_edit.setMaximumWidth(160)
+        self._sample_edit.setToolTip("Sample name — included at the start of saved filenames.")
+        self._sample_edit.setMaximumWidth(120)
+        self._point_edit     = QLineEdit(); self._point_edit.setPlaceholderText("p1")
+        self._point_edit.setToolTip("Measurement location (e.g. p1, center, edge) — included in filenames.")
+        self._point_edit.setFixedWidth(72)
         self._tag_edit       = QLineEdit(); self._tag_edit.setPlaceholderText("")
         self._tag_label = QLabel("Run note:")
         self._tag_edit.setToolTip("Short run tag or note — appended to filenames.")
@@ -1564,6 +1599,7 @@ class PresetsPanel(QWidget):
         self._subfolder_edit.setToolTip("Optional subfolder created under the base output directory.")
         self._subfolder_edit.setMaximumWidth(130)
         meta.addWidget(QLabel("Device ID:")); meta.addWidget(self._sample_edit)
+        meta.addWidget(QLabel("Point:"));     meta.addWidget(self._point_edit)
         meta.addWidget(self._tag_label);      meta.addWidget(self._tag_edit)
         meta.addWidget(QLabel("Laser:"));  meta.addWidget(self._laser_edit)
         meta.addWidget(QLabel("Power:"));  meta.addWidget(self._power_edit)
@@ -1853,7 +1889,7 @@ class PresetsPanel(QWidget):
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
-        self._progress.setFormat("%v/%m files")
+        self._progress.setFormat("%v/%m frames")
         lay_right.addWidget(self._progress)
 
         self._status_lbl = QLabel("Idle")
@@ -1952,6 +1988,7 @@ class PresetsPanel(QWidget):
         self._safe_jump_spin.valueChanged.connect(self._on_safety_changed)
         for widget in (
             self._sample_edit,
+            self._point_edit,
             self._tag_edit,
             self._temp_edit,
             self._laser_edit,
@@ -2047,6 +2084,7 @@ class PresetsPanel(QWidget):
         coeff = _safe_float(self._power_coeff_edit.text())
         return {
             "device_id": self._sample_edit.text().strip(),
+            "point": self._point_edit.text().strip(),
             "tag": "",
             "temperature": self._temp_edit.text().strip(),
             "measurement_mode": self._mode_combo_name.currentText(),
@@ -2284,11 +2322,13 @@ class PresetsPanel(QWidget):
             self._summary_lbl.setStyleSheet("color: red;")
             return
         self._summary_lbl.setStyleSheet("")
-        self._final_seq  = seq
-        self._df_batch   = batch
-        self._total_acq  = total
-        self._progress.setMaximum(max(total, 1))
+        self._final_seq    = seq
+        self._df_batch     = batch
+        self._total_acq    = total
         total_points = _count_total_points(seq, batch)
+        self._total_points = total_points
+        self._progress.setMaximum(max(total_points, 1))
+        self._progress.setValue(0)
         self._summary_lbl.setText(
             f"{len(seq)} sequence(s) x batch -> {total} file(s), "
             f"{total_points} sweep point(s)  [mode: {mode}]"
@@ -2328,6 +2368,7 @@ class PresetsPanel(QWidget):
         self._run_thread.started.connect(self._run_worker.run)
         self._run_worker.log.connect(self._log)
         self._run_worker.progress.connect(self._on_progress)
+        self._run_worker.frame_progress.connect(self._on_frame_progress)
         self._run_worker.tree_update.connect(self._on_tree_update)
         self._run_worker.error.connect(lambda e: self._log(f"ERROR: {e}"))
         self._run_worker.finished.connect(self._on_finished)
@@ -2347,13 +2388,18 @@ class PresetsPanel(QWidget):
 
     @Slot(int, int)
     def _on_progress(self, done: int, total: int):
-        self._progress.setMaximum(max(total, 1))
-        self._progress.setValue(done)
+        # Updates the tree only (file-level granularity).
         self._tree.update_plan(
             self._final_seq, self._df_batch,
             done=done, total_acq=total,
             current_seq_i=-1, current_label="", current_rep_i=0,
         )
+
+    @Slot(int, int)
+    def _on_frame_progress(self, done_frames: int, total_frames: int):
+        # Updates the progress bar at frame (sweep-point) granularity.
+        self._progress.setMaximum(max(total_frames, 1))
+        self._progress.setValue(done_frames)
 
     @Slot(int, str, int)
     def _on_tree_update(self, seq_i: int, label: str, rep_i: int):

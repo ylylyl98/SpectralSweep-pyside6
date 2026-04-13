@@ -52,21 +52,9 @@ class _PM100DWorker(QObject):
     @Slot()
     def scan_devices(self) -> None:
         try:
-            from ctypes import c_uint32, create_string_buffer, c_char_p, byref, c_int
-            from TLPMX import TLPMX
-            tlPM = TLPMX()
-            count = c_uint32()
-            tlPM.findRsrc(byref(count))
-            found = []
-            if count.value > 0:
-                buf = create_string_buffer(1024)
-                for i in range(count.value):
-                    tlPM.getRsrcName(c_int(i), buf)
-                    found.append(c_char_p(buf.raw).value.decode("ascii"))
-            try:
-                tlPM.close()
-            except Exception:
-                pass
+            from app.devices.pm100d_adapter import scan_pm100d_resources
+
+            found = scan_pm100d_resources()
             self.devices_scanned.emit(found if found else [])
         except ImportError:
             self.error.emit("TLPMX.py not found in project root.")

@@ -71,6 +71,7 @@ class FilenameConfig:
     temperature: str = "1.8"
     measurement_mode: str = "PL"
     power_coefficient: float = 1.0
+    point: str = ""
     enabled_parts: List[str] = field(default_factory=lambda: [
         "temp_mode",
         "laser_power",
@@ -83,12 +84,44 @@ class FilenameConfig:
 
 
 @dataclass
+class StageConfig:
+    """Linear-stage controller defaults and persisted selection."""
+
+    backend: str = "elliptec"
+    com_port: str = ""
+    visa_resource: str = ""
+    esp300_axis: int = 3
+
+
+@dataclass
+class RotationSlotConfig:
+    """Per-rotation-stage defaults and persisted selection."""
+
+    backend: str = "none"
+    com_port: str = ""
+    visa_resource: str = ""
+    esp300_axis: int = 1
+
+
+@dataclass
+class RotationConfig:
+    rot1: RotationSlotConfig = field(
+        default_factory=lambda: RotationSlotConfig(esp300_axis=1)
+    )
+    rot2: RotationSlotConfig = field(
+        default_factory=lambda: RotationSlotConfig(esp300_axis=2)
+    )
+
+
+@dataclass
 class AppConfig:
     """Top-level config object.  Holds all sub-configs plus misc app settings."""
     lf6: LF6Config = field(default_factory=LF6Config)
     smu: SMUConfig = field(default_factory=SMUConfig)
     ramp: RampConfig = field(default_factory=RampConfig)
     filename: FilenameConfig = field(default_factory=FilenameConfig)
+    rotation: RotationConfig = field(default_factory=RotationConfig)
+    stage: StageConfig = field(default_factory=StageConfig)
     font_size_pt: int = 9          # UI-wide font size in points
 
     # ── convenience properties ────────────────────────────────────────────────
@@ -127,6 +160,12 @@ class AppConfig:
         _update_dataclass(self.smu,      data.get("smu", {}))
         _update_dataclass(self.ramp,     data.get("ramp", {}))
         _update_dataclass(self.filename, data.get("filename", {}))
+        rotation_data = data.get("rotation", {})
+        if isinstance(rotation_data.get("rot1"), dict):
+            _update_dataclass(self.rotation.rot1, rotation_data["rot1"])
+        if isinstance(rotation_data.get("rot2"), dict):
+            _update_dataclass(self.rotation.rot2, rotation_data["rot2"])
+        _update_dataclass(self.stage,    data.get("stage", {}))
         if "font_size_pt" in data:
             self.font_size_pt = int(data["font_size_pt"])
 
