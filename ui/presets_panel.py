@@ -1484,22 +1484,7 @@ def _populate_batch_table(table: QTableWidget, df: pd.DataFrame) -> None:
     table.setHorizontalHeaderLabels(BATCH_SCHEMA)
     for r, row in df.iterrows():
         for c, col in enumerate(BATCH_SCHEMA):
-            val = row[col]
-            if col in _BATCH_BOOL_COLUMNS:
-                item = QTableWidgetItem("")
-                item.setFlags(
-                    Qt.ItemFlag.ItemIsEnabled
-                    | Qt.ItemFlag.ItemIsSelectable
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                )
-                item.setCheckState(Qt.CheckState.Checked if _to_bool(val) else Qt.CheckState.Unchecked)
-                item.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
-            else:
-                text = "" if (isinstance(val, float) and pd.isna(val)) else str(val)
-                item = QTableWidgetItem(text)
-                if col in _BATCH_INT_COLUMNS or col in _BATCH_FLOAT_COLUMNS:
-                    item.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
-            table.setItem(r, c, item)
+            table.setItem(r, c, _make_batch_table_item(col, row[col]))
     _configure_batch_table_columns(table)
 
 
@@ -1526,6 +1511,29 @@ def _read_batch_table(table: QTableWidget) -> pd.DataFrame:
                 row[col] = item.text() if item else ""
         rows.append(row)
     return pd.DataFrame(rows, columns=BATCH_SCHEMA) if rows else pd.DataFrame(columns=BATCH_SCHEMA)
+
+
+def _make_batch_table_item(col: str, val: Any) -> QTableWidgetItem:
+    if col in _BATCH_BOOL_COLUMNS:
+        item = QTableWidgetItem("")
+        item.setFlags(
+            Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsUserCheckable
+        )
+        item.setCheckState(Qt.CheckState.Checked if _to_bool(val) else Qt.CheckState.Unchecked)
+        item.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
+        return item
+
+    text = "" if (isinstance(val, float) and pd.isna(val)) else str(val)
+    item = QTableWidgetItem(text)
+    if col in _BATCH_INT_COLUMNS or col in _BATCH_FLOAT_COLUMNS:
+        item.setTextAlignment(int(Qt.AlignmentFlag.AlignCenter))
+    return item
+
+
+def _is_checkable_batch_item(item: Optional[QTableWidgetItem]) -> bool:
+    return bool(item and (item.flags() & Qt.ItemFlag.ItemIsUserCheckable))
 
 
 # ── Main panel ────────────────────────────────────────────────────────────────
@@ -1980,7 +1988,7 @@ class PresetsPanel(QWidget):
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn.clicked.connect(self._on_stop)
         self._loop_table.itemChanged.connect(lambda _item: self._update_filename_preview())
-        self._batch_table.itemChanged.connect(lambda _item: self._update_filename_preview())
+        self._batch_table.itemChanged.connect(self._on_batch_item_changed)
         self._batch_table.itemSelectionChanged.connect(self._update_filename_preview)
         self._loop_table.itemSelectionChanged.connect(self._update_filename_preview)
         self._mode_combo.currentTextChanged.connect(lambda _mode: self._update_filename_preview())
@@ -2262,7 +2270,7 @@ class PresetsPanel(QWidget):
             "Vbias_start": "", "Vbias_stop": "",
         }
         for c, col in enumerate(BATCH_SCHEMA):
-            self._batch_table.setItem(r, c, QTableWidgetItem(defaults.get(col, "")))
+            self._batch_table.setItem(r, c, _make_batch_table_item(col, defaults.get(col, "")))
         self._update_filename_preview()
 
     @Slot()
@@ -2270,6 +2278,21 @@ class PresetsPanel(QWidget):
         rows = {i.row() for i in self._batch_table.selectedIndexes()}
         for r in sorted(rows, reverse=True):
             self._batch_table.removeRow(r)
+        self._update_filename_preview()
+
+    @Slot(QTableWidgetItem)
+    def _on_batch_item_changed(self, item: Optional[QTableWidgetItem]):
+        if item is None:
+            self._update_filename_preview()
+            return
+
+        col_name = BATCH_SCHEMA[item.column()]
+        if col_name in _BATCH_BOOL_COLUMNS and not _is_checkable_batch_item(item):
+            normalized_item = _make_batch_table_item(col_name, item.text())
+            self._batch_table.blockSignals(True)
+            self._batch_table.setItem(item.row(), item.column(), normalized_item)
+            self._batch_table.blockSignals(False)
+
         self._update_filename_preview()
 
     @Slot(dict)
