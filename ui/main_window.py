@@ -149,7 +149,7 @@ from ui.settings_panel   import SettingsPanel
 from ui.spectrum_panel   import SpectrumPanel
 from ui.presets_panel    import PresetsPanel
 from ui.megasweep_panel  import MegaSweepPanel
-from ui.bfp_panel        import BFPPanel
+from ui.bfp_panel_integrated import BFPPanel
 
 
 _ORG  = "SpectralSweep"

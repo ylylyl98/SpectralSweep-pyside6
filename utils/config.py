@@ -84,6 +84,46 @@ class FilenameConfig:
 
 
 @dataclass
+class BFPNamingConfig:
+    dev: str = ""
+    material: str = "monoWSe2"
+    material_custom: str = ""
+    point: str = ""
+    exp_type: str = "Ref"
+    power: str = ""
+    note: str = ""
+    suffix: str = "BFP"
+    repeat: int = 1
+    auto_save_csv: bool = True
+    auto_color_scale: bool = True
+
+
+@dataclass
+class BFPRCConfig:
+    brc_sample: str = ""
+    brc_bg: str = ""
+    brc_scale: float = 1.0
+    brc_calc: str = "contrast"
+    brc_smooth_window: int = 9
+    brc_diff_order: int = 1
+    brc_xmin: str = ""
+    brc_xmax: str = ""
+    brc_ymin: str = ""
+    brc_ymax: str = ""
+    frc_sample: str = ""
+    frc_bg: str = ""
+    frc_display: str = "result"
+    frc_calc: str = "contrast"
+    frc_auto_color_scale: bool = True
+    frc_xmin: str = ""
+    frc_xmax: str = ""
+    frc_ymin: str = ""
+    frc_ymax: str = ""
+    frc_zmin: str = ""
+    frc_zmax: str = ""
+
+
+@dataclass
 class StageConfig:
     """Linear-stage controller defaults and persisted selection."""
 
@@ -120,6 +160,8 @@ class AppConfig:
     smu: SMUConfig = field(default_factory=SMUConfig)
     ramp: RampConfig = field(default_factory=RampConfig)
     filename: FilenameConfig = field(default_factory=FilenameConfig)
+    bfp_naming: BFPNamingConfig = field(default_factory=BFPNamingConfig)
+    bfp_rc: BFPRCConfig = field(default_factory=BFPRCConfig)
     rotation: RotationConfig = field(default_factory=RotationConfig)
     stage: StageConfig = field(default_factory=StageConfig)
     font_size_pt: int = 9          # UI-wide font size in points
@@ -160,6 +202,8 @@ class AppConfig:
         _update_dataclass(self.smu,      data.get("smu", {}))
         _update_dataclass(self.ramp,     data.get("ramp", {}))
         _update_dataclass(self.filename, data.get("filename", {}))
+        _update_dataclass(self.bfp_naming, data.get("bfp_naming", {}))
+        _update_dataclass(self.bfp_rc, data.get("bfp_rc", {}))
         rotation_data = data.get("rotation", {})
         if isinstance(rotation_data.get("rot1"), dict):
             _update_dataclass(self.rotation.rot1, rotation_data["rot1"])

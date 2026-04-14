@@ -1,0 +1,91 @@
+{
+  "lf6": {
+    "exposure_ms": 2000.0,
+    "center_nm": 730.0,
+    "accumulations": 1,
+    "auto_load_on_connect": true
+  },
+  "smu": {
+    "curr_compliance_A": 1e-06,
+    "volt_compliance_V": 20.0
+  },
+  "ramp": {
+    "step_V": 0.1,
+    "delay_s": 0.02,
+    "settle_s": 0.05,
+    "vbias_step_V": 0.1,
+    "safe_jump_V": 0.5
+  },
+  "filename": {
+    "base_out": "D:\\instrument control_v_3\\SpectralSweep-pyside6\\tmp_bfp_autosave_check",
+    "temperature": "1.8",
+    "measurement_mode": "PL",
+    "power_coefficient": 1.0,
+    "point": "",
+    "enabled_parts": [
+      "temp_mode",
+      "laser_power",
+      "center",
+      "exposure",
+      "condition"
+    ],
+    "invalid_chars": "<>:\"/\\|?*"
+  },
+  "bfp_naming": {
+    "dev": "",
+    "material": "tBN",
+    "material_custom": "",
+    "point": "",
+    "exp_type": "PL",
+    "power": "",
+    "note": "",
+    "suffix": "",
+    "repeat": 1,
+    "auto_save_csv": true,
+    "auto_color_scale": true
+  },
+  "bfp_rc": {
+    "brc_sample": "",
+    "brc_bg": "",
+    "brc_scale": 1.0,
+    "brc_calc": "contrast",
+    "brc_smooth_window": 1,
+    "brc_diff_order": 1,
+    "brc_xmin": "",
+    "brc_xmax": "",
+    "brc_ymin": "",
+    "brc_ymax": "",
+    "frc_sample": "D:/Dropbox2026/Dropbox/Bo Chen/code/Grating_1_Dev125/Grating_1_R10C4grating_77K_720nm_40s_BFP_20260209_211433_005.csv",
+    "frc_bg": "D:/Dropbox2026/Dropbox/Bo Chen/code/Grating_1_Dev125/Grating_1_bg_77K_720nm_40s_BFP_20260209_211006_002.csv",
+    "frc_display": "result",
+    "frc_calc": "contrast",
+    "frc_auto_color_scale": true,
+    "frc_xmin": "",
+    "frc_xmax": "",
+    "frc_ymin": "",
+    "frc_ymax": "",
+    "frc_zmin": "",
+    "frc_zmax": ""
+  },
+  "rotation": {
+    "rot1": {
+      "backend": "none",
+      "com_port": "",
+      "visa_resource": "",
+      "esp300_axis": 1
+    },
+    "rot2": {
+      "backend": "none",
+      "com_port": "",
+      "visa_resource": "",
+      "esp300_axis": 2
+    }
+  },
+  "stage": {
+    "backend": "elliptec",
+    "com_port": "COM1",
+    "visa_resource": "",
+    "esp300_axis": 3
+  },
+  "font_size_pt": 9
+}
