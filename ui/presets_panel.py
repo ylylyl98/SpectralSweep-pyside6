@@ -492,18 +492,19 @@ def _enabled_filename_parts() -> List[str]:
     return parts or ["device_id", "temp_mode", "center", "exposure", "condition"]
 
 
-_AUTO_ROTATION_FILENAME_PARTS: Tuple[Tuple[str, str], ...] = (
-    ("Rotation1 Angle (deg)", "rotation1"),
-    ("Rotation2 Angle (deg)", "rotation2"),
-)
+_LOOP_PARAM_FILENAME_PARTS: Dict[str, str] = {
+    "Center Wavelength (nm)": "center",
+    "Exposure Time (ms)": "exposure",
+    "Accumulations (EPF)": "exposure",
+    "Rotation1 Angle (deg)": "rotation1",
+    "Rotation2 Angle (deg)": "rotation2",
+    "Stage Position": "stage_position",
+}
 
 
 def _effective_filename_parts(selected_parts: Sequence[str], ctx: Dict[str, Any]) -> List[str]:
-    effective = set(selected_parts or [])
-    for param_name, part_key in _AUTO_ROTATION_FILENAME_PARTS:
-        if _safe_float(ctx.get(param_name)) is not None:
-            effective.add(part_key)
-    return [key for key, _label in PART_SPECS if key in effective]
+    selected = set(selected_parts or [])
+    return [key for key, _label in PART_SPECS if key in selected]
 
 
 def _first_applicable_seq_ctx(seq: Sequence[Dict[str, Any]], row: Dict[str, Any]) -> Dict[str, Any]:
@@ -538,6 +539,7 @@ def _filename_context_from_row(
         accumulations=ctx.get("Accumulations (EPF)", cfg.lf6.accumulations),
         rotation1_deg=ctx.get("Rotation1 Angle (deg)"),
         rotation2_deg=ctx.get("Rotation2 Angle (deg)"),
+        stage_position=ctx.get("Stage Position"),
         condition_label=cond_label,
         point=meta.get("point", ""),
         measure_power=_to_bool(row.get("MeasurePower", False)),
@@ -1570,6 +1572,7 @@ class PresetsPanel(QWidget):
         self._df_batch:    pd.DataFrame = self._batch_src.copy()
         self._total_acq:   int = 0
         self._total_points: int = 0
+        self._manual_filename_parts = set(_enabled_filename_parts())
 
         self._build()
         self._refresh_tables()
@@ -1870,6 +1873,7 @@ class PresetsPanel(QWidget):
         self._filename_parts_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._filename_parts_table.setMaximumHeight(200)
         self._filename_parts_table.setAlternatingRowColors(True)
+        self._filename_parts_table.hide()
         self._filename_preview_lbl = QLabel("Filename: -")
         self._filename_preview_lbl.setWordWrap(True)
         self._filename_preview_lbl.setStyleSheet("font-family: monospace;")
@@ -1883,7 +1887,6 @@ class PresetsPanel(QWidget):
         self._upcoming_preview.setReadOnly(True)
         self._upcoming_preview.setMaximumHeight(72)
         self._upcoming_preview.setStyleSheet("font-family: monospace; font-size: 11px;")
-        file_lay.addWidget(self._filename_parts_table)
         file_lay.addWidget(self._filename_preview_lbl)
         file_lay.addWidget(self._save_path_preview_lbl)
         file_lay.addWidget(self._preview_note_lbl)
@@ -2050,7 +2053,7 @@ class PresetsPanel(QWidget):
                 combo.setProperty("preview_connected", True)
 
     def _populate_filename_parts(self):
-        enabled = set(_enabled_filename_parts())
+        enabled = set(self._manual_filename_parts)
         self._filename_parts_table.setRowCount(len(PART_SPECS))
         for r, (key, label) in enumerate(PART_SPECS):
             self._filename_parts_table.setCellWidget(r, 0, _make_check_cell(key in enabled))
@@ -2060,20 +2063,59 @@ class PresetsPanel(QWidget):
             if cb and not cb.property("preview_connected"):
                 cb.toggled.connect(self._on_filename_parts_changed)
                 cb.setProperty("preview_connected", True)
+        self._sync_filename_parts_from_loop_table()
 
     def _selected_filename_parts(self) -> List[str]:
-        parts: List[str] = []
+        selected = self._manual_filename_parts | self._auto_filename_parts_from_loop_table()
+        return [key for key, _label in PART_SPECS if key in selected]
+
+    def _auto_filename_parts_from_loop_table(self) -> set[str]:
+        auto_parts: set[str] = set()
+        try:
+            loop_df = _normalize_loop(_read_loop_table(self._loop_table))
+        except Exception:
+            return auto_parts
+        if loop_df.empty:
+            return auto_parts
+        active = loop_df[loop_df["Enable"]]
+        for param in active["Parameter"].tolist():
+            key = _LOOP_PARAM_FILENAME_PARTS.get(str(param))
+            if key:
+                auto_parts.add(key)
+        return auto_parts
+
+    def _sync_filename_parts_from_loop_table(self):
+        auto_parts = self._auto_filename_parts_from_loop_table()
+        selected = self._manual_filename_parts | auto_parts
         for r, (key, _label) in enumerate(PART_SPECS):
-            if _cell_checked(self._filename_parts_table.cellWidget(r, 0)):
-                parts.append(key)
-        return parts
+            widget = self._filename_parts_table.cellWidget(r, 0)
+            cb = widget.findChild(QCheckBox) if widget is not None else None
+            if cb is None:
+                continue
+            desired = key in selected
+            if cb.isChecked() != desired:
+                cb.blockSignals(True)
+                cb.setChecked(desired)
+                cb.blockSignals(False)
+            if key in auto_parts:
+                cb.setToolTip("Auto-included because this parameter is enabled in the loop table.")
+            else:
+                cb.setToolTip("")
 
     def _on_filename_parts_changed(self, *_args):
-        cfg.filename.enabled_parts = self._selected_filename_parts()
+        auto_parts = self._auto_filename_parts_from_loop_table()
+        current_checked = {
+            key
+            for r, (key, _label) in enumerate(PART_SPECS)
+            if _cell_checked(self._filename_parts_table.cellWidget(r, 0))
+        }
+        self._manual_filename_parts = current_checked - auto_parts
+        cfg.filename.enabled_parts = [key for key, _label in PART_SPECS if key in self._manual_filename_parts]
         cfg.filename.temperature = self._temp_edit.text().strip() or cfg.filename.temperature
         cfg.filename.measurement_mode = self._mode_combo_name.currentText()
         coeff = _safe_float(self._power_coeff_edit.text())
         cfg.filename.power_coefficient = coeff if coeff is not None else 1.0
+        self._sync_filename_parts_from_loop_table()
         self._update_filename_preview()
 
     def _on_safety_changed(self, value: float):
@@ -2121,6 +2163,7 @@ class PresetsPanel(QWidget):
     def _update_filename_preview(self, *_args):
         if not hasattr(self, "_filename_preview_lbl"):
             return
+        self._sync_filename_parts_from_loop_table()
 
         try:
             loop_df, batch_df, seq, _batch = self._draft_loop_and_batch()
@@ -2323,7 +2366,7 @@ class PresetsPanel(QWidget):
     def _on_apply(self):
         self._loop_src  = _normalize_loop(_read_loop_table(self._loop_table))
         self._batch_src = _normalize_batch(_read_batch_table(self._batch_table))
-        cfg.filename.enabled_parts = self._selected_filename_parts()
+        cfg.filename.enabled_parts = [key for key, _label in PART_SPECS if key in self._manual_filename_parts]
         cfg.filename.temperature = self._temp_edit.text().strip() or cfg.filename.temperature
         cfg.filename.measurement_mode = self._mode_combo_name.currentText()
         coeff = _safe_float(self._power_coeff_edit.text())
@@ -2356,8 +2399,35 @@ class PresetsPanel(QWidget):
             f"{len(seq)} sequence(s) x batch -> {total} file(s), "
             f"{total_points} sweep point(s)  [mode: {mode}]"
         )
-        self._tree.update_plan(seq, batch, done=0, total_acq=total)
+        self._tree.update_plan(
+            seq,
+            batch,
+            done=0,
+            total_acq=total,
+            param_order=self._tree_param_order(),
+        )
         self._update_filename_preview()
+
+    def _tree_param_order(self) -> List[str]:
+        if hasattr(self, "_loop_src") and not self._loop_src.empty:
+            active = self._loop_src[self._loop_src["Enable"]]
+            ordered = [str(param) for param in active["Parameter"].tolist() if str(param).strip()]
+            deduped: List[str] = []
+            seen = set()
+            for param in ordered:
+                if param not in seen:
+                    seen.add(param)
+                    deduped.append(param)
+            if deduped:
+                return deduped
+        return [
+            "Center Wavelength (nm)",
+            "Exposure Time (ms)",
+            "Accumulations (EPF)",
+            "Rotation1 Angle (deg)",
+            "Rotation2 Angle (deg)",
+            "Stage Position",
+        ]
 
     # ── run / stop ────────────────────────────────────────────────────────────
 
@@ -2418,6 +2488,7 @@ class PresetsPanel(QWidget):
             self._final_seq, self._df_batch,
             done=done, total_acq=total,
             current_seq_i=-1, current_label="", current_rep_i=0,
+            param_order=self._tree_param_order(),
         )
 
     @Slot(int, int)
@@ -2433,6 +2504,7 @@ class PresetsPanel(QWidget):
             self._final_seq, self._df_batch,
             done=done, total_acq=self._total_acq,
             current_seq_i=seq_i, current_label=label, current_rep_i=rep_i,
+            param_order=self._tree_param_order(),
         )
 
     @Slot(bool, str)

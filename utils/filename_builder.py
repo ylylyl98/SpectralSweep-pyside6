@@ -16,6 +16,7 @@ PART_SPECS: List[Tuple[str, str]] = [
     ("exposure", "Exposure + EPF"),
     ("rotation1", "Rotation 1"),
     ("rotation2", "Rotation 2"),
+    ("stage_position", "Stage position"),
     ("condition", "Condition"),
 ]
 
@@ -33,6 +34,7 @@ class FilenameContext:
     accumulations: Any
     rotation1_deg: Any = None
     rotation2_deg: Any = None
+    stage_position: Any = None
     condition_label: str = ""
     point: str = ""
     measure_power: bool = False
@@ -143,6 +145,13 @@ def format_rotation_token(index: int, degrees: Any) -> str:
     return f"Rot{index}{format_compact_number(deg, decimals=2)}deg"
 
 
+def format_stage_position_token(position: Any) -> str:
+    pos = _coerce_float(position)
+    if pos is None:
+        return ""
+    return f"Stage{format_compact_number(pos, decimals=3)}"
+
+
 def resolve_power_uw(ctx: FilenameContext) -> Tuple[Optional[float], str]:
     corrected = None
     if ctx.measure_power and ctx.measured_power_uw is not None:
@@ -185,6 +194,7 @@ def build_part_values(ctx: FilenameContext) -> Dict[str, str]:
         "exposure": format_exposure_token(ctx.exposure_ms, ctx.accumulations),
         "rotation1": format_rotation_token(1, ctx.rotation1_deg),
         "rotation2": format_rotation_token(2, ctx.rotation2_deg),
+        "stage_position": format_stage_position_token(ctx.stage_position),
         "condition": clean_condition_label(ctx.condition_label),
     }
 

@@ -129,16 +129,25 @@ def _fmt_sweep_range(r: dict) -> str:
 def _fmt_ctx(ctx: dict, param_order: Optional[List[str]] = None) -> str:
     default_keys = ["Center Wavelength (nm)", "Exposure Time (ms)", "Stage Position"]
     keys = param_order or default_keys
+    aliases = {
+        "Center Wavelength (nm)": "CW",
+        "Exposure Time (ms)": "Exp",
+        "Accumulations (EPF)": "EPF",
+        "Rotation1 Angle (deg)": "R1",
+        "Rotation2 Angle (deg)": "R2",
+        "Stage Position": "Stage",
+    }
     parts = []
     for k in keys:
         v = ctx.get(k)
         if v is None or str(v).strip() == "":
             continue
-        k0 = k.split("(")[0].strip()
+        k0 = aliases.get(k, k.split("(")[0].strip())
         try:
-            parts.append(f"{k0}={float(v):g}")
+            value = f"{float(v):g}"
         except Exception:
-            parts.append(f"{k0}={v}")
+            value = f"{v}"
+        parts.append(f"{k0}={value}")
     return ", ".join(parts) if parts else "(no loop vars)"
 
 
@@ -151,6 +160,7 @@ def _make_item(
 ) -> QTreeWidgetItem:
     prefix = {"done": "✓ ", "now": "▶ ", "todo": "• "}[state]
     item = QTreeWidgetItem([prefix + text]) if parent is None else QTreeWidgetItem(parent, [prefix + text])
+    item.setToolTip(0, text)
 
     if state == "done":
         item.setForeground(0, _brush(_CLR_DONE_FG))
