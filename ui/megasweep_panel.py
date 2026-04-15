@@ -54,6 +54,13 @@ pg.setConfigOption("foreground", "k")
 
 NAN = float("nan")
 EPS = 1e-9
+_SAFETY_RAMP_STEP_V = 0.1
+_SAFETY_RAMP_DELAY_S = 0.02
+
+
+class _MegaSweepStopRequested(Exception):
+    """Internal control-flow exception used to unwind to the safety ramp."""
+    pass
 
 
 class CoordSystem(Enum):
@@ -1117,9 +1124,14 @@ class _MegaSweepWorker(QObject):
         self._smu = smu_ctrl
         self._lf6 = lf6_ctrl
         self._stop = threading.Event()
+        self._stopping = False
 
     def request_stop(self):
+        if self._stopping:
+            return
+        self._stopping = True
         self._stop.set()
+        self._emit_log("Stop requested - ramping to 0 V after the current step.")
 
     def _ts(self) -> str:
         return datetime.now().strftime("%H:%M:%S")
@@ -1187,62 +1199,96 @@ class _MegaSweepWorker(QObject):
         self._emit_log(f"Writing data to {fp}")
         self._emit_log(f"Writing metadata to {meta_fp.name}")
 
-        if iv is not None:
-            vtg0, vbg0, vb0 = points[0]["raw"]
-            iv.set_gates(Vtg=vtg0, Vbg=vbg0, delay_s=p["step_delay_s"], ramp_step=p["ramp_step"])
-            if hasattr(iv, "set_bias"):
-                iv.set_bias(Vbias=vb0, delay_s=p["step_delay_s"], ramp_step=p["ramp_step"])
-            time.sleep(p["settle"])
-
-        total = len(points)
-        prev = None
-        with open(fp, "a", newline="") as fh:
-            for done, point in enumerate(points, start=1):
-                if self._stop.is_set():
-                    self._emit_log("Stopped by user.")
-                    break
-                vtg, vbg, vbias = point["raw"]
-                if iv is not None:
-                    if prev is None or abs(prev[0] - vtg) > EPS or abs(prev[1] - vbg) > EPS:
-                        iv.set_gates(Vtg=vtg, Vbg=vbg, delay_s=p["step_delay_s"], ramp_step=p["ramp_step"])
-                    if hasattr(iv, "set_bias") and (prev is None or abs(prev[2] - vbias) > EPS):
-                        iv.set_bias(Vbias=vbias, delay_s=p["step_delay_s"], ramp_step=p["ramp_step"])
-                    prev = point["raw"]
-                    time.sleep(p["settle"])
-
-                vbg_m, vtg_m = _read_gates(iv)
-                vbias_m = _read_bias(iv)
-                Ibg, Itg, Ib = _read_currents(iv)
-                y = _read_intensity(spec, int(wls.size)) if spec is not None else np.full(wls.size, NAN, dtype=float)
-                axis_vals = point["axis_values"]
-                prefix = np.array([
-                    point["axis_a"], point["axis_b"],
-                    vtg, vbg, vbias,
-                    axis_vals.get("Doping", NAN), axis_vals.get("E-field", NAN),
-                    vbg_m, vtg_m, vbias_m, Ibg, Itg, Ib,
-                ], dtype=np.float64)
-                row = np.concatenate((prefix, y)).reshape(1, -1)
-                np.savetxt(fh, row, fmt="%.6e", delimiter=",")
-                fh.flush()
-                self.progress.emit(done, total)
-                self.point_done.emit(done)
-                self._emit_log(
-                    f"{done}/{total}: {p['axis_a']}={point['axis_a']:.4f}, {p['axis_b']}={point['axis_b']:.4f} | "
-                    f"raw Vtg={vtg:.4f}, Vbg={vbg:.4f}, Vb={vbias:.4f} | "
-                    f"Itg={_fmt_uA(Itg)} uA, Ibg={_fmt_uA(Ibg)} uA, Ib={_fmt_uA(Ib)} uA"
+        try:
+            if iv is not None:
+                vtg0, vbg0, vb0 = points[0]["raw"]
+                iv.set_gates(
+                    Vtg=vtg0,
+                    Vbg=vbg0,
+                    delay_s=p["step_delay_s"],
+                    ramp_step=p["ramp_step"],
+                    stop_cb=self._stop.is_set,
+                    stop_exc=_MegaSweepStopRequested,
                 )
+                if hasattr(iv, "set_bias"):
+                    iv.set_bias(
+                        Vbias=vb0,
+                        delay_s=p["step_delay_s"],
+                        ramp_step=p["ramp_step"],
+                        stop_cb=self._stop.is_set,
+                        stop_exc=_MegaSweepStopRequested,
+                    )
+                time.sleep(p["settle"])
 
-        self._ramp_to_zero(iv, p["ramp_step"], p["step_delay_s"])
-        self._emit_log(f"Done. Saved -> {fp.name}")
+            total = len(points)
+            prev = None
+            with open(fp, "a", newline="") as fh:
+                for done, point in enumerate(points, start=1):
+                    if self._stop.is_set():
+                        raise _MegaSweepStopRequested()
+                    vtg, vbg, vbias = point["raw"]
+                    if iv is not None:
+                        if prev is None or abs(prev[0] - vtg) > EPS or abs(prev[1] - vbg) > EPS:
+                            iv.set_gates(
+                                Vtg=vtg,
+                                Vbg=vbg,
+                                delay_s=p["step_delay_s"],
+                                ramp_step=p["ramp_step"],
+                                stop_cb=self._stop.is_set,
+                                stop_exc=_MegaSweepStopRequested,
+                            )
+                        if hasattr(iv, "set_bias") and (prev is None or abs(prev[2] - vbias) > EPS):
+                            iv.set_bias(
+                                Vbias=vbias,
+                                delay_s=p["step_delay_s"],
+                                ramp_step=p["ramp_step"],
+                                stop_cb=self._stop.is_set,
+                                stop_exc=_MegaSweepStopRequested,
+                            )
+                        prev = point["raw"]
+                        time.sleep(p["settle"])
 
-    def _ramp_to_zero(self, iv, ramp_step: float, step_delay_s: float):
+                    vbg_m, vtg_m = _read_gates(iv)
+                    vbias_m = _read_bias(iv)
+                    Ibg, Itg, Ib = _read_currents(iv)
+                    y = _read_intensity(spec, int(wls.size)) if spec is not None else np.full(wls.size, NAN, dtype=float)
+                    axis_vals = point["axis_values"]
+                    prefix = np.array([
+                        point["axis_a"], point["axis_b"],
+                        vtg, vbg, vbias,
+                        axis_vals.get("Doping", NAN), axis_vals.get("E-field", NAN),
+                        vbg_m, vtg_m, vbias_m, Ibg, Itg, Ib,
+                    ], dtype=np.float64)
+                    row = np.concatenate((prefix, y)).reshape(1, -1)
+                    np.savetxt(fh, row, fmt="%.6e", delimiter=",")
+                    fh.flush()
+                    self.progress.emit(done, total)
+                    self.point_done.emit(done)
+                    self._emit_log(
+                        f"{done}/{total}: {p['axis_a']}={point['axis_a']:.4f}, {p['axis_b']}={point['axis_b']:.4f} | "
+                        f"raw Vtg={vtg:.4f}, Vbg={vbg:.4f}, Vb={vbias:.4f} | "
+                        f"Itg={_fmt_uA(Itg)} uA, Ibg={_fmt_uA(Ibg)} uA, Ib={_fmt_uA(Ib)} uA"
+                    )
+        except _MegaSweepStopRequested:
+            self._emit_log("Stopped by user.")
+        finally:
+            self._safe_ramp_to_zero(iv)
+
+        if self._stop.is_set():
+            self._emit_log(f"Stopped. Partial data saved -> {fp.name}")
+        else:
+            self._emit_log(f"Done. Saved -> {fp.name}")
+
+    def _safe_ramp_to_zero(self, iv):
         if iv is None:
             return
         try:
-            self._emit_log("Ramping to 0 V...")
-            if hasattr(iv, "set_bias"):
-                iv.set_bias(Vbias=0.0, delay_s=step_delay_s, ramp_step=ramp_step)
-            iv.set_gates(Vtg=0.0, Vbg=0.0, delay_s=step_delay_s, ramp_step=ramp_step)
+            self._emit_log("Ramping all connected channels to 0 V...")
+            iv.ramp_all_to_zero(
+                ramp_step=_SAFETY_RAMP_STEP_V,
+                delay_s=_SAFETY_RAMP_DELAY_S,
+            )
+            self._emit_log("All connected channels are at 0 V.")
         except Exception as exc:
             self._emit_log(f"Return-to-zero failed: {exc}")
 
@@ -1256,6 +1302,7 @@ class MegaSweepPanel(QWidget):
         self._thread: Optional[QThread] = None
         self._run_inner_count = 1
         self._last_preview: dict = {"all_points": [], "valid_points": []}
+        self._run_failed = False
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(80)
@@ -1388,9 +1435,12 @@ class MegaSweepPanel(QWidget):
         )
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
+        self._status_lbl = QLabel("Ready")
+        self._status_lbl.setStyleSheet("color: #707070; font-size: 11px;")
         controls.addWidget(self._run_btn)
         controls.addWidget(self._stop_btn)
         controls.addWidget(self._progress, stretch=1)
+        controls.addWidget(self._status_lbl)
         right_lay.addLayout(controls)
 
         self._log_edit = QTextEdit()
@@ -1693,8 +1743,10 @@ class MegaSweepPanel(QWidget):
         self._preview.clear_progress()
         self._progress.setValue(0)
         self._log_edit.clear()
+        self._run_failed = False
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
+        self._set_status("Running...", "#b26a00")
         self._run_inner_count = max(1, len(params.get("axis_b_vals", [])))
         self._worker = _MegaSweepWorker(params, self._smu, self._lf6)
         self._thread = QThread()
@@ -1704,8 +1756,7 @@ class MegaSweepPanel(QWidget):
         self._worker.progress.connect(self._on_progress)
         self._worker.point_done.connect(self._on_point_done)
         self._worker.finished.connect(self._on_finished)
-        self._worker.error.connect(lambda msg: self._on_log(f"ERROR: {msg}"))
-        self._worker.error.connect(self._on_finished)
+        self._worker.error.connect(self._on_error)
         self._thread.start()
 
     @Slot()
@@ -1713,12 +1764,18 @@ class MegaSweepPanel(QWidget):
         if self._worker is not None:
             self._worker.request_stop()
         self._stop_btn.setEnabled(False)
+        self._set_status("Stopping...", "#b26a00")
 
     @Slot(str)
     def _on_log(self, msg: str):
         self._log_edit.append(msg)
         sb = self._log_edit.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+    @Slot(str)
+    def _on_error(self, msg: str):
+        self._run_failed = True
+        self._on_log(f"ERROR: {msg}")
 
     @Slot(int, int)
     def _on_progress(self, done: int, total: int):
@@ -1731,10 +1788,23 @@ class MegaSweepPanel(QWidget):
     @Slot()
     def _on_finished(self):
         if self._thread:
-            self._thread.quit()
-            self._thread.wait()
+            if self._thread.isRunning():
+                self._thread.quit()
+                self._thread.wait()
             self._thread = None
+        worker = self._worker
         self._worker = None
+        self._run_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
+        if self._run_failed:
+            self._set_status("Error", "#b42318")
+        elif worker is not None and worker._stop.is_set():
+            self._set_status("Stopped", "#707070")
+        else:
+            self._set_status("Done", "#1f7a1f")
         self._update_ratio_validation()
         self._schedule_preview()
+
+    def _set_status(self, text: str, color: str):
+        self._status_lbl.setText(text)
+        self._status_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")

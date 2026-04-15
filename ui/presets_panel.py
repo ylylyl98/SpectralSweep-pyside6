@@ -2406,8 +2406,10 @@ class PresetsPanel(QWidget):
     @Slot()
     def _on_stop(self):
         self._stop_event.set()
-        self._status_lbl.setText("Stopping…")
+        self._stop_btn.setEnabled(False)
+        self._status_lbl.setText("Stopping...")
         self._log("Stop requested.")
+        self._log("Ramping all channels to 0 V - please wait...")
 
     @Slot(int, int)
     def _on_progress(self, done: int, total: int):
