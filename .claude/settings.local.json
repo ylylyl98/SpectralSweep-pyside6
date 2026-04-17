@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(rm -rf \"d:/instrument control_v_3/SpectralSweep-pyside6/tmp_axis_check\" \"d:/instrument control_v_3/SpectralSweep-pyside6/tmp_bfp_autosave_check\" \"d:/instrument control_v_3/SpectralSweep-pyside6/tmp_bfp_validation\" \"d:/instrument control_v_3/SpectralSweep-pyside6/tmp_csv_format_check\")",
-      "Bash(rm \"d:/instrument control_v_3/SpectralSweep-pyside6/utils/__pycache__/bfp_analysis.cpython-313.pyc.1787238672848\" \"d:/instrument control_v_3/SpectralSweep-pyside6/utils/__pycache__/bfp_analysis.cpython-313.pyc.1883406564976\")"
+      "Bash(rm \"d:/instrument control_v_3/SpectralSweep-pyside6/utils/__pycache__/bfp_analysis.cpython-313.pyc.1787238672848\" \"d:/instrument control_v_3/SpectralSweep-pyside6/utils/__pycache__/bfp_analysis.cpython-313.pyc.1883406564976\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('ui/megasweep_panel.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c ' *)"
     ]
   }
 }

@@ -450,42 +450,52 @@ class _CoordSystemWidget(QGroupBox):
     changed = Signal()
 
     def __init__(self, parent=None):
-        super().__init__("Coordinate System", parent)
+        super().__init__("Coordinate System  Gate Ratio", parent)
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(3)
         self._group = QButtonGroup(self)
-        self._raw = QRadioButton("Raw Voltages")
-        self._physical = QRadioButton("Physical Coordinates")
+        self._raw = QRadioButton("Raw Voltages  — sweep Vtg / Vbg directly")
+        self._physical = QRadioButton("Physical Coordinates  — sweep Doping / E-field")
         self._raw.setChecked(True)
         self._group.addButton(self._raw)
         self._group.addButton(self._physical)
         lay.addWidget(self._raw)
         lay.addWidget(self._physical)
 
+        note = QLabel(
+            "Raw: step sizes are actual Vtg/Vbg steps; second preview tab shows the resulting D/F map.\n"
+            "Physical: step sizes are Doping/E-field steps; Vtg/Vbg positions are derived via ratio."
+        )
+        note.setStyleSheet("color: #6a6a6a; font-style: italic; font-size: 10px;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+
         row = QHBoxLayout()
+        row.setSpacing(6)
         self._ratio_label = QLabel("Gate ratio r")
         self._ratio_spin = QDoubleSpinBox()
         self._ratio_spin.setRange(-1000.0, 1000.0)
         self._ratio_spin.setDecimals(4)
         self._ratio_spin.setValue(1.0)
+        self._ratio_spin.setToolTip(
+            "Gate efficiency ratio r.\n"
+            "Doping D = Vtg + r·Vbg\n"
+            "E-field F = Vtg − r·Vbg\n"
+            "Hardware: Vtg = (D+F)/2,  Vbg = (D−F)/(2r)\n\n"
+            "Changing r changes the actual Vtg/Vbg positions swept."
+        )
         row.addWidget(self._ratio_label)
-        row.addWidget(self._ratio_spin)
+        row.addWidget(self._ratio_spin, 1)
         lay.addLayout(row)
 
-        self._formula = QLabel("doping = Vtg + r·Vbg    efield = Vtg − r·Vbg")
-        self._formula.setStyleSheet("color: #6a6a6a;")
+        self._formula = QLabel("D = Vtg + r·Vbg    F = Vtg − r·Vbg\nVtg = (D+F)/2    Vbg = (D−F)/(2r)")
+        self._formula.setStyleSheet("color: #6a6a6a; font-size: 10px;")
         lay.addWidget(self._formula)
 
-        self._raw.toggled.connect(self._update_visibility)
         self._raw.toggled.connect(self.changed)
         self._physical.toggled.connect(self.changed)
         self._ratio_spin.valueChanged.connect(self.changed)
-        self._update_visibility()
-
-    def _update_visibility(self):
-        visible = self._physical.isChecked()
-        self._ratio_label.setVisible(visible)
-        self._ratio_spin.setVisible(visible)
-        self._formula.setVisible(visible)
 
     def coord_system(self) -> CoordSystem:
         return CoordSystem.PHYSICAL if self._physical.isChecked() else CoordSystem.RAW
@@ -502,15 +512,24 @@ class _AxisSelectorWidget(QGroupBox):
 
     def __init__(self, parent=None):
         super().__init__("Axis Selection", parent)
-        form = QFormLayout(self)
+        vlay = QVBoxLayout(self)
+        vlay.setContentsMargins(6, 4, 6, 4)
+        vlay.setSpacing(3)
         self._available: list[str] = []
         self._outer = QComboBox()
         self._inner = QComboBox()
         self._snake = QCheckBox("Reverse inner direction on alternating outer steps")
         self._snake.setChecked(True)
-        form.addRow("Outer (slow) axis", self._outer)
-        form.addRow("Inner (fast) axis", self._inner)
-        form.addRow("", self._snake)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(QLabel("Outer (slow) axis"))
+        row.addWidget(self._outer)
+        row.addSpacing(16)
+        row.addWidget(QLabel("Inner (fast) axis"))
+        row.addWidget(self._inner)
+        row.addStretch()
+        vlay.addLayout(row)
+        vlay.addWidget(self._snake)
         self._outer.currentTextChanged.connect(self._sync_inner)
         self._inner.currentTextChanged.connect(self._sync_outer)
         self._outer.currentTextChanged.connect(self.changed)
@@ -567,7 +586,10 @@ class _AxisConfigWidget(QGroupBox):
     def __init__(self, title: str, default_start: float, default_stop: float, parent=None):
         super().__init__(title, parent)
         self._axis_name = title
-        form = QFormLayout(self)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(3)
+
         self._start = QDoubleSpinBox()
         self._stop = QDoubleSpinBox()
         self._step = QDoubleSpinBox()
@@ -581,10 +603,29 @@ class _AxisConfigWidget(QGroupBox):
         self._step.setValue(1.0)
         self._mode = QComboBox()
         self._mode.addItems(["Step Size", "Total Points"])
-        form.addRow("Start", self._start)
-        form.addRow("Stop", self._stop)
-        form.addRow("Step", self._step)
-        form.addRow("Step mode", self._mode)
+        self._mode.setFixedWidth(100)
+
+        range_row = QHBoxLayout()
+        range_row.setSpacing(4)
+        lbl_start = QLabel("Start")
+        lbl_start.setFixedWidth(30)
+        lbl_stop = QLabel("Stop")
+        lbl_stop.setFixedWidth(28)
+        range_row.addWidget(lbl_start)
+        range_row.addWidget(self._start, 1)
+        range_row.addWidget(lbl_stop)
+        range_row.addWidget(self._stop, 1)
+        lay.addLayout(range_row)
+
+        step_row = QHBoxLayout()
+        step_row.setSpacing(4)
+        lbl_step = QLabel("Step")
+        lbl_step.setFixedWidth(30)
+        step_row.addWidget(lbl_step)
+        step_row.addWidget(self._step, 1)
+        step_row.addWidget(self._mode)
+        lay.addLayout(step_row)
+
         self._start.valueChanged.connect(self.changed)
         self._stop.valueChanged.connect(self.changed)
         self._step.valueChanged.connect(self.changed)
@@ -637,6 +678,8 @@ class _FixedParamsWidget(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Fixed Parameters", parent)
         self._layout = QFormLayout(self)
+        self._layout.setContentsMargins(6, 4, 6, 4)
+        self._layout.setSpacing(3)
         self._spins: dict[str, QDoubleSpinBox] = {}
 
     def set_fixed_axes(self, axes: list[str], vbias_available: bool):
@@ -677,26 +720,33 @@ class _SafetyWidget(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Safety Limits", parent)
         form = QFormLayout(self)
+        form.setContentsMargins(6, 4, 6, 4)
+        form.setSpacing(3)
         self._spins: dict[str, QDoubleSpinBox] = {}
         defaults = {
             "vtg_min": -10.0, "vtg_max": 10.0,
             "vbg_min": -10.0, "vbg_max": 10.0,
             "vbias_min": -1.0, "vbias_max": 1.0,
         }
-        labels = {
-            "vtg_min": "Vtg min", "vtg_max": "Vtg max",
-            "vbg_min": "Vbg min", "vbg_max": "Vbg max",
-            "vbias_min": "Vbias min", "vbias_max": "Vbias max",
-        }
-        for key, value in defaults.items():
-            spin = QDoubleSpinBox()
-            spin.setRange(-200.0, 200.0)
-            spin.setDecimals(4)
-            spin.setValue(value)
-            spin.setSuffix(" V")
-            spin.valueChanged.connect(self.changed)
-            self._spins[key] = spin
-            form.addRow(labels[key], spin)
+        for prefix, row_label in (("vtg", "Vtg"), ("vbg", "Vbg"), ("vbias", "Vbias")):
+            container = QWidget()
+            hlay = QHBoxLayout(container)
+            hlay.setContentsMargins(0, 0, 0, 0)
+            hlay.setSpacing(4)
+            for suffix, short in (("min", "min"), ("max", "max")):
+                key = f"{prefix}_{suffix}"
+                spin = QDoubleSpinBox()
+                spin.setRange(-200.0, 200.0)
+                spin.setDecimals(4)
+                spin.setValue(defaults[key])
+                spin.setSuffix(" V")
+                spin.valueChanged.connect(self.changed)
+                self._spins[key] = spin
+                lbl = QLabel(short)
+                lbl.setFixedWidth(24)
+                hlay.addWidget(lbl)
+                hlay.addWidget(spin, 1)
+            form.addRow(row_label, container)
 
     def set_vbias_available(self, available: bool):
         self._spins["vbias_min"].setEnabled(available)
@@ -712,14 +762,17 @@ class _TimingWidget(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Timing", parent)
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(6, 4, 6, 4)
+        lay.setSpacing(3)
         form = QFormLayout()
+        form.setSpacing(3)
         lay.addLayout(form)
         self._settle = QDoubleSpinBox()
         self._settle.setRange(0.0, 60.0)
         self._settle.setDecimals(4)
         self._settle.setValue(cfg.ramp.settle_s)
         self._settle.setSuffix(" s")
-        form.addRow("Settle time after voltage change (s)", self._settle)
+        form.addRow("Settle time (s)", self._settle)
         self._toggle = QToolButton()
         self._toggle.setText("Advanced Timing")
         self._toggle.setCheckable(True)
@@ -801,6 +854,8 @@ class _PreviewPlot(QWidget):
         self._snake = True
         self._axis_stripes: dict[int, object] = {}
         self._voltage_stripes: dict[int, object] = {}
+        self._ratio: float = 1.0
+        self._coord: CoordSystem = CoordSystem.PHYSICAL
 
         self._planned_axis = pg.ScatterPlotItem(size=5, pen=pg.mkPen(None), brush=pg.mkBrush(90, 110, 130, 85))
         self._planned_v = pg.ScatterPlotItem(size=5, pen=pg.mkPen(None), brush=pg.mkBrush(90, 110, 130, 85))
@@ -880,6 +935,10 @@ class _PreviewPlot(QWidget):
                 item = plot_widget.plot([x, x], [span_lo, span_hi], pen=pen)
                 item_list.append(item)
 
+    def _raw_to_df(self, vtg: float, vbg: float) -> tuple[float, float]:
+        r = self._ratio
+        return (vtg + r * vbg, vtg - r * vbg)
+
     def _set_point_layers(self, all_points: list[dict], valid_points: list[dict]):
         self._all_points = list(all_points)
         total_points = max(1, len(all_points))
@@ -903,13 +962,21 @@ class _PreviewPlot(QWidget):
         raw_valid_x = [p["raw"][0] for p in valid_points]
         raw_valid_y = [p["raw"][1] for p in valid_points]
         self._planned_axis.setData(x=axis_valid_x, y=axis_valid_y)
-        self._planned_v.setData(x=raw_valid_x, y=raw_valid_y)
+        if self._coord == CoordSystem.RAW:
+            df_pairs = [self._raw_to_df(vtg, vbg) for vtg, vbg in zip(raw_valid_x, raw_valid_y)]
+            self._planned_v.setData(x=[d for d, _ in df_pairs], y=[f for _, f in df_pairs])
+        else:
+            self._planned_v.setData(x=raw_valid_x, y=raw_valid_y)
 
         show_oob = total_points <= 2500
         if show_oob:
             oob_points = [p for p in all_points if not p["in_bounds"]]
             self._oob_axis.setData(x=[p["axis_a"] for p in oob_points], y=[p["axis_b"] for p in oob_points])
-            self._oob_v.setData(x=[p["raw"][0] for p in oob_points], y=[p["raw"][1] for p in oob_points])
+            if self._coord == CoordSystem.RAW:
+                oob_df = [self._raw_to_df(p["raw"][0], p["raw"][1]) for p in oob_points]
+                self._oob_v.setData(x=[d for d, _ in oob_df], y=[f for _, f in oob_df])
+            else:
+                self._oob_v.setData(x=[p["raw"][0] for p in oob_points], y=[p["raw"][1] for p in oob_points])
         else:
             self._oob_axis.setData([], [])
             self._oob_v.setData([], [])
@@ -957,9 +1024,9 @@ class _PreviewPlot(QWidget):
             return
         shown = list(range(m)) if m <= 4 else [0, 1, 2, m - 1]
         extent_pen = pg.mkPen("#4aa8d8", width=1, style=Qt.DashLine)
-        self._add_rect(plot_widget, item_list, float(np.min(axis_a_vals)), float(np.min(axis_b_vals)), float(np.max(axis_a_vals)), float(np.max(axis_b_vals)), extent_pen)
 
         if coord_mode == "axis":
+            self._add_rect(plot_widget, item_list, float(np.min(axis_a_vals)), float(np.min(axis_b_vals)), float(np.max(axis_a_vals)), float(np.max(axis_b_vals)), extent_pen)
             if draw_polygon:
                 self.draw_safety_polygon(draw_polygon)
             elif axis_a_name in ("Vtg", "Vbg") and axis_b_name in ("Vtg", "Vbg"):
@@ -982,7 +1049,25 @@ class _PreviewPlot(QWidget):
                     self._add_limit_lines(plot_widget, item_list, "h", safety["vtg_min"], safety["vtg_max"], float(np.min(axis_a_vals)), float(np.max(axis_a_vals)))
                 elif axis_b_name == "Vbg":
                     self._add_limit_lines(plot_widget, item_list, "h", safety["vbg_min"], safety["vbg_max"], float(np.min(axis_a_vals)), float(np.max(axis_a_vals)))
-        else:
+        elif coord_mode == "df":
+            # Second tab in raw mode: show D/F derived space.
+            # Extent from actual D/F ranges of all points.
+            if all_points:
+                r = self._ratio
+                d_vals = [p["raw"][0] + r * p["raw"][1] for p in all_points]
+                f_vals = [p["raw"][0] - r * p["raw"][1] for p in all_points]
+                self._add_rect(plot_widget, item_list, min(d_vals), min(f_vals), max(d_vals), max(f_vals), extent_pen)
+            # Safety polygon in D/F space (Vtg/Vbg limits mapped via ratio).
+            if draw_polygon:
+                pts = [QPointF(x, y) for x, y in draw_polygon]
+                poly = QPolygonF(pts + [pts[0]])
+                poly_item = QGraphicsPolygonItem(poly)
+                poly_item.setPen(pg.mkPen("r", width=1.2, style=Qt.DashLine))
+                poly_item.setBrush(pg.mkBrush(None))
+                plot_widget.addItem(poly_item)
+                item_list.append(poly_item)
+        else:  # "voltage" — physical mode second tab (Vtg/Vbg)
+            self._add_rect(plot_widget, item_list, float(np.min(axis_a_vals)), float(np.min(axis_b_vals)), float(np.max(axis_a_vals)), float(np.max(axis_b_vals)), extent_pen)
             rect = QGraphicsRectItem(safety["vtg_min"], safety["vbg_min"], safety["vtg_max"] - safety["vtg_min"], safety["vbg_max"] - safety["vbg_min"])
             rect.setPen(pg.mkPen("r", width=1.2, style=Qt.DashLine))
             rect.setBrush(pg.mkBrush(None))
@@ -998,6 +1083,13 @@ class _PreviewPlot(QWidget):
                 start = (a_val, start_b)
                 end = (a_val, end_b)
                 stripe_points = [p for p in all_points if abs(p["axis_a"] - a_val) < EPS]
+            elif coord_mode == "df":
+                # Stripes in D/F space: transform raw endpoints.
+                start_raw, end_raw, _ = self._stripe_raw_endpoints(outer_index, axis_a_name, axis_b_name, axis_b_vals, all_points)
+                r = self._ratio
+                start = (start_raw[0] + r * start_raw[1], start_raw[0] - r * start_raw[1])
+                end = (end_raw[0] + r * end_raw[1], end_raw[0] - r * end_raw[1])
+                stripe_points = [p for p in all_points if abs(p["axis_a"] - a_val) < EPS]
             else:
                 start, end, _ = self._stripe_raw_endpoints(outer_index, axis_a_name, axis_b_name, axis_b_vals, all_points)
                 stripe_points = [p for p in all_points if abs(p["axis_a"] - a_val) < EPS]
@@ -1011,7 +1103,9 @@ class _PreviewPlot(QWidget):
             stripe = plot_widget.plot([start[0], end[0]], [start[1], end[1]], pen=pen)
             item_list.append(stripe)
             stripe_store[outer_index] = stripe
-            angle = 90 if end_b >= start_b else 270
+            # Arrow direction for axis/voltage: based on inner axis sweep direction.
+            # For df mode: based on D/F end coordinates.
+            angle = 90 if end[1] >= start[1] else 270
             arrow = pg.ArrowItem(pos=(end[0], end[1]), angle=angle, headLen=14, tipAngle=28, baseAngle=22, brush=pg.mkBrush("#7a7a7a"), pen=pg.mkPen("#7a7a7a"))
             plot_widget.addItem(arrow)
             item_list.append(arrow)
@@ -1019,6 +1113,10 @@ class _PreviewPlot(QWidget):
         if m > 4:
             gap_x = float((axis_a_vals[2] + axis_a_vals[-1]) / 2.0)
             gap_y = float((axis_b_vals[0] + axis_b_vals[-1]) / 2.0)
+            if coord_mode == "df" and all_points:
+                r = self._ratio
+                gap_x = (axis_a_vals[2] + r * float(np.mean(axis_b_vals)) + axis_a_vals[-1] + r * float(np.mean(axis_b_vals))) / 2.0
+                gap_y = (axis_a_vals[2] - r * float(np.mean(axis_b_vals)) + axis_a_vals[-1] - r * float(np.mean(axis_b_vals))) / 2.0
             dots = pg.TextItem("· · ·", color="#6f6f6f", anchor=(0.5, 0.5))
             dots.setPos(gap_x, gap_y)
             plot_widget.addItem(dots)
@@ -1026,10 +1124,18 @@ class _PreviewPlot(QWidget):
 
         start_axis = (float(axis_a_vals[0]), float(axis_b_vals[0]))
         end_axis = (float(axis_a_vals[-1]), float(axis_b_vals[0] if (snake and ((m - 1) % 2 == 1)) else axis_b_vals[-1]))
-        start_raw = all_points[0]["raw"][:2] if all_points else (0.0, 0.0)
-        end_raw = all_points[-1]["raw"][:2] if all_points else (0.0, 0.0)
-        start_xy = start_axis if coord_mode == "axis" else start_raw
-        end_xy = end_axis if coord_mode == "axis" else end_raw
+        start_raw_pt = all_points[0]["raw"][:2] if all_points else (0.0, 0.0)
+        end_raw_pt = all_points[-1]["raw"][:2] if all_points else (0.0, 0.0)
+        if coord_mode == "axis":
+            start_xy = start_axis
+            end_xy = end_axis
+        elif coord_mode == "df":
+            r = self._ratio
+            start_xy = (start_raw_pt[0] + r * start_raw_pt[1], start_raw_pt[0] - r * start_raw_pt[1])
+            end_xy = (end_raw_pt[0] + r * end_raw_pt[1], end_raw_pt[0] - r * end_raw_pt[1])
+        else:
+            start_xy = start_raw_pt
+            end_xy = end_raw_pt
         start_marker = pg.ScatterPlotItem(x=[start_xy[0]], y=[start_xy[1]], symbol="o", size=16, pen=pg.mkPen("#1f9d55", width=1.5), brush=pg.mkBrush("#1f9d55"))
         end_marker = pg.ScatterPlotItem(x=[end_xy[0]], y=[end_xy[1]], symbol="s", size=16, pen=pg.mkPen("#d92d20", width=1.5), brush=pg.mkBrush("#d92d20"))
         plot_widget.addItem(start_marker)
@@ -1047,7 +1153,12 @@ class _PreviewPlot(QWidget):
         axis_b_vals: np.ndarray,
         snake: bool,
         draw_polygon: list[tuple[float, float]] | None = None,
+        coord: CoordSystem = CoordSystem.PHYSICAL,
+        ratio: float = 1.0,
+        df_polygon: list[tuple[float, float]] | None = None,
     ):
+        self._coord = coord
+        self._ratio = ratio
         self.clear()
         self._valid_points = list(valid_points)
         self._set_point_layers(all_points, valid_points)
@@ -1055,8 +1166,24 @@ class _PreviewPlot(QWidget):
         self._axis_b_vals = np.asarray(axis_b_vals, dtype=float)
         self._snake = bool(snake)
         self.set_axis_labels(axis_a_name, axis_b_name)
+
+        if coord == CoordSystem.RAW:
+            self._tabs.setTabText(0, "Raw (Vtg/Vbg)")
+            self._tabs.setTabText(1, "Derived (Doping / E-field)")
+            self._pw_v.setLabel("bottom", "Doping  D = Vtg + r·Vbg", units="V")
+            self._pw_v.setLabel("left", "E-field  F = Vtg − r·Vbg", units="V")
+            v_coord_mode = "df"
+            v_draw = df_polygon
+        else:
+            self._tabs.setTabText(0, "Physical (D/F)")
+            self._tabs.setTabText(1, "Raw (Vtg/Vbg)")
+            self._pw_v.setLabel("bottom", "Vtg", units="V")
+            self._pw_v.setLabel("left", "Vbg", units="V")
+            v_coord_mode = "voltage"
+            v_draw = None
+
         self._build_stripe_schematic(self._axis_a_vals, self._axis_b_vals, snake, all_points, valid_points, safety, self._pw_axis, self._axis_items, self._axis_stripes, "axis", axis_a_name, axis_b_name, draw_polygon)
-        self._build_stripe_schematic(self._axis_a_vals, self._axis_b_vals, snake, all_points, valid_points, safety, self._pw_v, self._voltage_items, self._voltage_stripes, "voltage", axis_a_name, axis_b_name, None)
+        self._build_stripe_schematic(self._axis_a_vals, self._axis_b_vals, snake, all_points, valid_points, safety, self._pw_v, self._voltage_items, self._voltage_stripes, v_coord_mode, axis_a_name, axis_b_name, v_draw)
 
         self._pw_axis.autoRange()
         self._pw_v.autoRange()
@@ -1068,14 +1195,20 @@ class _PreviewPlot(QWidget):
         upto = min(done, len(self._valid_points))
         pts = self._valid_points[:upto]
         cur = pts[-1]
+        def _v_coords(p: dict) -> tuple[float, float]:
+            vtg, vbg = p["raw"][0], p["raw"][1]
+            if self._coord == CoordSystem.RAW:
+                return self._raw_to_df(vtg, vbg)
+            return vtg, vbg
+
         self._completed_axis_pts.setData(x=[p["axis_a"] for p in pts], y=[p["axis_b"] for p in pts])
-        self._completed_v_pts.setData(x=[p["raw"][0] for p in pts], y=[p["raw"][1] for p in pts])
+        self._completed_v_pts.setData(x=[_v_coords(p)[0] for p in pts], y=[_v_coords(p)[1] for p in pts])
         inner_count = max(1, inner_count)
         current_stripe = min(len(self._axis_a_vals) - 1, max(0, (done - 1) // inner_count)) if len(self._axis_a_vals) else 0
         completed = [float(self._axis_a_vals[i]) for i in range(current_stripe) if i < len(self._axis_a_vals)]
         if completed:
             axis_x, axis_y = [], []
-            raw_x, raw_y = [], []
+            v_x, v_y = [], []
             for idx in range(current_stripe):
                 a_val = float(self._axis_a_vals[idx])
                 stripe_pts = [p for p in self._valid_points if abs(p["axis_a"] - a_val) < EPS]
@@ -1083,22 +1216,27 @@ class _PreviewPlot(QWidget):
                     continue
                 axis_x.extend([stripe_pts[0]["axis_a"], stripe_pts[-1]["axis_a"], np.nan])
                 axis_y.extend([stripe_pts[0]["axis_b"], stripe_pts[-1]["axis_b"], np.nan])
-                raw_x.extend([stripe_pts[0]["raw"][0], stripe_pts[-1]["raw"][0], np.nan])
-                raw_y.extend([stripe_pts[0]["raw"][1], stripe_pts[-1]["raw"][1], np.nan])
+                v0 = _v_coords(stripe_pts[0])
+                v1 = _v_coords(stripe_pts[-1])
+                v_x.extend([v0[0], v1[0], np.nan])
+                v_y.extend([v0[1], v1[1], np.nan])
             self._done_axis.setData(x=axis_x, y=axis_y)
-            self._done_v.setData(x=raw_x, y=raw_y)
+            self._done_v.setData(x=v_x, y=v_y)
         else:
             self._done_axis.setData([], [])
             self._done_v.setData([], [])
         current_pts = [p for p in self._valid_points if abs(p["axis_a"] - cur["axis_a"]) < EPS]
         if current_pts:
             self._current_axis_stripe.setData(x=[current_pts[0]["axis_a"], current_pts[-1]["axis_a"]], y=[current_pts[0]["axis_b"], current_pts[-1]["axis_b"]])
-            self._current_v_stripe.setData(x=[current_pts[0]["raw"][0], current_pts[-1]["raw"][0]], y=[current_pts[0]["raw"][1], current_pts[-1]["raw"][1]])
+            cv0 = _v_coords(current_pts[0])
+            cv1 = _v_coords(current_pts[-1])
+            self._current_v_stripe.setData(x=[cv0[0], cv1[0]], y=[cv0[1], cv1[1]])
         else:
             self._current_axis_stripe.setData([], [])
             self._current_v_stripe.setData([], [])
+        cv_cur = _v_coords(cur)
         self._cur_axis.setData(x=[cur["axis_a"]], y=[cur["axis_b"]])
-        self._cur_v.setData(x=[cur["raw"][0]], y=[cur["raw"][1]])
+        self._cur_v.setData(x=[cv_cur[0]], y=[cv_cur[1]])
 
     def clear_progress(self):
         self._completed_axis_pts.setData([], [])
@@ -1303,6 +1441,7 @@ class MegaSweepPanel(QWidget):
         self._run_inner_count = 1
         self._last_preview: dict = {"all_points": [], "valid_points": []}
         self._run_failed = False
+        self._step_linking = False
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(80)
@@ -1310,6 +1449,7 @@ class MegaSweepPanel(QWidget):
         self._build()
         self._wire()
         self._sync_vbias_availability()
+        self._update_raw_link_label()
         self._schedule_preview()
 
     def _build(self):
@@ -1325,7 +1465,7 @@ class MegaSweepPanel(QWidget):
         left = QWidget()
         self._left_lay = QVBoxLayout(left)
         self._left_lay.setContentsMargins(4, 4, 4, 4)
-        self._left_lay.setSpacing(6)
+        self._left_lay.setSpacing(3)
         scroll.setWidget(left)
         splitter.addWidget(scroll)
 
@@ -1338,14 +1478,16 @@ class MegaSweepPanel(QWidget):
 
         self._coord_widget = _CoordSystemWidget()
         self._axis_selector = _AxisSelectorWidget()
-        self._axis_a = _AxisConfigWidget("Axis A", -5.0, 5.0)
-        self._axis_b = _AxisConfigWidget("Axis B", -5.0, 5.0)
+        self._axis_a = _AxisConfigWidget("Outer Axis", -5.0, 5.0)
+        self._axis_b = _AxisConfigWidget("Inner Axis", -5.0, 5.0)
         self._fixed_widget = _FixedParamsWidget()
         self._safety_widget = _SafetyWidget()
         self._timing_widget = _TimingWidget()
 
         optical = QGroupBox("Optical Settings")
         optical_form = QFormLayout(optical)
+        optical_form.setContentsMargins(6, 4, 6, 4)
+        optical_form.setSpacing(3)
         self._exp_spin = QDoubleSpinBox()
         self._exp_spin.setRange(1, 600000)
         self._exp_spin.setDecimals(1)
@@ -1359,12 +1501,14 @@ class MegaSweepPanel(QWidget):
         self._frames_spin = QSpinBox()
         self._frames_spin.setRange(1, 1000)
         self._frames_spin.setValue(cfg.lf6.accumulations)
-        optical_form.addRow("Exposure (ms)", self._exp_spin)
-        optical_form.addRow("Center λ (nm)", self._center_spin)
-        optical_form.addRow("Frames / Accum", self._frames_spin)
+        optical_form.addRow("Exposure", self._exp_spin)
+        optical_form.addRow("Center λ", self._center_spin)
+        optical_form.addRow("Frames", self._frames_spin)
 
         meta = QGroupBox("File / Metadata")
         meta_form = QFormLayout(meta)
+        meta_form.setContentsMargins(6, 4, 6, 4)
+        meta_form.setSpacing(3)
         self._sample_edit = QLineEdit()
         self._sample_edit.setPlaceholderText("Sample")
         self._tag_edit = QLineEdit("2DSweep")
@@ -1375,17 +1519,15 @@ class MegaSweepPanel(QWidget):
         meta_form.addRow("Laser (nm)", self._laser_edit)
         meta_form.addRow("Power (µW)", self._power_edit)
 
-        for widget in (
-            self._coord_widget,
-            self._axis_selector,
-            self._axis_a,
-            self._axis_b,
-            self._fixed_widget,
-            self._safety_widget,
-            self._timing_widget,
-            optical,
-            meta,
-        ):
+        for widget in (self._coord_widget, self._axis_selector, self._axis_a, self._axis_b):
+            self._left_lay.addWidget(widget)
+
+        self._raw_link_label = QLabel()
+        self._raw_link_label.setStyleSheet("color: #6a6a6a; font-style: italic; font-size: 10px; padding: 0px 6px 1px 6px;")
+        self._raw_link_label.setWordWrap(True)
+        self._left_lay.addWidget(self._raw_link_label)
+
+        for widget in (self._fixed_widget, self._safety_widget, self._timing_widget, optical, meta):
             self._left_lay.addWidget(widget)
         self._left_lay.addStretch(1)
 
@@ -1459,6 +1601,9 @@ class MegaSweepPanel(QWidget):
         self._axis_selector.changed.connect(self._on_axis_selection_changed)
         self._axis_a.changed.connect(self._schedule_preview)
         self._axis_b.changed.connect(self._schedule_preview)
+        self._axis_a._step.valueChanged.connect(lambda v: self._on_raw_step_changed("a", v))
+        self._axis_b._step.valueChanged.connect(lambda v: self._on_raw_step_changed("b", v))
+        self._coord_widget._ratio_spin.valueChanged.connect(self._on_ratio_changed_for_step_link)
         self._fixed_widget.changed.connect(self._schedule_preview)
         self._safety_widget.changed.connect(self._schedule_preview)
         self._timing_widget.changed.connect(self._schedule_preview)
@@ -1496,6 +1641,7 @@ class MegaSweepPanel(QWidget):
     def _on_coord_system_changed(self):
         self._sync_vbias_availability()
         self._update_ratio_validation()
+        self._update_raw_link_label()
         self._schedule_preview()
 
     @Slot()
@@ -1511,7 +1657,69 @@ class MegaSweepPanel(QWidget):
             self._axis_a.set_axis_label(outer, AXIS_UNITS.get(outer, "V"))
         if inner:
             self._axis_b.set_axis_label(inner, AXIS_UNITS.get(inner, "V"))
+        self._update_raw_link_label()
         self._schedule_preview()
+
+    def _is_raw_vtg_vbg_mode(self) -> bool:
+        if self._coord_widget.coord_system() != CoordSystem.RAW:
+            return False
+        return {self._axis_selector.outer(), self._axis_selector.inner()} == {"Vtg", "Vbg"}
+
+    def _on_raw_step_changed(self, source: str, value: float):
+        if self._step_linking or not self._is_raw_vtg_vbg_mode():
+            return
+        r = self._coord_widget.ratio()
+        if abs(r) < EPS:
+            return
+        if self._axis_a._mode.currentText() != "Step Size" or self._axis_b._mode.currentText() != "Step Size":
+            return
+        outer_is_vtg = self._axis_selector.outer() == "Vtg"
+        self._step_linking = True
+        try:
+            if source == "a":
+                # axis_a step changed → update axis_b
+                # Δvtg = r · Δvbg always
+                self._axis_b._step.setValue(value / r if outer_is_vtg else value * r)
+            else:
+                # axis_b step changed → update axis_a
+                self._axis_a._step.setValue(value * r if outer_is_vtg else value / r)
+        finally:
+            self._step_linking = False
+        self._update_raw_link_label()
+
+    def _on_ratio_changed_for_step_link(self):
+        if self._step_linking or not self._is_raw_vtg_vbg_mode():
+            self._update_raw_link_label()
+            return
+        r = self._coord_widget.ratio()
+        if abs(r) < EPS:
+            self._update_raw_link_label()
+            return
+        if self._axis_a._mode.currentText() != "Step Size" or self._axis_b._mode.currentText() != "Step Size":
+            self._update_raw_link_label()
+            return
+        # Recompute axis_b from axis_a (Vtg drives Vbg)
+        outer_is_vtg = self._axis_selector.outer() == "Vtg"
+        step_a = self._axis_a._step.value()
+        self._step_linking = True
+        try:
+            self._axis_b._step.setValue(step_a / r if outer_is_vtg else step_a * r)
+        finally:
+            self._step_linking = False
+        self._update_raw_link_label()
+
+    def _update_raw_link_label(self):
+        if not self._is_raw_vtg_vbg_mode():
+            self._raw_link_label.setText("")
+            return
+        r = self._coord_widget.ratio()
+        outer = self._axis_selector.outer()
+        step_vtg = self._axis_a._step.value() if outer == "Vtg" else self._axis_b._step.value()
+        step_vbg = self._axis_b._step.value() if outer == "Vtg" else self._axis_a._step.value()
+        self._raw_link_label.setText(
+            f"Steps linked via ratio: Δvtg = r·Δvbg  "
+            f"({step_vtg:.4g} V = {r:.4g}·{step_vbg:.4g} V)"
+        )
 
     def _update_ratio_validation(self):
         invalid = self._coord_widget.coord_system() == CoordSystem.PHYSICAL and abs(self._coord_widget.ratio()) < EPS
@@ -1569,9 +1777,10 @@ class MegaSweepPanel(QWidget):
         )
 
     def _estimate_duration_s(self, valid_points: list[dict]) -> float:
+        exp_s = float(self._exp_spin.value()) / 1000.0 * int(self._frames_spin.value())
         ramp_rate = self._timing_widget.ramp_step() / max(self._timing_widget.step_delay_s(), EPS)
         avg_ramp_time = self._timing_widget.ramp_step() / max(ramp_rate, EPS)
-        return len(valid_points) * (self._timing_widget.settle() + avg_ramp_time)
+        return len(valid_points) * (self._timing_widget.settle() + avg_ramp_time + exp_s)
 
     def _format_duration(self, total_s: float) -> str:
         hours = int(total_s // 3600)
@@ -1612,6 +1821,17 @@ class MegaSweepPanel(QWidget):
         all_points = data["all_points"]
         valid_points = data["valid_points"]
         skipped = len(all_points) - len(valid_points)
+        coord = data["coord"]
+        ratio = data["ratio"]
+        df_polygon: list[tuple[float, float]] | None = None
+        if coord == CoordSystem.RAW and abs(ratio) > EPS:
+            raw_corners = [
+                (data["safety"]["vtg_min"], data["safety"]["vbg_min"]),
+                (data["safety"]["vtg_min"], data["safety"]["vbg_max"]),
+                (data["safety"]["vtg_max"], data["safety"]["vbg_max"]),
+                (data["safety"]["vtg_max"], data["safety"]["vbg_min"]),
+            ]
+            df_polygon = [_raw_to_physics(vtg, vbg, ratio) for vtg, vbg in raw_corners]
         self._preview.update_plan(
             all_points=all_points,
             valid_points=valid_points,
@@ -1621,7 +1841,10 @@ class MegaSweepPanel(QWidget):
             axis_a_vals=data["axis_a_vals"],
             axis_b_vals=data["axis_b_vals"],
             snake=self._axis_selector.snake(),
-            draw_polygon=self._safety_polygon_for_preview(data["axis_a"], data["axis_b"], data["ratio"], data["safety"]),
+            draw_polygon=self._safety_polygon_for_preview(data["axis_a"], data["axis_b"], ratio, data["safety"]),
+            coord=coord,
+            ratio=ratio,
+            df_polygon=df_polygon,
         )
 
         fixed_txt = ", ".join(f"{k} = {v:.4f} V" for k, v in data["fixed"].items()) if data["fixed"] else "None"
@@ -1639,13 +1862,15 @@ class MegaSweepPanel(QWidget):
             "sample": self._sample_edit.text().strip() or "Sample",
             "vbias_available": self._vbias_available(),
         })
+        exp_s_per_pt = float(self._exp_spin.value()) / 1000.0 * int(self._frames_spin.value())
         lines = [
             self._format_axis_summary(f"Outer ({data['axis_a']})", self._axis_a.describe()),
             self._format_axis_summary(f"Inner ({data['axis_b']})", self._axis_b.describe()),
             f"Fixed:            {fixed_txt}",
             f"Filename:         {filename_preview}.csv",
             f"Total planned:    {len(all_points)}    In-bounds: {len(valid_points)}    Skipped: {skipped}",
-            f"Est. duration:    {self._format_duration(est_s)}   (settle {self._timing_widget.settle():.3f} s, ramp ~{self._timing_widget.step_delay_s():.3f} s/pt avg)",
+            f"Est. duration:    {self._format_duration(est_s)}   "
+            f"(settle {self._timing_widget.settle():.3f} s + exposure {exp_s_per_pt:.3f} s + ramp ~{self._timing_widget.step_delay_s():.3f} s, per pt)",
         ]
         color = "#5a5a5a"
         if len(valid_points) == 0:

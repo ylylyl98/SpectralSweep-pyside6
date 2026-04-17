@@ -83,7 +83,7 @@
   },
   "stage": {
     "backend": "elliptec",
-    "com_port": "COM1",
+    "com_port": "COM4",
     "visa_resource": "",
     "esp300_axis": 3
   },
