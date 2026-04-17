@@ -518,15 +518,18 @@ class _AxisSelectorWidget(QGroupBox):
         self._available: list[str] = []
         self._outer = QComboBox()
         self._inner = QComboBox()
+        for combo in (self._outer, self._inner):
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            combo.setMinimumContentsLength(len("VDS (Vbias)"))
         self._snake = QCheckBox("Reverse inner direction on alternating outer steps")
         self._snake.setChecked(True)
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(QLabel("Outer (slow) axis"))
-        row.addWidget(self._outer)
+        row.addWidget(self._outer, 1)
         row.addSpacing(16)
         row.addWidget(QLabel("Inner (fast) axis"))
-        row.addWidget(self._inner)
+        row.addWidget(self._inner, 1)
         row.addStretch()
         vlay.addLayout(row)
         vlay.addWidget(self._snake)
@@ -643,10 +646,10 @@ class _AxisConfigWidget(QGroupBox):
             self._step.setSingleStep(0.1)
             self._step.setSuffix(f" {AXIS_UNITS.get(self._axis_name, 'V')}/step")
 
-    def set_axis_label(self, name: str, units: str):
+    def set_axis_label(self, name: str, units: str, display_name: str | None = None):
         self._axis_name = name
         prefix = self.title().split(":")[0]
-        self.setTitle(f"{prefix}: {name}")
+        self.setTitle(f"{prefix}: {display_name or name}")
         self._update_suffix()
         if name == "Vbias" and abs(self._stop.value() - 5.0) < EPS:
             self._stop.setValue(0.050)
@@ -695,6 +698,13 @@ class _FixedParamsWidget(QGroupBox):
             spin.setRange(-200.0, 200.0)
             spin.setDecimals(4)
             spin.setValue(0.0)
+            if axis == "E-field":
+                spin.setToolTip(
+                    "Fixed electric field - held constant for all sweep points.\n"
+                    "Gate voltages are derived from Doping + this value:\n"
+                    "  Vtg = (Doping + E-field) / 2\n"
+                    "  Vbg = (Doping - E-field) / (2r)"
+                )
             if axis == "Vbias" and not vbias_available:
                 spin.setEnabled(False)
                 row = QWidget()
@@ -1649,14 +1659,17 @@ class MegaSweepPanel(QWidget):
         axes = self._axis_selector.available_axes()
         outer = self._axis_selector.outer()
         inner = self._axis_selector.inner()
+        coord = self._coord_widget.coord_system()
         remaining = [axis for axis in axes if axis not in (outer, inner)]
         if not self._vbias_available() and "Vbias" not in remaining:
             remaining.append("Vbias")
         self._fixed_widget.set_fixed_axes(remaining, self._vbias_available())
         if outer:
-            self._axis_a.set_axis_label(outer, AXIS_UNITS.get(outer, "V"))
+            vds_label = "VDS (Vbias)" if (outer == "Vbias" and coord == CoordSystem.PHYSICAL) else None
+            self._axis_a.set_axis_label(outer, AXIS_UNITS.get(outer, "V"), display_name=vds_label)
         if inner:
-            self._axis_b.set_axis_label(inner, AXIS_UNITS.get(inner, "V"))
+            vds_label = "VDS (Vbias)" if (inner == "Vbias" and coord == CoordSystem.PHYSICAL) else None
+            self._axis_b.set_axis_label(inner, AXIS_UNITS.get(inner, "V"), display_name=vds_label)
         self._update_raw_link_label()
         self._schedule_preview()
 
