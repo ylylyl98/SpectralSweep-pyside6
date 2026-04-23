@@ -13,7 +13,7 @@
 #   disconnected()
 #   error(str)
 #   readings_ready(dict)      keys: Ibg, Itg, Ibias (A, float|None)
-#                                   Vbg_meas, Vtg_meas (V, float|nan)
+#                                   Vbg_meas, Vtg_meas, Vbias_meas (V, float|nan)
 #   ramp_complete()
 #
 # Public methods (call from main thread):
@@ -58,6 +58,24 @@ class _SMUWorker(QObject):
     def __init__(self) -> None:
         super().__init__()
         self._device = None   # app.devices.iv_adapter.IVDevice
+
+    def _emit_live_readings(self) -> None:
+        if self._device is None:
+            return
+        try:
+            Ibg, Itg, Ib = self._device.read_currents()
+            Vbg_m, Vtg_m = self._device.read_current_gates()
+            Vbias_m = self._device.read_current_bias()
+            self.readings_ready.emit({
+                "Ibg": Ibg,
+                "Itg": Itg,
+                "Ibias": Ib,
+                "Vbg_meas": Vbg_m,
+                "Vtg_meas": Vtg_m,
+                "Vbias_meas": Vbias_m,
+            })
+        except Exception as exc:
+            self.error.emit(f"SMU live read failed: {exc}")
 
     # ── connect ───────────────────────────���────────────────────────────��─────
 
@@ -130,6 +148,7 @@ class _SMUWorker(QObject):
             iv_setup = IVSetup(inst_list)
             self._device = IVDevice(iv_setup, role_map=role_map)
             self.connected.emit(opened)
+            self._emit_live_readings()
 
         except Exception as exc:
             self._device = None
@@ -169,15 +188,7 @@ class _SMUWorker(QObject):
             self.error.emit("SMU not connected.")
             return
         try:
-            Ibg, Itg, Ib = self._device.read_currents()
-            Vbg_m, Vtg_m = self._device.read_current_gates()
-            self.readings_ready.emit({
-                "Ibg":     Ibg,
-                "Itg":     Itg,
-                "Ibias":   Ib,
-                "Vbg_meas": Vbg_m,
-                "Vtg_meas": Vtg_m,
-            })
+            self._emit_live_readings()
         except Exception as exc:
             self.error.emit(f"SMU read_currents failed: {exc}")
 

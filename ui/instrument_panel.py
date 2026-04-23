@@ -599,6 +599,7 @@ class _ManualControlSection(QWidget):
         self._thread: Optional[QThread]        = None
         self._worker: Optional[_SetReadWorker] = None
         self._build()
+        self._wire()
 
     def _build(self):
         lay = QVBoxLayout(self)
@@ -679,6 +680,13 @@ class _ManualControlSection(QWidget):
         self._read_btn.clicked.connect(self._on_read)
         self._zero_btn.clicked.connect(self._on_zero_all)
 
+    def _wire(self):
+        if self._ctrl is None:
+            return
+        self._ctrl.connected.connect(self._on_smu_connected)
+        self._ctrl.disconnected.connect(self._on_smu_disconnected)
+        self._ctrl.readings_ready.connect(self._on_controller_readings_ready)
+
     # ── busy guard ────────────────────────────────────────────────────────
 
     def _is_busy(self) -> bool:
@@ -689,6 +697,12 @@ class _ManualControlSection(QWidget):
         self._zero_btn.setEnabled(not busy)
         for btn in self._set_btn.values():
             btn.setEnabled(not busy)
+
+    def _reset_display(self):
+        for lbl in self._cur_lbl.values():
+            lbl.setText("— V")
+            lbl.setStyleSheet("color: gray;")
+        self._i_lbl.setText("Ibg: —   Itg: —   Ibias: —")
 
     # ── launch worker ─────────────────────────────────────────────────────
 
@@ -723,6 +737,21 @@ class _ManualControlSection(QWidget):
     @Slot()
     def _on_read(self):
         self._launch("read")
+
+    @Slot(list)
+    def _on_smu_connected(self, _opened: list):
+        if self._is_busy():
+            return
+        self._status_lbl.setStyleSheet("color: orange; font-size: 10px;")
+        self._status_lbl.setText("SMU connected. Reading live voltages...")
+
+    @Slot()
+    def _on_smu_disconnected(self):
+        if self._is_busy():
+            return
+        self._reset_display()
+        self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        self._status_lbl.setText("Idle — connect SMU first.")
 
     @Slot()
     def _on_zero_all(self):
@@ -760,6 +789,23 @@ class _ManualControlSection(QWidget):
         self._i_lbl.setText(
             f"Ibg: {ibg*1e9:.4g} nA   Itg: {itg*1e9:.4g} nA   Ibias: {ib*1e9:.4g} nA"
         )
+
+    @Slot(object)
+    def _on_controller_readings_ready(self, readings: object):
+        if self._is_busy() or not isinstance(readings, dict):
+            return
+        ibg = float(readings.get("Ibg") or 0.0)
+        itg = float(readings.get("Itg") or 0.0)
+        ib = float(readings.get("Ibias") or 0.0)
+        for channel, key in (
+            ("Vbg", "Vbg_meas"),
+            ("Vtg", "Vtg_meas"),
+            ("Vbias", "Vbias_meas"),
+        ):
+            value = float(readings.get(key, float("nan")))
+            self._on_readings_ready(channel, value, ibg, itg, ib)
+        self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        self._status_lbl.setText("Live voltages refreshed after reconnect.")
 
     @Slot(str, float)
     def _on_set_done(self, channel: str, v_arrived: float):

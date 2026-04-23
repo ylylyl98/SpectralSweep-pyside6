@@ -141,6 +141,40 @@ class IVDevice:
             pass
         return nan
 
+    def _update_x_cache(self, name: str, value: Optional[float]) -> None:
+        """Keep cached setpoints aligned with a confirmed live hardware read."""
+        if value is None:
+            return
+        try:
+            value_f = float(value)
+        except Exception:
+            return
+        if not math.isfinite(value_f):
+            return
+        try:
+            xcc = getattr(self.setup, "x_channel_collection", None)
+            if xcc is not None and hasattr(xcc, "send_x"):
+                xcc.send_x(str(name), value_f)
+        except Exception:
+            pass
+
+    def _safe_read_live_x(self, name: str) -> float:
+        """Best-effort live hardware read for one axis, falling back to nan."""
+        nan = float("nan")
+        try:
+            if name == "Vbg":
+                value, _ = self.read_current_gates()
+                return float(value)
+            if name == "Vtg":
+                _, value = self.read_current_gates()
+                return float(value)
+            if name == "Vbias":
+                value = self.read_current_bias()
+                return float(value) if value is not None else nan
+        except Exception:
+            pass
+        return nan
+
     def _ramp_axis_stopaware(
         self,
         name: str,
@@ -169,7 +203,9 @@ class IVDevice:
                 time.sleep(float(delay_s))
             return True
 
-        x0 = self._safe_read_x(name)
+        x0 = self._safe_read_live_x(name)
+        if not math.isfinite(x0):
+            x0 = self._safe_read_x(name)
         if not math.isfinite(x0):
             x0 = 0.0
 
@@ -405,7 +441,9 @@ class IVDevice:
             if inst:
                 inst.read_y()
             self.setup.y_channel_collection.receive_y(meas_key)
-            return float(self.setup.get_single_y_value(meas_key))
+            value = float(self.setup.get_single_y_value(meas_key))
+            self._update_x_cache("Vbias", value)
+            return value
         except Exception:
             return None
 
@@ -440,8 +478,10 @@ class IVDevice:
 
                 if role == "Vbg":
                     bg_val = float(val)
+                    self._update_x_cache("Vbg", bg_val)
                 if role == "Vtg":
                     tg_val = float(val)
+                    self._update_x_cache("Vtg", tg_val)
 
             except Exception:
                 pass
