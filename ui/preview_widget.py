@@ -204,6 +204,8 @@ class RunPlanTree(QTreeWidget):
         current_seq_i: int = -1,
         current_label: str = "",
         current_rep_i: int = 0,
+        current_frame_i: int = 0,
+        current_frame_total: int = 0,
         max_seq_show: int = 12,
         param_order: Optional[List[str]] = None,
     ) -> None:
@@ -252,9 +254,13 @@ class RunPlanTree(QTreeWidget):
         for n in acq_counts:
             prefix_sums.append(prefix_sums[-1] + n)
 
-        # absolute index of currently running acquisition
-        current_abs = prefix_sums[current_seq_i] if 0 <= current_seq_i < len(prefix_sums) - 1 else -1
-        if 0 <= current_seq_i < len(seq_plans):
+        # Absolute index of currently running acquisition. Prefer the file
+        # counter because condition labels are allowed to repeat.
+        current_abs = -1
+        if 0 <= current_seq_i < len(prefix_sums) - 1 and prefix_sums[current_seq_i] <= done < prefix_sums[current_seq_i + 1]:
+            current_abs = int(done)
+        elif 0 <= current_seq_i < len(seq_plans):
+            current_abs = prefix_sums[current_seq_i]
             off = 0
             for lab, reps, _ in seq_plans[current_seq_i]:
                 if lab == current_label:
@@ -322,6 +328,13 @@ class RunPlanTree(QTreeWidget):
 
                     rep_tag = f"({r_i + 1}/{reps})"
                     leaf_text = f"{cond_name}  {rep_tag}" if not rng else f"{cond_name}  {rep_tag}  [{rng}]"
+                    if (
+                        acq_state == "now"
+                        and current_frame_total
+                        and int(current_frame_total) > 1
+                    ):
+                        frame_i = max(0, min(int(current_frame_i), int(current_frame_total)))
+                        leaf_text = f"{leaf_text} - frame {frame_i}/{int(current_frame_total)}"
                     _make_item(leaf_text, acq_state, seq_item)
                     acq_abs += 1
 

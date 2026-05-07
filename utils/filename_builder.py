@@ -165,8 +165,8 @@ def resolve_power_uw(ctx: FilenameContext) -> Tuple[Optional[float], str]:
 
 
 def format_power_uw_decimal(value: float) -> str:
-    """Format a power value as decimal uW, e.g. 5.19uW or 12.00uW."""
-    return f"{value:.2f}uW"
+    """Format a power value as decimal uW at 0.001 uW resolution."""
+    return f"{float(value):.3f}uW"
 
 
 def format_laser_power_token(ctx: FilenameContext) -> str:

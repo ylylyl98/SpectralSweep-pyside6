@@ -47,7 +47,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pyqtgraph as pg
 from utils.config import cfg
-from utils.filename_builder import format_compact_number, format_decimal_token
+from utils.filename_builder import format_compact_number, format_decimal_token, format_power_uw_decimal, sanitize_token
 
 pg.setConfigOption("background", "w")
 pg.setConfigOption("foreground", "k")
@@ -56,6 +56,10 @@ NAN = float("nan")
 EPS = 1e-9
 _SAFETY_RAMP_STEP_V = 0.1
 _SAFETY_RAMP_DELAY_S = 0.02
+_DEFAULT_EXTRA_OVERHEAD_S = 1.0
+_FLUSH_EVERY_POINTS = 50
+_PLOT_UPDATE_EVERY_POINTS = 5
+_UI_LOG_EVERY_POINTS = 10
 
 
 class _MegaSweepStopRequested(Exception):
@@ -260,6 +264,28 @@ def _format_exposure_seconds_token(exp_ms: float) -> str:
     return f"{int(exp_ms // 1000)}" if exp_ms % 1000 == 0 else format_decimal_token(exp_ms / 1000.0, decimals=3)
 
 
+def _format_axis_range_token(axis_name: str, desc: dict) -> str:
+    code = AXIS_CODES.get(axis_name, sanitize_token(axis_name) or "Axis")
+    start = format_compact_number(desc.get("start", 0.0), keep_sign=True, decimals=3)
+    stop = format_compact_number(desc.get("stop", 0.0), keep_sign=True, decimals=3)
+    points = int(desc.get("points", 0) or 0)
+    return f"{code}{start}to{stop}_{points}pts"
+
+
+def _format_laser_power_token(laser_nm, power_uw) -> str:
+    parts: list[str] = []
+    laser_txt = sanitize_token(laser_nm)
+    if laser_txt:
+        parts.append(f"{laser_txt}nm")
+    try:
+        power_txt = format_power_uw_decimal(float(power_uw)) if str(power_uw).strip() else ""
+    except Exception:
+        power_txt = ""
+    if power_txt:
+        parts.append(power_txt)
+    return "".join(parts)
+
+
 def _describe_array(arr: np.ndarray, mode: str, param: float) -> dict:
     vals = np.asarray(arr, dtype=float)
     start = float(vals[0]) if vals.size else 0.0
@@ -289,7 +315,15 @@ def build_megasweep_filename(params: dict) -> str:
     vbias_available = bool(params.get("vbias_available", True))
     fixed = params.get("fixed", {})
 
-    sweep_token = f"{AXIS_CODES[axis_a]}-{AXIS_CODES[axis_b]}"
+    axis_a_desc = params.get("axis_a_desc")
+    axis_b_desc = params.get("axis_b_desc")
+    if isinstance(axis_a_desc, dict) and isinstance(axis_b_desc, dict):
+        sweep_token = "_".join([
+            _format_axis_range_token(axis_a, axis_a_desc),
+            _format_axis_range_token(axis_b, axis_b_desc),
+        ])
+    else:
+        sweep_token = f"{AXIS_CODES[axis_a]}-{AXIS_CODES[axis_b]}"
     if coord == CoordSystem.PHYSICAL:
         sweep_token = f"{sweep_token}_r{format_decimal_token(ratio, decimals=2)}"
 
@@ -303,7 +337,12 @@ def build_megasweep_filename(params: dict) -> str:
 
     exp_s = _format_exposure_seconds_token(float(params.get("exp_ms", 0.0)))
     optical_token = f"{float(params.get('center_nm', 0.0)):.0f}nm_{exp_s}sx{int(params.get('frames', 1))}"
-    return f"{sample}~{sweep_token}~{fixed_token}~{optical_token}~{tag}"
+    laser_power_token = _format_laser_power_token(params.get("laser_nm", ""), params.get("power_uw", ""))
+    parts = [sample, sweep_token, fixed_token]
+    if laser_power_token:
+        parts.append(laser_power_token)
+    parts.extend([optical_token, tag])
+    return "~".join(parts)
 
 
 def _build_csv_metadata_text(params: dict, wls: np.ndarray) -> str:
@@ -363,8 +402,12 @@ def _build_csv_metadata_text(params: dict, wls: np.ndarray) -> str:
         "#",
         "# === Timing ===",
         f"# SettleTime_s: {params['settle']:.4f}",
+        f"# ExtraOverheadPerPoint_s: {float(params.get('extra_overhead_s', 0.0)):.4f}",
         f"# RampStep_V: {params['ramp_step']:.4f}",
         f"# StepDelay_s: {params['step_delay_s']:.4f}",
+        f"# CSVFlushEvery_points: {_FLUSH_EVERY_POINTS}",
+        f"# PlotUpdateEvery_points: {_PLOT_UPDATE_EVERY_POINTS}",
+        f"# UILogEvery_points: {_UI_LOG_EVERY_POINTS}",
         f"# RampRate_Vs: {ramp_rate:.2f}",
         "#",
         "# === Optical ===",
@@ -782,7 +825,19 @@ class _TimingWidget(QGroupBox):
         self._settle.setDecimals(4)
         self._settle.setValue(cfg.ramp.settle_s)
         self._settle.setSuffix(" s")
+        self._extra_overhead = QDoubleSpinBox()
+        self._extra_overhead.setRange(0.0, 30.0)
+        self._extra_overhead.setDecimals(3)
+        self._extra_overhead.setSingleStep(0.1)
+        self._extra_overhead.setValue(_DEFAULT_EXTRA_OVERHEAD_S)
+        self._extra_overhead.setSuffix(" s")
+        self._extra_overhead.setToolTip(
+            "Pre-run ETA allowance for per-point overhead not covered by exposure, "
+            "settle, or ramp time: SMU readbacks, current reads, spectrometer "
+            "readout overhead, CSV write, and UI/log work."
+        )
         form.addRow("Settle time (s)", self._settle)
+        form.addRow("Extra overhead / point", self._extra_overhead)
         self._toggle = QToolButton()
         self._toggle.setText("Advanced Timing")
         self._toggle.setCheckable(True)
@@ -811,6 +866,7 @@ class _TimingWidget(QGroupBox):
         lay.addWidget(self._advanced)
         self._toggle.toggled.connect(self._on_toggle)
         self._settle.valueChanged.connect(self.changed)
+        self._extra_overhead.valueChanged.connect(self.changed)
         self._ramp_step.valueChanged.connect(self._update_rate)
         self._step_delay_ms.valueChanged.connect(self._update_rate)
         self._ramp_step.valueChanged.connect(self.changed)
@@ -827,6 +883,9 @@ class _TimingWidget(QGroupBox):
 
     def settle(self) -> float:
         return float(self._settle.value())
+
+    def extra_overhead_s(self) -> float:
+        return float(self._extra_overhead.value())
 
     def ramp_step(self) -> float:
         return float(self._ramp_step.value())
@@ -1409,14 +1468,18 @@ class _MegaSweepWorker(QObject):
                     ], dtype=np.float64)
                     row = np.concatenate((prefix, y)).reshape(1, -1)
                     np.savetxt(fh, row, fmt="%.6e", delimiter=",")
-                    fh.flush()
+                    if done % _FLUSH_EVERY_POINTS == 0 or done == total:
+                        fh.flush()
                     self.progress.emit(done, total)
-                    self.point_done.emit(done)
-                    self._emit_log(
+                    if done % _PLOT_UPDATE_EVERY_POINTS == 0 or done == total:
+                        self.point_done.emit(done)
+                    point_msg = (
                         f"{done}/{total}: {p['axis_a']}={point['axis_a']:.4f}, {p['axis_b']}={point['axis_b']:.4f} | "
                         f"raw Vtg={vtg:.4f}, Vbg={vbg:.4f}, Vb={vbias:.4f} | "
                         f"Itg={_fmt_uA(Itg)} uA, Ibg={_fmt_uA(Ibg)} uA, Ib={_fmt_uA(Ib)} uA"
                     )
+                    if done == 1 or done % _UI_LOG_EVERY_POINTS == 0 or done == total:
+                        self._emit_log(point_msg)
         except _MegaSweepStopRequested:
             self._emit_log("Stopped by user.")
         finally:
@@ -1793,7 +1856,12 @@ class MegaSweepPanel(QWidget):
         exp_s = float(self._exp_spin.value()) / 1000.0 * int(self._frames_spin.value())
         ramp_rate = self._timing_widget.ramp_step() / max(self._timing_widget.step_delay_s(), EPS)
         avg_ramp_time = self._timing_widget.ramp_step() / max(ramp_rate, EPS)
-        return len(valid_points) * (self._timing_widget.settle() + avg_ramp_time + exp_s)
+        return len(valid_points) * (
+            self._timing_widget.settle()
+            + avg_ramp_time
+            + exp_s
+            + self._timing_widget.extra_overhead_s()
+        )
 
     def _format_duration(self, total_s: float) -> str:
         hours = int(total_s // 3600)
@@ -1866,24 +1934,35 @@ class MegaSweepPanel(QWidget):
             "coord": data["coord"],
             "axis_a": data["axis_a"],
             "axis_b": data["axis_b"],
+            "axis_a_desc": self._axis_a.describe(),
+            "axis_b_desc": self._axis_b.describe(),
             "fixed": data["fixed"],
             "ratio": data["ratio"],
             "center_nm": float(self._center_spin.value()),
             "exp_ms": float(self._exp_spin.value()),
             "frames": int(self._frames_spin.value()),
+            "laser_nm": self._laser_edit.text().strip(),
+            "power_uw": self._power_edit.text().strip(),
             "tag": self._tag_edit.text().strip() or "2DSweep",
             "sample": self._sample_edit.text().strip() or "Sample",
             "vbias_available": self._vbias_available(),
         })
+        sample = self._sample_edit.text().strip() or "Sample"
+        folder_preview = Path(cfg.filename.base_out) / sample / "megasweep"
+        full_preview = folder_preview / f"{filename_preview}.csv"
         exp_s_per_pt = float(self._exp_spin.value()) / 1000.0 * int(self._frames_spin.value())
         lines = [
             self._format_axis_summary(f"Outer ({data['axis_a']})", self._axis_a.describe()),
             self._format_axis_summary(f"Inner ({data['axis_b']})", self._axis_b.describe()),
             f"Fixed:            {fixed_txt}",
+            f"Folder:           {folder_preview}",
             f"Filename:         {filename_preview}.csv",
+            f"Full path:        {full_preview}",
             f"Total planned:    {len(all_points)}    In-bounds: {len(valid_points)}    Skipped: {skipped}",
             f"Est. duration:    {self._format_duration(est_s)}   "
-            f"(settle {self._timing_widget.settle():.3f} s + exposure {exp_s_per_pt:.3f} s + ramp ~{self._timing_widget.step_delay_s():.3f} s, per pt)",
+            f"(settle {self._timing_widget.settle():.3f} s + exposure {exp_s_per_pt:.3f} s + "
+            f"ramp ~{self._timing_widget.step_delay_s():.3f} s + overhead {self._timing_widget.extra_overhead_s():.3f} s, per pt)",
+            f"Run output cadence: flush every {_FLUSH_EVERY_POINTS} pts, plot every {_PLOT_UPDATE_EVERY_POINTS} pts, UI log every {_UI_LOG_EVERY_POINTS} pts",
         ]
         color = "#5a5a5a"
         if len(valid_points) == 0:
@@ -1916,6 +1995,7 @@ class MegaSweepPanel(QWidget):
             "laser_nm": self._laser_edit.text().strip(),
             "power_uw": self._power_edit.text().strip(),
             "settle": self._timing_widget.settle(),
+            "extra_overhead_s": self._timing_widget.extra_overhead_s(),
             "ramp_step": self._timing_widget.ramp_step(),
             "step_delay_s": self._timing_widget.step_delay_s(),
             "vbias_available": self._vbias_available(),

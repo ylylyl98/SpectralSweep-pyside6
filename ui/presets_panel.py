@@ -175,8 +175,13 @@ def _parse_values(s: str, param: str = "") -> Optional[List[float]]:
     if not s or not str(s).strip():
         return None
     raw = str(s).strip()
-    linspace_mode = raw.startswith("(") and raw.endswith(")")
-    if linspace_mode:
+    raw_lower = raw.lower()
+    paren_linspace = raw.startswith("(") and raw.endswith(")")
+    linspace_mode = paren_linspace
+    if raw_lower.startswith("linspace(") and raw.endswith(")"):
+        raw = raw[len("linspace("):-1].strip()
+        linspace_mode = True
+    if paren_linspace:
         raw = raw[1:-1].strip()
     try:
         nums = [float(x.strip()) for x in raw.replace(";", ",").split(",") if x.strip()]
@@ -1116,6 +1121,7 @@ class _RunWorker(QObject):
     log            = Signal(str)
     progress       = Signal(int, int)          # (done_files, total_files) — drives tree
     frame_progress = Signal(int, int)          # (done_frames, total_frames) — drives progress bar
+    active_frame   = Signal(int, str, int, int, int)
     tree_update    = Signal(int, str, int)
     finished       = Signal(bool, str)
     error          = Signal(str)
@@ -1325,6 +1331,7 @@ class _RunWorker(QObject):
 
                                 vbias_set = vbias_points[frame_i - 1] if vbias_points is not None else None
                                 is_start_point = (frame_i == 1)
+                                self.active_frame.emit(seq_i, cond_label, r_i, frame_i, point_count)
                                 self.log.emit(
                                     f"    Point {frame_i}/{point_count}: "
                                     f"Vbg={float(vbg_set):g} V, Vtg={float(vtg_set):g} V"
@@ -1335,6 +1342,47 @@ class _RunWorker(QObject):
                                 if self._smu and self._smu.is_connected:
                                     dev = self._smu.device
                                     try:
+                                        if is_start_point:
+                                            try:
+                                                vbg_now, vtg_now = dev.read_current_gates()
+                                            except Exception:
+                                                vbg_now = vtg_now = float("nan")
+                                            vbias_now = None
+                                            if vbias_set is not None and hasattr(dev, "read_current_bias"):
+                                                try:
+                                                    vbias_now = dev.read_current_bias()
+                                                except Exception:
+                                                    vbias_now = None
+
+                                            def _fmt_v(value):
+                                                try:
+                                                    x = float(value)
+                                                    if np.isfinite(x):
+                                                        return f"{x:.3f}"
+                                                except Exception:
+                                                    pass
+                                                return "n/a"
+
+                                            self.log.emit(
+                                                "    Pre-ramp readback: "
+                                                f"Vbg={_fmt_v(vbg_now)} V, "
+                                                f"Vtg={_fmt_v(vtg_now)} V"
+                                                + (
+                                                    f", Vbias={_fmt_v(vbias_now)} V"
+                                                    if vbias_set is not None else
+                                                    ", Vbias=skipped"
+                                                )
+                                            )
+                                            self.log.emit(
+                                                "    Ramping to sweep start: "
+                                                f"Vbg {_fmt_v(vbg_now)} -> {float(vbg_set):.3f} V, "
+                                                f"Vtg {_fmt_v(vtg_now)} -> {float(vtg_set):.3f} V"
+                                                + (
+                                                    f", Vbias {_fmt_v(vbias_now)} -> {float(vbias_set):.3f} V"
+                                                    if vbias_set is not None else
+                                                    ", Vbias skipped"
+                                                )
+                                            )
                                         dev.set_gates(
                                             Vbg=float(vbg_set), Vtg=float(vtg_set),
                                             ramp_step=(cfg.ramp.step_V if is_start_point else 0.0),
@@ -1572,6 +1620,13 @@ class PresetsPanel(QWidget):
         self._df_batch:    pd.DataFrame = self._batch_src.copy()
         self._total_acq:   int = 0
         self._total_points: int = 0
+        self._done_acq: int = 0
+        self._done_frames: int = 0
+        self._current_seq_i: int = -1
+        self._current_label: str = ""
+        self._current_rep_i: int = 0
+        self._current_frame_i: int = 0
+        self._current_frame_total: int = 0
         self._manual_filename_parts = set(_enabled_filename_parts())
 
         self._build()
@@ -1704,7 +1759,7 @@ class PresetsPanel(QWidget):
                 "Values to step through — comma-separated, e.g.  830, 860, 890\n"
                 "Linspace shorthand: (start, stop, n)  e.g.  (830, 890, 7)\n"
                 "  → generates n evenly-spaced values (linspace only supported\n"
-                "    for Stage Position)."
+                "    for Stage Position). Example: (0,50,51) or linspace(0,50,51)"
             ),
             "Group":     (
                 "Customized mode only.\n"
@@ -2393,6 +2448,13 @@ class PresetsPanel(QWidget):
         self._total_acq    = total
         total_points = _count_total_points(seq, batch)
         self._total_points = total_points
+        self._done_acq = 0
+        self._done_frames = 0
+        self._current_seq_i = -1
+        self._current_label = ""
+        self._current_rep_i = 0
+        self._current_frame_i = 0
+        self._current_frame_total = 0
         self._progress.setMaximum(max(total_points, 1))
         self._progress.setValue(0)
         self._summary_lbl.setText(
@@ -2447,6 +2509,13 @@ class PresetsPanel(QWidget):
         out_dir = self._current_output_dir(run_meta)
 
         self._stop_event.clear()
+        self._done_acq = 0
+        self._done_frames = 0
+        self._current_seq_i = -1
+        self._current_label = ""
+        self._current_rep_i = 0
+        self._current_frame_i = 0
+        self._current_frame_total = 0
         self._run_thread = QThread(self)
         self._run_worker = _RunWorker(
             self._final_seq, self._df_batch,
@@ -2462,6 +2531,7 @@ class PresetsPanel(QWidget):
         self._run_worker.log.connect(self._log)
         self._run_worker.progress.connect(self._on_progress)
         self._run_worker.frame_progress.connect(self._on_frame_progress)
+        self._run_worker.active_frame.connect(self._on_active_frame)
         self._run_worker.tree_update.connect(self._on_tree_update)
         self._run_worker.error.connect(lambda e: self._log(f"ERROR: {e}"))
         self._run_worker.finished.connect(self._on_finished)
@@ -2484,26 +2554,61 @@ class PresetsPanel(QWidget):
     @Slot(int, int)
     def _on_progress(self, done: int, total: int):
         # Updates the tree only (file-level granularity).
+        self._done_acq = int(done)
+        self._total_acq = int(total)
         self._tree.update_plan(
             self._final_seq, self._df_batch,
             done=done, total_acq=total,
-            current_seq_i=-1, current_label="", current_rep_i=0,
+            current_seq_i=self._current_seq_i,
+            current_label=self._current_label,
+            current_rep_i=self._current_rep_i,
+            current_frame_i=self._current_frame_i,
+            current_frame_total=self._current_frame_total,
             param_order=self._tree_param_order(),
         )
 
     @Slot(int, int)
     def _on_frame_progress(self, done_frames: int, total_frames: int):
         # Updates the progress bar at frame (sweep-point) granularity.
+        self._done_frames = int(done_frames)
+        self._total_points = int(total_frames)
         self._progress.setMaximum(max(total_frames, 1))
         self._progress.setValue(done_frames)
 
-    @Slot(int, str, int)
-    def _on_tree_update(self, seq_i: int, label: str, rep_i: int):
-        done = self._progress.value()
+    @Slot(int, str, int, int, int)
+    def _on_active_frame(self, seq_i: int, label: str, rep_i: int, frame_i: int, frame_total: int):
+        self._current_seq_i = int(seq_i)
+        self._current_label = str(label)
+        self._current_rep_i = int(rep_i)
+        self._current_frame_i = int(frame_i)
+        self._current_frame_total = int(frame_total)
         self._tree.update_plan(
             self._final_seq, self._df_batch,
-            done=done, total_acq=self._total_acq,
-            current_seq_i=seq_i, current_label=label, current_rep_i=rep_i,
+            done=self._done_acq,
+            total_acq=self._total_acq,
+            current_seq_i=self._current_seq_i,
+            current_label=self._current_label,
+            current_rep_i=self._current_rep_i,
+            current_frame_i=self._current_frame_i,
+            current_frame_total=self._current_frame_total,
+            param_order=self._tree_param_order(),
+        )
+
+    @Slot(int, str, int)
+    def _on_tree_update(self, seq_i: int, label: str, rep_i: int):
+        self._current_seq_i = int(seq_i)
+        self._current_label = str(label)
+        self._current_rep_i = int(rep_i)
+        self._current_frame_i = 0
+        self._current_frame_total = 0
+        self._tree.update_plan(
+            self._final_seq, self._df_batch,
+            done=self._done_acq, total_acq=self._total_acq,
+            current_seq_i=self._current_seq_i,
+            current_label=self._current_label,
+            current_rep_i=self._current_rep_i,
+            current_frame_i=self._current_frame_i,
+            current_frame_total=self._current_frame_total,
             param_order=self._tree_param_order(),
         )
 
