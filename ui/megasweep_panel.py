@@ -306,7 +306,7 @@ def _describe_array(arr: np.ndarray, mode: str, param: float) -> dict:
 
 
 def build_megasweep_filename(params: dict) -> str:
-    sample = params.get("sample", "Sample") or "Sample"
+    sample = params.get("sample", "SampleID") or "SampleID"
     tag = params.get("tag", "2DSweep") or "2DSweep"
     axis_a = params["axis_a"]
     axis_b = params["axis_b"]
@@ -423,8 +423,8 @@ def _build_csv_metadata_text(params: dict, wls: np.ndarray) -> str:
         f"# Vbias_Available: {vbias_available}",
         f"# LF6_Connected: {lf6_connected}",
         "#",
-        "# === Sample ===",
-        f"# Sample: {params.get('sample', 'Sample')}",
+        "# === Sample ID ===",
+        f"# Sample_ID: {params.get('sample', 'SampleID')}",
         f"# Tag: {params.get('tag', '2DSweep')}",
         f"# Laser_nm: {params.get('laser_nm', 'N/A') or 'N/A'}",
         f"# Power_uW: {params.get('power_uw', 'N/A') or 'N/A'}",
@@ -1583,11 +1583,11 @@ class MegaSweepPanel(QWidget):
         meta_form.setContentsMargins(6, 4, 6, 4)
         meta_form.setSpacing(3)
         self._sample_edit = QLineEdit()
-        self._sample_edit.setPlaceholderText("Sample")
+        self._sample_edit.setPlaceholderText("Sample ID")
         self._tag_edit = QLineEdit("2DSweep")
         self._laser_edit = QLineEdit("730")
         self._power_edit = QLineEdit("1")
-        meta_form.addRow("Sample", self._sample_edit)
+        meta_form.addRow("Sample ID", self._sample_edit)
         meta_form.addRow("Tag", self._tag_edit)
         meta_form.addRow("Laser (nm)", self._laser_edit)
         meta_form.addRow("Power (µW)", self._power_edit)
@@ -1944,10 +1944,10 @@ class MegaSweepPanel(QWidget):
             "laser_nm": self._laser_edit.text().strip(),
             "power_uw": self._power_edit.text().strip(),
             "tag": self._tag_edit.text().strip() or "2DSweep",
-            "sample": self._sample_edit.text().strip() or "Sample",
+            "sample": self._sample_edit.text().strip() or "SampleID",
             "vbias_available": self._vbias_available(),
         })
-        sample = self._sample_edit.text().strip() or "Sample"
+        sample = self._sample_edit.text().strip() or "SampleID"
         folder_preview = Path(cfg.filename.base_out) / sample / "megasweep"
         full_preview = folder_preview / f"{filename_preview}.csv"
         exp_s_per_pt = float(self._exp_spin.value()) / 1000.0 * int(self._frames_spin.value())
@@ -1979,7 +1979,7 @@ class MegaSweepPanel(QWidget):
 
     def _collect_params(self) -> dict:
         data = dict(self._last_preview)
-        sample = self._sample_edit.text().strip() or "Sample"
+        sample = self._sample_edit.text().strip() or "SampleID"
         tag = self._tag_edit.text().strip() or "2DSweep"
         exp_ms = float(self._exp_spin.value())
         frames = int(self._frames_spin.value())

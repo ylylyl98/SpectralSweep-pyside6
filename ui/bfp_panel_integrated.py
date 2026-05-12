@@ -949,6 +949,7 @@ class BFPPanel(QWidget):
         name_grp = QGroupBox("Save Name")
         name_form = QFormLayout(name_grp)
         self._dev_edit = QLineEdit()
+        self._dev_edit.setPlaceholderText("Sample ID")
         self._material_combo = QComboBox()
         self._material_combo.addItems(MATERIAL_OPTIONS)
         self._material_custom_edit = QLineEdit()
@@ -965,7 +966,7 @@ class BFPPanel(QWidget):
         self._run_idx_spin.setRange(1, 999)
         self._auto_inc_chk = QCheckBox("Auto +1")
         self._auto_inc_chk.setChecked(True)
-        name_form.addRow("Dev:", self._dev_edit)
+        name_form.addRow("Sample ID:", self._dev_edit)
         name_form.addRow("Material:", material_row)
         name_form.addRow("Point:", self._point_edit)
         name_form.addRow("Experiment:", self._exp_type_combo)
@@ -1110,7 +1111,7 @@ class BFPPanel(QWidget):
         parts = []
         dev = _sanitize(self._dev_edit.text())
         if dev:
-            parts.append(f"Dev{dev}")
+            parts.append(dev)
         material = _sanitize(self._current_material_text())
         if material:
             parts.append(material)
@@ -1135,7 +1136,7 @@ class BFPPanel(QWidget):
         return "_".join(part for part in parts if part) or "measurement"
 
     def _out_dir(self) -> Path:
-        sample_hint = _sanitize(self._dev_edit.text()) or "BFP"
+        sample_hint = _sanitize(self._dev_edit.text()) or "SampleID"
         return Path(cfg.base_out) / sample_hint / "bfp"
 
     def _refresh_preview(self):

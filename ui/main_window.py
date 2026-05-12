@@ -149,6 +149,7 @@ from ui.settings_panel   import SettingsPanel
 from ui.spectrum_panel   import SpectrumPanel
 from ui.presets_panel    import PresetsPanel
 from ui.megasweep_panel  import MegaSweepPanel
+from ui.power_sweep_panel import PowerSweepPanel
 from ui.bfp_panel_integrated import BFPPanel
 
 
@@ -233,6 +234,15 @@ class MainWindow(QMainWindow):
             lf6_ctrl=self._lf6,
         )
         self._tabs.addTab(self._mega, "2D Sweep")
+
+        # Power Sweep
+        self._power_sweep = PowerSweepPanel(
+            lf6_ctrl=self._lf6,
+            stage_ctrl=self._stg,
+            pm_ctrl=self._pm,
+            smu_ctrl=self._smu,
+        )
+        self._tabs.addTab(self._power_sweep, "Power Sweep")
 
         # BFP
         self._bfp = BFPPanel(lf6_ctrl=self._lf6)

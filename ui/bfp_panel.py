@@ -54,8 +54,8 @@ def _now_ts() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
-def _build_stem(sample: str, note: str, suffix: str, ts: str, run_idx: int) -> str:
-    parts = [p for p in [_sanitize(sample), _sanitize(note), _sanitize(suffix), ts, f"{int(run_idx):03d}"] if p]
+def _build_stem(sample_id: str, note: str, suffix: str, ts: str, run_idx: int) -> str:
+    parts = [p for p in [_sanitize(sample_id) or "SampleID", _sanitize(note), _sanitize(suffix), ts, f"{int(run_idx):03d}"] if p]
     return "_".join(parts) or "bfp"
 
 
@@ -442,6 +442,7 @@ class BFPPanel(QWidget):
         name_grp = QGroupBox("Save Name")
         name_form = QFormLayout(name_grp)
         self._sample_edit = QLineEdit()
+        self._sample_edit.setPlaceholderText("Sample ID")
         self._note_edit   = QLineEdit()
         self._suffix_edit = QLineEdit("BFP")
         self._run_idx_spin = QSpinBox()
@@ -449,7 +450,7 @@ class BFPPanel(QWidget):
         self._run_idx_spin.setValue(1)
         self._auto_inc_chk = QCheckBox("Auto +1")
         self._auto_inc_chk.setChecked(True)
-        name_form.addRow("Sample:", self._sample_edit)
+        name_form.addRow("Sample ID:", self._sample_edit)
         name_form.addRow("Note:",   self._note_edit)
         name_form.addRow("Suffix:", self._suffix_edit)
         name_form.addRow("Run #:",  self._run_idx_spin)
@@ -666,7 +667,7 @@ class BFPPanel(QWidget):
     # ── save ──────────────────────────────────────────────────────────────────
 
     def _out_path(self) -> Path:
-        sample = _sanitize(self._sample_edit.text()) or "Sample"
+        sample = _sanitize(self._sample_edit.text()) or "SampleID"
         return Path(cfg.filename.base_out) / sample / "bfp"
 
     def _next_stem(self) -> str:

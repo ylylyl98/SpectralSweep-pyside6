@@ -1643,8 +1643,8 @@ class PresetsPanel(QWidget):
         # ── top meta row ───────────────────────────────────────────────────
         meta = QHBoxLayout()
         meta.setSpacing(6)
-        self._sample_edit    = QLineEdit(); self._sample_edit.setPlaceholderText("Device ID")
-        self._sample_edit.setToolTip("Sample name — included at the start of saved filenames.")
+        self._sample_edit    = QLineEdit(); self._sample_edit.setPlaceholderText("Sample ID")
+        self._sample_edit.setToolTip("Sample ID — included at the start of saved filenames.")
         self._sample_edit.setMaximumWidth(120)
         self._point_edit     = QLineEdit(); self._point_edit.setPlaceholderText("p1")
         self._point_edit.setToolTip("Measurement location (e.g. p1, center, edge) — included in filenames.")
@@ -1664,7 +1664,7 @@ class PresetsPanel(QWidget):
         self._subfolder_edit = QLineEdit(); self._subfolder_edit.setPlaceholderText("Initial Data")
         self._subfolder_edit.setToolTip("Optional subfolder created under the base output directory.")
         self._subfolder_edit.setMaximumWidth(130)
-        meta.addWidget(QLabel("Device ID:")); meta.addWidget(self._sample_edit)
+        meta.addWidget(QLabel("Sample ID:")); meta.addWidget(self._sample_edit)
         meta.addWidget(QLabel("Point:"));     meta.addWidget(self._point_edit)
         meta.addWidget(self._tag_label);      meta.addWidget(self._tag_edit)
         meta.addWidget(QLabel("Laser:"));  meta.addWidget(self._laser_edit)
@@ -2200,7 +2200,7 @@ class PresetsPanel(QWidget):
         }
 
     def _current_output_dir(self, run_meta: Dict[str, Any]) -> Path:
-        device_id = run_meta["device_id"].strip() or "DeviceID"
+        device_id = run_meta["device_id"].strip() or "SampleID"
         subfolder = run_meta["subfolder"].strip() or "Initial Data"
         return cfg.base_out / device_id / subfolder
 
@@ -2251,7 +2251,7 @@ class PresetsPanel(QWidget):
             self._filename_preview_lbl.setText(f"Filename: {base_name}.csv")
             self._save_path_preview_lbl.setText(f"Folder: {out_dir}")
             note = (
-                "Files are saved under output_root / Device ID / Subfolder. "
+                "Files are saved under output_root / Sample ID / Subfolder. "
                 "Numeric suffixes like _001 are added only when a name collision exists."
             )
             if _to_bool(selected_row.get("MeasurePower", False)):
@@ -2304,7 +2304,7 @@ class PresetsPanel(QWidget):
 
         run_meta = self._current_run_meta()
         if not run_meta["device_id"].strip():
-            return None, "Device ID is required before running."
+            return None, "Sample ID is required before running."
         if not run_meta["temperature"].strip():
             return None, "Temperature is required before running."
         if not self._selected_filename_parts():

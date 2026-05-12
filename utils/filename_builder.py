@@ -210,7 +210,7 @@ def build_filename_tokens(ctx: FilenameContext, enabled_parts: Sequence[str]) ->
 
 
 def build_base_filename(ctx: FilenameContext, enabled_parts: Sequence[str]) -> str:
-    # Device ID and Point always lead the filename, in that order.
+    # Sample ID (legacy field name: device_id) and Point always lead the filename.
     prefix = []
     dev = sanitize_token(ctx.device_id)
     if dev:
