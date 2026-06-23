@@ -123,13 +123,22 @@ class CSVWriter:
         # allow new scalar keys to become columns (only before first row)
         self._maybe_extend_scalar_fields(scalars)
 
+        if spectrum is None:
+            spectrum_values = [""] * len(self.wavelength_headers or [])
+        else:
+            spectrum_values = list(spectrum)
+
+        expected_spectrum_len = len(self.wavelength_headers or [])
+        if len(spectrum_values) != expected_spectrum_len:
+            raise ValueError(
+                "CSV spectrum length does not match its wavelength header: "
+                f"expected {expected_spectrum_len}, received {len(spectrum_values)}."
+            )
+
         self._ensure_open()
 
         row_scalars = [self._fmt_cell(scalars.get(k, "")) for k in self.scalar_fields]
-
-        if spectrum is None:
-            spectrum = [""] * len(self.wavelength_headers or [])
-        row_spec = [self._fmt_cell(x) for x in list(spectrum)]
+        row_spec = [self._fmt_cell(x) for x in spectrum_values]
 
         self.writer.writerow(row_scalars + row_spec)
         self._data_rows_written += 1

@@ -3,6 +3,8 @@ from typing import Tuple
 import numpy as np
 import lf6_automation
 
+from .spectrum_alignment import align_wavelengths_to_intensities
+
 class SpectrometerLF6:
     """
     Thin adapter over lf6_automation.LF6Setup.
@@ -47,7 +49,7 @@ class SpectrometerLF6:
         """
         y = np.asarray(self.setup.acquire(), dtype=float).ravel()
         wl = self.calibration_wavelengths(force=True)
-        return wl, y
+        return align_wavelengths_to_intensities(wl, y)
 
     def acquire_2d(self):
         """

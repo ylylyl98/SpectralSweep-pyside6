@@ -52,6 +52,10 @@ class SMUConfig:
     """Keithley SMU defaults (applied at connect time)."""
     curr_compliance_A: float = 1e-6   # A   — smu_compliance_by_addr default
     volt_compliance_V: float = 20.0   # V   — smu_compliance_by_addr default
+    vbg_resource: str = ""
+    vtg_resource: str = ""
+    vbias_resource: str = ""
+    termination: str = r"\n"
 
 
 @dataclass
@@ -211,7 +215,10 @@ class AppConfig:
             _update_dataclass(self.rotation.rot2, rotation_data["rot2"])
         _update_dataclass(self.stage,    data.get("stage", {}))
         if "font_size_pt" in data:
-            self.font_size_pt = int(data["font_size_pt"])
+            try:
+                self.font_size_pt = min(max(int(data["font_size_pt"]), 7), 18)
+            except (TypeError, ValueError):
+                self.font_size_pt = 9
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────

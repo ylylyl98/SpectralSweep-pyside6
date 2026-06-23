@@ -204,9 +204,18 @@ class ThorlabsPM100D_Wrapper:
             raise RuntimeError(f"Connection failed: {detail}")
 
         try:
+            # Finite communication timeout so a stalled USB transaction raises
+            # instead of blocking measPower() forever. Without this a single
+            # stuck read leaves the UI's read thread permanently "running",
+            # which freezes all further reads until the whole app is restarted.
+            self.inst.setTimeoutValue(c_uint32(5000))
             self.inst.setWavelength(c_double(730), TLPM_DEFAULT_CHANNEL)
             self.inst.setPowerAutoRange(c_int16(1), TLPM_DEFAULT_CHANNEL)
             self.inst.setPowerUnit(c_int16(0), TLPM_DEFAULT_CHANNEL)
+            # Hardware averaging: ~3000 samples/s → 1000 ≈ 330 ms per reading.
+            # Without this each measPower() is a single sample that swings
+            # negative at low power; the device's own display already averages.
+            self.inst.setAvgCnt(c_int16(1000), TLPM_DEFAULT_CHANNEL)
         except Exception as exc:
             print(
                 "Warning: PM100D config failed "

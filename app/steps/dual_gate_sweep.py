@@ -7,6 +7,7 @@ from typing import Dict, Any, Tuple, Iterable, Optional
 
 import numpy as np
 
+from app.devices.spectrum_alignment import align_wavelengths_to_intensities
 from .registry import register
 
 
@@ -788,9 +789,9 @@ class DualGateSweep:
                 _raise_if_stop(self.stop_cb, log=log, msg="🛑 STOP requested before acquire — aborting (will ramp to 0V).")
 
                 wl, intens = spec.acquire()
-
-                wl = list(map(float, wl))
-                intens = list(map(float, intens))
+                wl, intens = align_wavelengths_to_intensities(wl, intens)
+                wl = wl.tolist()
+                intens = intens.tolist()
 
                 # On first row, force CSV wavelength header = actual wl from acquire()
                 if getattr(csvw, "_data_rows_written", 0) == 0:
@@ -800,12 +801,11 @@ class DualGateSweep:
                 else:
                     wl_headers = wl_headers or getattr(csvw, "wavelength_headers", None)
 
-                # Align lengths if needed
                 if wl_headers and len(intens) != len(wl_headers):
-                    if len(intens) > len(wl_headers):
-                        intens = intens[: len(wl_headers)]
-                    else:
-                        intens = intens + [0.0] * (len(wl_headers) - len(intens))
+                    raise RuntimeError(
+                        "Spectrometer output length changed during the sweep: "
+                        f"expected {len(wl_headers)} samples, received {len(intens)}."
+                    )
 
                 # Measured bias voltage (if bias is active)
                 vbias_meas_v = float(vbias_meas) if (vbias_set is not None and vbias_meas is not None and np.isfinite(vbias_meas)) else None

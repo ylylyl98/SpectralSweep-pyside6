@@ -151,10 +151,21 @@ from ui.presets_panel    import PresetsPanel
 from ui.megasweep_panel  import MegaSweepPanel
 from ui.power_sweep_panel import PowerSweepPanel
 from ui.bfp_panel_integrated import BFPPanel
+from utils.config import cfg
 
 
 _ORG  = "SpectralSweep"
 _APP  = "SpectralSweep"
+
+
+def _valid_font_size(value: object, default: int = 9) -> int:
+    try:
+        pt = int(value)
+    except (TypeError, ValueError):
+        pt = default
+    if pt <= 0:
+        pt = default
+    return min(max(pt, 7), 18)
 
 
 class MainWindow(QMainWindow):
@@ -172,10 +183,11 @@ class MainWindow(QMainWindow):
 
         # Apply global stylesheet once (on the QApplication so all windows share it)
         app = QApplication.instance()
-        if app and not app.styleSheet():
-            app.setStyleSheet(_STYLESHEET)
-            base_font = QFont("Segoe UI", 9)
-            app.setFont(base_font)
+        if app:
+            if not app.styleSheet():
+                app.setStyleSheet(_STYLESHEET)
+            app_font = QFont("Segoe UI", _valid_font_size(cfg.font_size_pt))
+            app.setFont(app_font)
 
         # ── create controllers (one per instrument family) ────────────────────
         self._lf6  = LF6Controller(parent=self)

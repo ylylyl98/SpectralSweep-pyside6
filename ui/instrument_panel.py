@@ -82,6 +82,27 @@ def _list_visa_resources(prefixes=("GPIB", "USB")) -> list[str]:
         return []
 
 
+def _select_or_insert_combo_text(combo: QComboBox, text: str) -> None:
+    text = str(text or "").strip()
+    if not text:
+        return
+    idx = combo.findText(text)
+    if idx < 0:
+        combo.insertItem(0, text)
+        idx = 0
+    combo.setCurrentIndex(idx)
+
+
+def _valid_font_size(value: object, default: int = 9) -> int:
+    try:
+        pt = int(value)
+    except (TypeError, ValueError):
+        pt = default
+    if pt <= 0:
+        pt = default
+    return min(max(pt, 7), 18)
+
+
 class _VisaScanWorker(QObject):
     """Runs pyvisa list_resources() in a background thread."""
     finished = Signal(list)   # emits list[str] of found resources
@@ -267,7 +288,10 @@ class _SMUSection(QWidget):
         super().__init__(parent)
         self._ctrl = smu_ctrl
         self._visa_resources: list[str] = []
+        self._pending_role_map: dict[str, Optional[str]] = {}
+        self._pending_termination_text = cfg.smu.termination or r"\n"
         self._build()
+        self._populate_role_combos(prefer_saved=True)
         self._wire()
 
     def _build(self):
@@ -277,14 +301,10 @@ class _SMUSection(QWidget):
         visa_row = QHBoxLayout()
         self._refresh_btn = QPushButton("Refresh VISA")
         visa_row.addWidget(self._refresh_btn)
-        self._asrl_chk = QCheckBox("incl. ASRL")
-        self._asrl_chk.setToolTip(
-            "Also scan serial (ASRL) resources.\n"
-            "Warning: can be very slow — each COM port is opened and timed out."
-        )
-        visa_row.addWidget(self._asrl_chk)
         self._termination = QComboBox()
         self._termination.addItems([r"\n", r"\r", r"\r\n", "<none>"])
+        term_idx = self._termination.findText(cfg.smu.termination or r"\n")
+        self._termination.setCurrentIndex(max(term_idx, 0))
         self._termination.setFixedWidth(80)
         self._termination.setToolTip(
             "Read/write termination character sent to the instrument.\n"
@@ -363,11 +383,10 @@ class _SMUSection(QWidget):
     def _on_refresh(self):
         if self._scan_thread and self._scan_thread.isRunning():
             return  # already scanning
-        prefixes = ("ASRL", "GPIB", "USB") if self._asrl_chk.isChecked() else ("GPIB", "USB")
         self._refresh_btn.setEnabled(False)
-        self._scan_status.setText("Scanning VISA…")
+        self._scan_status.setText("Scanning GPIB VISA resources...")
 
-        self._scan_worker = _VisaScanWorker(prefixes)
+        self._scan_worker = _VisaScanWorker(("GPIB",))
         self._scan_thread = QThread()
         self._scan_worker.moveToThread(self._scan_thread)
         self._scan_thread.started.connect(self._scan_worker.run)
@@ -383,15 +402,38 @@ class _SMUSection(QWidget):
         n = len(resources)
         self._scan_status.setText(f"{n} resource{'s' if n != 1 else ''} found.")
 
-    def _populate_role_combos(self):
+    def _saved_smu_resources(self) -> list[str]:
+        resources = []
+        for resource in (
+            cfg.smu.vbg_resource,
+            cfg.smu.vtg_resource,
+            cfg.smu.vbias_resource,
+        ):
+            resource = str(resource or "").strip()
+            if resource.startswith("GPIB") and resource not in resources:
+                resources.append(resource)
+        return resources
+
+    def _populate_role_combos(self, *, prefer_saved: bool = False):
         """Fill Vbg/Vtg/Vbias combos with all currently listed resources."""
-        options = ["<none>"] + self._visa_resources
-        for combo in (self._role_vbg, self._role_vtg, self._role_vbias):
+        options = ["<none>"]
+        for resource in self._saved_smu_resources() + self._visa_resources:
+            if resource.startswith("GPIB") and resource not in options:
+                options.append(resource)
+
+        for combo, saved in (
+            (self._role_vbg, cfg.smu.vbg_resource),
+            (self._role_vtg, cfg.smu.vtg_resource),
+            (self._role_vbias, cfg.smu.vbias_resource),
+        ):
             prev = combo.currentText()
+            wanted = str(saved or "").strip() if prefer_saved else prev
+            if not wanted or wanted == "<none>":
+                wanted = prev
             combo.blockSignals(True)
             combo.clear()
             combo.addItems(options)
-            idx = combo.findText(prev)
+            idx = combo.findText(wanted)
             combo.setCurrentIndex(max(0, idx))
             combo.blockSignals(False)
 
@@ -410,6 +452,9 @@ class _SMUSection(QWidget):
         if not visa_addrs:
             self._status.setText("Select at least one VISA resource.")
             return
+        if any(not addr.startswith("GPIB") for addr in visa_addrs):
+            self._status.setText("Keithley resources must be GPIB addresses.")
+            return
 
         term_text = self._termination.currentText()
         termination = "" if term_text == "<none>" else term_text.replace("\\n", "\n").replace("\\r", "\r")
@@ -419,6 +464,8 @@ class _SMUSection(QWidget):
             for addr in visa_addrs
         }
 
+        self._pending_role_map = role_map.copy()
+        self._pending_termination_text = term_text
         self._status.setText("Connecting…")
         self._status.setStyleSheet("color: orange; font-weight: bold;")
         self._ctrl.connect_instrument(visa_addrs, role_map, termination, comp)
@@ -429,6 +476,17 @@ class _SMUSection(QWidget):
         self._status.setStyleSheet("color: green; font-weight: bold;")
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
+        role_map = self._pending_role_map or {}
+        cfg.smu.vbg_resource = role_map.get("Vbg") or ""
+        cfg.smu.vtg_resource = role_map.get("Vtg") or ""
+        cfg.smu.vbias_resource = role_map.get("Vbias") or ""
+        cfg.smu.termination = self._pending_termination_text
+        cfg.smu.curr_compliance_A = self._curr_comp.value() * 1e-9
+        cfg.smu.volt_compliance_V = self._volt_comp.value()
+        try:
+            cfg.save()
+        except Exception as exc:
+            self._scan_status.setText(f"Connected, but config save failed: {exc}")
 
     @Slot()
     def _on_disconnected(self):
@@ -1163,6 +1221,7 @@ class _RotationBlock(QWidget):
             self._fast_asrl = _com_ports_as_asrl()
             self._addr_combo.clear()
             self._addr_combo.addItems(self._fast_asrl)
+            self._apply_saved_address()
             # Then kick off a background VISA scan for GPIB/USB (and optionally ASRL)
             prefixes = ("ASRL", "GPIB", "USB") if self._asrl_chk.isChecked() \
                        else ("GPIB", "USB")
@@ -1220,9 +1279,7 @@ class _RotationBlock(QWidget):
         )
         if not saved:
             return
-        idx = self._addr_combo.findText(saved)
-        if idx >= 0:
-            self._addr_combo.setCurrentIndex(idx)
+        _select_or_insert_combo_text(self._addr_combo, saved)
 
     def _apply_mapping_hint(self):
         type_text = self._type_combo.currentText()
@@ -1294,6 +1351,10 @@ class _RotationBlock(QWidget):
         self._disconnect_btn.setEnabled(True)
         self._set_ctrl_enabled(True)
         self._apply_mapping_hint()
+        try:
+            cfg.save()
+        except Exception as exc:
+            self._mapping_hint.setText(f"Connected, but config save failed: {exc}")
         self._launch_rot("read")   # auto-read position on connect
 
     @Slot(str)
@@ -1432,6 +1493,12 @@ class _StageSection(QWidget):
     def _current_profile(self):
         return get_linear_stage_profile(self._current_backend())
 
+    def _load_saved_address_only(self):
+        backend = self._current_backend()
+        saved_addr = cfg.stage.visa_resource if backend == "esp300" else cfg.stage.com_port
+        self._addr_combo.clear()
+        _select_or_insert_combo_text(self._addr_combo, saved_addr)
+
     def _load_axis_options(self, axes: list[int]):
         selected = int(cfg.stage.esp300_axis or 3)
         self._stage_axes = [int(ax) for ax in axes] or [selected]
@@ -1455,7 +1522,7 @@ class _StageSection(QWidget):
         )
         for w in (self._scan_axes_btn, self._axis_combo):
             w.setVisible(is_esp300)
-        self._on_refresh()
+        self._load_saved_address_only()
         self._load_axis_options(self._stage_axes)
 
     def _apply_stage_profile(self):
@@ -1569,10 +1636,7 @@ class _StageSection(QWidget):
             self._addr_combo.addItems(_list_visa_resources(("ASRL", "GPIB", "USB")))
         else:
             self._addr_combo.addItems(_list_com_ports())
-        if saved_addr:
-            idx = self._addr_combo.findText(saved_addr)
-            if idx >= 0:
-                self._addr_combo.setCurrentIndex(idx)
+        _select_or_insert_combo_text(self._addr_combo, saved_addr)
 
     @Slot()
     def _on_scan_axes(self):
@@ -1644,6 +1708,10 @@ class _StageSection(QWidget):
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._set_ctrl_enabled(True)
+        try:
+            cfg.save()
+        except Exception as exc:
+            self._range_hint.setText(f"Connected, but config save failed: {exc}")
         self._launch_stage("read")
 
     @Slot()
@@ -1664,6 +1732,7 @@ class _PM100DSection(QWidget):
         self._ctrl = pm_ctrl
         self._pm_thread: Optional[QThread] = None
         self._pm_worker: Optional[object] = None   # keep Python ref so GC can't destroy it
+        self._retired_reads: list = []             # threads that stalled; keep refs so Qt can't crash on GC
         self._poll_timer = QTimer()
         self._poll_timer.timeout.connect(self._do_read)
         self._build()
@@ -1816,6 +1885,7 @@ class _PM100DSection(QWidget):
     @Slot()
     def _on_pm_done(self):
         self._pm_worker = None   # allow GC now that the thread is done
+        self._pm_thread = None   # clear the slot so the next read isn't blocked
 
     @Slot(float)
     def _on_reading(self, p_w: float):
@@ -1859,6 +1929,15 @@ class _PM100DSection(QWidget):
     @Slot()
     def _on_disconnected(self):
         self._poll_timer.stop()
+        # Retire any in-flight read thread. If a measPower() call stalled, the
+        # thread may still be running; keep a reference so Qt doesn't abort on
+        # GC of a live QThread, but free the active slot so a later reconnect
+        # can issue fresh reads instead of being blocked forever.
+        if self._pm_thread is not None:
+            if self._pm_thread.isRunning():
+                self._retired_reads.append((self._pm_thread, self._pm_worker))
+            self._pm_thread = None
+            self._pm_worker = None
         self._auto_chk.setChecked(False)
         self._status.setText("Disconnected")
         self._status.setStyleSheet("color: gray; font-weight: bold;")
@@ -1912,7 +1991,7 @@ class InstrumentPanel(QScrollArea):
         _fnt_lbl.setToolTip("Adjust the font size of all text in this panel.")
         self._font_spn = QSpinBox()
         self._font_spn.setRange(7, 18)
-        self._font_spn.setValue(QApplication.font().pointSize() or 9)
+        self._font_spn.setValue(_valid_font_size(cfg.font_size_pt))
         self._font_spn.setSuffix(" pt")
         self._font_spn.setFixedWidth(62)
         self._font_spn.setToolTip("Panel font size in points.")
@@ -1973,6 +2052,8 @@ class InstrumentPanel(QScrollArea):
     @Slot(int)
     def _on_font_size_changed(self, pt: int):
         from PySide6.QtGui import QFont
+        pt = _valid_font_size(pt)
+        cfg.font_size_pt = pt
         f = self._content.font()
         f.setPointSize(pt)
         self._content.setFont(f)

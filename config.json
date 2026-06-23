@@ -6,8 +6,12 @@
     "auto_load_on_connect": true
   },
   "smu": {
-    "curr_compliance_A": 1e-06,
-    "volt_compliance_V": 20.0
+    "curr_compliance_A": 6.000000000000001e-07,
+    "volt_compliance_V": 20.0,
+    "vbg_resource": "GPIB1::2::INSTR",
+    "vtg_resource": "GPIB1::3::INSTR",
+    "vbias_resource": "GPIB1::4::INSTR",
+    "termination": "\\n"
   },
   "ramp": {
     "step_V": 0.1,
@@ -18,8 +22,8 @@
   },
   "filename": {
     "base_out": "D:/instrument_control_v3_1",
-    "temperature": "1.8",
-    "measurement_mode": "PL",
+    "temperature": "3.6",
+    "measurement_mode": "Ref",
     "power_coefficient": 1.0,
     "point": "",
     "enabled_parts": [
@@ -71,20 +75,20 @@
     "rot1": {
       "backend": "esp300",
       "com_port": "",
-      "visa_resource": "ASRL5::INSTR",
+      "visa_resource": "ASRL3::INSTR",
       "esp300_axis": 1
     },
     "rot2": {
-      "backend": "none",
+      "backend": "esp300",
       "com_port": "",
-      "visa_resource": "",
+      "visa_resource": "ASRL3::INSTR",
       "esp300_axis": 2
     }
   },
   "stage": {
-    "backend": "elliptec",
+    "backend": "esp300",
     "com_port": "COM6",
-    "visa_resource": "",
+    "visa_resource": "ASRL3::INSTR",
     "esp300_axis": 3
   },
   "font_size_pt": 9

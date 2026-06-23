@@ -28,6 +28,8 @@ import time
 import numpy as np
 from typing import List
 
+from app.devices.spectrum_alignment import align_wavelengths_to_intensities
+
 
 # ── Constants matching a typical Princeton Instruments PIXIS / PyLoN CCD ──────
 _DEFAULT_N_PIXELS = 1340          # detector width in pixels
@@ -270,7 +272,7 @@ class MockAdapter:
     def acquire(self):
         cts = self.setup.acquire()
         wl  = self.calibration_wavelengths(force=True)
-        return wl, cts
+        return align_wavelengths_to_intensities(wl, cts)
 
     def acquire_2d(self) -> np.ndarray:
         return self.setup.acquire_2d()
