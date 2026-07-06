@@ -376,7 +376,7 @@ class _SMUSection(QWidget):
         self._disconnect_btn.clicked.connect(self._ctrl.disconnect_instrument)
         self._ctrl.connected.connect(self._on_connected)
         self._ctrl.disconnected.connect(self._on_disconnected)
-        self._ctrl.error.connect(lambda msg: self._status.setText(f"Error: {msg[:60]}"))
+        self._ctrl.error.connect(self._on_error)
         self._scan_thread: Optional[QThread] = None
 
     @Slot()
@@ -468,7 +468,16 @@ class _SMUSection(QWidget):
         self._pending_termination_text = term_text
         self._status.setText("Connecting…")
         self._status.setStyleSheet("color: orange; font-weight: bold;")
+        self._connect_btn.setEnabled(False)
         self._ctrl.connect_instrument(visa_addrs, role_map, termination, comp)
+
+    @Slot(str)
+    def _on_error(self, msg: str):
+        self._status.setText(f"Error: {msg[:100]}")
+        self._status.setStyleSheet("color: red; font-weight: bold;")
+        if not self._ctrl.is_connected:
+            self._connect_btn.setEnabled(True)
+            self._disconnect_btn.setEnabled(False)
 
     @Slot(list)
     def _on_connected(self, opened: list):
@@ -2006,9 +2015,15 @@ class InstrumentPanel(QScrollArea):
         lay.setContentsMargins(4, 4, 4, 6)
         lay.setAlignment(Qt.AlignmentFlag.AlignTop)
         lay.setSpacing(3)
+        self._sections: dict[str, QWidget] = {}
+        self._expanders: dict[str, _Expander] = {}
 
         if lf6_ctrl is not None:
-            lay.addWidget(_Expander("LF6 Spectrometer", _LF6Section(lf6_ctrl)))
+            section = _LF6Section(lf6_ctrl)
+            expander = _Expander("LF6 Spectrometer", section)
+            self._sections["lf6"] = section
+            self._expanders["lf6"] = expander
+            lay.addWidget(expander)
 
         if smu_ctrl is not None:
             lay.addWidget(_Expander("SMU — Keithley (VISA)", _SMUSection(smu_ctrl)))
@@ -2035,8 +2050,27 @@ class InstrumentPanel(QScrollArea):
             lay.addWidget(_Expander("PM100D Power Meter", _PM100DSection(pm_ctrl)))
 
         lay.addStretch()
+        for expander in container.findChildren(_Expander):
+            section = expander._content
+            key = ""
+            if isinstance(section, _LF6Section):
+                key = "lf6"
+            elif isinstance(section, _SMUSection):
+                key = "smu"
+            elif isinstance(section, _ManualControlSection):
+                key = "manual_smu"
+            elif isinstance(section, _RotationBlock):
+                key = section._slot
+            elif isinstance(section, _StageSection):
+                key = "stage"
+            elif isinstance(section, _PM100DSection):
+                key = "pm100d"
+            if key:
+                self._sections[key] = section
+                self._expanders[key] = expander
 
         scroll_area = QScrollArea()
+        self._scroll_area = scroll_area
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
@@ -2048,6 +2082,158 @@ class InstrumentPanel(QScrollArea):
         # Wire font spinner — updates container font which Qt propagates to children
         self._font_spn.valueChanged.connect(self._on_font_size_changed)
         self._content = container
+
+    def capture_session_state(self) -> dict:
+        """Capture connection setup and harmless UI preferences only."""
+        state: dict = {
+            "font_size_pt": int(self._font_spn.value()),
+            "scroll_y": int(self._scroll_area.verticalScrollBar().value()),
+            "expanded": {
+                key: bool(expander._btn.isChecked())
+                for key, expander in self._expanders.items()
+            },
+        }
+        lf6 = self._sections.get("lf6")
+        if isinstance(lf6, _LF6Section):
+            state["lf6"] = {"use_mock": bool(lf6._mock_chk.isChecked())}
+        smu = self._sections.get("smu")
+        if isinstance(smu, _SMUSection):
+            state["smu"] = {
+                "vbg_resource": smu._role_vbg.currentText(),
+                "vtg_resource": smu._role_vtg.currentText(),
+                "vbias_resource": smu._role_vbias.currentText(),
+                "termination": smu._termination.currentText(),
+                "current_compliance_na": float(smu._curr_comp.value()),
+                "voltage_compliance_v": float(smu._volt_comp.value()),
+            }
+        for key in ("rot1", "rot2"):
+            rotation = self._sections.get(key)
+            if isinstance(rotation, _RotationBlock):
+                state[key] = {
+                    "backend": rotation._type_combo.currentText(),
+                    "address": rotation._addr_combo.currentText(),
+                    "axis": rotation._axis_combo.currentText(),
+                    "include_asrl": bool(rotation._asrl_chk.isChecked()),
+                    "jog": float(rotation._jog_spn.value()),
+                }
+        stage = self._sections.get("stage")
+        if isinstance(stage, _StageSection):
+            state["stage"] = {
+                "backend": stage._type_combo.currentText(),
+                "address": stage._addr_combo.currentText(),
+                "axis": stage._axis_combo.currentText(),
+                "jog": float(stage._jog_spn.value()),
+            }
+        pm = self._sections.get("pm100d")
+        if isinstance(pm, _PM100DSection):
+            state["pm100d"] = {
+                "device": pm._device_combo.currentText(),
+                "wavelength_nm": float(pm._wl_spn.value()),
+                "poll_interval_s": float(pm._interval_spn.value()),
+            }
+        return state
+
+    def restore_session_state(self, state: dict) -> None:
+        """Restore controls without connecting, polling, moving, or setting outputs."""
+        if not isinstance(state, dict):
+            return
+        try:
+            self._font_spn.setValue(_valid_font_size(state["font_size_pt"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+        expanded = state.get("expanded")
+        if isinstance(expanded, dict):
+            for key, value in expanded.items():
+                expander = self._expanders.get(str(key))
+                if expander is not None:
+                    expander._btn.setChecked(bool(value))
+
+        lf6_state = state.get("lf6")
+        lf6 = self._sections.get("lf6")
+        if isinstance(lf6_state, dict) and isinstance(lf6, _LF6Section):
+            if "use_mock" in lf6_state:
+                lf6._mock_chk.setChecked(bool(lf6_state["use_mock"]))
+
+        smu_state = state.get("smu")
+        smu = self._sections.get("smu")
+        if isinstance(smu_state, dict) and isinstance(smu, _SMUSection):
+            for key, combo in (
+                ("vbg_resource", smu._role_vbg),
+                ("vtg_resource", smu._role_vtg),
+                ("vbias_resource", smu._role_vbias),
+                ("termination", smu._termination),
+            ):
+                value = smu_state.get(key)
+                if isinstance(value, str):
+                    _select_or_insert_combo_text(combo, value)
+            for key, spin in (
+                ("current_compliance_na", smu._curr_comp),
+                ("voltage_compliance_v", smu._volt_comp),
+            ):
+                try:
+                    spin.setValue(float(smu_state[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+        for key in ("rot1", "rot2"):
+            rotation_state = state.get(key)
+            rotation = self._sections.get(key)
+            if not isinstance(rotation_state, dict) or not isinstance(rotation, _RotationBlock):
+                continue
+            backend = rotation_state.get("backend")
+            if isinstance(backend, str) and rotation._type_combo.findText(backend) >= 0:
+                rotation._type_combo.setCurrentText(backend)
+            address = rotation_state.get("address")
+            if isinstance(address, str):
+                _select_or_insert_combo_text(rotation._addr_combo, address)
+            axis = rotation_state.get("axis")
+            if isinstance(axis, str):
+                _select_or_insert_combo_text(rotation._axis_combo, axis)
+            if "include_asrl" in rotation_state:
+                rotation._asrl_chk.setChecked(bool(rotation_state["include_asrl"]))
+            try:
+                rotation._jog_spn.setValue(float(rotation_state["jog"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+
+        stage_state = state.get("stage")
+        stage = self._sections.get("stage")
+        if isinstance(stage_state, dict) and isinstance(stage, _StageSection):
+            backend = stage_state.get("backend")
+            if isinstance(backend, str) and stage._type_combo.findText(backend) >= 0:
+                stage._type_combo.setCurrentText(backend)
+            address = stage_state.get("address")
+            if isinstance(address, str):
+                _select_or_insert_combo_text(stage._addr_combo, address)
+            axis = stage_state.get("axis")
+            if isinstance(axis, str):
+                _select_or_insert_combo_text(stage._axis_combo, axis)
+            try:
+                stage._jog_spn.setValue(float(stage_state["jog"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+
+        pm_state = state.get("pm100d")
+        pm = self._sections.get("pm100d")
+        if isinstance(pm_state, dict) and isinstance(pm, _PM100DSection):
+            device = pm_state.get("device")
+            if isinstance(device, str):
+                _select_or_insert_combo_text(pm._device_combo, device)
+            for key, spin in (
+                ("wavelength_nm", pm._wl_spn),
+                ("poll_interval_s", pm._interval_spn),
+            ):
+                try:
+                    spin.setValue(float(pm_state[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+        try:
+            scroll_y = max(0, int(state.get("scroll_y", 0)))
+        except (TypeError, ValueError):
+            scroll_y = 0
+        QTimer.singleShot(
+            0, lambda: self._scroll_area.verticalScrollBar().setValue(scroll_y)
+        )
 
     @Slot(int)
     def _on_font_size_changed(self, pt: int):

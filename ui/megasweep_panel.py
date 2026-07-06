@@ -1529,7 +1529,8 @@ class MegaSweepPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
-        splitter = QSplitter(Qt.Horizontal)
+        self._splitter = QSplitter(Qt.Horizontal)
+        splitter = self._splitter
         root.addWidget(splitter, stretch=1)
 
         scroll = QScrollArea()
@@ -1691,6 +1692,158 @@ class MegaSweepPanel(QWidget):
         if self._smu is not None:
             self._smu.connected.connect(lambda *_: self._sync_vbias_availability())
             self._smu.disconnected.connect(self._sync_vbias_availability)
+
+    def capture_session_state(self) -> dict:
+        """Capture the editable sweep recipe, never controller/runtime state."""
+
+        def axis_state(widget: _AxisConfigWidget) -> dict:
+            return {
+                "start": float(widget._start.value()),
+                "stop": float(widget._stop.value()),
+                "step": float(widget._step.value()),
+                "mode": widget._mode.currentText(),
+            }
+
+        return {
+            "coordinate_system": self._coord_widget.coord_system().value,
+            "ratio": float(self._coord_widget.ratio()),
+            "outer_axis": self._axis_selector.outer(),
+            "inner_axis": self._axis_selector.inner(),
+            "snake": bool(self._axis_selector.snake()),
+            "outer_config": axis_state(self._axis_a),
+            "inner_config": axis_state(self._axis_b),
+            "fixed": self._fixed_widget.get_values(),
+            "safety": self._safety_widget.get_limits(),
+            "timing": {
+                "settle_s": float(self._timing_widget.settle()),
+                "extra_overhead_s": float(self._timing_widget.extra_overhead_s()),
+                "ramp_step": float(self._timing_widget.ramp_step()),
+                "step_delay_s": float(self._timing_widget.step_delay_s()),
+                "advanced_open": bool(self._timing_widget._toggle.isChecked()),
+            },
+            "optical": {
+                "exposure_ms": float(self._exp_spin.value()),
+                "center_nm": float(self._center_spin.value()),
+                "frames": int(self._frames_spin.value()),
+            },
+            "metadata": {
+                "sample_id": self._sample_edit.text(),
+                "tag": self._tag_edit.text(),
+                "laser_nm": self._laser_edit.text(),
+                "power_uw": self._power_edit.text(),
+            },
+            "splitter_sizes": [int(v) for v in self._splitter.sizes()],
+        }
+
+    def restore_session_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+
+        coord = state.get("coordinate_system")
+        if coord == CoordSystem.PHYSICAL.value:
+            self._coord_widget._physical.setChecked(True)
+        elif coord == CoordSystem.RAW.value:
+            self._coord_widget._raw.setChecked(True)
+        try:
+            self._coord_widget._ratio_spin.setValue(float(state["ratio"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+
+        self._sync_vbias_availability()
+        outer = state.get("outer_axis")
+        if isinstance(outer, str) and self._axis_selector._outer.findText(outer) >= 0:
+            self._axis_selector._outer.setCurrentText(outer)
+        inner = state.get("inner_axis")
+        if isinstance(inner, str) and self._axis_selector._inner.findText(inner) >= 0:
+            self._axis_selector._inner.setCurrentText(inner)
+        if "snake" in state:
+            self._axis_selector._snake.setChecked(bool(state["snake"]))
+        self._on_axis_selection_changed()
+
+        def restore_axis(widget: _AxisConfigWidget, values: object) -> None:
+            if not isinstance(values, dict):
+                return
+            mode = values.get("mode")
+            if isinstance(mode, str) and widget._mode.findText(mode) >= 0:
+                widget._mode.setCurrentText(mode)
+            for key, spin in (
+                ("start", widget._start),
+                ("stop", widget._stop),
+                ("step", widget._step),
+            ):
+                try:
+                    spin.setValue(float(values[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+
+        restore_axis(self._axis_a, state.get("outer_config"))
+        restore_axis(self._axis_b, state.get("inner_config"))
+
+        fixed = state.get("fixed")
+        if isinstance(fixed, dict):
+            for key, value in fixed.items():
+                spin = self._fixed_widget._spins.get(str(key))
+                if spin is not None:
+                    try:
+                        spin.setValue(float(value))
+                    except (TypeError, ValueError):
+                        pass
+        safety = state.get("safety")
+        if isinstance(safety, dict):
+            for key, value in safety.items():
+                spin = self._safety_widget._spins.get(str(key))
+                if spin is not None:
+                    try:
+                        spin.setValue(float(value))
+                    except (TypeError, ValueError):
+                        pass
+        timing = state.get("timing")
+        if isinstance(timing, dict):
+            for key, spin, scale in (
+                ("settle_s", self._timing_widget._settle, 1.0),
+                ("extra_overhead_s", self._timing_widget._extra_overhead, 1.0),
+                ("ramp_step", self._timing_widget._ramp_step, 1.0),
+                ("step_delay_s", self._timing_widget._step_delay_ms, 1000.0),
+            ):
+                try:
+                    spin.setValue(float(timing[key]) * scale)
+                except (KeyError, TypeError, ValueError):
+                    pass
+            if "advanced_open" in timing:
+                self._timing_widget._toggle.setChecked(bool(timing["advanced_open"]))
+
+        optical = state.get("optical")
+        if isinstance(optical, dict):
+            for key, spin in (
+                ("exposure_ms", self._exp_spin),
+                ("center_nm", self._center_spin),
+            ):
+                try:
+                    spin.setValue(float(optical[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+            try:
+                self._frames_spin.setValue(int(optical["frames"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+        metadata = state.get("metadata")
+        if isinstance(metadata, dict):
+            for key, edit in (
+                ("sample_id", self._sample_edit),
+                ("tag", self._tag_edit),
+                ("laser_nm", self._laser_edit),
+                ("power_uw", self._power_edit),
+            ):
+                value = metadata.get(key)
+                if isinstance(value, str):
+                    edit.setText(value)
+        sizes = state.get("splitter_sizes")
+        if isinstance(sizes, list) and len(sizes) == 2:
+            try:
+                self._splitter.setSizes([max(0, int(v)) for v in sizes])
+            except (TypeError, ValueError):
+                pass
+        self._schedule_preview()
 
     def _schedule_preview(self):
         self._preview_timer.start()

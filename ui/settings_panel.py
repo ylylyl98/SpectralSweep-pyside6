@@ -234,6 +234,56 @@ class SettingsPanel(QWidget):
 
     # ── slots ─────────────────────────────────────────────────────────────────
 
+    def capture_session_state(self) -> dict:
+        """Capture global defaults so edits participate in automatic saving."""
+        return {
+            "lf6": {
+                "exposure_ms": float(self._exposure.value()),
+                "center_nm": float(self._center.value()),
+                "accumulations": int(self._accum.value()),
+            },
+            "output": {
+                "base_out": self._base_out_edit.text(),
+                "temperature": self._temp_edit.text(),
+                "measurement_mode": self._measurement_mode.currentText(),
+                "power_coefficient": float(self._power_coeff.value()),
+            },
+        }
+
+    def restore_session_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        lf6 = state.get("lf6")
+        if isinstance(lf6, dict):
+            for key, spin in (
+                ("exposure_ms", self._exposure),
+                ("center_nm", self._center),
+            ):
+                try:
+                    spin.setValue(float(lf6[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+            try:
+                self._accum.setValue(int(lf6["accumulations"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+        output = state.get("output")
+        if isinstance(output, dict):
+            for key, edit in (
+                ("base_out", self._base_out_edit),
+                ("temperature", self._temp_edit),
+            ):
+                value = output.get(key)
+                if isinstance(value, str):
+                    edit.setText(value)
+            mode = output.get("measurement_mode")
+            if isinstance(mode, str) and self._measurement_mode.findText(mode) >= 0:
+                self._measurement_mode.setCurrentText(mode)
+            try:
+                self._power_coeff.setValue(float(output["power_coefficient"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+
     @Slot()
     def _on_apply_lf6(self):
         if self._ctrl is None:

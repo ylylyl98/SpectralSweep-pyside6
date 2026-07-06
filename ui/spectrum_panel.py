@@ -219,6 +219,27 @@ class SpectrumPanel(QWidget):
 
     # ── slots ─────────────────────────────────────────────────────────────────
 
+    def capture_session_state(self) -> dict:
+        """Return display preferences only; acquired data is intentionally omitted."""
+        return {
+            "view_tab": int(self._tabs.currentIndex()),
+            "auto_y": bool(self._spec_plot._autoscale_chk.isChecked()),
+            "colormap": self._frame_plot._cmap_combo.currentText(),
+        }
+
+    def restore_session_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        self._spec_plot._autoscale_chk.setChecked(bool(state.get("auto_y", True)))
+        cmap = state.get("colormap")
+        if isinstance(cmap, str) and self._frame_plot._cmap_combo.findText(cmap) >= 0:
+            self._frame_plot._cmap_combo.setCurrentText(cmap)
+        try:
+            tab = int(state.get("view_tab", 0))
+        except (TypeError, ValueError):
+            tab = 0
+        self._tabs.setCurrentIndex(min(max(tab, 0), self._tabs.count() - 1))
+
     @Slot()
     def _on_acquire(self):
         if self._ctrl is None:

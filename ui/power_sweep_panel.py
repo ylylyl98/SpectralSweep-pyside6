@@ -488,7 +488,8 @@ class PowerSweepPanel(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        splitter = QSplitter(Qt.Horizontal)
+        self._splitter = QSplitter(Qt.Horizontal)
+        splitter = self._splitter
         root.addWidget(splitter, stretch=1)
 
         # ── left: scrollable controls ────────────────────────────────────────
@@ -775,6 +776,75 @@ class PowerSweepPanel(QWidget):
                 w.valueChanged.connect(self._update_filename_preview)
             elif hasattr(w, "toggled"):
                 w.toggled.connect(self._update_filename_preview)
+
+    def capture_session_state(self) -> dict:
+        """Capture setup controls, excluding run progress, plots, and hardware state."""
+        return {
+            "positions": self._pos_input.text(),
+            "center_nm": float(self._center_spin.value()),
+            "exposure_ms": float(self._exp_spin.value()),
+            "frames": int(self._frames_spin.value()),
+            "pm_wavelength_nm": float(self._pm_wl_spin.value()),
+            "vbg": float(self._vbg_spin.value()),
+            "vtg": float(self._vtg_spin.value()),
+            "vbias": float(self._vbias_spin.value()),
+            "ramp_step": float(self._ramp_step_spin.value()),
+            "settle_s": float(self._settle_spin.value()),
+            "apply_gates": bool(self._apply_gates_chk.isChecked()),
+            "return_zero": bool(self._return_zero_chk.isChecked()),
+            "sample_id": self._devid_edit.text(),
+            "point": self._point_edit.text(),
+            "laser_nm": self._laser_edit.text(),
+            "subfolder": self._subfolder_edit.text(),
+            "splitter_sizes": [int(v) for v in self._splitter.sizes()],
+        }
+
+    def restore_session_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+
+        def set_number(widget, key: str) -> None:
+            try:
+                value = float(state[key])
+                widget.setValue(int(value) if isinstance(widget, QSpinBox) else value)
+            except (KeyError, TypeError, ValueError):
+                pass
+
+        text_fields = {
+            "positions": self._pos_input,
+            "sample_id": self._devid_edit,
+            "point": self._point_edit,
+            "laser_nm": self._laser_edit,
+            "subfolder": self._subfolder_edit,
+        }
+        for key, widget in text_fields.items():
+            value = state.get(key)
+            if isinstance(value, str):
+                widget.setText(value)
+        for key, widget in (
+            ("center_nm", self._center_spin),
+            ("exposure_ms", self._exp_spin),
+            ("frames", self._frames_spin),
+            ("pm_wavelength_nm", self._pm_wl_spin),
+            ("vbg", self._vbg_spin),
+            ("vtg", self._vtg_spin),
+            ("vbias", self._vbias_spin),
+            ("ramp_step", self._ramp_step_spin),
+            ("settle_s", self._settle_spin),
+        ):
+            set_number(widget, key)
+        if "apply_gates" in state:
+            self._apply_gates_chk.setChecked(bool(state["apply_gates"]))
+        if "return_zero" in state:
+            self._return_zero_chk.setChecked(bool(state["return_zero"]))
+        sizes = state.get("splitter_sizes")
+        if isinstance(sizes, list) and len(sizes) == 2:
+            try:
+                self._splitter.setSizes([max(0, int(v)) for v in sizes])
+            except (TypeError, ValueError):
+                pass
+        self._update_position_preview()
+        self._update_filename_preview()
 
     # ── position preview ──────────────────────────────────────────────────────
 

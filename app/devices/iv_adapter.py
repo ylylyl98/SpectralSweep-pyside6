@@ -1,9 +1,53 @@
 from __future__ import annotations
 
-from typing import Tuple, Optional, Dict, Callable, Type
+from collections import deque
+from datetime import datetime, timezone
+from typing import Any, Tuple, Optional, Dict, Callable, Type
 import math
+import threading
 import time
 import iv_automation
+
+
+class SMUCommunicationError(RuntimeError):
+    """A structured, role-specific SMU communication failure."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        role: Optional[str] = None,
+        address: Optional[str] = None,
+        operation: Optional[str] = None,
+        command: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+        diagnosis: Optional[Dict[str, Any]] = None,
+        recent_operations: Optional[list] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.role = role
+        self.address = address
+        self.operation = operation
+        self.command = command
+        self.timeout_ms = timeout_ms
+        self.diagnosis = dict(diagnosis or {})
+        self.recent_operations = list(recent_operations or [])
+        self.context = dict(context or {})
+
+    def to_incident_dict(self) -> Dict[str, Any]:
+        return {
+            "error_type": type(self).__name__,
+            "error": str(self),
+            "role": self.role,
+            "address": self.address,
+            "operation": self.operation,
+            "command": self.command,
+            "timeout_ms": self.timeout_ms,
+            "diagnosis": dict(self.diagnosis),
+            "recent_operations": list(self.recent_operations),
+            "context": dict(self.context),
+        }
 
 
 class IVDevice:
@@ -19,8 +63,389 @@ class IVDevice:
     ):
         self.setup = setup
         self.role_map = role_map or {"Vbg": None, "Vtg": None, "Vbias": None}
+        self._io_lock = threading.RLock()
+        self._operation_context: Dict[str, Any] = {}
+        self._operation_history = deque(maxlen=30)
+        self._role_health: Dict[str, str] = {
+            role: "ready" for role in ("Vbg", "Vtg", "Vbias")
+        }
+        self._health_transitions: Dict[str, list] = {
+            role: [] for role in ("Vbg", "Vtg", "Vbias")
+        }
+        self._baseline_esr: Dict[str, Optional[int]] = {}
+        self._last_communication_error: Optional[SMUCommunicationError] = None
 
     # ---------------- internal helpers ----------------
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+    @staticmethod
+    def _is_timeout_error(exc: BaseException) -> bool:
+        current: Optional[BaseException] = exc
+        while current is not None:
+            text = f"{type(current).__name__}: {current}".lower()
+            code = str(getattr(current, "error_code", "")).lower()
+            if "timeout" in text or "timed out" in text or "vi_error_tmo" in code:
+                return True
+            current = current.__cause__ or current.__context__
+        return False
+
+    @staticmethod
+    def _instrument_timeout_ms(inst) -> Optional[int]:
+        candidates = (
+            getattr(inst, "timeout", None),
+            getattr(getattr(inst, "my_instr", None), "timeout", None),
+        )
+        for value in candidates:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def set_operation_context(self, **context: Any) -> None:
+        """Attach run/frame metadata to subsequent SMU operations."""
+        with self._io_lock:
+            self._operation_context = {
+                str(key): value for key, value in context.items() if value is not None
+            }
+
+    def clear_operation_context(self) -> None:
+        with self._io_lock:
+            self._operation_context = {}
+
+    @property
+    def requires_reconnect(self) -> bool:
+        return any(
+            state != "ready"
+            for role, state in self._role_health.items()
+            if self.role_map.get(role)
+        )
+
+    @property
+    def health_states(self) -> Dict[str, str]:
+        return dict(self._role_health)
+
+    @property
+    def last_communication_error(self) -> Optional[SMUCommunicationError]:
+        return self._last_communication_error
+
+    def _set_health(self, role: str, state: str, reason: str) -> None:
+        role = str(role)
+        old_state = self._role_health.get(role, "ready")
+        if old_state == state and self._health_transitions.get(role):
+            return
+        self._role_health[role] = state
+        self._health_transitions.setdefault(role, []).append({
+            "timestamp_utc": self._utc_now(),
+            "from": old_state,
+            "to": state,
+            "reason": str(reason),
+        })
+
+    def _instrument_for_role(self, role: str):
+        key = f"measured_{role}"
+        try:
+            ycc = getattr(self.setup, "y_channel_collection", None)
+            if ycc is not None:
+                inst = ycc.get_instrument(key)
+                if inst is not None:
+                    return inst
+        except Exception:
+            pass
+        try:
+            xcc = getattr(self.setup, "x_channel_collection", None)
+            if xcc is not None:
+                return xcc.get_instrument(role)
+        except Exception:
+            pass
+        return None
+
+    def _assert_role_ready(self, role: str, inst=None) -> None:
+        state = self._role_health.get(role, "ready")
+        if state == "ready":
+            return
+        if (
+            self._last_communication_error is not None
+            and self._last_communication_error.role == role
+        ):
+            raise self._last_communication_error
+        address = getattr(inst, "address", None) or self.role_map.get(role)
+        diagnosis = {
+            "classification": state,
+            "summary": (
+                "This SMU is quarantined after a communication failure. "
+                "Disconnect and reconnect the SMUs before another run."
+            ),
+            "state_transitions": list(self._health_transitions.get(role, [])),
+        }
+        raise SMUCommunicationError(
+            f"{role} on {address or 'unknown address'} requires reconnect/reinitialization",
+            role=role,
+            address=address,
+            operation="blocked_after_failure",
+            diagnosis=diagnosis,
+            recent_operations=self.recent_operations(role=role),
+            context=self._operation_context,
+        )
+
+    def _record_operation(
+        self,
+        *,
+        role: str,
+        address: str,
+        operation: str,
+        command: str,
+        status: str,
+        started: float,
+        started_at_utc: str,
+        error: str = "",
+        setpoint: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        finished_at_utc = self._utc_now()
+        item = {
+            "timestamp_utc": finished_at_utc,
+            "started_at_utc": started_at_utc,
+            "finished_at_utc": finished_at_utc,
+            "role": role,
+            "address": address,
+            "operation": operation,
+            "command": command,
+            "status": status,
+            "duration_ms": round((time.monotonic() - started) * 1000.0, 3),
+            "context": dict(self._operation_context),
+        }
+        if error:
+            item["error"] = error
+        if setpoint is not None:
+            item["setpoint_V"] = float(setpoint)
+        self._operation_history.append(item)
+        return item
+
+    def recent_operations(self, *, role: Optional[str] = None) -> list:
+        items = list(self._operation_history)
+        if role is not None:
+            items = [item for item in items if item.get("role") == role]
+        return items
+
+    def establish_health_baseline(self, *, strict: bool = True) -> None:
+        """
+        Destructively read ESR once after connection.
+
+        This clears a pre-existing Power-On bit so a later bit-7 report is
+        evidence that the instrument restarted after the connection baseline.
+        """
+        seen = set()
+        for role in ("Vbg", "Vtg", "Vbias"):
+            if not self.has_role(role):
+                continue
+            inst = self._instrument_for_role(role)
+            if inst is None or id(inst) in seen:
+                continue
+            seen.add(id(inst))
+            try:
+                raw = inst.query("*ESR?")
+                self._baseline_esr[role] = int(float(str(raw).strip()))
+                self._set_health(role, "ready", "Connection health baseline established.")
+            except Exception as exc:
+                self._baseline_esr[role] = None
+                if strict:
+                    address = getattr(inst, "address", self.role_map.get(role))
+                    raise SMUCommunicationError(
+                        f"{role} baseline query failed on {address}: {exc}",
+                        role=role,
+                        address=address,
+                        operation="connection_baseline",
+                        command="*ESR?",
+                        timeout_ms=self._instrument_timeout_ms(inst),
+                        context=self._operation_context,
+                    ) from exc
+
+    def _diagnose_after_failure(
+        self,
+        role: str,
+        inst,
+        failure: BaseException,
+    ) -> Dict[str, Any]:
+        """
+        Read-only diagnosis after the failed VISA call has unwound.
+
+        The diagnostic timeout is shortened and the output is never enabled.
+        *ESR? and :SYST:ERR? are destructive reads, which is recorded here.
+        """
+        address = getattr(inst, "address", self.role_map.get(role))
+        resource = getattr(inst, "my_instr", None)
+        old_timeout = getattr(resource, "timeout", None) if resource is not None else None
+        timeout_changed = False
+        if resource is not None and old_timeout is not None:
+            try:
+                resource.timeout = min(max(int(old_timeout), 250), 1000)
+                timeout_changed = True
+            except Exception:
+                pass
+
+        responses: Dict[str, Any] = {}
+        errors: Dict[str, str] = {}
+        try:
+            query = getattr(inst, "query", None)
+            if not callable(query):
+                errors["*IDN?"] = "Instrument wrapper does not provide query()."
+            else:
+                try:
+                    responses["*IDN?"] = str(query("*IDN?")).strip()
+                except Exception as exc:
+                    errors["*IDN?"] = f"{type(exc).__name__}: {exc}"
+
+                if "*IDN?" in responses:
+                    for command in ("*ESR?", ":OUTP?", ":SYST:ERR?"):
+                        try:
+                            responses[command] = str(query(command)).strip()
+                        except Exception as exc:
+                            errors[command] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if timeout_changed:
+                try:
+                    resource.timeout = old_timeout
+                except Exception:
+                    pass
+
+        esr = None
+        try:
+            esr = int(float(responses.get("*ESR?", "")))
+        except (TypeError, ValueError):
+            pass
+        power_on_bit = bool(esr is not None and esr & 0x80)
+
+        output_on = None
+        output_raw = str(responses.get(":OUTP?", "")).strip().upper()
+        if output_raw in {"0", "OFF"}:
+            output_on = False
+        elif output_raw in {"1", "ON"}:
+            output_on = True
+
+        responded = "*IDN?" in responses
+        timed_out = self._is_timeout_error(failure)
+        if not responded:
+            classification = "unreachable"
+            summary = (
+                f"{role} did not answer the post-failure identity query; it may "
+                "still be unpowered, rebooting, disconnected, or unreachable on GPIB."
+            )
+            state = "unreachable"
+        elif power_on_bit:
+            classification = "power_cycle_detected"
+            summary = (
+                f"{role} responded again and ESR bit 7 (Power On) is set. "
+                "The instrument lost/restarted power after connection and must be reinitialized."
+            )
+            state = "recovered_reinit_required"
+        elif output_on is False:
+            classification = "output_off_after_failure"
+            summary = (
+                f"{role} responded again but its source output is OFF. A power "
+                "restart or another output-off event is suspected; reconnect is required."
+            )
+            state = "recovered_reinit_required"
+        else:
+            classification = "communication_fault"
+            summary = (
+                f"{role} responded to diagnostics after the failed operation, "
+                "but a power cycle was not proven. Reconnect is required before continuing."
+            )
+            state = "reinit_required"
+
+        self._set_health(
+            role,
+            "timeout" if timed_out else "communication_error",
+            f"{type(failure).__name__}: {failure}",
+        )
+        if power_on_bit:
+            self._set_health(
+                role,
+                "power_lost",
+                "ESR bit 7 indicates the instrument restarted after the connection baseline.",
+            )
+        self._set_health(role, state, summary)
+        return {
+            "classification": classification,
+            "summary": summary,
+            "responded_after_failure": responded,
+            "timed_out": timed_out,
+            "identity": responses.get("*IDN?"),
+            "connection_baseline_esr": self._baseline_esr.get(role),
+            "esr": esr,
+            "power_on_bit_set": power_on_bit,
+            "output_on": output_on,
+            "system_error": responses.get(":SYST:ERR?"),
+            "query_responses": responses,
+            "query_errors": errors,
+            "destructive_queries": ["*ESR?", ":SYST:ERR?"],
+            "state_transitions": list(self._health_transitions.get(role, [])),
+            "address": address,
+        }
+
+    def _execute_io(
+        self,
+        *,
+        role: str,
+        inst,
+        operation: str,
+        command: str,
+        action: Callable[[], Any],
+        setpoint: Optional[float] = None,
+    ) -> Any:
+        address = str(getattr(inst, "address", self.role_map.get(role) or "unknown address"))
+        with self._io_lock:
+            self._assert_role_ready(role, inst)
+            started = time.monotonic()
+            started_at_utc = self._utc_now()
+            try:
+                result = action()
+            except SMUCommunicationError:
+                raise
+            except Exception as exc:
+                self._record_operation(
+                    role=role,
+                    address=address,
+                    operation=operation,
+                    command=command,
+                    status="failed",
+                    started=started,
+                    started_at_utc=started_at_utc,
+                    error=f"{type(exc).__name__}: {exc}",
+                    setpoint=setpoint,
+                )
+                diagnosis = self._diagnose_after_failure(role, inst, exc)
+                timeout_ms = self._instrument_timeout_ms(inst)
+                timeout_text = (
+                    f" after {timeout_ms} ms" if timeout_ms is not None else ""
+                )
+                communication_error = SMUCommunicationError(
+                    f"{role} {operation} failed on {address}{timeout_text}: {exc}",
+                    role=role,
+                    address=address,
+                    operation=operation,
+                    command=command,
+                    timeout_ms=timeout_ms,
+                    diagnosis=diagnosis,
+                    recent_operations=self.recent_operations(role=role),
+                    context=self._operation_context,
+                )
+                self._last_communication_error = communication_error
+                raise communication_error from exc
+            self._record_operation(
+                role=role,
+                address=address,
+                operation=operation,
+                command=command,
+                status="ok",
+                started=started,
+                started_at_utc=started_at_utc,
+                setpoint=setpoint,
+            )
+            return result
 
     def has_role(self, name: str) -> bool:
         """
@@ -66,18 +491,29 @@ class IVDevice:
                     k = id(inst)
                     if k not in seen:
                         seen.add(k)
-                        insts.append(inst)
-            except Exception:
-                pass
+                        insts.append((str(name), float(val), inst))
+            except Exception as exc:
+                raise SMUCommunicationError(
+                    f"{name} setpoint preparation failed: {exc}",
+                    role=str(name),
+                    address=self.role_map.get(str(name)),
+                    operation="prepare_set_voltage",
+                    command=f":SOUR:VOLT:LEV {float(val):.9g}",
+                    context=self._operation_context,
+                ) from exc
 
         if not insts:
             return False
 
-        for inst in insts:
-            try:
-                inst.write_x()
-            except Exception:
-                pass
+        for role, value, inst in insts:
+            self._execute_io(
+                role=role,
+                inst=inst,
+                operation="set_voltage",
+                command=f":SOUR:VOLT:LEV {value:.9g}",
+                action=inst.write_x,
+                setpoint=value,
+            )
 
         return True
 
@@ -95,6 +531,8 @@ class IVDevice:
         try:
             self.setup.x_goto(name, float(value), delta=0, delay=0.0, print_steps=False)
             return True
+        except SMUCommunicationError:
+            raise
         except Exception:
             return False
 
@@ -162,14 +600,8 @@ class IVDevice:
         """Best-effort live hardware read for one axis, falling back to nan."""
         nan = float("nan")
         try:
-            if name == "Vbg":
-                value, _ = self.read_current_gates()
-                return float(value)
-            if name == "Vtg":
-                _, value = self.read_current_gates()
-                return float(value)
-            if name == "Vbias":
-                value = self.read_current_bias()
+            if name in ("Vbg", "Vtg", "Vbias"):
+                value = self._read_measured_role(name)
                 return float(value) if value is not None else nan
         except Exception:
             pass
@@ -198,7 +630,15 @@ class IVDevice:
         # jump mode
         if step <= 0:
             self._check_stop(stop_cb, stop_exc)
-            self._set_x_fast(name, target)
+            if not self._set_x_fast(name, target):
+                raise SMUCommunicationError(
+                    f"{name} set failed because no mapped instrument accepted the command",
+                    role=name,
+                    address=self.role_map.get(name),
+                    operation="set_voltage",
+                    command=f":SOUR:VOLT:LEV {target:.9g}",
+                    context=self._operation_context,
+                )
             if delay_s and float(delay_s) > 0:
                 time.sleep(float(delay_s))
             return True
@@ -216,13 +656,29 @@ class IVDevice:
             self._check_stop(stop_cb, stop_exc)
             f = i / n
             xi = float(x0) + dx * f
-            self._set_x_fast(name, float(xi))
+            if not self._set_x_fast(name, float(xi)):
+                raise SMUCommunicationError(
+                    f"{name} ramp failed because no mapped instrument accepted the command",
+                    role=name,
+                    address=self.role_map.get(name),
+                    operation="set_voltage",
+                    command=f":SOUR:VOLT:LEV {float(xi):.9g}",
+                    context=self._operation_context,
+                )
             if delay_s and float(delay_s) > 0:
                 time.sleep(float(delay_s))
 
         # exact final snap (should be equal already, but keep it explicit)
         self._check_stop(stop_cb, stop_exc)
-        self._set_x_fast(name, target)
+        if not self._set_x_fast(name, target):
+            raise SMUCommunicationError(
+                f"{name} final ramp setpoint could not be applied",
+                role=name,
+                address=self.role_map.get(name),
+                operation="set_voltage",
+                command=f":SOUR:VOLT:LEV {target:.9g}",
+                context=self._operation_context,
+            )
         if delay_s and float(delay_s) > 0:
             time.sleep(float(delay_s))
         return True
@@ -389,7 +845,7 @@ class IVDevice:
                 return 0.0
         return _get("Vbg_leakage"), _get("Vtg_leakage")
 
-    def _safe_read_y(self, key: str) -> Optional[float]:
+    def _safe_read_y(self, key: str, *, strict: bool = False) -> Optional[float]:
         """
         Best-effort: force a hardware read for the instrument that owns this y-channel,
         then return the latest y value for that key.
@@ -406,9 +862,35 @@ class IVDevice:
 
             if inst is not None and hasattr(inst, "read_y"):
                 try:
-                    inst.read_y()
-                except Exception:
-                    pass
+                    if key.startswith("Vbg"):
+                        role = "Vbg"
+                    elif key.startswith("Vtg"):
+                        role = "Vtg"
+                    elif key.startswith("Vbias"):
+                        role = "Vbias"
+                    else:
+                        role = key
+                    self._execute_io(
+                        role=role,
+                        inst=inst,
+                        operation="read_current",
+                        command=":READ?",
+                        action=inst.read_y,
+                    )
+                except SMUCommunicationError:
+                    raise
+                except Exception as exc:
+                    if strict:
+                        address = getattr(inst, "address", "unknown address")
+                        raise SMUCommunicationError(
+                            f"{key} read failed on {address}: {exc}",
+                            role=role,
+                            address=address,
+                            operation="read_current",
+                            command=":READ?",
+                            context=self._operation_context,
+                        ) from exc
+                    return None
 
             try:
                 ycc.receive_y(key)
@@ -419,35 +901,75 @@ class IVDevice:
                 return float(self.setup.get_single_y_value(key))
             except Exception:
                 return None
-        except Exception:
+        except SMUCommunicationError:
+            if strict:
+                raise
+            return None
+        except Exception as exc:
+            if strict:
+                raise SMUCommunicationError(
+                    f"{key} read failed: {exc}",
+                    operation="read_current",
+                    command=":READ?",
+                    context=self._operation_context,
+                ) from exc
             return None
 
-    def read_currents(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    def read_currents(
+        self, *, strict: bool = False
+    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """
         Return (Ibg, Itg, Ibias) in Amps.
         Keys come directly from iv_automation.py: <x_name>_leakage.
         """
-        Ibg = self._safe_read_y("Vbg_leakage") if self.has_role("Vbg") else None
-        Itg = self._safe_read_y("Vtg_leakage") if self.has_role("Vtg") else None
-        Ib  = self._safe_read_y("Vbias_leakage") if self.has_role("Vbias") else None
+        Ibg = self._safe_read_y("Vbg_leakage", strict=strict) if self.has_role("Vbg") else None
+        Itg = self._safe_read_y("Vtg_leakage", strict=strict) if self.has_role("Vtg") else None
+        Ib  = self._safe_read_y("Vbias_leakage", strict=strict) if self.has_role("Vbias") else None
         return Ibg, Itg, Ib
 
-    def read_current_bias(self) -> Optional[float]:
-        if not self.has_role("Vbias"):
+    def _read_measured_role(
+        self, role: str, *, strict: bool = False
+    ) -> Optional[float]:
+        if not self.has_role(role):
             return None
+        meas_key = f"measured_{role}"
         try:
-            meas_key = "measured_Vbias"
             inst = self.setup.y_channel_collection.get_instrument(meas_key)
             if inst:
-                inst.read_y()
+                self._execute_io(
+                    role=role,
+                    inst=inst,
+                    operation="read_voltage",
+                    command=":READ?",
+                    action=inst.read_y,
+                )
             self.setup.y_channel_collection.receive_y(meas_key)
             value = float(self.setup.get_single_y_value(meas_key))
-            self._update_x_cache("Vbias", value)
+            self._update_x_cache(role, value)
             return value
-        except Exception:
+        except SMUCommunicationError:
+            if strict:
+                raise
+            return None
+        except Exception as exc:
+            if strict:
+                address = getattr(locals().get("inst"), "address", "unknown address")
+                raise SMUCommunicationError(
+                    f"{role} read failed on {address}: {exc}",
+                    role=role,
+                    address=address,
+                    operation="read_voltage",
+                    command=":READ?",
+                    context=self._operation_context,
+                ) from exc
             return None
 
-    def read_current_gates(self):
+    def read_current_bias(self, *, strict: bool = False) -> Optional[float]:
+        if not self.has_role("Vbias"):
+            return None
+        return self._read_measured_role("Vbias", strict=strict)
+
+    def read_current_gates(self, *, strict: bool = False):
         """
         Forces a hardware read of 'measured_Vbg' and 'measured_Vtg'.
         Returns nan for any role that is not mapped / not readable.
@@ -456,59 +978,56 @@ class IVDevice:
         bg_val = nan
         tg_val = nan
 
-        roles_to_check = []
         if self.has_role("Vbg"):
-            roles_to_check.append(("Vbg", "measured_Vbg"))
+            value = self._read_measured_role("Vbg", strict=strict)
+            if value is not None:
+                bg_val = float(value)
         if self.has_role("Vtg"):
-            roles_to_check.append(("Vtg", "measured_Vtg"))
-
-        for role, meas_key in roles_to_check:
-            try:
-                inst = None
-                try:
-                    inst = self.setup.y_channel_collection.get_instrument(meas_key)
-                except KeyError:
-                    continue
-
-                if inst:
-                    inst.read_y()
-
-                self.setup.y_channel_collection.receive_y(meas_key)
-                val = self.setup.get_single_y_value(meas_key)
-
-                if role == "Vbg":
-                    bg_val = float(val)
-                    self._update_x_cache("Vbg", bg_val)
-                if role == "Vtg":
-                    tg_val = float(val)
-                    self._update_x_cache("Vtg", tg_val)
-
-            except Exception:
-                pass
+            value = self._read_measured_role("Vtg", strict=strict)
+            if value is not None:
+                tg_val = float(value)
 
         return bg_val, tg_val
 
-    def ramp_all_to_zero(self, ramp_step: float = 0.1, delay_s: float = 0.05):
-        """Ramp Vbias, Vbg, Vtg -> 0V if roles exist."""
-        try:
-            if self.has_role("Vbias"):
-                self.set_bias(Vbias=0.0, delay_s=delay_s, ramp_step=ramp_step)
-                self.set_bias(Vbias=0.0, delay_s=0.0, ramp_step=0.0)
-        except Exception:
-            pass
+    def ramp_all_to_zero_report(
+        self, ramp_step: float = 0.1, delay_s: float = 0.05
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return a per-role cleanup result while isolating failed instruments."""
+        report: Dict[str, Dict[str, Any]] = {}
+        role_map = getattr(self, "role_map", {})
+        role_health = getattr(self, "_role_health", {})
+        for role in ("Vbias", "Vbg", "Vtg"):
+            if not self.has_role(role):
+                continue
+            try:
+                self.ramp_to(role, 0.0, ramp_step, delay_s)
+                self.ramp_to(role, 0.0, 0.0, 0.0)
+                report[role] = {
+                    "status": "reached_zero",
+                    "address": role_map.get(role),
+                }
+            except Exception as exc:
+                status = (
+                    "skipped_reconnect_required"
+                    if role_health.get(role, "ready") != "ready"
+                    else "failed"
+                )
+                report[role] = {
+                    "status": status,
+                    "address": role_map.get(role),
+                    "error": str(exc),
+                }
+        return report
 
-        try:
-            self.set_gates(
-                Vbg=0.0 if self.has_role("Vbg") else None,
-                Vtg=0.0 if self.has_role("Vtg") else None,
-                delay_s=delay_s,
-                ramp_step=ramp_step,
-            )
-            self.set_gates(
-                Vbg=0.0 if self.has_role("Vbg") else None,
-                Vtg=0.0 if self.has_role("Vtg") else None,
-                delay_s=0.0,
-                ramp_step=0.0,
-            )
-        except Exception:
-            pass
+    def ramp_all_to_zero(self, ramp_step: float = 0.1, delay_s: float = 0.05):
+        """Best-effort isolated ramps; one dead role cannot block the others."""
+        report = self.ramp_all_to_zero_report(
+            ramp_step=ramp_step,
+            delay_s=delay_s,
+        )
+        errors = [
+            f"{role}: {result.get('error', result.get('status', 'failed'))}"
+            for role, result in report.items()
+            if result.get("status") != "reached_zero"
+        ]
+        return errors

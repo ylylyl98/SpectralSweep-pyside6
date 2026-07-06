@@ -27,13 +27,31 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
+import tempfile
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 # ── Location of the persisted config file ─────────────────────────────────────
-_CONFIG_FILE = Path(__file__).resolve().parents[1] / "config.json"
+_PROJECT_CONFIG_FILE = Path(__file__).resolve().parents[1] / "config.json"
+
+
+def _default_config_file() -> Path:
+    """Return the per-user config path without importing Qt."""
+    override = os.environ.get("SPECTRALSWEEP_CONFIG_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "win32":
+        root = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    else:
+        root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return root / "SpectralSweep" / "config.json"
+
+
+_CONFIG_FILE = _default_config_file()
 
 
 # ── Sub-configs (plain dataclasses — no Qt dependency) ───────────────────────
@@ -52,6 +70,7 @@ class SMUConfig:
     """Keithley SMU defaults (applied at connect time)."""
     curr_compliance_A: float = 1e-6   # A   — smu_compliance_by_addr default
     volt_compliance_V: float = 20.0   # V   — smu_compliance_by_addr default
+    visa_timeout_ms: int = 5000       # bounded I/O so Stop can recover from a dead SMU
     vbg_resource: str = ""
     vtg_resource: str = ""
     vbias_resource: str = ""
@@ -158,6 +177,15 @@ class RotationConfig:
 
 
 @dataclass
+class SessionConfig:
+    """Last harmless UI/workflow setup; never contains live device state."""
+
+    schema_version: int = 1
+    active_tab: str = "dual_gate"
+    panels: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
 class AppConfig:
     """Top-level config object.  Holds all sub-configs plus misc app settings."""
     lf6: LF6Config = field(default_factory=LF6Config)
@@ -168,6 +196,7 @@ class AppConfig:
     bfp_rc: BFPRCConfig = field(default_factory=BFPRCConfig)
     rotation: RotationConfig = field(default_factory=RotationConfig)
     stage: StageConfig = field(default_factory=StageConfig)
+    session: SessionConfig = field(default_factory=SessionConfig)
     font_size_pt: int = 9          # UI-wide font size in points
 
     # ── convenience properties ────────────────────────────────────────────────
@@ -180,11 +209,31 @@ class AppConfig:
     # ── persistence ──────────────────────────────────────────────────────────
 
     def save(self, path: Optional[Path] = None) -> None:
-        """Serialise to JSON.  Creates parent dirs if needed."""
+        """Serialise atomically to JSON. Creates parent dirs if needed."""
         target = Path(path) if path else _CONFIG_FILE
         target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("w", encoding="utf-8") as fh:
-            json.dump(asdict(self), fh, indent=2)
+        tmp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=target.parent,
+                prefix=f".{target.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as fh:
+                tmp_path = Path(fh.name)
+                json.dump(asdict(self), fh, indent=2)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, target)
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
     def load(self, path: Optional[Path] = None) -> None:
         """
@@ -193,6 +242,10 @@ class AppConfig:
         after fields are added to the dataclasses.
         """
         target = Path(path) if path else _CONFIG_FILE
+        if path is None and not target.exists() and _PROJECT_CONFIG_FILE.exists():
+            # One-time compatibility bridge. The next save writes to the
+            # per-user path, leaving the source-tree file untouched.
+            target = _PROJECT_CONFIG_FILE
         if not target.exists():
             return
 
@@ -201,6 +254,8 @@ class AppConfig:
                 data = json.load(fh)
         except (json.JSONDecodeError, OSError):
             return  # corrupt / unreadable — keep defaults
+        if not isinstance(data, dict):
+            return
 
         _update_dataclass(self.lf6,      data.get("lf6", {}))
         _update_dataclass(self.smu,      data.get("smu", {}))
@@ -209,11 +264,31 @@ class AppConfig:
         _update_dataclass(self.bfp_naming, data.get("bfp_naming", {}))
         _update_dataclass(self.bfp_rc, data.get("bfp_rc", {}))
         rotation_data = data.get("rotation", {})
+        if not isinstance(rotation_data, dict):
+            rotation_data = {}
         if isinstance(rotation_data.get("rot1"), dict):
             _update_dataclass(self.rotation.rot1, rotation_data["rot1"])
         if isinstance(rotation_data.get("rot2"), dict):
             _update_dataclass(self.rotation.rot2, rotation_data["rot2"])
         _update_dataclass(self.stage,    data.get("stage", {}))
+        session_data = data.get("session", {})
+        if isinstance(session_data, dict):
+            try:
+                self.session.schema_version = max(
+                    1, int(session_data.get("schema_version", 1))
+                )
+            except (TypeError, ValueError):
+                self.session.schema_version = 1
+            active_tab = session_data.get("active_tab")
+            if isinstance(active_tab, str) and active_tab:
+                self.session.active_tab = active_tab
+            panels = session_data.get("panels")
+            if isinstance(panels, dict):
+                self.session.panels = {
+                    str(key): value
+                    for key, value in panels.items()
+                    if isinstance(value, dict)
+                }
         if "font_size_pt" in data:
             try:
                 self.font_size_pt = min(max(int(data["font_size_pt"]), 7), 18)
@@ -225,6 +300,8 @@ class AppConfig:
 
 def _update_dataclass(obj, mapping: dict) -> None:
     """Overwrite dataclass fields from a dict, ignoring unknown keys."""
+    if not isinstance(mapping, dict):
+        return
     for key, value in mapping.items():
         if hasattr(obj, key):
             setattr(obj, key, value)

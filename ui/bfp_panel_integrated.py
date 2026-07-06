@@ -423,24 +423,27 @@ class _BgPanel(QGroupBox):
     def _on_browse(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select background CSV", str(cfg.base_out), "CSV files (*.csv)")
         if path:
-            self._path_edit.setText(path)
-            try:
-                mode = detect_csv_mode(path)
-                if mode == "binned":
-                    wl, y = load_binned_csv(path)
-                    self._bg_data = y
-                    self._bg_wls = wl
-                else:
-                    full = load_full_image_csv(path)
-                    self._bg_data = full.image
-                    self._bg_wls = full.wl
-                self._status_lbl.setText(f"Loaded: {Path(path).name}")
-                self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
-            except Exception as exc:
-                self._bg_data = None
-                self._bg_wls = np.array([])
-                self._status_lbl.setText(f"Error: {exc}")
-                self._status_lbl.setStyleSheet("color: red; font-size: 10px;")
+            self.load_path(path)
+
+    def load_path(self, path: str) -> None:
+        self._path_edit.setText(path)
+        try:
+            mode = detect_csv_mode(path)
+            if mode == "binned":
+                wl, y = load_binned_csv(path)
+                self._bg_data = y
+                self._bg_wls = wl
+            else:
+                full = load_full_image_csv(path)
+                self._bg_data = full.image
+                self._bg_wls = full.wl
+            self._status_lbl.setText(f"Loaded: {Path(path).name}")
+            self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
+        except Exception as exc:
+            self._bg_data = None
+            self._bg_wls = np.array([])
+            self._status_lbl.setText(f"Error: {exc}")
+            self._status_lbl.setStyleSheet("color: red; font-size: 10px;")
 
     def apply_to(self, data: np.ndarray, wls: np.ndarray) -> tuple[bool, np.ndarray, str]:
         if not self._enable_chk.isChecked() or self._bg_data is None:
@@ -938,7 +941,8 @@ class BFPPanel(QWidget):
     def _build(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
-        splitter = QSplitter(Qt.Horizontal)
+        self._splitter = QSplitter(Qt.Horizontal)
+        splitter = self._splitter
         root.addWidget(splitter, stretch=1)
         left = QWidget()
         left_lay = QVBoxLayout(left)
@@ -1167,12 +1171,146 @@ class BFPPanel(QWidget):
         naming.repeat = int(self._repeat_spin.value())
         naming.auto_color_scale = self._display._auto_color_chk.isChecked()
         naming.auto_save_csv = self._auto_save_csv_chk.isChecked()
-        cfg.lf6.center_nm = float(self._center_spin.value())
-        cfg.lf6.exposure_ms = float(self._exp_spin.value())
-        cfg.lf6.accumulations = int(self._epf_spin.value())
         self._brc.save_config()
         self._frc.save_config()
-        cfg.save()
+
+    def capture_session_state(self) -> dict:
+        """Capture BFP workflow preferences without acquired arrays or run status."""
+        self._persist_ui_config()
+        return {
+            "naming": {
+                "device": self._dev_edit.text(),
+                "material": self._material_combo.currentText(),
+                "material_custom": self._material_custom_edit.text(),
+                "point": self._point_edit.text(),
+                "experiment": self._exp_type_combo.currentText(),
+                "power_mw": self._power_edit.text(),
+                "note": self._note_edit.text(),
+                "suffix": self._suffix_edit.text(),
+                "auto_increment": bool(self._auto_inc_chk.isChecked()),
+            },
+            "acquisition": {
+                "roi_mode": self._roi_combo.currentText(),
+                "center_nm": float(self._center_spin.value()),
+                "exposure_ms": float(self._exp_spin.value()),
+                "frames": int(self._epf_spin.value()),
+                "repeat": int(self._repeat_spin.value()),
+                "auto_save_csv": bool(self._auto_save_csv_chk.isChecked()),
+                "auto_apply": bool(self._auto_apply_chk.isChecked()),
+                "warmup": bool(self._warmup_chk.isChecked()),
+            },
+            "background": {
+                "enabled": bool(self._bg_panel._enable_chk.isChecked()),
+                "path": self._bg_panel._path_edit.text(),
+                "wavelength_tolerance_nm": float(self._bg_panel._tol_spin.value()),
+            },
+            "display": {
+                "panel_tab": int(self._tabs.currentIndex()),
+                "data_tab": int(self._display._tabs.currentIndex()),
+                "scale": self._display._scale_combo.currentText(),
+                "colormap": self._display._cmap_combo.currentText(),
+                "auto_color": bool(self._display._auto_color_chk.isChecked()),
+            },
+            "splitter_sizes": [int(v) for v in self._splitter.sizes()],
+        }
+
+    def restore_session_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        naming = state.get("naming")
+        if isinstance(naming, dict):
+            for key, edit in (
+                ("device", self._dev_edit),
+                ("material_custom", self._material_custom_edit),
+                ("point", self._point_edit),
+                ("power_mw", self._power_edit),
+                ("note", self._note_edit),
+                ("suffix", self._suffix_edit),
+            ):
+                value = naming.get(key)
+                if isinstance(value, str):
+                    edit.setText(value)
+            for key, combo in (
+                ("material", self._material_combo),
+                ("experiment", self._exp_type_combo),
+            ):
+                value = naming.get(key)
+                if isinstance(value, str) and combo.findText(value) >= 0:
+                    combo.setCurrentText(value)
+            if "auto_increment" in naming:
+                self._auto_inc_chk.setChecked(bool(naming["auto_increment"]))
+
+        acquisition = state.get("acquisition")
+        if isinstance(acquisition, dict):
+            roi = acquisition.get("roi_mode")
+            if isinstance(roi, str) and self._roi_combo.findText(roi) >= 0:
+                self._roi_combo.setCurrentText(roi)
+            for key, spin in (
+                ("center_nm", self._center_spin),
+                ("exposure_ms", self._exp_spin),
+            ):
+                try:
+                    spin.setValue(float(acquisition[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+            for key, spin in (
+                ("frames", self._epf_spin),
+                ("repeat", self._repeat_spin),
+            ):
+                try:
+                    spin.setValue(int(acquisition[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+            for key, check in (
+                ("auto_save_csv", self._auto_save_csv_chk),
+                ("auto_apply", self._auto_apply_chk),
+                ("warmup", self._warmup_chk),
+            ):
+                if key in acquisition:
+                    check.setChecked(bool(acquisition[key]))
+
+        background = state.get("background")
+        if isinstance(background, dict):
+            try:
+                self._bg_panel._tol_spin.setValue(
+                    float(background["wavelength_tolerance_nm"])
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
+            path = background.get("path")
+            if isinstance(path, str) and path:
+                self._bg_panel.load_path(path)
+            if "enabled" in background:
+                self._bg_panel._enable_chk.setChecked(bool(background["enabled"]))
+
+        display = state.get("display")
+        if isinstance(display, dict):
+            for key, combo in (
+                ("scale", self._display._scale_combo),
+                ("colormap", self._display._cmap_combo),
+            ):
+                value = display.get(key)
+                if isinstance(value, str) and combo.findText(value) >= 0:
+                    combo.setCurrentText(value)
+            if "auto_color" in display:
+                self._display._auto_color_chk.setChecked(bool(display["auto_color"]))
+            for key, tabs in (
+                ("panel_tab", self._tabs),
+                ("data_tab", self._display._tabs),
+            ):
+                try:
+                    index = min(max(int(display[key]), 0), tabs.count() - 1)
+                    tabs.setCurrentIndex(index)
+                except (KeyError, TypeError, ValueError):
+                    pass
+        sizes = state.get("splitter_sizes")
+        if isinstance(sizes, list) and len(sizes) == 2:
+            try:
+                self._splitter.setSizes([max(0, int(v)) for v in sizes])
+            except (TypeError, ValueError):
+                pass
+        self._refresh_preview()
+        self._update_est()
 
     @Slot(list)
     def _on_lf6_connected(self, _experiments):

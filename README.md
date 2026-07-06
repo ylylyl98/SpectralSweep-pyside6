@@ -113,6 +113,35 @@ Some modules depend on lab-specific hardware and vendor runtimes:
 
 If you are working on the UI without hardware access, start with `python main.py --mock`.
 
+## Remembered Setup
+
+The application automatically restores the last selected workflow tab, window
+layout, instrument connection choices, and editable setup fields for Dual Gate,
+2D Sweep, Power Sweep, BFP, Spectrum, and Settings. Dual Gate keeps the edited
+draft and the last applied tables separately.
+
+Live connections, voltage or motion targets, polling, acquired data, plots,
+progress, and logs are deliberately not restored. Connecting instruments and
+starting or applying a run always remains a manual action.
+
+On Windows, configuration is stored under
+`%APPDATA%\SpectralSweep\config.json`. An existing repository-level
+`config.json` is imported as a compatibility default and is left untouched.
+Writes are debounced and atomic.
+
+## SMU Hardware Incident Reports
+
+Keithley communication uses a finite VISA timeout. If an SMU stops responding,
+the Dual Gate runner records the role, VISA address, frame, failed command,
+recent SMU operations, read-only post-failure diagnostics, traceback, and
+per-role zero-ramp result in `hardware_incidents.jsonl` beside the run CSVs.
+
+For a responding Series 2400, the diagnostics include identity, the Standard
+Event Status Register Power-On bit, output state, and the oldest system error.
+A failed role is quarantined after the incident: the run does not resume, and a
+new run is blocked until the SMUs are disconnected and reconnected. The
+software never turns an output back on as part of diagnosis or recovery.
+
 ## Legacy Cleanup Note
 
 The previous Streamlit/LabRunner implementation has been moved into `archive_streamlit_labrunner/` instead of being kept in the active application path. Those files are preserved only as a legacy reference and are no longer maintained as a supported workflow.

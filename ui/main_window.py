@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtGui  import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QTabWidget, QWidget, QStatusBar, QApplication,
@@ -268,10 +268,104 @@ class MainWindow(QMainWindow):
         self._settings = SettingsPanel(lf6_ctrl=self._lf6)
         self._tabs.addTab(self._settings, "Settings")
 
+        self._session_panels = {
+            "instruments": self._inst_panel,
+            "dual_gate": self._presets,
+            "mega_sweep": self._mega,
+            "power_sweep": self._power_sweep,
+            "bfp": self._bfp,
+            "spectrum": self._spectrum,
+            "settings": self._settings,
+        }
+        self._tab_ids = {
+            self._presets: "dual_gate",
+            self._mega: "mega_sweep",
+            self._power_sweep: "power_sweep",
+            self._bfp: "bfp",
+            self._spectrum: "spectrum",
+            self._settings: "settings",
+        }
+
         # ── restore geometry ──────────────────────────────────────────────────
         self._restore_geometry()
+        self._restore_session()
+
+        # A short polling debounce also catches dynamic table-cell widgets.
+        self._last_observed_session = self._capture_session()
+        self._session_poll_timer = QTimer(self)
+        self._session_poll_timer.setInterval(250)
+        self._session_poll_timer.timeout.connect(self._poll_session_changes)
+        self._session_save_timer = QTimer(self)
+        self._session_save_timer.setSingleShot(True)
+        self._session_save_timer.setInterval(500)
+        self._session_save_timer.timeout.connect(self._persist_session)
+        self._session_poll_timer.start()
 
     # ── geometry persistence ──────────────────────────────────────────────────
+
+    def _active_tab_id(self) -> str:
+        widget = self._tabs.currentWidget()
+        return self._tab_ids.get(widget, "dual_gate")
+
+    def _capture_session(self) -> dict:
+        panels = {
+            str(key): value
+            for key, value in cfg.session.panels.items()
+            if isinstance(value, dict)
+        }
+        for key, panel in self._session_panels.items():
+            capture = getattr(panel, "capture_session_state", None)
+            if capture is None:
+                continue
+            try:
+                value = capture()
+            except Exception:
+                continue
+            if isinstance(value, dict):
+                panels[key] = value
+        return {
+            "schema_version": 1,
+            "active_tab": self._active_tab_id(),
+            "panels": panels,
+        }
+
+    def _restore_session(self) -> None:
+        panels = cfg.session.panels
+        if isinstance(panels, dict):
+            for key, panel in self._session_panels.items():
+                restore = getattr(panel, "restore_session_state", None)
+                state = panels.get(key)
+                if restore is None or not isinstance(state, dict):
+                    continue
+                try:
+                    restore(state)
+                except Exception as exc:
+                    self._status.showMessage(
+                        f"Some saved {key.replace('_', ' ')} settings were skipped: {exc}",
+                        8000,
+                    )
+        wanted = cfg.session.active_tab
+        for widget, tab_id in self._tab_ids.items():
+            if tab_id == wanted:
+                self._tabs.setCurrentWidget(widget)
+                break
+
+    def _poll_session_changes(self) -> None:
+        current = self._capture_session()
+        if current != self._last_observed_session:
+            self._last_observed_session = current
+            self._session_save_timer.start()
+
+    def _persist_session(self) -> None:
+        session = self._capture_session()
+        cfg.session.schema_version = int(session["schema_version"])
+        cfg.session.active_tab = str(session["active_tab"])
+        cfg.session.panels = session["panels"]
+        self._last_observed_session = session
+        try:
+            cfg.save()
+        except Exception as exc:
+            self._status.showMessage(f"Could not save settings: {exc}", 8000)
 
     def _restore_geometry(self):
         s = QSettings(_ORG, _APP)
@@ -290,6 +384,9 @@ class MainWindow(QMainWindow):
     # ── close ─────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._session_poll_timer.stop()
+        self._session_save_timer.stop()
+        self._persist_session()
         self._save_geometry()
         # Shut controllers down gracefully
         for ctrl in (self._lf6, self._smu, self._rot, self._stg, self._pm):

@@ -26,10 +26,12 @@
 from __future__ import annotations
 
 import itertools
+import json
 import re
 import sys
 import time
 import threading
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -53,6 +55,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
+from utils.hardware_incidents import (
+    HardwareIncidentRecorder,
+    build_hardware_incident,
+    incident_display_text,
+)
 from app.devices.stage_adapter import get_linear_stage_profile
 from utils.filename_builder import (
     FilenameContext,
@@ -490,6 +497,23 @@ class _RunFlowError(RuntimeError):
         super().__init__(message)
         self.stage = stage
         self.message = message
+
+
+class _StopRequested(Exception):
+    """Internal cooperative-stop signal used to unwind into safe cleanup."""
+
+
+def _find_smu_communication_error(exc: BaseException):
+    from app.devices.iv_adapter import SMUCommunicationError
+
+    current: Optional[BaseException] = exc
+    seen = set()
+    while current is not None and id(current) not in seen:
+        if isinstance(current, SMUCommunicationError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _enabled_filename_parts() -> List[str]:
@@ -1123,6 +1147,7 @@ class _RunWorker(QObject):
     frame_progress = Signal(int, int)          # (done_frames, total_frames) — drives progress bar
     active_frame   = Signal(int, str, int, int, int)
     tree_update    = Signal(int, str, int)
+    incident       = Signal(object)
     finished       = Signal(bool, str)
     error          = Signal(str)
 
@@ -1150,6 +1175,7 @@ class _RunWorker(QObject):
         self._meta     = dict(run_meta)
         self._parts    = list(filename_parts)
         self._stop     = stop_event
+        self._active_run_context: Dict[str, Any] = {}
 
     @Slot()
     def run(self) -> None:
@@ -1166,6 +1192,13 @@ class _RunWorker(QObject):
         done_frames = 0
         failed = False
         summary = "Run complete."
+        hardware_error = None
+        hardware_stage = "smu_io"
+        hardware_traceback = ""
+        cleanup_report: Dict[str, Any] = {
+            "attempted": False,
+            "roles": {},
+        }
 
         try:
             self.log.emit(
@@ -1331,6 +1364,25 @@ class _RunWorker(QObject):
 
                                 vbias_set = vbias_points[frame_i - 1] if vbias_points is not None else None
                                 is_start_point = (frame_i == 1)
+                                self._active_run_context = {
+                                    "sequence": seq_i + 1,
+                                    "sequence_total": len(self._seq),
+                                    "condition": cond_label,
+                                    "repetition": r_i + 1,
+                                    "repetition_total": n_rep,
+                                    "frame": frame_i,
+                                    "frame_total": point_count,
+                                    "csv_path": str(csv_path),
+                                    "Vbg_set_V": float(vbg_set),
+                                    "Vtg_set_V": float(vtg_set),
+                                    "Vbias_set_V": (
+                                        float(vbias_set) if vbias_set is not None else None
+                                    ),
+                                }
+                                if self._smu and self._smu.is_connected:
+                                    self._smu.device.set_operation_context(
+                                        **self._active_run_context
+                                    )
                                 self.active_frame.emit(seq_i, cond_label, r_i, frame_i, point_count)
                                 self.log.emit(
                                     f"    Point {frame_i}/{point_count}: "
@@ -1388,6 +1440,7 @@ class _RunWorker(QObject):
                                             ramp_step=(cfg.ramp.step_V if is_start_point else 0.0),
                                             delay_s=(cfg.ramp.delay_s if is_start_point else 0.0),
                                             stop_cb=self._stop.is_set,
+                                            stop_exc=_StopRequested,
                                         )
                                         if vbias_set is not None:
                                             dev.set_bias(
@@ -1395,7 +1448,10 @@ class _RunWorker(QObject):
                                                 ramp_step=(cfg.ramp.vbias_step_V if is_start_point else 0.0),
                                                 delay_s=(cfg.ramp.delay_s if is_start_point else 0.0),
                                                 stop_cb=self._stop.is_set,
+                                                stop_exc=_StopRequested,
                                             )
+                                    except _StopRequested:
+                                        raise
                                     except Exception as e:
                                         raise _RunFlowError("hardware", f"Gate set error: {e}") from e
                                     time.sleep(cfg.ramp.settle_s)
@@ -1413,20 +1469,30 @@ class _RunWorker(QObject):
                                 else:
                                     raise _RunFlowError("acquisition", "LF6 is not connected.")
 
+                                if self._stop.is_set():
+                                    raise _StopRequested()
+
                                 Ibg = Itg = Ib = None
                                 Vbg_meas = Vtg_meas = float("nan")
                                 Vbias_meas = float(vbias_set) if vbias_set is not None else None
                                 if self._smu and self._smu.is_connected:
                                     dev = self._smu.device
                                     try:
-                                        Ibg, Itg, Ib = dev.read_currents()
-                                        Vbg_meas, Vtg_meas = dev.read_current_gates()
+                                        Ibg, Itg, Ib = dev.read_currents(strict=True)
+                                        Vbg_meas, Vtg_meas = dev.read_current_gates(strict=True)
                                         if vbias_set is not None and hasattr(dev, "read_current_bias"):
-                                            vb_read = dev.read_current_bias()
+                                            vb_read = dev.read_current_bias(strict=True)
                                             if vb_read is not None:
                                                 Vbias_meas = float(vb_read)
-                                    except Exception:
-                                        pass
+                                    except Exception as exc:
+                                        if (
+                                            self._stop.is_set()
+                                            and _find_smu_communication_error(exc) is None
+                                        ):
+                                            raise _StopRequested() from exc
+                                        raise _RunFlowError(
+                                            "readback", f"SMU read failed: {exc}"
+                                        ) from exc
 
                                 if wl.size == 0:
                                     raise _RunFlowError("acquisition", "No wavelength headers were returned by the spectrometer.")
@@ -1444,7 +1510,7 @@ class _RunWorker(QObject):
                                 writer.write_row(row_data, cts.tolist())
                                 done_frames += 1
                                 self.frame_progress.emit(done_frames, total_points)
-                        except _RunFlowError:
+                        except (_RunFlowError, _StopRequested):
                             raise
                         except Exception as e:
                             raise _RunFlowError("save", f"CSV write error: {e}") from e
@@ -1465,27 +1531,118 @@ class _RunWorker(QObject):
                 if failed or self._stop.is_set():
                     break
 
+        except _StopRequested:
+            summary = "Run stopped by user."
+            self.log.emit(summary)
+
         except _RunFlowError as exc:
             failed = True
-            summary = f"{exc.stage.capitalize()} failed: {exc.message}"
+            smu_error = _find_smu_communication_error(exc)
+            if smu_error is not None:
+                hardware_error = smu_error
+                hardware_traceback = traceback.format_exc()
+                diagnosis = smu_error.diagnosis.get("summary")
+                summary = (
+                    f"Hardware incident: {diagnosis}"
+                    if diagnosis
+                    else f"Hardware incident: {smu_error}"
+                )
+            else:
+                summary = f"{exc.stage.capitalize()} failed: {exc.message}"
             self.log.emit(summary)
             self.error.emit(summary)
 
         except Exception as exc:
             failed = True
-            summary = f"Unexpected failure: {exc}"
+            smu_error = _find_smu_communication_error(exc)
+            if smu_error is not None:
+                hardware_error = smu_error
+                hardware_traceback = traceback.format_exc()
+                diagnosis = smu_error.diagnosis.get("summary")
+                summary = (
+                    f"Hardware incident: {diagnosis}"
+                    if diagnosis
+                    else f"Hardware incident: {smu_error}"
+                )
+            else:
+                summary = f"Unexpected failure: {exc}"
             self.log.emit(summary)
             self.error.emit(summary)
         finally:
             if self._smu and self._smu.is_connected:
                 self.log.emit("Ramping all channels to zero (2x slower than sweep settings)...")
+                cleanup_report["attempted"] = True
                 try:
-                    self._smu.device.ramp_all_to_zero(
-                        ramp_step=max(float(cfg.ramp.step_V) * 0.5, 1e-6),
-                        delay_s=float(cfg.ramp.delay_s) * 2.0,
-                    )
+                    device = self._smu.device
+                    if hasattr(device, "ramp_all_to_zero_report"):
+                        cleanup_roles = device.ramp_all_to_zero_report(
+                            ramp_step=max(float(cfg.ramp.step_V) * 0.5, 1e-6),
+                            delay_s=float(cfg.ramp.delay_s) * 2.0,
+                        )
+                        cleanup_report["roles"] = cleanup_roles
+                        cleanup_errors = [
+                            f"{role}: {result.get('error', result.get('status'))}"
+                            for role, result in cleanup_roles.items()
+                            if result.get("status") != "reached_zero"
+                        ]
+                    else:
+                        cleanup_errors = device.ramp_all_to_zero(
+                            ramp_step=max(float(cfg.ramp.step_V) * 0.5, 1e-6),
+                            delay_s=float(cfg.ramp.delay_s) * 2.0,
+                        )
+                        cleanup_report["errors"] = list(cleanup_errors or [])
+                    if cleanup_errors:
+                        for error in cleanup_errors:
+                            self.log.emit(f"Cleanup warning: {error}")
+                    else:
+                        self.log.emit("All available SMU channels reached 0 V.")
                 except Exception as e:
+                    cleanup_report["error"] = str(e)
                     self.log.emit(f"Cleanup warning: ramp-to-zero error: {e}")
+
+                if hardware_error is None:
+                    cleanup_error = getattr(
+                        self._smu.device, "last_communication_error", None
+                    )
+                    if cleanup_error is not None:
+                        hardware_error = cleanup_error
+                        hardware_stage = "smu_cleanup"
+                        failed = True
+                        diagnosis = cleanup_error.diagnosis.get("summary")
+                        summary = (
+                            f"Hardware incident during cleanup: {diagnosis}"
+                            if diagnosis
+                            else f"Hardware incident during cleanup: {cleanup_error}"
+                        )
+
+            if hardware_error is not None:
+                incident = build_hardware_incident(
+                    hardware_error,
+                    stage=hardware_stage,
+                    run_context=self._active_run_context,
+                    cleanup=cleanup_report,
+                    traceback_text=hardware_traceback,
+                )
+                try:
+                    recorder = HardwareIncidentRecorder(self._out_dir)
+                    incident["report_path"] = str(recorder.path)
+                    report_path = recorder.write(incident)
+                    self.log.emit("HARDWARE INCIDENT: " + incident_display_text(incident))
+                    self.log.emit(f"Incident report saved: {report_path}")
+                except Exception as report_exc:
+                    incident["report_write_error"] = str(report_exc)
+                    self.log.emit(f"Incident report could not be saved: {report_exc}")
+                self.log.emit(
+                    "Run will not resume automatically. Disconnect/reconnect the "
+                    "SMUs before starting another run."
+                )
+                self.incident.emit(incident)
+
+            if self._smu and self._smu.is_connected:
+                try:
+                    self._smu.device.clear_operation_context()
+                except Exception:
+                    pass
 
             if failed:
                 self.log.emit("Run failed.")
@@ -1615,6 +1772,7 @@ class PresetsPanel(QWidget):
         self._run_thread: Optional[QThread]      = None
         self._run_worker: Optional[_RunWorker]   = None
         self._stop_event = threading.Event()
+        self._hardware_incident_active = False
 
         self._final_seq:   List[dict] = []
         self._df_batch:    pd.DataFrame = self._batch_src.copy()
@@ -1707,7 +1865,8 @@ class PresetsPanel(QWidget):
         root.addWidget(meta_frame)
 
         # ── main splitter ──────────────────────────────────────────────────
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = self._splitter
         root.addWidget(splitter, stretch=1)
 
         # ── left: tables + apply/discard ──────────────────────────────────
@@ -2071,7 +2230,157 @@ class PresetsPanel(QWidget):
         self._sweep_calc._recalculate()
         if self._smu is not None:
             self._smu.connected.connect(lambda *_: self._sweep_calc.set_vbias_available(self._smu.is_connected))
+            self._smu.connected.connect(self._on_smu_reconnected)
             self._smu.disconnected.connect(lambda: self._sweep_calc.set_vbias_available(False))
+
+    @staticmethod
+    def _session_records(df: pd.DataFrame) -> List[dict]:
+        """Convert a table to JSON-native records (including NaN -> null)."""
+        return json.loads(df.to_json(orient="records"))
+
+    def capture_session_state(self) -> dict:
+        """Capture both the edited draft and last applied Dual Gate recipe."""
+        calc = self._sweep_calc
+        return {
+            "metadata": {
+                "sample_id": self._sample_edit.text(),
+                "point": self._point_edit.text(),
+                "tag": self._tag_edit.text(),
+                "temperature": self._temp_edit.text(),
+                "measurement_mode": self._mode_combo_name.currentText(),
+                "laser_nm": self._laser_edit.text(),
+                "power_uw": self._power_edit.text(),
+                "power_coefficient": self._power_coeff_edit.text(),
+                "subfolder": self._subfolder_edit.text(),
+            },
+            "loop_mode": self._mode_combo.currentText(),
+            "draft_loop": self._session_records(_read_loop_table(self._loop_table)),
+            "draft_batch": self._session_records(_read_batch_table(self._batch_table)),
+            "applied_loop": self._session_records(self._loop_src),
+            "applied_batch": self._session_records(self._batch_src),
+            "safe_jump_v": float(self._safe_jump_spin.value()),
+            "filename_parts": [
+                key for key, _label in PART_SPECS
+                if key in self._manual_filename_parts
+            ],
+            "calculator": {
+                "open": bool(calc._toggle.isChecked()),
+                "operator": calc._op_combo.currentText(),
+                "ratio": float(calc._ratio_spin.value()),
+                "constant": float(calc._constant_spin.value()),
+                "vbg_step": float(calc._vbg_step_spin.value()),
+                "vtg_min": float(calc._vtg_min_spin.value()),
+                "vtg_max": float(calc._vtg_max_spin.value()),
+                "vbg_min": float(calc._vbg_min_spin.value()),
+                "vbg_max": float(calc._vbg_max_spin.value()),
+                "vbias": float(calc._vbias_spin.value()),
+                "include_vbias": bool(calc._include_vbias_chk.isChecked()),
+                "condition_label": calc._condition_edit.text(),
+            },
+            "splitter_sizes": [int(v) for v in self._splitter.sizes()],
+        }
+
+    def restore_session_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        metadata = state.get("metadata")
+        if isinstance(metadata, dict):
+            for key, edit in (
+                ("sample_id", self._sample_edit),
+                ("point", self._point_edit),
+                ("tag", self._tag_edit),
+                ("temperature", self._temp_edit),
+                ("laser_nm", self._laser_edit),
+                ("power_uw", self._power_edit),
+                ("power_coefficient", self._power_coeff_edit),
+                ("subfolder", self._subfolder_edit),
+            ):
+                value = metadata.get(key)
+                if isinstance(value, str):
+                    edit.setText(value)
+            mode_name = metadata.get("measurement_mode")
+            if (
+                isinstance(mode_name, str)
+                and self._mode_combo_name.findText(mode_name) >= 0
+            ):
+                self._mode_combo_name.setCurrentText(mode_name)
+
+        loop_mode = state.get("loop_mode")
+        if isinstance(loop_mode, str) and self._mode_combo.findText(loop_mode) >= 0:
+            self._mode_combo.setCurrentText(loop_mode)
+        try:
+            self._safe_jump_spin.setValue(float(state["safe_jump_v"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+
+        parts = state.get("filename_parts")
+        if isinstance(parts, list):
+            allowed = {key for key, _label in PART_SPECS}
+            self._manual_filename_parts = {
+                str(key) for key in parts if str(key) in allowed
+            }
+            self._populate_filename_parts()
+
+        def records_frame(key: str, normalizer, fallback: pd.DataFrame) -> pd.DataFrame:
+            records = state.get(key)
+            if not isinstance(records, list):
+                return fallback.copy()
+            try:
+                return normalizer(pd.DataFrame(records))
+            except Exception:
+                return fallback.copy()
+
+        self._loop_src = records_frame(
+            "applied_loop", _normalize_loop, self._loop_src
+        )
+        self._batch_src = records_frame(
+            "applied_batch", _normalize_batch, self._batch_src
+        )
+        draft_loop = records_frame("draft_loop", _normalize_loop, self._loop_src)
+        draft_batch = records_frame("draft_batch", _normalize_batch, self._batch_src)
+        _populate_loop_table(self._loop_table, draft_loop)
+        _populate_batch_table(self._batch_table, draft_batch)
+        self._connect_loop_param_signals()
+        self._on_mode_changed(self._mode_combo.currentText())
+
+        calculator = state.get("calculator")
+        if isinstance(calculator, dict):
+            operator = calculator.get("operator")
+            if isinstance(operator, str) and self._sweep_calc._op_combo.findText(operator) >= 0:
+                self._sweep_calc._op_combo.setCurrentText(operator)
+            for key, spin in (
+                ("ratio", self._sweep_calc._ratio_spin),
+                ("constant", self._sweep_calc._constant_spin),
+                ("vbg_step", self._sweep_calc._vbg_step_spin),
+                ("vtg_min", self._sweep_calc._vtg_min_spin),
+                ("vtg_max", self._sweep_calc._vtg_max_spin),
+                ("vbg_min", self._sweep_calc._vbg_min_spin),
+                ("vbg_max", self._sweep_calc._vbg_max_spin),
+                ("vbias", self._sweep_calc._vbias_spin),
+            ):
+                try:
+                    spin.setValue(float(calculator[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+            if "include_vbias" in calculator:
+                self._sweep_calc._include_vbias_chk.setChecked(
+                    bool(calculator["include_vbias"])
+                )
+            condition = calculator.get("condition_label")
+            if isinstance(condition, str):
+                self._sweep_calc._condition_edit.setText(condition)
+            if "open" in calculator:
+                self._sweep_calc._toggle.setChecked(bool(calculator["open"]))
+            self._sweep_calc._recalculate()
+
+        sizes = state.get("splitter_sizes")
+        if isinstance(sizes, list) and len(sizes) == 2:
+            try:
+                self._splitter.setSizes([max(0, int(v)) for v in sizes])
+            except (TypeError, ValueError):
+                pass
+        self._update_plan()
+        self._update_filename_preview()
 
     # ── mode ──────────────────────────────────────────────────────────────────
 
@@ -2311,6 +2620,19 @@ class PresetsPanel(QWidget):
             return None, "Enable at least one filename part."
         if not self._lf6 or not self._lf6.is_connected:
             return None, "LF6 must be connected or running in mock mode before a sweep can start."
+        if self._smu and self._smu.is_connected:
+            device = self._smu.device
+            if bool(getattr(device, "requires_reconnect", False)):
+                states = getattr(device, "health_states", {})
+                affected = ", ".join(
+                    f"{role}={state}"
+                    for role, state in states.items()
+                    if state != "ready"
+                )
+                return None, (
+                    "An SMU communication failure requires disconnect/reconnect "
+                    f"before another run ({affected or 'reinitialization required'})."
+                )
         if self._df_batch.empty or not self._final_seq:
             return None, "No runnable plan is available."
         if any(_to_bool(row.get("MeasurePower", False)) for _, row in self._df_batch.iterrows()):
@@ -2516,6 +2838,7 @@ class PresetsPanel(QWidget):
         self._current_rep_i = 0
         self._current_frame_i = 0
         self._current_frame_total = 0
+        self._hardware_incident_active = False
         self._run_thread = QThread(self)
         self._run_worker = _RunWorker(
             self._final_seq, self._df_batch,
@@ -2533,6 +2856,7 @@ class PresetsPanel(QWidget):
         self._run_worker.frame_progress.connect(self._on_frame_progress)
         self._run_worker.active_frame.connect(self._on_active_frame)
         self._run_worker.tree_update.connect(self._on_tree_update)
+        self._run_worker.incident.connect(self._on_hardware_incident)
         self._run_worker.error.connect(lambda e: self._log(f"ERROR: {e}"))
         self._run_worker.finished.connect(self._on_finished)
         self._run_worker.finished.connect(self._run_thread.quit)
@@ -2549,7 +2873,20 @@ class PresetsPanel(QWidget):
         self._stop_btn.setEnabled(False)
         self._status_lbl.setText("Stopping...")
         self._log("Stop requested.")
-        self._log("Ramping all channels to 0 V - please wait...")
+        timeout_s = max(0.25, float(getattr(cfg.smu, "visa_timeout_ms", 5000)) / 1000.0)
+        self._log(
+            f"Waiting for the current hardware call (up to ~{timeout_s:g} s per SMU I/O). "
+            "The zero-ramp will begin immediately afterward."
+        )
+
+    @Slot(list)
+    def _on_smu_reconnected(self, _addresses: list):
+        if not self._hardware_incident_active:
+            return
+        self._hardware_incident_active = False
+        self._status_lbl.setText("SMUs reconnected - ready")
+        self._status_lbl.setStyleSheet("color: green;")
+        self._log("SMUs reconnected and reinitialized; the hardware fault lock is cleared.")
 
     @Slot(int, int)
     def _on_progress(self, done: int, total: int):
@@ -2616,7 +2953,10 @@ class PresetsPanel(QWidget):
     def _on_finished(self, success: bool, message: str):
         self._run_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
-        if success:
+        if self._hardware_incident_active:
+            self._status_lbl.setText("Hardware fault - reconnect SMUs")
+            self._status_lbl.setStyleSheet("color: red;")
+        elif success:
             self._status_lbl.setText("Completed")
             self._status_lbl.setStyleSheet("color: green;")
         elif self._stop_event.is_set():
@@ -2625,6 +2965,33 @@ class PresetsPanel(QWidget):
         else:
             self._status_lbl.setText("Failed")
             self._status_lbl.setStyleSheet("color: red;")
+
+    @Slot(object)
+    def _on_hardware_incident(self, incident: object):
+        if not isinstance(incident, dict):
+            return
+        self._hardware_incident_active = True
+        summary = incident_display_text(incident)
+        report_path = incident.get("report_path")
+        self._status_lbl.setText("Hardware fault - reconnect SMUs")
+        self._status_lbl.setStyleSheet("color: red;")
+
+        text = (
+            f"{summary}\n\n"
+            "The run has been stopped and will not resume automatically. "
+            "Other reachable SMUs were ramped toward 0 V; inspect the cleanup "
+            "results below. Disconnect and reconnect the SMUs before running again."
+        )
+        if report_path:
+            text += f"\n\nIncident report:\n{report_path}"
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Critical)
+        dialog.setWindowTitle("SMU hardware incident")
+        dialog.setText(text)
+        dialog.setDetailedText(json.dumps(incident, indent=2, ensure_ascii=False))
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.exec()
 
     def _log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")

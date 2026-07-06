@@ -11,7 +11,14 @@ class CustomError(Exception):
 
 
 class PyvisaInstrument:
-    def __init__(self, address: str, name: str, termination: str, rm: pyvisa.ResourceManager):
+    def __init__(
+        self,
+        address: str,
+        name: str,
+        termination: str,
+        rm: pyvisa.ResourceManager,
+        timeout_ms: int = 5000,
+    ):
         # instrument address
         self.address = address
         self.name = name
@@ -20,7 +27,9 @@ class PyvisaInstrument:
         # pyvisa resource manager
         self.rm = rm
         self.my_instr = None
-        self.timeout = None
+        # PyVISA interprets None as an infinite timeout. A failed Keithley
+        # would then trap the sweep thread forever and prevent Stop/cleanup.
+        self.timeout = max(250, int(timeout_ms))
         self.x_indexes = {}
         self.y_indexes = {}
         self.x_values = np.array([])
@@ -108,13 +117,28 @@ class MonoControl(PyvisaInstrument):
 
 
 class KeithControl(PyvisaInstrument):
-    def __init__(self, address: str, name: str, variable_name: str, rm: pyvisa.ResourceManager):
-        super().__init__(address, name, '\n', rm)
+    def __init__(
+        self,
+        address: str,
+        name: str,
+        variable_name: str,
+        rm: pyvisa.ResourceManager,
+        *,
+        curr_compliance: float = 1e-6,
+        volt_compliance: float = 20.0,
+        timeout_ms: int = 5000,
+    ):
+        super().__init__(address, name, '\n', rm, timeout_ms=timeout_ms)
         self.type = 'keithley'
         self.connect()
         self.get_identity()
         self.mode = 'volt_step'
-        self.set_volt_step()
+        # Configure exactly once. Previously construction used 1 µA and the
+        # controller immediately configured the same SMU again.
+        self.set_volt_step(
+            curr_compliance=curr_compliance,
+            volt_compliance=volt_compliance,
+        )
         self.x_indexes[variable_name] = 0
         self.y_indexes['measured_'+variable_name] = 0
         self.y_indexes[variable_name + '_leakage'] = 1
