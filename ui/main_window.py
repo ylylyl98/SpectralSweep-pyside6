@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSettings, QTimer
+from PySide6.QtCore import Qt, QRect, QSettings, QTimer
 from PySide6.QtGui  import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QTabWidget, QWidget, QStatusBar, QApplication,
@@ -28,109 +28,277 @@ from PySide6.QtWidgets import (
 
 # ── Global stylesheet ──────────────────────────────────────────────────────────
 _STYLESHEET = """
-/* Buttons */
-QPushButton {
-    padding: 4px 12px;
-    min-height: 22px;
-    border: 1px solid #b8b8b8;
-    border-radius: 4px;
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #f9f9f9, stop:1 #e9e9e9);
+/* Application surfaces */
+QWidget {
+    color: #202936;
+    selection-background-color: #2a75c7;
+    selection-color: #ffffff;
 }
-QPushButton:hover {
-    border-color: #9090a8;
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #ffffff, stop:1 #f0f0f0);
+QMainWindow, QDialog {
+    background: #f3f6fa;
 }
-QPushButton:pressed {
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
-                    stop:0 #dcdcdc, stop:1 #e8e8e8);
-}
-QPushButton:disabled {
-    color: #aaaaaa;
-    border-color: #d4d4d4;
-    background: #f2f2f2;
+QToolTip {
+    color: #202936;
+    background: #ffffff;
+    border: 1px solid #cfd7e3;
+    border-radius: 5px;
+    padding: 5px 7px;
 }
 
-/* GroupBox */
+/* Cards and sections */
 QGroupBox {
+    background: #ffffff;
     font-weight: 600;
-    border: 1px solid #cccccc;
-    border-radius: 5px;
-    margin-top: 10px;
-    padding-top: 2px;
+    border: 1px solid #d9e0e9;
+    border-radius: 8px;
+    margin-top: 14px;
+    padding: 9px 8px 8px 8px;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 8px;
-    top: -1px;
-    padding: 0 4px;
-    color: #3a3a3a;
+    left: 10px;
+    top: 1px;
+    padding: 0 5px;
+    color: #29384c;
+    background: #ffffff;
+}
+QFrame[frameShape="4"], QFrame[frameShape="5"] {
+    color: #dce2ea;
+}
+
+/* Inputs */
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox,
+QDateEdit, QDateTimeEdit, QTimeEdit {
+    min-height: 24px;
+    color: #202936;
+    background: #ffffff;
+    border: 1px solid #cbd4e0;
+    border-radius: 5px;
+    padding: 2px 7px;
+}
+QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover,
+QDateEdit:hover, QDateTimeEdit:hover, QTimeEdit:hover {
+    border-color: #9caabd;
+}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus,
+QDateEdit:focus, QDateTimeEdit:focus, QTimeEdit:focus {
+    border: 1px solid #2574c7;
+}
+QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
+QComboBox:disabled, QDateEdit:disabled, QDateTimeEdit:disabled,
+QTimeEdit:disabled {
+    color: #8b96a5;
+    background: #eef1f5;
+    border-color: #dde2e9;
+}
+QComboBox::drop-down {
+    width: 24px;
+    border: none;
+    border-left: 1px solid #e1e6ed;
+}
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    border: 1px solid #cbd4e0;
+    border-radius: 5px;
+    padding: 3px;
+    outline: none;
+}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
+    width: 18px;
+    background: #f7f9fc;
+    border: none;
+    border-left: 1px solid #e2e7ee;
+}
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {
+    background: #eaf2fb;
+}
+QPlainTextEdit, QTextEdit {
+    color: #202936;
+    background: #ffffff;
+    border: 1px solid #d3dbe6;
+    border-radius: 6px;
+    padding: 4px;
+}
+
+/* Buttons */
+QPushButton {
+    min-height: 25px;
+    color: #243246;
+    background: #ffffff;
+    border: 1px solid #c8d1dd;
+    border-radius: 6px;
+    padding: 4px 13px;
+}
+QPushButton:hover {
+    color: #145da5;
+    background: #edf5fd;
+    border-color: #79a9d8;
+}
+QPushButton:pressed {
+    background: #dcecfb;
+    border-color: #4f8bc6;
+}
+QPushButton:focus, QPushButton:default {
+    border: 1px solid #2877c9;
+}
+QPushButton:disabled {
+    color: #96a0ae;
+    background: #edf0f4;
+    border-color: #dce1e8;
+}
+QToolButton {
+    min-width: 22px;
+    min-height: 22px;
+    border: 1px solid transparent;
+    border-radius: 5px;
     background: transparent;
 }
-
-/* Tab bar */
-QTabBar::tab {
-    padding: 5px 16px;
-    border: 1px solid #c0c0c0;
-    border-bottom: none;
-    border-radius: 4px 4px 0 0;
-    background: #e8e8e8;
-    color: #555555;
-    min-width: 72px;
+QToolButton:hover {
+    background: #e8f1fb;
+    border-color: #c5d9ed;
 }
-QTabBar::tab:selected {
-    background: palette(window);
-    color: #111111;
-    font-weight: 600;
-    border-bottom: 1px solid palette(window);
+QToolButton:pressed, QToolButton:checked {
+    background: #d9eafa;
+    border-color: #9fc1e2;
+}
+
+/* Navigation */
+QTabWidget::pane {
+    background: #ffffff;
+    border: 1px solid #d7dee8;
+    border-radius: 0 8px 8px 8px;
+    top: -1px;
+}
+QTabBar::tab {
+    min-width: 76px;
+    color: #667386;
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: 2px solid transparent;
+    padding: 8px 17px;
+    margin-right: 2px;
 }
 QTabBar::tab:hover:!selected {
-    background: #f0f0f0;
+    color: #245f9b;
+    background: #edf4fb;
+    border-radius: 6px 6px 0 0;
 }
-
-/* Table header */
-QHeaderView::section {
-    background: #f0f0f0;
-    border: none;
-    border-right: 1px solid #d4d4d4;
-    border-bottom: 1px solid #d4d4d4;
-    padding: 3px 6px;
+QTabBar::tab:selected {
+    color: #174f87;
+    background: #ffffff;
+    border: 1px solid #d7dee8;
+    border-bottom: 2px solid #2374c6;
+    border-radius: 6px 6px 0 0;
     font-weight: 600;
-    color: #333333;
 }
-QHeaderView::section:first {
-    border-left: none;
+QDockWidget {
+    color: #202936;
+}
+QDockWidget::title {
+    color: #2b3b4f;
+    background: #eaf0f7;
+    border-bottom: 1px solid #d2dbe6;
+    padding: 7px 9px;
+    font-weight: 600;
 }
 
-/* Progress bar */
+/* Data views */
+QTableView, QTableWidget, QTreeView, QListView {
+    alternate-background-color: #f7f9fc;
+    background: #ffffff;
+    border: 1px solid #d5dde7;
+    border-radius: 6px;
+    gridline-color: #e6eaf0;
+    outline: none;
+}
+QTableView::item, QTableWidget::item, QTreeView::item, QListView::item {
+    padding: 3px 5px;
+}
+QTableView::item:hover, QTableWidget::item:hover,
+QTreeView::item:hover, QListView::item:hover {
+    background: #edf5fd;
+}
+QTableView::item:selected, QTableWidget::item:selected,
+QTreeView::item:selected, QListView::item:selected {
+    color: #173b61;
+    background: #d9eafb;
+}
+QHeaderView::section {
+    color: #344358;
+    background: #eef2f7;
+    border: none;
+    border-right: 1px solid #dde3eb;
+    border-bottom: 1px solid #d5dde7;
+    padding: 5px 7px;
+    font-weight: 600;
+}
+QTableCornerButton::section {
+    background: #eef2f7;
+    border: none;
+    border-right: 1px solid #dde3eb;
+    border-bottom: 1px solid #d5dde7;
+}
+
+/* Feedback and structure */
 QProgressBar {
-    border: 1px solid #bbbbbb;
-    border-radius: 4px;
+    min-height: 17px;
+    color: #344358;
+    background: #e8edf3;
+    border: 1px solid #d2dae5;
+    border-radius: 6px;
     text-align: center;
-    background: #eeeeee;
-    min-height: 16px;
     font-size: 11px;
 }
 QProgressBar::chunk {
-    background: #5a8fc4;
-    border-radius: 3px;
+    background: #2c7bc9;
+    border-radius: 5px;
 }
-
-/* Status bar */
 QStatusBar {
-    border-top: 1px solid #cccccc;
+    color: #536174;
+    background: #edf1f6;
+    border-top: 1px solid #d5dce6;
     font-size: 11px;
-    color: #505050;
+}
+QSplitter::handle {
+    background: #e1e6ed;
+}
+QSplitter::handle:hover {
+    background: #b7cbe0;
 }
 
-/* Dock widget title */
-QDockWidget::title {
-    font-weight: 600;
-    padding: 4px 6px;
-    background: #ececec;
-    border-bottom: 1px solid #c8c8c8;
+/* Scroll bars */
+QScrollBar:vertical {
+    width: 11px;
+    margin: 2px;
+    background: transparent;
+}
+QScrollBar::handle:vertical {
+    min-height: 28px;
+    background: #c4ceda;
+    border-radius: 5px;
+}
+QScrollBar::handle:vertical:hover { background: #9eacbd; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    height: 0px;
+    background: transparent;
+}
+QScrollBar:horizontal {
+    height: 11px;
+    margin: 2px;
+    background: transparent;
+}
+QScrollBar::handle:horizontal {
+    min-width: 28px;
+    background: #c4ceda;
+    border-radius: 5px;
+}
+QScrollBar::handle:horizontal:hover { background: #9eacbd; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    width: 0px;
+    background: transparent;
 }
 """
 
@@ -168,6 +336,20 @@ def _valid_font_size(value: object, default: int = 9) -> int:
     return min(max(pt, 7), 18)
 
 
+def _clamp_window_rect(rect: QRect, available: QRect, margin: int = 8) -> QRect:
+    """Return a normal-window rectangle fully inside the available screen."""
+    safe = available.adjusted(margin, margin, -margin, -margin)
+    if safe.width() <= 0 or safe.height() <= 0:
+        safe = QRect(available)
+    width = min(max(1, rect.width()), safe.width())
+    height = min(max(1, rect.height()), safe.height())
+    max_x = safe.right() - width + 1
+    max_y = safe.bottom() - height + 1
+    x = min(max(rect.x(), safe.left()), max_x)
+    y = min(max(rect.y(), safe.top()), max_y)
+    return QRect(x, y, width, height)
+
+
 class MainWindow(QMainWindow):
     """
     Application shell.
@@ -179,15 +361,26 @@ class MainWindow(QMainWindow):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("SpectralSweep — PySide6")
-        self.resize(1400, 900)
 
         # Apply global stylesheet once (on the QApplication so all windows share it)
         app = QApplication.instance()
         if app:
+            app.setStyle("Fusion")
             if not app.styleSheet():
                 app.setStyleSheet(_STYLESHEET)
             app_font = QFont("Segoe UI", _valid_font_size(cfg.font_size_pt))
             app.setFont(app_font)
+            screen = app.primaryScreen()
+            if screen is not None:
+                available = screen.availableGeometry()
+                self.resize(
+                    min(1400, max(1, available.width() - 64)),
+                    min(900, max(1, available.height() - 64)),
+                )
+            else:
+                self.resize(1400, 900)
+        else:
+            self.resize(1400, 900)
 
         # ── create controllers (one per instrument family) ────────────────────
         self._lf6  = LF6Controller(parent=self)
@@ -367,6 +560,25 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._status.showMessage(f"Could not save settings: {exc}", 8000)
 
+    def _available_geometry_for_window(self) -> Optional[QRect]:
+        app = QApplication.instance()
+        if app is None:
+            return None
+        screen = QApplication.screenAt(self.frameGeometry().center())
+        if screen is None:
+            screen = self.screen() or app.primaryScreen()
+        return QRect(screen.availableGeometry()) if screen is not None else None
+
+    def _clamp_to_available_screen(self) -> None:
+        if self.isMaximized() or self.isFullScreen():
+            return
+        available = self._available_geometry_for_window()
+        if available is None:
+            return
+        bounded = _clamp_window_rect(self.geometry(), available)
+        if bounded != self.geometry():
+            self.setGeometry(bounded)
+
     def _restore_geometry(self):
         s = QSettings(_ORG, _APP)
         geom = s.value("geometry")
@@ -375,6 +587,8 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geom)
         if state is not None:
             self.restoreState(state)
+        self._clamp_to_available_screen()
+        QTimer.singleShot(0, self._clamp_to_available_screen)
 
     def _save_geometry(self):
         s = QSettings(_ORG, _APP)

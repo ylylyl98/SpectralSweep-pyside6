@@ -28,13 +28,13 @@
 
 from __future__ import annotations
 
-import re
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QBrush, QFont
 from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem, QWidget
 from utils.filename_builder import build_condition_display_label
+from utils.when_condition import evaluate_when_expression
 
 try:
     import pandas as pd
@@ -74,15 +74,7 @@ def _when_ok(when_str: str, ctx: dict) -> bool:
     Returns True if the condition is empty or passes.
     Supports simple expressions like "Exposure Time (ms) == 2000".
     """
-    w = str(when_str).strip()
-    if not w or w.lower() in ("always", "all", ""):
-        return True
-    try:
-        # Build a safe local namespace from the ctx dict
-        ns = {re.sub(r"[^a-zA-Z0-9_]", "_", k): v for k, v in ctx.items()}
-        return bool(eval(w, {"__builtins__": {}}, ns))  # noqa: S307
-    except Exception:
-        return True   # unknown → include
+    return evaluate_when_expression(when_str, ctx)
 
 
 def _outer_ctx_alias(ctx: dict) -> dict:
