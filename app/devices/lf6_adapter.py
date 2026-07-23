@@ -3,7 +3,7 @@ from typing import Tuple
 import numpy as np
 import lf6_automation
 
-from .spectrum_alignment import align_wavelengths_to_intensities
+from .spectrum_alignment import align_wavelengths_to_image, align_wavelengths_to_intensities
 
 class SpectrometerLF6:
     """
@@ -47,8 +47,16 @@ class SpectrometerLF6:
         Return (wavelengths, intensities).
         We force λ refresh to reflect any recent center change.
         """
-        y = np.asarray(self.setup.acquire(), dtype=float).ravel()
+        # acquire_2d preserves full-sensor geometry while still returning a
+        # flat buffer when the LightField frame does not expose dimensions.
+        if hasattr(self.setup, "acquire_2d"):
+            y = np.asarray(self.setup.acquire_2d(), dtype=float)
+        else:
+            y = np.asarray(self.setup.acquire(), dtype=float)
         wl = self.calibration_wavelengths(force=True)
+        if y.ndim == 2 and y.shape[0] > 1 and y.shape[1] > 1:
+            return align_wavelengths_to_image(wl, y)
+        y = y.ravel()
         return align_wavelengths_to_intensities(wl, y)
 
     def acquire_2d(self):

@@ -7,8 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from app.devices.spectrum_alignment import align_wavelengths_to_intensities
+from app.devices.spectrum_alignment import align_wavelengths_to_image, align_wavelengths_to_intensities
 from app.engine.csv_writer import CSVWriter
+from utils.dual_gate_preview import load_last_dual_gate_acquisition
 
 
 class SpectrumAlignmentTests(unittest.TestCase):
@@ -35,6 +36,28 @@ class SpectrumAlignmentTests(unittest.TestCase):
             align_wavelengths_to_intensities(
                 np.arange(1023, dtype=float), np.arange(1024, dtype=float)
             )
+
+    def test_aligns_full_sensor_image_and_trims_trailing_calibration(self) -> None:
+        image = np.arange(3 * 1024, dtype=float).reshape(3, 1024)
+        wavelengths, aligned = align_wavelengths_to_image(np.arange(1030, dtype=float), image)
+
+        self.assertEqual(wavelengths.size, 1024)
+        np.testing.assert_array_equal(aligned, image)
+
+    def test_transposes_full_sensor_image_to_y_by_wavelength(self) -> None:
+        image = np.arange(3 * 1024, dtype=float).reshape(1024, 3)
+        wavelengths, aligned = align_wavelengths_to_image(np.arange(1030, dtype=float), image)
+
+        self.assertEqual(wavelengths.size, 1024)
+        self.assertEqual(aligned.shape, (3, 1024))
+        np.testing.assert_array_equal(aligned, image.T)
+
+    def test_presets_failure_shape_aligns_as_256_by_1024(self) -> None:
+        image = np.arange(256 * 1024, dtype=float).reshape(256, 1024)
+        wavelengths, aligned = align_wavelengths_to_image(np.arange(1024, dtype=float), image)
+
+        self.assertEqual(wavelengths.size, 1024)
+        self.assertEqual(aligned.shape, (256, 1024))
 
 
 class CSVWriterTests(unittest.TestCase):
@@ -91,6 +114,66 @@ class CSVWriterTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "expected 4, received 3"):
                 writer.write_row({"Vbg_set": 0.25}, [1.0, 2.0, 3.0])
+
+    def test_writes_and_reconstructs_full_sensor_sweep_points(self) -> None:
+        first = np.arange(12, dtype=float).reshape(3, 4)
+        second = first + 100.0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            writer = CSVWriter(
+                out_dir=temp_dir,
+                file_base="full_sensor",
+                wavelength_headers=[700.0, 700.1, 700.2, 700.3],
+                scalar_fields_order=["Vbg_set", "Vtg_set"],
+            )
+            writer.write_matrix({"Vbg_set": -1.0, "Vtg_set": 0.5}, first, point_index=0)
+            writer.write_matrix({"Vbg_set": -1.0, "Vtg_set": 1.0}, second, point_index=1)
+            writer.close()
+
+            with (Path(temp_dir) / "full_sensor.csv").open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.reader(handle))
+
+        self.assertEqual(rows[0][:4], ["point_index", "y_pixel", "Vbg_set", "Vtg_set"])
+        self.assertEqual(len(rows), 7)
+        reconstructed_first = np.asarray([[float(v) for v in row[4:]] for row in rows[1:4]])
+        reconstructed_second = np.asarray([[float(v) for v in row[4:]] for row in rows[4:7]])
+        np.testing.assert_array_equal(reconstructed_first, first)
+        np.testing.assert_array_equal(reconstructed_second, second)
+
+    def test_viewer_loads_last_1d_acquisition_from_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            writer = CSVWriter(
+                out_dir=temp_dir,
+                file_base="spectrum",
+                wavelength_headers=[700.0, 701.0, 702.0],
+                scalar_fields_order=["Vbg_set"],
+            )
+            writer.write_row({"Vbg_set": 0.0}, [1.0, 2.0, 3.0])
+            writer.write_row({"Vbg_set": 1.0}, [4.0, 5.0, 6.0])
+            result = load_last_dual_gate_acquisition(writer.path)
+            writer.close()
+
+        self.assertEqual(result["mode"], "spectrum")
+        np.testing.assert_array_equal(result["data"], [4.0, 5.0, 6.0])
+
+    def test_viewer_loads_last_full_sensor_point_from_csv(self) -> None:
+        first = np.arange(12, dtype=float).reshape(3, 4)
+        second = first + 100.0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            writer = CSVWriter(
+                out_dir=temp_dir,
+                file_base="full_sensor",
+                wavelength_headers=[700.0, 701.0, 702.0, 703.0],
+                scalar_fields_order=["Vbg_set"],
+            )
+            writer.write_matrix({"Vbg_set": 0.0}, first, point_index=0)
+            writer.write_matrix({"Vbg_set": 1.0}, second, point_index=1)
+            result = load_last_dual_gate_acquisition(writer.path)
+            writer.close()
+
+        self.assertEqual(result["mode"], "full_sensor")
+        self.assertEqual(result["point_index"], 1)
+        np.testing.assert_array_equal(result["data"], second)
 
 
 if __name__ == "__main__":

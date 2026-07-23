@@ -7,7 +7,7 @@ from typing import Dict, Any, Tuple, Iterable, Optional
 
 import numpy as np
 
-from app.devices.spectrum_alignment import align_wavelengths_to_intensities
+from app.devices.spectrum_alignment import align_wavelengths_to_image, align_wavelengths_to_intensities
 from .registry import register
 
 
@@ -789,9 +789,14 @@ class DualGateSweep:
                 _raise_if_stop(self.stop_cb, log=log, msg="🛑 STOP requested before acquire — aborting (will ramp to 0V).")
 
                 wl, intens = spec.acquire()
-                wl, intens = align_wavelengths_to_intensities(wl, intens)
+                acquired = np.asarray(intens, dtype=float)
+                if acquired.ndim == 2:
+                    wl, acquired = align_wavelengths_to_image(wl, acquired)
+                    is_full_sensor = True
+                else:
+                    wl, acquired = align_wavelengths_to_intensities(wl, acquired)
+                    is_full_sensor = False
                 wl = wl.tolist()
-                intens = intens.tolist()
 
                 # On first row, force CSV wavelength header = actual wl from acquire()
                 if getattr(csvw, "_data_rows_written", 0) == 0:
@@ -801,10 +806,12 @@ class DualGateSweep:
                 else:
                     wl_headers = wl_headers or getattr(csvw, "wavelength_headers", None)
 
-                if wl_headers and len(intens) != len(wl_headers):
+                acquired_width = acquired.shape[1] if is_full_sensor else acquired.size
+                if wl_headers and acquired_width != len(wl_headers):
                     raise RuntimeError(
                         "Spectrometer output length changed during the sweep: "
-                        f"expected {len(wl_headers)} samples, received {len(intens)}."
+                        f"expected {len(wl_headers)} wavelength samples, "
+                        f"received acquisition shape {acquired.shape}."
                     )
 
                 # Measured bias voltage (if bias is active)
@@ -832,10 +839,19 @@ class DualGateSweep:
                     "Ibias": None if Ibias_a is None else float(Ibias_a),
                 }
 
-                if hasattr(csvw, "write_row"):
-                    csvw.write_row(scalars, intens)
+                if is_full_sensor:
+                    if not hasattr(csvw, "write_matrix"):
+                        raise RuntimeError("The configured CSV writer does not support full-sensor matrices.")
+                    csvw.write_matrix(
+                        scalars,
+                        acquired,
+                        point_index=i,
+                        y_pixels=list(range(acquired.shape[0])),
+                    )
+                elif hasattr(csvw, "write_row"):
+                    csvw.write_row(scalars, acquired.tolist())
                 else:
-                    csvw.add_row(scalars, intens)
+                    csvw.add_row(scalars, acquired.tolist())
 
                 cb = getattr(self, "frame_progress_cb", None)
                 if callable(cb):

@@ -142,9 +142,54 @@ class CSVWriter:
 
         self.writer.writerow(row_scalars + row_spec)
         self._data_rows_written += 1
+        self.fp.flush()
 
     def add_row(self, scalars: Dict[str, Any], spectrum: Optional[List[float]] = None) -> None:
         self.write_row(scalars, spectrum)
+
+    def write_matrix(
+        self,
+        scalars: Dict[str, Any],
+        image: Any,
+        point_index: int,
+        y_pixels: Optional[List[Any]] = None,
+    ) -> None:
+        """Write one full-sensor acquisition as a contiguous group of rows."""
+        if np is None:
+            raise RuntimeError("Matrix CSV export requires NumPy.")
+        frame = np.asarray(image, dtype=float)
+        if frame.ndim != 2 or 0 in frame.shape:
+            raise ValueError(f"CSV matrix export expects a non-empty 2D array; received {frame.shape}.")
+        expected_width = len(self.wavelength_headers or [])
+        if frame.shape[1] != expected_width:
+            raise ValueError(
+                "CSV matrix width does not match its wavelength header: "
+                f"expected {expected_width}, received image shape {frame.shape}."
+            )
+        y_values = list(range(frame.shape[0])) if y_pixels is None else list(y_pixels)
+        if len(y_values) != frame.shape[0]:
+            raise ValueError(
+                f"CSV matrix has {frame.shape[0]} rows but received {len(y_values)} Y-pixel labels."
+            )
+
+        matrix_fields = ["point_index", "y_pixel"]
+        if self._data_rows_written and any(k not in self.scalar_fields for k in matrix_fields):
+            raise ValueError("Cannot switch an existing 1D CSV to full-sensor matrix layout.")
+        if self._data_rows_written == 0:
+            self.scalar_fields = matrix_fields + [k for k in self.scalar_fields if k not in matrix_fields]
+        self._maybe_extend_scalar_fields(scalars)
+        self._ensure_open()
+
+        rows = []
+        for y_value, spectrum in zip(y_values, frame):
+            row_values = dict(scalars)
+            row_values["point_index"] = point_index
+            row_values["y_pixel"] = y_value
+            row_scalars = [self._fmt_cell(row_values.get(k, "")) for k in self.scalar_fields]
+            rows.append(row_scalars + [self._fmt_cell(x) for x in spectrum])
+        self.writer.writerows(rows)
+        self._data_rows_written += len(rows)
+        self.fp.flush()
 
     def close(self) -> None:
         if self.fp:

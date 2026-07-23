@@ -65,6 +65,7 @@ from utils.when_condition import (
     validate_when_expression,
 )
 from app.devices.stage_adapter import get_linear_stage_profile
+from app.devices.spectrum_alignment import align_wavelengths_to_image, align_wavelengths_to_intensities
 from utils.filename_builder import (
     FilenameContext,
     PART_SPECS,
@@ -77,6 +78,8 @@ from utils.filename_builder import (
     resolve_power_uw,
 )
 from ui.preview_widget import RunPlanTree
+from ui.dual_gate_spectrum_viewer import DualGateSpectrumViewer
+from utils.dual_gate_preview import load_last_dual_gate_acquisition
 
 # ── Schema constants ───────────────────────────────────────────────────────────
 
@@ -1429,6 +1432,7 @@ class _RunWorker(QObject):
     active_frame   = Signal(int, str, int, int, int)
     tree_update    = Signal(int, str, int)
     incident       = Signal(object)
+    acquisition_ready = Signal(object)
     finished       = Signal(bool, str)
     error          = Signal(str)
 
@@ -1443,6 +1447,7 @@ class _RunWorker(QObject):
         run_meta: Dict[str, Any],
         filename_parts: List[str],
         stop_event: threading.Event,
+        preview_event: Optional[threading.Event] = None,
     ) -> None:
         super().__init__()
         self._seq      = final_sequence
@@ -1456,6 +1461,7 @@ class _RunWorker(QObject):
         self._meta     = dict(run_meta)
         self._parts    = list(filename_parts)
         self._stop     = stop_event
+        self._preview_event = preview_event
         self._active_run_context: Dict[str, Any] = {}
 
     @Slot()
@@ -1777,6 +1783,19 @@ class _RunWorker(QObject):
 
                                 if wl.size == 0:
                                     raise _RunFlowError("acquisition", "No wavelength headers were returned by the spectrometer.")
+                                acquired = np.asarray(cts, dtype=float)
+                                try:
+                                    if acquired.ndim == 2:
+                                        wl, acquired = align_wavelengths_to_image(wl, acquired)
+                                        is_full_sensor = True
+                                    else:
+                                        wl, acquired = align_wavelengths_to_intensities(wl, acquired)
+                                        is_full_sensor = False
+                                except ValueError as exc:
+                                    raise _RunFlowError(
+                                        "acquisition",
+                                        f"LightField data/axis mismatch: {exc}",
+                                    ) from exc
                                 if getattr(writer, "_data_rows_written", 0) == 0 and hasattr(writer, "set_wavelength_headers"):
                                     writer.set_wavelength_headers(wl.tolist())
 
@@ -1788,7 +1807,29 @@ class _RunWorker(QObject):
                                 if vbias_set is not None:
                                     row_data["Vbias_set"] = float(vbias_set)
                                     row_data["Vbias_meas"] = Vbias_meas
-                                writer.write_row(row_data, cts.tolist())
+                                if is_full_sensor:
+                                    writer.write_matrix(
+                                        row_data,
+                                        acquired,
+                                        point_index=frame_i - 1,
+                                        y_pixels=list(range(acquired.shape[0])),
+                                    )
+                                else:
+                                    writer.write_row(row_data, acquired.tolist())
+                                preview_payload = {
+                                    "csv_path": str(csv_path),
+                                    "mode": "full_sensor" if is_full_sensor else "spectrum",
+                                    "point_index": frame_i - 1,
+                                    "point_number": frame_i,
+                                    "point_total": point_count,
+                                    **row_data,
+                                }
+                                if self._preview_event is not None and self._preview_event.is_set():
+                                    preview_payload["wavelengths"] = wl.copy()
+                                    preview_payload["data"] = acquired.copy()
+                                    if is_full_sensor:
+                                        preview_payload["y_pixels"] = np.arange(acquired.shape[0], dtype=float)
+                                self.acquisition_ready.emit(preview_payload)
                                 done_frames += 1
                                 self.frame_progress.emit(done_frames, total_points)
                         except (_RunFlowError, _StopRequested):
@@ -2070,6 +2111,9 @@ class PresetsPanel(QWidget):
         self._run_thread: Optional[QThread]      = None
         self._run_worker: Optional[_RunWorker]   = None
         self._stop_event = threading.Event()
+        self._preview_event = threading.Event()
+        self._spectrum_viewer: Optional[DualGateSpectrumViewer] = None
+        self._last_acquisition_ref: Optional[dict[str, Any]] = None
         self._hardware_incident_active = False
 
         self._final_seq:   List[dict] = []
@@ -2506,8 +2550,15 @@ class PresetsPanel(QWidget):
             "Voltages are ramped back to zero before the run exits."
         )
         self._stop_btn.setEnabled(False)
+        self._spectrum_btn = QPushButton("Show Spectrum")
+        self._spectrum_btn.setCheckable(True)
+        self._spectrum_btn.setMinimumHeight(32)
+        self._spectrum_btn.setToolTip(
+            "Show the most recent completed LightField acquisition in a separate window."
+        )
         run_row.addWidget(self._run_btn)
         run_row.addWidget(self._stop_btn)
+        run_row.addWidget(self._spectrum_btn)
         run_row.addStretch()
         lay_right.addLayout(run_row)
 
@@ -2564,6 +2615,7 @@ class PresetsPanel(QWidget):
         self._batch_down_btn.clicked.connect(self._move_batch_row_down)
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn.clicked.connect(self._on_stop)
+        self._spectrum_btn.clicked.connect(self._toggle_spectrum_viewer)
         self._loop_table.itemChanged.connect(self._on_draft_edited)
         self._batch_table.itemChanged.connect(self._on_batch_item_changed)
         self._batch_table.itemSelectionChanged.connect(self._update_filename_preview)
@@ -3582,6 +3634,7 @@ class PresetsPanel(QWidget):
             run_meta=run_meta,
             filename_parts=self._selected_filename_parts(),
             stop_event=self._stop_event,
+            preview_event=self._preview_event,
         )
         self._run_worker.moveToThread(self._run_thread)
         self._run_thread.started.connect(self._run_worker.run)
@@ -3591,6 +3644,7 @@ class PresetsPanel(QWidget):
         self._run_worker.active_frame.connect(self._on_active_frame)
         self._run_worker.tree_update.connect(self._on_tree_update)
         self._run_worker.incident.connect(self._on_hardware_incident)
+        self._run_worker.acquisition_ready.connect(self._on_acquisition_ready)
         self._run_worker.error.connect(lambda e: self._log(f"ERROR: {e}"))
         self._run_worker.finished.connect(self._on_finished)
         self._run_worker.finished.connect(self._run_thread.quit)
@@ -3600,6 +3654,60 @@ class PresetsPanel(QWidget):
         self._status_lbl.setText("Running…")
         self._status_lbl.setStyleSheet("color: orange;")
         self._run_thread.start()
+
+    @Slot(bool)
+    def _toggle_spectrum_viewer(self, checked: bool):
+        if not checked:
+            if self._spectrum_viewer is not None:
+                self._spectrum_viewer.hide()
+            return
+        if self._spectrum_viewer is None:
+            self._spectrum_viewer = DualGateSpectrumViewer(self)
+            self._spectrum_viewer.visibility_changed.connect(
+                self._on_spectrum_viewer_visibility_changed
+            )
+        self._preview_event.set()
+        self._spectrum_viewer.show()
+        self._spectrum_viewer.raise_()
+        self._spectrum_viewer.activateWindow()
+        if self._last_acquisition_ref:
+            try:
+                loaded = load_last_dual_gate_acquisition(
+                    self._last_acquisition_ref["csv_path"]
+                )
+                loaded.update(self._last_acquisition_ref)
+                self._spectrum_viewer.set_acquisition(loaded)
+            except Exception as exc:
+                self._spectrum_viewer.show_message(
+                    f"Could not load the last completed acquisition: {exc}"
+                )
+
+    @Slot(bool)
+    def _on_spectrum_viewer_visibility_changed(self, visible: bool):
+        if visible:
+            self._preview_event.set()
+        else:
+            self._preview_event.clear()
+        self._spectrum_btn.blockSignals(True)
+        self._spectrum_btn.setChecked(bool(visible))
+        self._spectrum_btn.setText("Hide Spectrum" if visible else "Show Spectrum")
+        self._spectrum_btn.blockSignals(False)
+
+    @Slot(object)
+    def _on_acquisition_ready(self, payload: dict):
+        # Retain only lightweight information while hidden.  The complete
+        # acquisition remains recoverable from the flushed CSV on demand.
+        self._last_acquisition_ref = {
+            key: value
+            for key, value in payload.items()
+            if key not in ("wavelengths", "data", "y_pixels")
+        }
+        if (
+            self._spectrum_viewer is not None
+            and self._spectrum_viewer.isVisible()
+            and "data" in payload
+        ):
+            self._spectrum_viewer.set_acquisition(payload)
 
     @Slot()
     def _on_stop(self):
