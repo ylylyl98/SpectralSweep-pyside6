@@ -330,6 +330,199 @@ class SweepLinePanelTests(unittest.TestCase):
             Qt.CheckState.Unchecked,
         )
 
+    def test_duplicate_batch_row_copies_every_field_below_selection(self):
+        panel = PresetsPanel()
+        table = panel._batch_table
+        values = {
+            "When": "Center_Wavelength == 860",
+            "condition_label": "duplicate-me",
+            "repeat": "3",
+            "frames": "41",
+            "Vbg_start": "-4.5",
+            "Vbg_stop": "2.5",
+            "Vtg_start": "1.25",
+            "Vtg_stop": "8.75",
+            "Vbias_start": "-0.1",
+            "Vbias_stop": "0.2",
+        }
+        for name, value in values.items():
+            table.item(0, BATCH_SCHEMA.index(name)).setText(value)
+        table.item(0, BATCH_SCHEMA.index("Run")).setCheckState(
+            Qt.CheckState.Unchecked
+        )
+        table.item(0, BATCH_SCHEMA.index("MeasurePower")).setCheckState(
+            Qt.CheckState.Checked
+        )
+        table.selectRow(0)
+
+        panel._duplicate_batch_row()
+
+        self.assertEqual(table.rowCount(), 2)
+        self.assertEqual(panel._selected_batch_row_index(), 1)
+        for column, name in enumerate(BATCH_SCHEMA):
+            source = table.item(0, column)
+            duplicate = table.item(1, column)
+            if name in {"Run", "MeasurePower"}:
+                self.assertEqual(duplicate.checkState(), source.checkState())
+            else:
+                self.assertEqual(duplicate.text(), source.text())
+        self.assertTrue(panel._tables_dirty)
+
+    def test_create_rev_row_swaps_all_voltage_pairs_and_uses_rev_label(self):
+        panel = PresetsPanel()
+        table = panel._batch_table
+        source_values = {
+            "condition_label": "TG-1.05BG=20",
+            "Vbg_start": "-12.5",
+            "Vbg_stop": "-2.381",
+            "Vtg_start": "6.875",
+            "Vtg_stop": "17.5",
+            "Vbias_start": "-0.2",
+            "Vbias_stop": "0.4",
+        }
+        for name, value in source_values.items():
+            table.item(0, BATCH_SCHEMA.index(name)).setText(value)
+        table.selectRow(0)
+
+        panel._create_rev_batch_row()
+
+        self.assertEqual(table.rowCount(), 2)
+        self.assertEqual(
+            table.item(1, BATCH_SCHEMA.index("condition_label")).text(),
+            "TG-1.05BG=20_Rev",
+        )
+        for start_name, stop_name in (
+            ("Vbg_start", "Vbg_stop"),
+            ("Vtg_start", "Vtg_stop"),
+            ("Vbias_start", "Vbias_stop"),
+        ):
+            self.assertEqual(
+                table.item(1, BATCH_SCHEMA.index(start_name)).text(),
+                source_values[stop_name],
+            )
+            self.assertEqual(
+                table.item(1, BATCH_SCHEMA.index(stop_name)).text(),
+                source_values[start_name],
+            )
+        self.assertEqual(panel._selected_batch_row_index(), 1)
+
+    def test_run_selection_actions_toggle_rows_as_a_group(self):
+        panel = PresetsPanel()
+        panel._batch_table.selectRow(0)
+        panel._add_batch_row()
+        panel._add_batch_row()
+        table = panel._batch_table
+        run_col = BATCH_SCHEMA.index("Run")
+        table.selectRow(1)
+
+        panel._run_only_selected_rows()
+
+        self.assertEqual(
+            [
+                table.item(row, run_col).checkState()
+                for row in range(table.rowCount())
+            ],
+            [
+                Qt.CheckState.Unchecked,
+                Qt.CheckState.Checked,
+                Qt.CheckState.Unchecked,
+            ],
+        )
+        panel._set_all_rows_run_state(True)
+        self.assertTrue(
+            all(
+                table.item(row, run_col).checkState()
+                == Qt.CheckState.Checked
+                for row in range(table.rowCount())
+            )
+        )
+        panel._set_selected_rows_run_state(False)
+        self.assertEqual(
+            table.item(1, run_col).checkState(),
+            Qt.CheckState.Unchecked,
+        )
+
+    def test_row_clipboard_paste_and_undo_redo(self):
+        panel = PresetsPanel()
+        table = panel._batch_table
+        label_col = BATCH_SCHEMA.index("condition_label")
+        table.item(0, label_col).setText("clipboard-row")
+        table.selectRow(0)
+        panel._copy_batch_rows()
+
+        panel._paste_batch_rows()
+
+        self.assertEqual(table.rowCount(), 2)
+        self.assertEqual(table.item(1, label_col).text(), "clipboard-row")
+        panel._undo_batch_edit()
+        self.assertEqual(table.rowCount(), 1)
+        panel._redo_batch_edit()
+        self.assertEqual(table.rowCount(), 2)
+        self.assertEqual(table.item(1, label_col).text(), "clipboard-row")
+
+    def test_auto_frames_uses_largest_selected_voltage_range(self):
+        panel = PresetsPanel()
+        table = panel._batch_table
+        panel._safe_jump_spin.setValue(0.5)
+        for name, value in {
+            "Vbg_start": "0",
+            "Vbg_stop": "1",
+            "Vtg_start": "-1",
+            "Vtg_stop": "1",
+            "Vbias_start": "",
+            "Vbias_stop": "",
+        }.items():
+            table.item(0, BATCH_SCHEMA.index(name)).setText(value)
+        table.selectRow(0)
+
+        panel._auto_frames_for_selected_rows()
+
+        self.assertEqual(
+            table.item(0, BATCH_SCHEMA.index("frames")).text(),
+            "5",
+        )
+        self.assertEqual(panel._batch_validation_issues(), [])
+
+    def test_validation_reports_invalid_condition_and_numeric_cell(self):
+        panel = PresetsPanel()
+        table = panel._batch_table
+        table.item(0, BATCH_SCHEMA.index("When")).setText(
+            "Center_Wavelength = 860"
+        )
+        table.item(0, BATCH_SCHEMA.index("Vtg_start")).setText("not-a-number")
+
+        issues = panel._batch_validation_issues()
+
+        self.assertTrue(any("Use ==" in issue for issue in issues))
+        self.assertTrue(any("Vtg_start must be numeric" in issue for issue in issues))
+
+    def test_move_to_edge_and_delete_disabled_rows(self):
+        panel = PresetsPanel()
+        table = panel._batch_table
+        label_col = BATCH_SCHEMA.index("condition_label")
+        run_col = BATCH_SCHEMA.index("Run")
+        table.item(0, label_col).setText("first")
+        table.selectRow(0)
+        panel._add_batch_row()
+        table.item(1, label_col).setText("middle")
+        panel._add_batch_row()
+        table.item(2, label_col).setText("last")
+        table.selectRow(2)
+
+        panel._move_batch_row_to_edge(top=True)
+
+        self.assertEqual(table.item(0, label_col).text(), "last")
+        table.item(1, run_col).setCheckState(Qt.CheckState.Unchecked)
+        panel._delete_disabled_batch_rows()
+        self.assertEqual(table.rowCount(), 2)
+        self.assertNotIn(
+            "first",
+            [
+                table.item(row, label_col).text()
+                for row in range(table.rowCount())
+            ],
+        )
+
     def test_batch_move_blocks_cell_events_and_refreshes_once(self):
         panel = PresetsPanel()
         panel._batch_table.selectRow(0)

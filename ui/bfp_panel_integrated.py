@@ -64,6 +64,36 @@ pg.setConfigOption("foreground", "k")
 
 MATERIAL_OPTIONS = ["tBN", "bBN", "biBN", "monoWS2", "monoWSe2", "WSe2/WS2", "Custom"]
 EXPERIMENT_OPTIONS = ["PL", "Ref"]
+PNG_EXPORT_DPI = 300
+PNG_SIZE_OPTIONS = (
+    ("4 × 4 in", (4.0, 4.0)),
+    ("3 × 4 in", (3.0, 4.0)),
+)
+
+
+def _make_png_size_combo() -> QComboBox:
+    combo = QComboBox()
+    for label, size_inches in PNG_SIZE_OPTIONS:
+        combo.addItem(label, size_inches)
+    combo.setToolTip(
+        "PNG dimensions are width × height at 300 DPI.\n"
+        "4 × 4 in = 1200 × 1200 px\n"
+        "3 × 4 in = 900 × 1200 px"
+    )
+    combo.setMinimumContentsLength(8)
+    return combo
+
+
+def _selected_png_size(combo: QComboBox) -> tuple[float, float]:
+    value = combo.currentData()
+    if isinstance(value, (tuple, list)) and len(value) == 2:
+        try:
+            width, height = float(value[0]), float(value[1])
+            if width > 0 and height > 0:
+                return width, height
+        except (TypeError, ValueError):
+            pass
+    return PNG_SIZE_OPTIONS[0][1]
 
 
 def _sanitize(text: str) -> str:

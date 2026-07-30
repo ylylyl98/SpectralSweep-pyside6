@@ -12,15 +12,17 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QObject, QPointF, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPointF, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QFont, QPolygonF
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGraphicsPolygonItem,
     QGraphicsRectItem,
     QGroupBox,
@@ -32,6 +34,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -60,6 +63,151 @@ _DEFAULT_EXTRA_OVERHEAD_S = 1.0
 _FLUSH_EVERY_POINTS = 50
 _PLOT_UPDATE_EVERY_POINTS = 5
 _UI_LOG_EVERY_POINTS = 10
+_SETTINGS_MIN_WIDTH = 420
+_PREVIEW_MIN_WIDTH = 420
+_RESPONSIVE_BREAKPOINT = 960
+_SETTINGS_TWO_COLUMN_BREAKPOINT = 570
+_SPLITTER_HANDLE_WIDTH = 8
+_COMPACT_FIELD_MIN_WIDTH = 86
+_COMPACT_FIELD_MAX_WIDTH = 132
+
+
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """Numeric editor that can never be changed by a mouse-wheel gesture."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class _NoWheelSpinBox(QSpinBox):
+    """Integer editor that can never be changed by a mouse-wheel gesture."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class _NoWheelComboBox(QComboBox):
+    """Selector that ignores wheel input unless its popup is being used."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+def _set_compact_editor(
+    widget: QWidget,
+    *,
+    minimum: int = _COMPACT_FIELD_MIN_WIDTH,
+    maximum: int = _COMPACT_FIELD_MAX_WIDTH,
+) -> None:
+    """Keep form fields readable without allowing them to consume a whole card."""
+
+    widget.setMinimumWidth(minimum)
+    widget.setMaximumWidth(maximum)
+    widget.setSizePolicy(
+        QSizePolicy.Policy.Preferred,
+        QSizePolicy.Policy.Fixed,
+    )
+
+
+def _configure_compact_form(form: QFormLayout) -> None:
+    form.setContentsMargins(7, 5, 7, 6)
+    form.setHorizontalSpacing(8)
+    form.setVerticalSpacing(5)
+    form.setFieldGrowthPolicy(
+        QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint
+    )
+    form.setFormAlignment(
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+    )
+    form.setLabelAlignment(
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+    )
+
+
+class _CollapsibleSection(QFrame):
+    """Lightweight card used for secondary 2D-sweep settings."""
+
+    expanded_changed = Signal(bool)
+
+    def __init__(
+        self,
+        title: str,
+        content: QWidget,
+        *,
+        expanded: bool = True,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setObjectName("MegaSweepDisclosure")
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Maximum,
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._header = QToolButton()
+        self._header.setObjectName("MegaSweepDisclosureHeader")
+        self._header.setText(title)
+        self._header.setCheckable(True)
+        self._header.setChecked(expanded)
+        self._header.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self._header.setArrowType(
+            Qt.ArrowType.DownArrow
+            if expanded
+            else Qt.ArrowType.RightArrow
+        )
+        self._header.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+
+        self._content = content
+        self._content.setVisible(expanded)
+        layout.addWidget(self._header)
+        layout.addWidget(self._content)
+        self._header.toggled.connect(self._on_toggled)
+
+        self.setStyleSheet(
+            "QFrame#MegaSweepDisclosure {"
+            " background: #ffffff;"
+            " border: 1px solid #d9e0e9;"
+            " border-radius: 7px;"
+            "}"
+            "QToolButton#MegaSweepDisclosureHeader {"
+            " min-height: 24px;"
+            " border: none;"
+            " border-radius: 6px;"
+            " padding: 4px 7px;"
+            " color: #29384c;"
+            " font-weight: 600;"
+            " text-align: left;"
+            " background: transparent;"
+            "}"
+            "QToolButton#MegaSweepDisclosureHeader:hover {"
+            " background: #f0f5fb;"
+            "}"
+        )
+
+    @Slot(bool)
+    def _on_toggled(self, expanded: bool) -> None:
+        self._content.setVisible(expanded)
+        self._header.setArrowType(
+            Qt.ArrowType.DownArrow
+            if expanded
+            else Qt.ArrowType.RightArrow
+        )
+        self.updateGeometry()
+        self.expanded_changed.emit(expanded)
+
+    def is_expanded(self) -> bool:
+        return self._header.isChecked()
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._header.setChecked(bool(expanded))
 
 
 class _MegaSweepStopRequested(Exception):
@@ -493,34 +641,35 @@ class _CoordSystemWidget(QGroupBox):
     changed = Signal()
 
     def __init__(self, parent=None):
-        super().__init__("Coordinate System  Gate Ratio", parent)
+        super().__init__("Sweep Coordinates", parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 4, 6, 4)
-        lay.setSpacing(3)
+        lay.setContentsMargins(7, 5, 7, 6)
+        lay.setSpacing(5)
         self._group = QButtonGroup(self)
-        self._raw = QRadioButton("Raw Voltages  — sweep Vtg / Vbg directly")
-        self._physical = QRadioButton("Physical Coordinates  — sweep Doping / E-field")
+        self._raw = QRadioButton("Raw Vtg/Vbg")
+        self._physical = QRadioButton("Physical D/F")
+        self._raw.setToolTip("Sweep the Vtg and Vbg voltages directly.")
+        self._physical.setToolTip(
+            "Sweep Doping and E-field coordinates; derive Vtg and Vbg using the gate ratio."
+        )
         self._raw.setChecked(True)
         self._group.addButton(self._raw)
         self._group.addButton(self._physical)
-        lay.addWidget(self._raw)
-        lay.addWidget(self._physical)
-
-        note = QLabel(
-            "Raw: step sizes are actual Vtg/Vbg steps; second preview tab shows the resulting D/F map.\n"
-            "Physical: step sizes are Doping/E-field steps; Vtg/Vbg positions are derived via ratio."
-        )
-        note.setStyleSheet("color: #6a6a6a; font-style: italic; font-size: 10px;")
-        note.setWordWrap(True)
-        lay.addWidget(note)
+        coord_row = QVBoxLayout()
+        coord_row.setContentsMargins(0, 0, 0, 0)
+        coord_row.setSpacing(3)
+        coord_row.addWidget(self._raw)
+        coord_row.addWidget(self._physical)
+        lay.addLayout(coord_row)
 
         row = QHBoxLayout()
         row.setSpacing(6)
-        self._ratio_label = QLabel("Gate ratio r")
-        self._ratio_spin = QDoubleSpinBox()
+        self._ratio_label = QLabel("Ratio r")
+        self._ratio_spin = _NoWheelDoubleSpinBox()
         self._ratio_spin.setRange(-1000.0, 1000.0)
         self._ratio_spin.setDecimals(4)
         self._ratio_spin.setValue(1.0)
+        _set_compact_editor(self._ratio_spin, minimum=90, maximum=116)
         self._ratio_spin.setToolTip(
             "Gate efficiency ratio r.\n"
             "Doping D = Vtg + r·Vbg\n"
@@ -529,11 +678,13 @@ class _CoordSystemWidget(QGroupBox):
             "Changing r changes the actual Vtg/Vbg positions swept."
         )
         row.addWidget(self._ratio_label)
-        row.addWidget(self._ratio_spin, 1)
+        row.addWidget(self._ratio_spin)
+        row.addStretch(1)
         lay.addLayout(row)
 
         self._formula = QLabel("D = Vtg + r·Vbg    F = Vtg − r·Vbg\nVtg = (D+F)/2    Vbg = (D−F)/(2r)")
         self._formula.setStyleSheet("color: #6a6a6a; font-size: 10px;")
+        self._formula.setWordWrap(True)
         lay.addWidget(self._formula)
 
         self._raw.toggled.connect(self.changed)
@@ -554,27 +705,33 @@ class _AxisSelectorWidget(QGroupBox):
     changed = Signal()
 
     def __init__(self, parent=None):
-        super().__init__("Axis Selection", parent)
+        super().__init__("Sweep Axes", parent)
         vlay = QVBoxLayout(self)
-        vlay.setContentsMargins(6, 4, 6, 4)
-        vlay.setSpacing(3)
+        vlay.setContentsMargins(7, 5, 7, 6)
+        vlay.setSpacing(5)
         self._available: list[str] = []
-        self._outer = QComboBox()
-        self._inner = QComboBox()
+        self._outer = _NoWheelComboBox()
+        self._inner = _NoWheelComboBox()
         for combo in (self._outer, self._inner):
-            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-            combo.setMinimumContentsLength(len("VDS (Vbias)"))
-        self._snake = QCheckBox("Reverse inner direction on alternating outer steps")
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(0)
+            _set_compact_editor(combo, minimum=104, maximum=144)
+        self._snake = QCheckBox("Snake scan")
+        self._snake.setToolTip(
+            "Reverse the inner-axis direction on alternating outer-axis steps."
+        )
         self._snake.setChecked(True)
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(QLabel("Outer (slow) axis"))
-        row.addWidget(self._outer, 1)
-        row.addSpacing(16)
-        row.addWidget(QLabel("Inner (fast) axis"))
-        row.addWidget(self._inner, 1)
-        row.addStretch()
-        vlay.addLayout(row)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(5)
+        grid.addWidget(QLabel("Outer (slow)"), 0, 0)
+        grid.addWidget(self._outer, 0, 1)
+        grid.addWidget(QLabel("Inner (fast)"), 1, 0)
+        grid.addWidget(self._inner, 1, 1)
+        vlay.addLayout(grid)
         vlay.addWidget(self._snake)
         self._outer.currentTextChanged.connect(self._sync_inner)
         self._inner.currentTextChanged.connect(self._sync_outer)
@@ -633,12 +790,12 @@ class _AxisConfigWidget(QGroupBox):
         super().__init__(title, parent)
         self._axis_name = title
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 4, 6, 4)
-        lay.setSpacing(3)
+        lay.setContentsMargins(7, 5, 7, 6)
+        lay.setSpacing(5)
 
-        self._start = QDoubleSpinBox()
-        self._stop = QDoubleSpinBox()
-        self._step = QDoubleSpinBox()
+        self._start = _NoWheelDoubleSpinBox()
+        self._stop = _NoWheelDoubleSpinBox()
+        self._step = _NoWheelDoubleSpinBox()
         for spin in (self._start, self._stop):
             spin.setRange(-200.0, 200.0)
             spin.setDecimals(4)
@@ -647,9 +804,11 @@ class _AxisConfigWidget(QGroupBox):
         self._step.setRange(1e-9, 100000.0)
         self._step.setDecimals(4)
         self._step.setValue(1.0)
-        self._mode = QComboBox()
+        self._mode = _NoWheelComboBox()
         self._mode.addItems(["Step Size", "Total Points"])
-        self._mode.setFixedWidth(100)
+        _set_compact_editor(self._mode, minimum=92, maximum=112)
+        for spin in (self._start, self._stop, self._step):
+            _set_compact_editor(spin, minimum=82, maximum=112)
 
         range_row = QHBoxLayout()
         range_row.setSpacing(4)
@@ -724,8 +883,7 @@ class _FixedParamsWidget(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Fixed Parameters", parent)
         self._layout = QFormLayout(self)
-        self._layout.setContentsMargins(6, 4, 6, 4)
-        self._layout.setSpacing(3)
+        _configure_compact_form(self._layout)
         self._spins: dict[str, QDoubleSpinBox] = {}
 
     def set_fixed_axes(self, axes: list[str], vbias_available: bool):
@@ -737,10 +895,11 @@ class _FixedParamsWidget(QGroupBox):
             display_axes.append("Vbias")
         self.setVisible(bool(display_axes))
         for axis in display_axes:
-            spin = QDoubleSpinBox()
+            spin = _NoWheelDoubleSpinBox()
             spin.setRange(-200.0, 200.0)
             spin.setDecimals(4)
             spin.setValue(0.0)
+            _set_compact_editor(spin)
             if axis == "E-field":
                 spin.setToolTip(
                     "Fixed electric field - held constant for all sweep points.\n"
@@ -753,10 +912,13 @@ class _FixedParamsWidget(QGroupBox):
                 row = QWidget()
                 row_lay = QHBoxLayout(row)
                 row_lay.setContentsMargins(0, 0, 0, 0)
-                badge = QLabel("SMU not connected")
+                row_lay.setSpacing(6)
+                badge = QLabel("N/A")
+                badge.setToolTip("No usable Vbias Keithley channel is connected.")
                 badge.setStyleSheet("color: #ad6700;")
                 row_lay.addWidget(spin)
                 row_lay.addWidget(badge)
+                row_lay.addStretch(1)
                 self._layout.addRow(axis, row)
             else:
                 spin.valueChanged.connect(self.changed)
@@ -772,34 +934,39 @@ class _SafetyWidget(QGroupBox):
 
     def __init__(self, parent=None):
         super().__init__("Safety Limits", parent)
-        form = QFormLayout(self)
-        form.setContentsMargins(6, 4, 6, 4)
-        form.setSpacing(3)
+        grid = QGridLayout(self)
+        grid.setContentsMargins(7, 5, 7, 6)
+        grid.setHorizontalSpacing(7)
+        grid.setVerticalSpacing(5)
+        min_header = QLabel("Minimum")
+        max_header = QLabel("Maximum")
+        for header in (min_header, max_header):
+            header.setStyleSheet("color: #6a6a6a; font-size: 10px;")
+        grid.addWidget(min_header, 0, 1)
+        grid.addWidget(max_header, 0, 2)
         self._spins: dict[str, QDoubleSpinBox] = {}
         defaults = {
             "vtg_min": -10.0, "vtg_max": 10.0,
             "vbg_min": -10.0, "vbg_max": 10.0,
             "vbias_min": -1.0, "vbias_max": 1.0,
         }
-        for prefix, row_label in (("vtg", "Vtg"), ("vbg", "Vbg"), ("vbias", "Vbias")):
-            container = QWidget()
-            hlay = QHBoxLayout(container)
-            hlay.setContentsMargins(0, 0, 0, 0)
-            hlay.setSpacing(4)
-            for suffix, short in (("min", "min"), ("max", "max")):
+        for row, (prefix, row_label) in enumerate(
+            (("vtg", "Vtg"), ("vbg", "Vbg"), ("vbias", "Vbias")),
+            start=1,
+        ):
+            grid.addWidget(QLabel(row_label), row, 0)
+            for column, suffix in enumerate(("min", "max"), start=1):
                 key = f"{prefix}_{suffix}"
-                spin = QDoubleSpinBox()
+                spin = _NoWheelDoubleSpinBox()
                 spin.setRange(-200.0, 200.0)
                 spin.setDecimals(4)
                 spin.setValue(defaults[key])
                 spin.setSuffix(" V")
+                _set_compact_editor(spin, minimum=88, maximum=116)
                 spin.valueChanged.connect(self.changed)
                 self._spins[key] = spin
-                lbl = QLabel(short)
-                lbl.setFixedWidth(24)
-                hlay.addWidget(lbl)
-                hlay.addWidget(spin, 1)
-            form.addRow(row_label, container)
+                grid.addWidget(spin, row, column)
+        grid.setColumnStretch(3, 1)
 
     def set_vbias_available(self, available: bool):
         self._spins["vbias_min"].setEnabled(available)
@@ -815,29 +982,32 @@ class _TimingWidget(QGroupBox):
     def __init__(self, parent=None):
         super().__init__("Timing", parent)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 4, 6, 4)
-        lay.setSpacing(3)
+        lay.setContentsMargins(7, 5, 7, 6)
+        lay.setSpacing(5)
         form = QFormLayout()
-        form.setSpacing(3)
+        _configure_compact_form(form)
+        form.setContentsMargins(0, 0, 0, 0)
         lay.addLayout(form)
-        self._settle = QDoubleSpinBox()
+        self._settle = _NoWheelDoubleSpinBox()
         self._settle.setRange(0.0, 60.0)
         self._settle.setDecimals(4)
         self._settle.setValue(cfg.ramp.settle_s)
         self._settle.setSuffix(" s")
-        self._extra_overhead = QDoubleSpinBox()
+        _set_compact_editor(self._settle)
+        self._extra_overhead = _NoWheelDoubleSpinBox()
         self._extra_overhead.setRange(0.0, 30.0)
         self._extra_overhead.setDecimals(3)
         self._extra_overhead.setSingleStep(0.1)
         self._extra_overhead.setValue(_DEFAULT_EXTRA_OVERHEAD_S)
         self._extra_overhead.setSuffix(" s")
+        _set_compact_editor(self._extra_overhead)
         self._extra_overhead.setToolTip(
             "Pre-run ETA allowance for per-point overhead not covered by exposure, "
             "settle, or ramp time: SMU readbacks, current reads, spectrometer "
             "readout overhead, CSV write, and UI/log work."
         )
         form.addRow("Settle time (s)", self._settle)
-        form.addRow("Extra overhead / point", self._extra_overhead)
+        form.addRow("Overhead / point", self._extra_overhead)
         self._toggle = QToolButton()
         self._toggle.setText("Advanced Timing")
         self._toggle.setCheckable(True)
@@ -848,16 +1018,20 @@ class _TimingWidget(QGroupBox):
         self._advanced = QFrame()
         self._advanced.setVisible(False)
         adv_form = QFormLayout(self._advanced)
-        self._ramp_step = QDoubleSpinBox()
+        _configure_compact_form(adv_form)
+        adv_form.setContentsMargins(0, 0, 0, 0)
+        self._ramp_step = _NoWheelDoubleSpinBox()
         self._ramp_step.setRange(0.001, 10.0)
         self._ramp_step.setDecimals(4)
         self._ramp_step.setValue(cfg.ramp.step_V)
         self._ramp_step.setSuffix(" V")
-        self._step_delay_ms = QDoubleSpinBox()
+        _set_compact_editor(self._ramp_step)
+        self._step_delay_ms = _NoWheelDoubleSpinBox()
         self._step_delay_ms.setRange(1.0, 10000.0)
         self._step_delay_ms.setDecimals(1)
         self._step_delay_ms.setValue(cfg.ramp.delay_s * 1000.0)
         self._step_delay_ms.setSuffix(" ms")
+        _set_compact_editor(self._step_delay_ms)
         self._rate = QLabel("")
         self._rate.setStyleSheet("color: #6a6a6a;")
         adv_form.addRow("Voltage increment (V)", self._ramp_step)
@@ -1515,6 +1689,8 @@ class MegaSweepPanel(QWidget):
         self._last_preview: dict = {"all_points": [], "valid_points": []}
         self._run_failed = False
         self._step_linking = False
+        self._horizontal_splitter_ratio = 0.40
+        self._settings_two_column: Optional[bool] = None
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(80)
@@ -1534,21 +1710,72 @@ class MegaSweepPanel(QWidget):
         root.addWidget(splitter, stretch=1)
 
         scroll = QScrollArea()
+        self._settings_scroll = scroll
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(380)
+        scroll.setMinimumWidth(_SETTINGS_MIN_WIDTH)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Expanding,
+        )
         left = QWidget()
+        left.setMinimumWidth(0)
+        left.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self._settings_content = left
         self._left_lay = QVBoxLayout(left)
-        self._left_lay.setContentsMargins(4, 4, 4, 4)
-        self._left_lay.setSpacing(3)
+        self._left_lay.setContentsMargins(5, 4, 5, 6)
+        self._left_lay.setSpacing(0)
+        self._left_lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+        left.setStyleSheet(
+            "QGroupBox[compactCard=\"true\"] {"
+            " margin-top: 11px;"
+            " padding: 6px 5px 5px 5px;"
+            " border-radius: 7px;"
+            "}"
+            "QGroupBox[compactCard=\"true\"]::title {"
+            " left: 8px;"
+            " padding: 0 4px;"
+            "}"
+            "QGroupBox#MegaSweepEmbeddedGroup {"
+            " border: none;"
+            " margin: 0;"
+            " padding: 0;"
+            " background: transparent;"
+            "}"
+        )
         scroll.setWidget(left)
+        scroll.viewport().installEventFilter(self)
         splitter.addWidget(scroll)
 
         right = QWidget()
+        self._right_panel = right
+        right.setMinimumWidth(_PREVIEW_MIN_WIDTH)
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(6, 4, 4, 4)
         right_lay.setSpacing(6)
         splitter.addWidget(right)
-        splitter.setSizes([380, 620])
+        splitter.setHandleWidth(_SPLITTER_HANDLE_WIDTH)
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStyleSheet(
+            "QSplitter::handle {"
+            " background: #d7e0ea;"
+            " border-left: 1px solid #c7d2df;"
+            " border-right: 1px solid #c7d2df;"
+            "}"
+            "QSplitter::handle:hover { background: #afc6dd; }"
+        )
+        splitter.setSizes([480, 720])
+        splitter.splitterMoved.connect(self._on_splitter_moved)
 
         self._coord_widget = _CoordSystemWidget()
         self._axis_selector = _AxisSelectorWidget()
@@ -1558,63 +1785,140 @@ class MegaSweepPanel(QWidget):
         self._safety_widget = _SafetyWidget()
         self._timing_widget = _TimingWidget()
 
-        optical = QGroupBox("Optical Settings")
+        for card in (
+            self._coord_widget,
+            self._axis_selector,
+            self._axis_a,
+            self._axis_b,
+            self._fixed_widget,
+            self._safety_widget,
+        ):
+            card.setProperty("compactCard", True)
+
+        self._timing_widget.setTitle("")
+        self._timing_widget.setObjectName("MegaSweepEmbeddedGroup")
+        self._timing_widget.setStyleSheet(
+            "QGroupBox#MegaSweepEmbeddedGroup {"
+            " border: none; margin: 0; padding: 0;"
+            " background: transparent;"
+            "}"
+        )
+        self._timing_section = _CollapsibleSection(
+            "Timing",
+            self._timing_widget,
+            expanded=False,
+        )
+
+        optical = QWidget()
         optical_form = QFormLayout(optical)
-        optical_form.setContentsMargins(6, 4, 6, 4)
-        optical_form.setSpacing(3)
-        self._exp_spin = QDoubleSpinBox()
+        _configure_compact_form(optical_form)
+        self._exp_spin = _NoWheelDoubleSpinBox()
         self._exp_spin.setRange(1, 600000)
         self._exp_spin.setDecimals(1)
         self._exp_spin.setValue(cfg.lf6.exposure_ms)
         self._exp_spin.setSuffix(" ms")
-        self._center_spin = QDoubleSpinBox()
+        _set_compact_editor(self._exp_spin)
+        self._center_spin = _NoWheelDoubleSpinBox()
         self._center_spin.setRange(200, 2000)
         self._center_spin.setDecimals(2)
         self._center_spin.setValue(cfg.lf6.center_nm)
         self._center_spin.setSuffix(" nm")
-        self._frames_spin = QSpinBox()
+        _set_compact_editor(self._center_spin)
+        self._frames_spin = _NoWheelSpinBox()
         self._frames_spin.setRange(1, 1000)
         self._frames_spin.setValue(cfg.lf6.accumulations)
+        _set_compact_editor(self._frames_spin)
         optical_form.addRow("Exposure", self._exp_spin)
         optical_form.addRow("Center λ", self._center_spin)
         optical_form.addRow("Frames", self._frames_spin)
+        self._optical_group = _CollapsibleSection(
+            "Optical Settings",
+            optical,
+            expanded=True,
+        )
 
-        meta = QGroupBox("File / Metadata")
-        meta_form = QFormLayout(meta)
-        meta_form.setContentsMargins(6, 4, 6, 4)
-        meta_form.setSpacing(3)
+        meta = QWidget()
+        meta_grid = QGridLayout(meta)
+        self._metadata_grid = meta_grid
+        meta_grid.setContentsMargins(7, 5, 7, 6)
+        meta_grid.setHorizontalSpacing(8)
+        meta_grid.setVerticalSpacing(5)
         self._sample_edit = QLineEdit()
         self._sample_edit.setPlaceholderText("Sample ID")
         self._tag_edit = QLineEdit("2DSweep")
         self._laser_edit = QLineEdit("730")
         self._power_edit = QLineEdit("1")
-        meta_form.addRow("Sample ID", self._sample_edit)
-        meta_form.addRow("Tag", self._tag_edit)
-        meta_form.addRow("Laser (nm)", self._laser_edit)
-        meta_form.addRow("Power (µW)", self._power_edit)
-
-        for widget in (self._coord_widget, self._axis_selector, self._axis_a, self._axis_b):
-            self._left_lay.addWidget(widget)
+        for edit in (
+            self._sample_edit,
+            self._tag_edit,
+            self._laser_edit,
+            self._power_edit,
+        ):
+            _set_compact_editor(edit, minimum=104, maximum=164)
+        self._metadata_fields = (
+            (QLabel("Sample ID"), self._sample_edit),
+            (QLabel("Tag"), self._tag_edit),
+            (QLabel("Laser (nm)"), self._laser_edit),
+            (QLabel("Power (µW)"), self._power_edit),
+        )
+        self._metadata_two_column: Optional[bool] = None
+        self._metadata_group = _CollapsibleSection(
+            "File / Metadata",
+            meta,
+            expanded=True,
+        )
 
         self._raw_link_label = QLabel()
-        self._raw_link_label.setStyleSheet("color: #6a6a6a; font-style: italic; font-size: 10px; padding: 0px 6px 1px 6px;")
+        self._raw_link_label.setStyleSheet(
+            "color: #6a6a6a; font-size: 10px;"
+            " padding: 1px 6px 2px 6px;"
+        )
         self._raw_link_label.setWordWrap(True)
-        self._left_lay.addWidget(self._raw_link_label)
 
-        for widget in (self._fixed_widget, self._safety_widget, self._timing_widget, optical, meta):
-            self._left_lay.addWidget(widget)
-        self._left_lay.addStretch(1)
+        self._settings_grid = QGridLayout()
+        self._settings_grid.setContentsMargins(0, 0, 0, 0)
+        self._settings_grid.setHorizontalSpacing(8)
+        self._settings_grid.setVerticalSpacing(7)
+        self._left_lay.addLayout(self._settings_grid)
+        self._left_lay.addSpacing(12)
+        self._settings_cards = (
+            self._coord_widget,
+            self._axis_selector,
+            self._axis_a,
+            self._axis_b,
+            self._raw_link_label,
+            self._fixed_widget,
+            self._safety_widget,
+            self._timing_section,
+            self._optical_group,
+            self._metadata_group,
+        )
+        self._apply_settings_card_layout(force=True)
 
         self._preview = _PreviewPlot()
         right_lay.addWidget(self._preview, stretch=1)
-        self._summary = QLabel("")
+        self._summary = QTextEdit()
+        self._summary.setReadOnly(True)
+        self._summary.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self._summary.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._summary.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._summary.setMinimumHeight(112)
+        self._summary.setMaximumHeight(168)
+        self._summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
         font = QFont("Consolas", 9)
         font.setStyleHint(QFont.Monospace)
         self._summary.setFont(font)
-        self._summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._summary.setStyleSheet(
-            "color: #444444; background: #f5f5f7; border: 1px solid #dedede;"
-            " border-radius: 3px; padding: 4px 6px;"
+            "QTextEdit { color: #444444; background: #f5f5f7;"
+            " border: 1px solid #dedede; border-radius: 3px;"
+            " padding: 4px 6px; }"
         )
         right_lay.addWidget(self._summary)
 
@@ -1652,12 +1956,17 @@ class MegaSweepPanel(QWidget):
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
         self._status_lbl = QLabel("Ready")
+        self._status_lbl.setMinimumWidth(84)
+        self._status_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self._status_lbl.setStyleSheet("color: #707070; font-size: 11px;")
         controls.addWidget(self._run_btn)
         controls.addWidget(self._stop_btn)
-        controls.addWidget(self._progress, stretch=1)
+        controls.addStretch(1)
         controls.addWidget(self._status_lbl)
         right_lay.addLayout(controls)
+        right_lay.addWidget(self._progress)
 
         self._log_edit = QTextEdit()
         self._log_edit.setReadOnly(True)
@@ -1669,6 +1978,226 @@ class MegaSweepPanel(QWidget):
             " border-radius: 3px; }"
         )
         right_lay.addWidget(self._log_edit)
+        self._install_settings_wheel_redirects()
+        QTimer.singleShot(0, self._refresh_settings_scroll_range)
+
+    def _apply_metadata_field_layout(
+        self,
+        two_column: bool,
+        *,
+        force: bool = False,
+    ) -> bool:
+        if not hasattr(self, "_metadata_grid"):
+            return False
+        if not force and self._metadata_two_column == two_column:
+            return False
+        while self._metadata_grid.count():
+            self._metadata_grid.takeAt(0)
+        for column in range(5):
+            self._metadata_grid.setColumnStretch(column, 0)
+        for index, (label, editor) in enumerate(self._metadata_fields):
+            if two_column:
+                row = index // 2
+                label_column = (index % 2) * 2
+            else:
+                row = index
+                label_column = 0
+            self._metadata_grid.addWidget(label, row, label_column)
+            self._metadata_grid.addWidget(editor, row, label_column + 1)
+        self._metadata_grid.setColumnStretch(4 if two_column else 2, 1)
+        self._metadata_two_column = two_column
+        self._metadata_grid.invalidate()
+        return True
+
+    def _apply_settings_card_layout(self, *, force: bool = False) -> bool:
+        """Reflow settings cards from one to two columns using pane width."""
+
+        if not hasattr(self, "_settings_grid"):
+            return False
+        viewport_width = self._settings_scroll.viewport().width()
+        two_column = viewport_width >= _SETTINGS_TWO_COLUMN_BREAKPOINT
+        metadata_changed = self._apply_metadata_field_layout(
+            two_column,
+            force=force,
+        )
+        if not force and self._settings_two_column == two_column:
+            return metadata_changed
+
+        while self._settings_grid.count():
+            self._settings_grid.takeAt(0)
+
+        if two_column:
+            placements = (
+                (self._coord_widget, 0, 0, 1, 1),
+                (self._axis_selector, 0, 1, 1, 1),
+                (self._axis_a, 1, 0, 1, 1),
+                (self._axis_b, 1, 1, 1, 1),
+                (self._raw_link_label, 2, 0, 1, 2),
+                (self._fixed_widget, 3, 0, 1, 1),
+                (self._safety_widget, 3, 1, 1, 1),
+                (self._timing_section, 4, 0, 1, 1),
+                (self._optical_group, 4, 1, 1, 1),
+                (self._metadata_group, 5, 0, 1, 2),
+            )
+            self._settings_grid.setColumnStretch(0, 1)
+            self._settings_grid.setColumnStretch(1, 1)
+        else:
+            placements = tuple(
+                (widget, row, 0, 1, 1)
+                for row, widget in enumerate(self._settings_cards)
+            )
+            self._settings_grid.setColumnStretch(0, 1)
+            self._settings_grid.setColumnStretch(1, 0)
+
+        for widget, row, column, row_span, column_span in placements:
+            self._settings_grid.addWidget(
+                widget,
+                row,
+                column,
+                row_span,
+                column_span,
+                Qt.AlignmentFlag.AlignTop,
+            )
+        self._settings_two_column = two_column
+        self._settings_grid.invalidate()
+        self._settings_grid.activate()
+        self._settings_content.updateGeometry()
+        return True
+
+    def _on_splitter_moved(self, *_args):
+        if self._splitter.orientation() != Qt.Orientation.Horizontal:
+            return
+        sizes = self._splitter.sizes()
+        total = sum(sizes)
+        if total > 0:
+            self._horizontal_splitter_ratio = min(
+                0.55,
+                max(0.25, float(sizes[0]) / float(total)),
+            )
+        QTimer.singleShot(0, self._refresh_settings_scroll_range)
+
+    def _apply_responsive_layout(self, *, force: bool = False):
+        if not hasattr(self, "_splitter"):
+            return
+        narrow = self.width() < _RESPONSIVE_BREAKPOINT
+        target = (
+            Qt.Orientation.Vertical
+            if narrow
+            else Qt.Orientation.Horizontal
+        )
+        changed = self._splitter.orientation() != target
+        if not changed and not force:
+            if target == Qt.Orientation.Horizontal:
+                self._apply_horizontal_splitter_sizes()
+            return
+
+        if self._splitter.orientation() == Qt.Orientation.Horizontal:
+            self._on_splitter_moved()
+        self._splitter.setOrientation(target)
+        if target == Qt.Orientation.Vertical:
+            self._settings_scroll.setMinimumWidth(0)
+            self._right_panel.setMinimumWidth(0)
+            self._settings_scroll.setMinimumHeight(140)
+            self._right_panel.setMinimumHeight(260)
+            self._splitter.setStretchFactor(0, 0)
+            self._splitter.setStretchFactor(1, 1)
+            available = max(
+                0,
+                self._splitter.height() - self._splitter.handleWidth(),
+            )
+            settings_height = max(140, int(round(available * 0.40)))
+            settings_height = min(
+                360,
+                max(140, available - 260),
+                settings_height,
+            )
+            self._splitter.setSizes(
+                [settings_height, max(260, available - settings_height)]
+            )
+        else:
+            self._settings_scroll.setMinimumHeight(0)
+            self._right_panel.setMinimumHeight(0)
+            self._settings_scroll.setMinimumWidth(_SETTINGS_MIN_WIDTH)
+            self._right_panel.setMinimumWidth(_PREVIEW_MIN_WIDTH)
+            self._splitter.setStretchFactor(0, 0)
+            self._splitter.setStretchFactor(1, 1)
+            self._apply_horizontal_splitter_sizes()
+        QTimer.singleShot(0, self._refresh_settings_scroll_range)
+
+    def _apply_horizontal_splitter_sizes(self):
+        available = max(
+            0,
+            self._splitter.width() - self._splitter.handleWidth(),
+        )
+        if available <= 0:
+            return
+        max_left = max(
+            _SETTINGS_MIN_WIDTH,
+            available - _PREVIEW_MIN_WIDTH,
+        )
+        left_width = int(round(available * self._horizontal_splitter_ratio))
+        left_width = min(max_left, max(_SETTINGS_MIN_WIDTH, left_width))
+        self._splitter.setSizes(
+            [left_width, max(_PREVIEW_MIN_WIDTH, available - left_width)]
+        )
+
+    def _refresh_settings_scroll_range(self):
+        if not hasattr(self, "_settings_content"):
+            return
+        self._apply_settings_card_layout()
+        self._install_settings_wheel_redirects()
+        self._left_lay.invalidate()
+        self._left_lay.activate()
+        required_height = max(
+            self._left_lay.minimumSize().height(),
+            self._left_lay.sizeHint().height(),
+        )
+        self._settings_content.setMinimumHeight(max(0, required_height))
+        self._settings_content.updateGeometry()
+        self._settings_scroll.widget().updateGeometry()
+        self._settings_scroll.viewport().update()
+
+    def _install_settings_wheel_redirects(self):
+        controls = [
+            *self._settings_content.findChildren(QAbstractSpinBox),
+            *self._settings_content.findChildren(QComboBox),
+        ]
+        for control in controls:
+            if not control.property("settings_wheel_redirect"):
+                control.installEventFilter(self)
+                control.setProperty("settings_wheel_redirect", True)
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() == QEvent.Type.Resize
+            and hasattr(self, "_settings_scroll")
+            and watched is self._settings_scroll.viewport()
+        ):
+            QTimer.singleShot(0, self._refresh_settings_scroll_range)
+            return False
+        if (
+            event.type() == QEvent.Type.Wheel
+            and isinstance(watched, (QAbstractSpinBox, QComboBox))
+            and hasattr(self, "_settings_content")
+            and self._settings_content.isAncestorOf(watched)
+        ):
+            scrollbar = self._settings_scroll.verticalScrollBar()
+            pixel_delta = int(event.pixelDelta().y())
+            if pixel_delta:
+                scroll_delta = pixel_delta
+            else:
+                steps = float(event.angleDelta().y()) / 120.0
+                scroll_delta = int(
+                    round(steps * max(24, scrollbar.singleStep() * 3))
+                )
+            scrollbar.setValue(scrollbar.value() - scroll_delta)
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
 
     def _wire(self):
         self._coord_widget.changed.connect(self._on_coord_system_changed)
@@ -1681,6 +2210,21 @@ class MegaSweepPanel(QWidget):
         self._fixed_widget.changed.connect(self._schedule_preview)
         self._safety_widget.changed.connect(self._schedule_preview)
         self._timing_widget.changed.connect(self._schedule_preview)
+        self._timing_widget._toggle.toggled.connect(
+            lambda *_: QTimer.singleShot(
+                0, self._refresh_settings_scroll_range
+            )
+        )
+        for section in (
+            self._timing_section,
+            self._optical_group,
+            self._metadata_group,
+        ):
+            section.expanded_changed.connect(
+                lambda *_: QTimer.singleShot(
+                    0, self._refresh_settings_scroll_range
+                )
+            )
         for w in (
             self._exp_spin, self._center_spin, self._frames_spin,
         ):
@@ -1732,7 +2276,13 @@ class MegaSweepPanel(QWidget):
                 "laser_nm": self._laser_edit.text(),
                 "power_uw": self._power_edit.text(),
             },
+            "sections": {
+                "timing": self._timing_section.is_expanded(),
+                "optical": self._optical_group.is_expanded(),
+                "metadata": self._metadata_group.is_expanded(),
+            },
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
+            "splitter_ratio": float(self._horizontal_splitter_ratio),
         }
 
     def restore_session_state(self, state: dict) -> None:
@@ -1837,12 +2387,39 @@ class MegaSweepPanel(QWidget):
                 value = metadata.get(key)
                 if isinstance(value, str):
                     edit.setText(value)
-        sizes = state.get("splitter_sizes")
-        if isinstance(sizes, list) and len(sizes) == 2:
-            try:
-                self._splitter.setSizes([max(0, int(v)) for v in sizes])
-            except (TypeError, ValueError):
-                pass
+        sections = state.get("sections")
+        if isinstance(sections, dict):
+            for key, section in (
+                ("timing", self._timing_section),
+                ("optical", self._optical_group),
+                ("metadata", self._metadata_group),
+            ):
+                if key in sections:
+                    section.set_expanded(bool(sections[key]))
+        ratio = state.get("splitter_ratio")
+        try:
+            restored_ratio = float(ratio)
+        except (TypeError, ValueError):
+            restored_ratio = float("nan")
+        if not math.isfinite(restored_ratio):
+            sizes = state.get("splitter_sizes")
+            if isinstance(sizes, list) and len(sizes) == 2:
+                try:
+                    total = max(0, int(sizes[0])) + max(0, int(sizes[1]))
+                    if total > 0:
+                        restored_ratio = max(0, int(sizes[0])) / total
+                except (TypeError, ValueError):
+                    pass
+        if math.isfinite(restored_ratio):
+            self._horizontal_splitter_ratio = min(
+                0.55,
+                max(0.25, restored_ratio),
+            )
+        QTimer.singleShot(
+            0,
+            lambda: self._apply_responsive_layout(force=True),
+        )
+        QTimer.singleShot(0, self._refresh_settings_scroll_range)
         self._schedule_preview()
 
     def _schedule_preview(self):
@@ -1880,6 +2457,7 @@ class MegaSweepPanel(QWidget):
         if not self._vbias_available() and "Vbias" not in remaining:
             remaining.append("Vbias")
         self._fixed_widget.set_fixed_axes(remaining, self._vbias_available())
+        self._install_settings_wheel_redirects()
         if outer:
             vds_label = "VDS (Vbias)" if (outer == "Vbias" and coord == CoordSystem.PHYSICAL) else None
             self._axis_a.set_axis_label(outer, AXIS_UNITS.get(outer, "V"), display_name=vds_label)
@@ -1887,6 +2465,7 @@ class MegaSweepPanel(QWidget):
             vds_label = "VDS (Vbias)" if (inner == "Vbias" and coord == CoordSystem.PHYSICAL) else None
             self._axis_b.set_axis_label(inner, AXIS_UNITS.get(inner, "V"), display_name=vds_label)
         self._update_raw_link_label()
+        QTimer.singleShot(0, self._refresh_settings_scroll_range)
         self._schedule_preview()
 
     def _is_raw_vtg_vbg_mode(self) -> bool:
@@ -2026,6 +2605,19 @@ class MegaSweepPanel(QWidget):
             return f"~{mins} min {secs} sec"
         return f"~{secs} sec"
 
+    def _set_summary_text(self, text: str, color: str = "#444444"):
+        self._summary.setStyleSheet(
+            "QTextEdit {"
+            f" color: {color};"
+            " background: #f5f5f7;"
+            " border: 1px solid #dedede;"
+            " border-radius: 3px;"
+            " padding: 4px 6px;"
+            "}"
+        )
+        self._summary.setPlainText(str(text))
+        self._summary.setToolTip(str(text))
+
     def _safety_polygon_for_preview(self, axis_a: str, axis_b: str, ratio: float, safety: dict) -> list[tuple[float, float]]:
         if self._coord_widget.coord_system() != CoordSystem.PHYSICAL:
             return []
@@ -2046,8 +2638,7 @@ class MegaSweepPanel(QWidget):
         try:
             data = self._resolve_preview_data()
         except Exception as exc:
-            self._summary.setStyleSheet("color: #b42318;")
-            self._summary.setText(f"Warning: {exc}")
+            self._set_summary_text(f"Warning: {exc}", "#b42318")
             self._preview.clear()
             return
 
@@ -2127,8 +2718,7 @@ class MegaSweepPanel(QWidget):
         elif est_s > 3600:
             color = "#ad6700"
             lines.append(f"Warning: Estimated sweep time is {self._format_duration(est_s)}.")
-        self._summary.setStyleSheet(f"color: {color};")
-        self._summary.setText("\n".join(lines))
+        self._set_summary_text("\n".join(lines), color)
 
     def _collect_params(self) -> dict:
         data = dict(self._last_preview)
@@ -2278,4 +2868,5 @@ class MegaSweepPanel(QWidget):
 
     def _set_status(self, text: str, color: str):
         self._status_lbl.setText(text)
+        self._status_lbl.setToolTip(text)
         self._status_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")

@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import Qt, QThread, QObject, Signal, Slot, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QSplitter,
     QGroupBox, QLabel, QPushButton, QLineEdit,
@@ -47,7 +47,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QTextEdit, QSizePolicy, QFormLayout,
     QCheckBox, QAbstractItemView, QComboBox, QFrame, QToolButton,
     QCompleter, QStyledItemDelegate, QMessageBox, QDoubleSpinBox, QSpinBox,
-    QAbstractSpinBox, QScrollArea,
+    QAbstractSpinBox, QMenu, QScrollArea,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -445,6 +445,93 @@ def _safe_float(value) -> Optional[float]:
 def _valid_bias_value(value) -> Optional[float]:
     x = _safe_float(value)
     return x if x is not None else None
+
+
+_SMU_ROLE_ORDER = ("Vbg", "Vtg", "Vbias")
+
+
+def _required_smu_roles(
+    final_sequence: Sequence[Dict[str, Any]],
+    batch_df: pd.DataFrame,
+) -> Tuple[str, ...]:
+    """Return the Keithley roles used by at least one applicable batch row."""
+    required = set()
+    for ctx in final_sequence:
+        outer = _outer_ctx(ctx)
+        for _, row in batch_df.iterrows():
+            if not _when_ok(row.get("When", ""), outer):
+                continue
+            required.update(("Vbg", "Vtg"))
+            if (
+                _valid_bias_value(row.get("Vbias_start")) is not None
+                or _valid_bias_value(row.get("Vbias_stop")) is not None
+            ):
+                required.add("Vbias")
+    return tuple(role for role in _SMU_ROLE_ORDER if role in required)
+
+
+def _smu_readiness_issues(smu_ctrl, required_roles: Sequence[str]) -> List[str]:
+    """Validate that every requested Keithley role is connected and healthy."""
+    roles = tuple(role for role in _SMU_ROLE_ORDER if role in set(required_roles))
+    if not roles:
+        return []
+    role_text = ", ".join(roles)
+    if smu_ctrl is None or not bool(getattr(smu_ctrl, "is_connected", False)):
+        return [f"Required Keithley channels are not connected: {role_text}."]
+
+    device = getattr(smu_ctrl, "device", None)
+    if device is None:
+        return [f"Required Keithley channels are unavailable: {role_text}."]
+
+    missing: List[str] = []
+    for role in roles:
+        try:
+            availability_check = getattr(device, "role_is_available", None)
+            if callable(availability_check):
+                available = bool(availability_check(role))
+            else:
+                has_role = getattr(device, "has_role", None)
+                available = bool(callable(has_role) and has_role(role))
+        except Exception:
+            available = False
+        if not available:
+            missing.append(role)
+    if missing:
+        return [f"Required Keithley channels are missing: {', '.join(missing)}."]
+
+    health_states = getattr(device, "health_states", {})
+    if not isinstance(health_states, dict):
+        health_states = {}
+    unhealthy = [
+        f"{role}={health_states.get(role, 'unknown')}"
+        for role in roles
+        if health_states.get(role, "ready") != "ready"
+    ]
+    if unhealthy:
+        return [
+            "Reconnect the Keithley SMUs before running "
+            f"({', '.join(unhealthy)})."
+        ]
+    if bool(getattr(device, "requires_reconnect", False)):
+        return ["Reconnect the Keithley SMUs after the hardware fault."]
+    return []
+
+
+def _format_current_readback(
+    ibg: Optional[float],
+    itg: Optional[float],
+    ibias: Optional[float],
+    *,
+    include_bias: bool,
+) -> str:
+    def _fmt(value: Optional[float]) -> str:
+        current = _safe_float(value)
+        return f"{current:.4e} A" if current is not None else "unavailable"
+
+    parts = [f"Ibg={_fmt(ibg)}", f"Itg={_fmt(itg)}"]
+    if include_bias:
+        parts.append(f"Ibias={_fmt(ibias)}")
+    return "Keithley current readback: " + ", ".join(parts)
 
 
 def _solve_condition_line(
@@ -1048,8 +1135,8 @@ class _SweepLineCalculator(QGroupBox):
         self._vbias_spin.setSuffix(" V")
         self._include_vbias_chk = QCheckBox("Include")
         self._include_vbias_chk.setToolTip("Include this fixed source-drain bias in the batch row.")
-        self._vbias_badge = QLabel("SMU offline")
-        self._vbias_badge.setToolTip("SMU not connected")
+        self._vbias_badge = QLabel("Vbias unavailable")
+        self._vbias_badge.setToolTip("No usable Vbias Keithley channel is connected.")
         self._vbias_badge.setStyleSheet("color: #b86300; font-size: 10px;")
         vb_row.addWidget(vb_lbl)
         vb_row.addWidget(self._vbias_spin)
@@ -1178,7 +1265,7 @@ class _SweepLineCalculator(QGroupBox):
         self._include_vbias_chk.toggled.connect(self._recalculate)
         self._vbias_spin.valueChanged.connect(self._recalculate)
         self._add_btn.clicked.connect(self._on_add_clicked)
-        self.set_vbias_available(bool(self._smu is not None and getattr(self._smu, "is_connected", False)))
+        self.set_vbias_available(self._vbias_available())
 
     def _on_toggle(self, checked: bool):
         self._body.setVisible(checked)
@@ -1285,6 +1372,13 @@ class _SweepLineCalculator(QGroupBox):
         self._vbias_badge.setVisible(not available)
         self._recalculate()
 
+    def _vbias_available(self) -> bool:
+        if self._smu is None:
+            return False
+        if hasattr(self._smu, "has_vbias"):
+            return bool(getattr(self._smu, "has_vbias"))
+        return bool(getattr(self._smu, "is_connected", False))
+
     def _recalculate(self):
         op = self._op_combo.currentText()
         ratio = float(self._ratio_spin.value())
@@ -1385,8 +1479,8 @@ class _SweepLineCalculator(QGroupBox):
         elif abs(self._vbg_stop_spin.value() - self._vbg_start_spin.value()) < 2.0 * vbg_step:
             msg = f"⚠ Only {frames_now} point(s) will be sampled. Reduce step size."
             color = "#c26a00"
-        elif self._include_vbias_chk.isChecked() and not (self._smu is not None and getattr(self._smu, 'is_connected', False)):
-            msg = f"⚠ Vbias set to {self._vbias_spin.value():.4f} V, but SMU is not connected."
+        elif self._include_vbias_chk.isChecked() and not self._vbias_available():
+            msg = f"⚠ Vbias set to {self._vbias_spin.value():.4f} V, but its Keithley channel is unavailable."
             color = "#c26a00"
         self._set_status(msg, color)
         self._add_btn.setEnabled(True)
@@ -1414,11 +1508,11 @@ class _SweepLineCalculator(QGroupBox):
             "Vbias_start": float(self._vbias_spin.value()) if self._include_vbias_chk.isChecked() else "",
             "Vbias_stop": float(self._vbias_spin.value()) if self._include_vbias_chk.isChecked() else "",
         }
-        if self._include_vbias_chk.isChecked() and not (self._smu is not None and getattr(self._smu, "is_connected", False)):
+        if self._include_vbias_chk.isChecked() and not self._vbias_available():
             QMessageBox.information(
                 self,
-                "SMU not connected",
-                f"The generated row includes Vbias = {self._vbias_spin.value():.4f} V. The SMU is not currently connected, so Vbias will not be applied until the SMU is connected and the row is run.",
+                "Vbias Keithley unavailable",
+                f"The generated row includes Vbias = {self._vbias_spin.value():.4f} V. Run will remain blocked until a healthy Vbias Keithley channel is connected.",
             )
         self.add_row_requested.emit(row)
 
@@ -1463,6 +1557,13 @@ class _RunWorker(QObject):
         self._stop     = stop_event
         self._preview_event = preview_event
         self._active_run_context: Dict[str, Any] = {}
+        self._required_smu_roles = _required_smu_roles(self._seq, self._batch)
+
+    def _require_smu_ready(self):
+        issues = _smu_readiness_issues(self._smu, self._required_smu_roles)
+        if issues:
+            raise _RunFlowError("SMU safety", issues[0])
+        return self._smu.device
 
     @Slot()
     def run(self) -> None:
@@ -1488,6 +1589,7 @@ class _RunWorker(QObject):
         }
 
         try:
+            self._require_smu_ready()
             self.log.emit(
                 f"Resolved run plan: {len(self._seq)} sequence(s), "
                 f"{total_acq} acquisition file(s), {total_points} sweep point(s)."
@@ -1666,10 +1768,10 @@ class _RunWorker(QObject):
                                         float(vbias_set) if vbias_set is not None else None
                                     ),
                                 }
-                                if self._smu and self._smu.is_connected:
-                                    self._smu.device.set_operation_context(
-                                        **self._active_run_context
-                                    )
+                                dev = self._require_smu_ready()
+                                dev.set_operation_context(
+                                    **self._active_run_context
+                                )
                                 self.active_frame.emit(seq_i, cond_label, r_i, frame_i, point_count)
                                 self.log.emit(
                                     f"    Point {frame_i}/{point_count}: "
@@ -1678,75 +1780,74 @@ class _RunWorker(QObject):
                                     + (" | ramp to sweep start" if is_start_point else " | direct setpoint jump")
                                 )
 
-                                if self._smu and self._smu.is_connected:
-                                    dev = self._smu.device
-                                    try:
-                                        if is_start_point:
+                                try:
+                                    if is_start_point:
+                                        try:
+                                            vbg_now, vtg_now = dev.read_current_gates()
+                                        except Exception:
+                                            vbg_now = vtg_now = float("nan")
+                                        vbias_now = None
+                                        if vbias_set is not None and hasattr(dev, "read_current_bias"):
                                             try:
-                                                vbg_now, vtg_now = dev.read_current_gates()
+                                                vbias_now = dev.read_current_bias()
                                             except Exception:
-                                                vbg_now = vtg_now = float("nan")
-                                            vbias_now = None
-                                            if vbias_set is not None and hasattr(dev, "read_current_bias"):
-                                                try:
-                                                    vbias_now = dev.read_current_bias()
-                                                except Exception:
-                                                    vbias_now = None
+                                                vbias_now = None
 
-                                            def _fmt_v(value):
-                                                try:
-                                                    x = float(value)
-                                                    if np.isfinite(x):
-                                                        return f"{x:.3f}"
-                                                except Exception:
-                                                    pass
-                                                return "n/a"
+                                        def _fmt_v(value):
+                                            try:
+                                                x = float(value)
+                                                if np.isfinite(x):
+                                                    return f"{x:.3f}"
+                                            except Exception:
+                                                pass
+                                            return "n/a"
 
-                                            self.log.emit(
-                                                "    Pre-ramp readback: "
-                                                f"Vbg={_fmt_v(vbg_now)} V, "
-                                                f"Vtg={_fmt_v(vtg_now)} V"
-                                                + (
-                                                    f", Vbias={_fmt_v(vbias_now)} V"
-                                                    if vbias_set is not None else
-                                                    ", Vbias=skipped"
-                                                )
+                                        self.log.emit(
+                                            "    Pre-ramp readback: "
+                                            f"Vbg={_fmt_v(vbg_now)} V, "
+                                            f"Vtg={_fmt_v(vtg_now)} V"
+                                            + (
+                                                f", Vbias={_fmt_v(vbias_now)} V"
+                                                if vbias_set is not None else
+                                                ", Vbias=skipped"
                                             )
-                                            self.log.emit(
-                                                "    Ramping to sweep start: "
-                                                f"Vbg {_fmt_v(vbg_now)} -> {float(vbg_set):.3f} V, "
-                                                f"Vtg {_fmt_v(vtg_now)} -> {float(vtg_set):.3f} V"
-                                                + (
-                                                    f", Vbias {_fmt_v(vbias_now)} -> {float(vbias_set):.3f} V"
-                                                    if vbias_set is not None else
-                                                    ", Vbias skipped"
-                                                )
+                                        )
+                                        self.log.emit(
+                                            "    Ramping to sweep start: "
+                                            f"Vbg {_fmt_v(vbg_now)} -> {float(vbg_set):.3f} V, "
+                                            f"Vtg {_fmt_v(vtg_now)} -> {float(vtg_set):.3f} V"
+                                            + (
+                                                f", Vbias {_fmt_v(vbias_now)} -> {float(vbias_set):.3f} V"
+                                                if vbias_set is not None else
+                                                ", Vbias skipped"
                                             )
-                                        dev.set_gates(
-                                            Vbg=float(vbg_set), Vtg=float(vtg_set),
-                                            ramp_step=(cfg.ramp.step_V if is_start_point else 0.0),
+                                        )
+                                    dev.set_gates(
+                                        Vbg=float(vbg_set), Vtg=float(vtg_set),
+                                        ramp_step=(cfg.ramp.step_V if is_start_point else 0.0),
+                                        delay_s=(cfg.ramp.delay_s if is_start_point else 0.0),
+                                        stop_cb=self._stop.is_set,
+                                        stop_exc=_StopRequested,
+                                    )
+                                    if vbias_set is not None:
+                                        dev.set_bias(
+                                            Vbias=float(vbias_set),
+                                            ramp_step=(cfg.ramp.vbias_step_V if is_start_point else 0.0),
                                             delay_s=(cfg.ramp.delay_s if is_start_point else 0.0),
                                             stop_cb=self._stop.is_set,
                                             stop_exc=_StopRequested,
                                         )
-                                        if vbias_set is not None:
-                                            dev.set_bias(
-                                                Vbias=float(vbias_set),
-                                                ramp_step=(cfg.ramp.vbias_step_V if is_start_point else 0.0),
-                                                delay_s=(cfg.ramp.delay_s if is_start_point else 0.0),
-                                                stop_cb=self._stop.is_set,
-                                                stop_exc=_StopRequested,
-                                            )
-                                    except _StopRequested:
-                                        raise
-                                    except Exception as e:
-                                        raise _RunFlowError("hardware", f"Gate set error: {e}") from e
-                                    time.sleep(cfg.ramp.settle_s)
+                                except _StopRequested:
+                                    raise
+                                except Exception as e:
+                                    raise _RunFlowError("hardware", f"Gate set error: {e}") from e
+                                time.sleep(cfg.ramp.settle_s)
 
                                 if self._stop.is_set():
                                     summary = "Run stopped by user."
                                     break
 
+                                self._require_smu_ready()
                                 wl = np.array([]); cts = np.array([])
                                 if self._lf6 and self._lf6.is_connected:
                                     try:
@@ -1762,24 +1863,32 @@ class _RunWorker(QObject):
                                 Ibg = Itg = Ib = None
                                 Vbg_meas = Vtg_meas = float("nan")
                                 Vbias_meas = float(vbias_set) if vbias_set is not None else None
-                                if self._smu and self._smu.is_connected:
-                                    dev = self._smu.device
-                                    try:
-                                        Ibg, Itg, Ib = dev.read_currents(strict=True)
-                                        Vbg_meas, Vtg_meas = dev.read_current_gates(strict=True)
-                                        if vbias_set is not None and hasattr(dev, "read_current_bias"):
-                                            vb_read = dev.read_current_bias(strict=True)
-                                            if vb_read is not None:
-                                                Vbias_meas = float(vb_read)
-                                    except Exception as exc:
-                                        if (
-                                            self._stop.is_set()
-                                            and _find_smu_communication_error(exc) is None
-                                        ):
-                                            raise _StopRequested() from exc
-                                        raise _RunFlowError(
-                                            "readback", f"SMU read failed: {exc}"
-                                        ) from exc
+                                dev = self._require_smu_ready()
+                                try:
+                                    Ibg, Itg, Ib = dev.read_currents(strict=True)
+                                    Vbg_meas, Vtg_meas = dev.read_current_gates(strict=True)
+                                    if vbias_set is not None and hasattr(dev, "read_current_bias"):
+                                        vb_read = dev.read_current_bias(strict=True)
+                                        if vb_read is not None:
+                                            Vbias_meas = float(vb_read)
+                                except Exception as exc:
+                                    if (
+                                        self._stop.is_set()
+                                        and _find_smu_communication_error(exc) is None
+                                    ):
+                                        raise _StopRequested() from exc
+                                    raise _RunFlowError(
+                                        "readback", f"SMU read failed: {exc}"
+                                    ) from exc
+                                self.log.emit(
+                                    "    "
+                                    + _format_current_readback(
+                                        Ibg,
+                                        Itg,
+                                        Ib,
+                                        include_bias=vbias_set is not None,
+                                    )
+                                )
 
                                 if wl.size == 0:
                                     raise _RunFlowError("acquisition", "No wavelength headers were returned by the spectrometer.")
@@ -2102,6 +2211,10 @@ class PresetsPanel(QWidget):
         self._applied_mode = "Synchronize"
         self._tables_dirty = False
         self._last_power_uw: Optional[float] = None
+        self._batch_row_clipboard: List[Dict[str, Any]] = []
+        self._batch_history: List[pd.DataFrame] = []
+        self._batch_history_index = -1
+        self._batch_history_restoring = False
 
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -2369,17 +2482,45 @@ class PresetsPanel(QWidget):
         self._batch_add_btn.setToolTip(
             "Insert a new empty row below the selected row. Appends when no row is selected."
         )
+        self._batch_duplicate_btn = QPushButton("Duplicate")
+        self._batch_duplicate_btn.setFixedWidth(82)
+        self._batch_duplicate_btn.setToolTip(
+            "Copy the selected batch row and insert the duplicate directly below it."
+        )
+        self._batch_rev_btn = QPushButton("Rev")
+        self._batch_rev_btn.setFixedWidth(58)
+        self._batch_rev_btn.setToolTip(
+            "Create a reverse sweep below the selected row by swapping every "
+            "start/stop voltage and appending _Rev to the label."
+        )
         self._batch_del_btn = QPushButton("− Row"); self._batch_del_btn.setFixedWidth(64)
         self._batch_del_btn.setToolTip("Delete the selected row(s) from the batch table.")
         self._batch_up_btn = QPushButton("↑ Up"); self._batch_up_btn.setFixedWidth(64)
         self._batch_up_btn.setToolTip("Move the selected batch row up one position.")
         self._batch_down_btn = QPushButton("↓ Down"); self._batch_down_btn.setFixedWidth(72)
         self._batch_down_btn.setToolTip("Move the selected batch row down one position.")
+        self._batch_actions_btn = QToolButton()
+        self._batch_actions_btn.setText("Actions")
+        self._batch_actions_btn.setToolTip(
+            "More batch tools: run-state controls, copy/paste, arrangement, "
+            "auto-frames, validation, and undo/redo."
+        )
+        self._batch_actions_btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextOnly
+        )
+        self._batch_actions_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self._batch_actions_btn.setMinimumWidth(76)
+        self._build_batch_actions()
         batch_btn_row.addWidget(self._batch_add_btn)
+        batch_btn_row.addWidget(self._batch_duplicate_btn)
+        batch_btn_row.addWidget(self._batch_rev_btn)
         batch_btn_row.addWidget(self._batch_del_btn)
         batch_btn_row.addSpacing(8)
         batch_btn_row.addWidget(self._batch_up_btn)
         batch_btn_row.addWidget(self._batch_down_btn)
+        batch_btn_row.addWidget(self._batch_actions_btn)
         batch_btn_row.addStretch()
         batch_lay.addWidget(self._batch_table)
         batch_lay.addLayout(batch_btn_row)
@@ -2610,6 +2751,8 @@ class PresetsPanel(QWidget):
         self._loop_add_btn.clicked.connect(self._add_loop_row)
         self._loop_del_btn.clicked.connect(self._del_loop_row)
         self._batch_add_btn.clicked.connect(self._add_batch_row)
+        self._batch_duplicate_btn.clicked.connect(self._duplicate_batch_row)
+        self._batch_rev_btn.clicked.connect(self._create_rev_batch_row)
         self._batch_del_btn.clicked.connect(self._del_batch_row)
         self._batch_up_btn.clicked.connect(self._move_batch_row_up)
         self._batch_down_btn.clicked.connect(self._move_batch_row_down)
@@ -2643,7 +2786,9 @@ class PresetsPanel(QWidget):
         self._sweep_calc._recalculate()
         self._update_batch_row_buttons()
         if self._smu is not None:
-            self._smu.connected.connect(lambda *_: self._sweep_calc.set_vbias_available(self._smu.is_connected))
+            self._smu.connected.connect(
+                lambda *_: self._sweep_calc.set_vbias_available(self._smu.has_vbias)
+            )
             self._smu.connected.connect(self._on_smu_reconnected)
             self._smu.disconnected.connect(lambda: self._sweep_calc.set_vbias_available(False))
             self._smu.connected.connect(self._refresh_readiness)
@@ -2820,6 +2965,7 @@ class PresetsPanel(QWidget):
         self._update_plan()
         self._refresh_draft_state()
         self._refresh_filename_preview()
+        self._reset_batch_history()
 
     # ── mode ──────────────────────────────────────────────────────────────────
 
@@ -2859,13 +3005,197 @@ class PresetsPanel(QWidget):
         target = self._apply_btn if expanded else self._batch_table
         self._workflow_scroll.ensureWidgetVisible(target, 0, 10)
 
+    def _build_batch_actions(self):
+        menu = QMenu(self._batch_actions_btn)
+        menu.setToolTipsVisible(True)
+
+        def add_action(
+            label: str,
+            callback,
+            *,
+            tooltip: str = "",
+            shortcut=None,
+            target_menu: Optional[QMenu] = None,
+        ) -> QAction:
+            action = QAction(label, self)
+            action.triggered.connect(callback)
+            if tooltip:
+                action.setToolTip(tooltip)
+                action.setStatusTip(tooltip)
+            if shortcut is not None:
+                action.setShortcuts(shortcut)
+                action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+            (target_menu or menu).addAction(action)
+            return action
+
+        self._batch_undo_action = add_action(
+            "Undo Batch Edit",
+            self._undo_batch_edit,
+            tooltip="Restore the previous batch-table state.",
+            shortcut=QKeySequence.StandardKey.Undo,
+        )
+        self._batch_redo_action = add_action(
+            "Redo Batch Edit",
+            self._redo_batch_edit,
+            tooltip="Reapply the most recently undone batch-table edit.",
+            shortcut=QKeySequence.StandardKey.Redo,
+        )
+        menu.addSeparator()
+        self._batch_copy_action = add_action(
+            "Copy Selected Rows",
+            self._copy_batch_rows,
+            tooltip="Copy all selected rows to the internal row clipboard.",
+            shortcut=QKeySequence.StandardKey.Copy,
+        )
+        self._batch_paste_action = add_action(
+            "Paste Rows Below",
+            self._paste_batch_rows,
+            tooltip="Paste copied rows below the selection, or append them.",
+            shortcut=QKeySequence.StandardKey.Paste,
+        )
+        self._batch_duplicate_action = add_action(
+            "Duplicate Selected Row",
+            self._duplicate_batch_row,
+            tooltip="Insert an exact copy below the selected row.",
+        )
+        self._batch_rev_action = add_action(
+            "Create Rev Sweep",
+            self._create_rev_batch_row,
+            tooltip="Duplicate the row, swap start/stop values, and append _Rev.",
+        )
+        menu.addSeparator()
+        run_menu = menu.addMenu("Run State")
+        self._batch_enable_selected_action = add_action(
+            "Enable Selected Rows",
+            lambda: self._set_selected_rows_run_state(True),
+            target_menu=run_menu,
+        )
+        self._batch_disable_selected_action = add_action(
+            "Disable Selected Rows",
+            lambda: self._set_selected_rows_run_state(False),
+            target_menu=run_menu,
+        )
+        self._batch_only_selected_action = add_action(
+            "Run Only Selected Rows",
+            self._run_only_selected_rows,
+            tooltip="Enable selected rows and disable every other row.",
+            target_menu=run_menu,
+        )
+        self._batch_enable_all_action = add_action(
+            "Enable All Rows",
+            lambda: self._set_all_rows_run_state(True),
+            target_menu=run_menu,
+        )
+        self._batch_disable_all_action = add_action(
+            "Disable All Rows",
+            lambda: self._set_all_rows_run_state(False),
+            target_menu=run_menu,
+        )
+        arrange_menu = menu.addMenu("Arrange and Clean Up")
+        self._batch_move_top_action = add_action(
+            "Move Selected Row to Top",
+            lambda: self._move_batch_row_to_edge(top=True),
+            target_menu=arrange_menu,
+        )
+        self._batch_move_bottom_action = add_action(
+            "Move Selected Row to Bottom",
+            lambda: self._move_batch_row_to_edge(top=False),
+            target_menu=arrange_menu,
+        )
+        self._batch_delete_disabled_action = add_action(
+            "Delete Disabled Rows",
+            self._delete_disabled_batch_rows,
+            target_menu=arrange_menu,
+        )
+        tools_menu = menu.addMenu("Sweep Tools")
+        self._batch_auto_frames_action = add_action(
+            "Auto Frames for Selected",
+            self._auto_frames_for_selected_rows,
+            tooltip="Set the minimum frame count that satisfies the max jump/step.",
+            target_menu=tools_menu,
+        )
+        self._batch_validate_action = add_action(
+            "Validate All Rows",
+            self._show_batch_validation,
+            tooltip="Check conditions, labels, numeric values, frames, and safe jumps.",
+            target_menu=tools_menu,
+        )
+
+        self._batch_actions_menu = menu
+        self._batch_actions_btn.setMenu(menu)
+        self._batch_table.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.ActionsContextMenu
+        )
+        self._batch_table.addActions(menu.actions())
+
     def _refresh_tables(self):
         _populate_loop_table(self._loop_table, self._loop_src)
         _populate_batch_table(self._batch_table, self._batch_src)
         # Reapply mode (column visibility may have changed)
         self._on_mode_changed(self._mode_combo.currentText())
         self._connect_loop_param_signals()
+        self._reset_batch_history()
         self._update_filename_preview()
+
+    def _batch_snapshot(self) -> pd.DataFrame:
+        return _read_batch_table(self._batch_table).copy(deep=True)
+
+    def _reset_batch_history(self):
+        if not hasattr(self, "_batch_table"):
+            return
+        self._batch_history = [self._batch_snapshot()]
+        self._batch_history_index = 0
+        self._update_batch_action_states()
+
+    def _record_batch_history(self):
+        if self._batch_history_restoring:
+            return
+        snapshot = self._batch_snapshot()
+        if (
+            0 <= self._batch_history_index < len(self._batch_history)
+            and snapshot.equals(self._batch_history[self._batch_history_index])
+        ):
+            self._update_batch_action_states()
+            return
+        self._batch_history = self._batch_history[: self._batch_history_index + 1]
+        self._batch_history.append(snapshot)
+        if len(self._batch_history) > 50:
+            self._batch_history.pop(0)
+        self._batch_history_index = len(self._batch_history) - 1
+        self._update_batch_action_states()
+
+    def _restore_batch_history(self, index: int):
+        if not (0 <= index < len(self._batch_history)):
+            return
+        selected = self._selected_batch_rows()
+        preferred_row = selected[0] if selected else 0
+        self._batch_history_restoring = True
+        try:
+            _populate_batch_table(
+                self._batch_table,
+                self._batch_history[index].copy(deep=True),
+            )
+            self._batch_history_index = index
+            if self._batch_table.rowCount():
+                self._batch_table.selectRow(
+                    min(preferred_row, self._batch_table.rowCount() - 1)
+                )
+        finally:
+            self._batch_history_restoring = False
+        self._update_batch_row_buttons()
+        self._on_draft_edited()
+
+    @Slot()
+    def _undo_batch_edit(self):
+        self._restore_batch_history(self._batch_history_index - 1)
+
+    @Slot()
+    def _redo_batch_edit(self):
+        self._restore_batch_history(self._batch_history_index + 1)
+
+    def _commit_batch_change(self):
+        self._record_batch_history()
+        self._on_draft_edited()
 
     def _when_names_for_loop(self, loop_df: pd.DataFrame) -> set[str]:
         names: set[str] = set()
@@ -3016,6 +3346,8 @@ class PresetsPanel(QWidget):
             issues.append("At least one filename part is required.")
         if not self._lf6 or not self._lf6.is_connected:
             issues.append("LF6 is not connected or in mock mode.")
+        required_smu_roles = _required_smu_roles(self._final_seq, self._df_batch)
+        issues.extend(_smu_readiness_issues(self._smu, required_smu_roles))
         if self._hardware_incident_active:
             issues.append("Reconnect the SMUs after the hardware fault.")
         if not self._final_seq or self._df_batch.empty or self._total_acq <= 0:
@@ -3050,17 +3382,29 @@ class PresetsPanel(QWidget):
             extra = f"  (+{len(issues) - 1} more)" if len(issues) > 1 else ""
             self._readiness_lbl.setText(f"Not ready: {issues[0]}{extra}")
             self._readiness_lbl.setToolTip("\n".join(issues))
+            self._run_btn.setToolTip(
+                "Cannot start the sweep:\n"
+                + "\n".join(f"• {issue}" for issue in issues)
+            )
             self._readiness_lbl.setStyleSheet(
                 "padding: 6px 8px; color: #8f2019; background: #fff0ef; "
                 "border: 1px solid #efc1bd; border-radius: 6px;"
             )
             self._run_btn.setEnabled(False)
         else:
+            required_roles = _required_smu_roles(self._final_seq, self._df_batch)
+            role_status = "/".join(required_roles)
+            if "Vbias" not in required_roles:
+                role_status = f"{role_status}; Vbias optional"
             self._readiness_lbl.setText(
                 f"Ready to run · {self._total_acq} file(s) · "
-                f"{self._total_points} sweep point(s) · safety checks passed"
+                f"{self._total_points} sweep point(s) · Keithley {role_status}"
             )
             self._readiness_lbl.setToolTip("")
+            self._run_btn.setToolTip(
+                "Start the applied sweep plan.\n"
+                f"Keithley safety check passed: {role_status}."
+            )
             self._readiness_lbl.setStyleSheet(
                 "padding: 6px 8px; color: #24652d; background: #edf8ee; "
                 "border: 1px solid #bedfc2; border-radius: 6px;"
@@ -3290,21 +3634,12 @@ class PresetsPanel(QWidget):
             return None, "Enable at least one filename part."
         if not self._lf6 or not self._lf6.is_connected:
             return None, "LF6 must be connected or running in mock mode before a sweep can start."
-        if self._smu and self._smu.is_connected:
-            device = self._smu.device
-            if bool(getattr(device, "requires_reconnect", False)):
-                states = getattr(device, "health_states", {})
-                affected = ", ".join(
-                    f"{role}={state}"
-                    for role, state in states.items()
-                    if state != "ready"
-                )
-                return None, (
-                    "An SMU communication failure requires disconnect/reconnect "
-                    f"before another run ({affected or 'reinitialization required'})."
-                )
         if self._df_batch.empty or not self._final_seq:
             return None, "No runnable plan is available."
+        required_smu_roles = _required_smu_roles(self._final_seq, self._df_batch)
+        smu_issues = _smu_readiness_issues(self._smu, required_smu_roles)
+        if smu_issues:
+            return None, smu_issues[0]
         if any(_to_bool(row.get("MeasurePower", False)) for _, row in self._df_batch.iterrows()):
             if not self._pm or not self._pm.is_connected:
                 return None, "MeasurePower rows require a connected PM100D."
@@ -3362,7 +3697,6 @@ class PresetsPanel(QWidget):
             )
             + 1
         )
-        self._batch_table.insertRow(r)
         defaults = {
             "Run": True, "When": "", "MeasurePower": False,
             "condition_label": "baseline", "repeat": "1", "frames": "1",
@@ -3370,39 +3704,401 @@ class PresetsPanel(QWidget):
             "Vtg_start": "0", "Vtg_stop": "0",
             "Vbias_start": "", "Vbias_stop": "",
         }
-        for c, col in enumerate(BATCH_SCHEMA):
-            self._batch_table.setItem(r, c, _make_batch_table_item(col, defaults.get(col, "")))
-        self._batch_table.selectRow(r)
-        self._batch_table.scrollTo(self._batch_table.model().index(r, 0))
-        self._on_draft_edited()
+        self._insert_batch_rows(r, [defaults])
 
     @Slot()
     def _del_batch_row(self):
         rows = {i.row() for i in self._batch_table.selectedIndexes()}
-        for r in sorted(rows, reverse=True):
-            self._batch_table.removeRow(r)
+        signals_were_blocked = self._batch_table.blockSignals(True)
+        try:
+            for r in sorted(rows, reverse=True):
+                self._batch_table.removeRow(r)
+        finally:
+            self._batch_table.blockSignals(signals_were_blocked)
         if rows and self._batch_table.rowCount():
             self._batch_table.selectRow(
                 min(min(rows), self._batch_table.rowCount() - 1)
             )
         self._update_batch_row_buttons()
-        self._on_draft_edited()
+        self._commit_batch_change()
 
     def _selected_batch_row_index(self) -> int:
-        rows = (
-            self._batch_table.selectionModel().selectedRows()
-            if self._batch_table.selectionModel()
-            else []
-        )
+        rows = self._selected_batch_rows()
         if len(rows) != 1:
             return -1
-        return int(rows[0].row())
+        return rows[0]
+
+    def _selected_batch_rows(self) -> List[int]:
+        selection_model = self._batch_table.selectionModel()
+        if selection_model is None:
+            return []
+        return sorted({int(index.row()) for index in selection_model.selectedRows()})
+
+    def _batch_row_values(self, row: int) -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
+        for column, name in enumerate(BATCH_SCHEMA):
+            item = self._batch_table.item(row, column)
+            if name in _BATCH_BOOL_COLUMNS:
+                values[name] = bool(
+                    item and item.checkState() == Qt.CheckState.Checked
+                )
+            else:
+                values[name] = item.text() if item is not None else ""
+        return values
+
+    def _insert_batch_rows(
+        self,
+        target: int,
+        rows: Sequence[Dict[str, Any]],
+    ):
+        if not rows:
+            return
+        table = self._batch_table
+        target = min(max(int(target), 0), table.rowCount())
+        current_column = max(0, table.currentColumn())
+        signals_were_blocked = table.blockSignals(True)
+        updates_were_enabled = table.updatesEnabled()
+        table.setUpdatesEnabled(False)
+        try:
+            for offset, values in enumerate(rows):
+                row_index = target + offset
+                table.insertRow(row_index)
+                for column, name in enumerate(BATCH_SCHEMA):
+                    table.setItem(
+                        row_index,
+                        column,
+                        _make_batch_table_item(name, values.get(name, "")),
+                    )
+            selected_row = target + len(rows) - 1
+            table.setCurrentCell(selected_row, current_column)
+            table.selectRow(selected_row)
+        finally:
+            table.setUpdatesEnabled(updates_were_enabled)
+            table.blockSignals(signals_were_blocked)
+        if updates_were_enabled:
+            table.viewport().update()
+        table.scrollTo(table.model().index(selected_row, current_column))
+        self._update_batch_row_buttons()
+        self._commit_batch_change()
 
     @Slot()
     def _update_batch_row_buttons(self):
+        rows = self._selected_batch_rows()
         row = self._selected_batch_row_index()
+        self._batch_duplicate_btn.setEnabled(row >= 0)
+        self._batch_rev_btn.setEnabled(row >= 0)
         self._batch_up_btn.setEnabled(row > 0)
         self._batch_down_btn.setEnabled(0 <= row < self._batch_table.rowCount() - 1)
+        self._update_batch_action_states(rows)
+
+    def _update_batch_action_states(self, rows: Optional[List[int]] = None):
+        if not hasattr(self, "_batch_undo_action"):
+            return
+        rows = self._selected_batch_rows() if rows is None else rows
+        has_rows = bool(rows)
+        single_row = rows[0] if len(rows) == 1 else -1
+        row_count = self._batch_table.rowCount()
+        self._batch_undo_action.setEnabled(self._batch_history_index > 0)
+        self._batch_redo_action.setEnabled(
+            0 <= self._batch_history_index < len(self._batch_history) - 1
+        )
+        self._batch_copy_action.setEnabled(has_rows)
+        self._batch_paste_action.setEnabled(bool(self._batch_row_clipboard))
+        self._batch_duplicate_action.setEnabled(single_row >= 0)
+        self._batch_rev_action.setEnabled(single_row >= 0)
+        self._batch_enable_selected_action.setEnabled(has_rows)
+        self._batch_disable_selected_action.setEnabled(has_rows)
+        self._batch_only_selected_action.setEnabled(has_rows)
+        self._batch_enable_all_action.setEnabled(row_count > 0)
+        self._batch_disable_all_action.setEnabled(row_count > 0)
+        self._batch_auto_frames_action.setEnabled(has_rows)
+        self._batch_move_top_action.setEnabled(single_row > 0)
+        self._batch_move_bottom_action.setEnabled(
+            0 <= single_row < row_count - 1
+        )
+        has_disabled = any(
+            self._batch_table.item(row_index, BATCH_SCHEMA.index("Run"))
+            and self._batch_table.item(
+                row_index, BATCH_SCHEMA.index("Run")
+            ).checkState() != Qt.CheckState.Checked
+            for row_index in range(row_count)
+        )
+        self._batch_delete_disabled_action.setEnabled(has_disabled)
+
+    @Slot()
+    def _duplicate_batch_row(self):
+        source = self._selected_batch_row_index()
+        if source < 0:
+            return
+        self._insert_batch_rows(source + 1, [self._batch_row_values(source)])
+
+    @Slot()
+    def _create_rev_batch_row(self):
+        source = self._selected_batch_row_index()
+        if source < 0:
+            return
+        values = self._batch_row_values(source)
+        for start_name, stop_name in (
+            ("Vbg_start", "Vbg_stop"),
+            ("Vtg_start", "Vtg_stop"),
+            ("Vbias_start", "Vbias_stop"),
+        ):
+            values[start_name], values[stop_name] = (
+                values.get(stop_name, ""),
+                values.get(start_name, ""),
+            )
+
+        label = str(values.get("condition_label", "")).strip() or "Sweep"
+        existing = {
+            str(self._batch_row_values(row).get("condition_label", "")).strip()
+            for row in range(self._batch_table.rowCount())
+        }
+        candidate = f"{label}_Rev"
+        suffix = 2
+        while candidate in existing:
+            candidate = f"{label}_Rev{suffix}"
+            suffix += 1
+        values["condition_label"] = candidate
+        self._insert_batch_rows(source + 1, [values])
+
+    @Slot()
+    def _copy_batch_rows(self):
+        rows = self._selected_batch_rows()
+        if not rows:
+            return
+        self._batch_row_clipboard = [
+            dict(self._batch_row_values(row)) for row in rows
+        ]
+        self._update_batch_action_states(rows)
+        self._log(
+            f"Copied {len(self._batch_row_clipboard)} batch row(s)."
+        )
+
+    @Slot()
+    def _paste_batch_rows(self):
+        if not self._batch_row_clipboard:
+            return
+        rows = self._selected_batch_rows()
+        target = max(rows) + 1 if rows else self._batch_table.rowCount()
+        self._insert_batch_rows(
+            target,
+            [dict(row) for row in self._batch_row_clipboard],
+        )
+
+    def _set_rows_run_state(self, rows: Sequence[int], enabled: bool):
+        run_column = BATCH_SCHEMA.index("Run")
+        table = self._batch_table
+        signals_were_blocked = table.blockSignals(True)
+        try:
+            for row in rows:
+                if not (0 <= int(row) < table.rowCount()):
+                    continue
+                item = table.item(int(row), run_column)
+                if item is not None:
+                    item.setCheckState(
+                        Qt.CheckState.Checked
+                        if enabled
+                        else Qt.CheckState.Unchecked
+                    )
+        finally:
+            table.blockSignals(signals_were_blocked)
+        self._commit_batch_change()
+
+    def _set_selected_rows_run_state(self, enabled: bool):
+        rows = self._selected_batch_rows()
+        if rows:
+            self._set_rows_run_state(rows, enabled)
+
+    def _set_all_rows_run_state(self, enabled: bool):
+        self._set_rows_run_state(
+            range(self._batch_table.rowCount()),
+            enabled,
+        )
+
+    @Slot()
+    def _run_only_selected_rows(self):
+        selected = set(self._selected_batch_rows())
+        if not selected:
+            return
+        run_column = BATCH_SCHEMA.index("Run")
+        table = self._batch_table
+        signals_were_blocked = table.blockSignals(True)
+        try:
+            for row in range(table.rowCount()):
+                item = table.item(row, run_column)
+                if item is not None:
+                    item.setCheckState(
+                        Qt.CheckState.Checked
+                        if row in selected
+                        else Qt.CheckState.Unchecked
+                    )
+        finally:
+            table.blockSignals(signals_were_blocked)
+        self._commit_batch_change()
+
+    def _move_batch_row_to_edge(self, *, top: bool):
+        source = self._selected_batch_row_index()
+        row_count = self._batch_table.rowCount()
+        if source < 0 or row_count < 2:
+            return
+        target = 0 if top else row_count - 1
+        if source == target:
+            return
+        frame = self._batch_snapshot()
+        moving = frame.iloc[[source]].copy()
+        remaining = frame.drop(frame.index[source]).reset_index(drop=True)
+        updated = (
+            pd.concat([moving, remaining], ignore_index=True)
+            if top
+            else pd.concat([remaining, moving], ignore_index=True)
+        )
+        _populate_batch_table(self._batch_table, updated)
+        self._batch_table.selectRow(target)
+        self._batch_table.scrollTo(
+            self._batch_table.model().index(target, 0)
+        )
+        self._update_batch_row_buttons()
+        self._commit_batch_change()
+
+    @Slot()
+    def _delete_disabled_batch_rows(self):
+        run_column = BATCH_SCHEMA.index("Run")
+        disabled = [
+            row
+            for row in range(self._batch_table.rowCount())
+            if (
+                self._batch_table.item(row, run_column) is None
+                or self._batch_table.item(
+                    row, run_column
+                ).checkState() != Qt.CheckState.Checked
+            )
+        ]
+        if not disabled:
+            return
+        table = self._batch_table
+        signals_were_blocked = table.blockSignals(True)
+        try:
+            for row in reversed(disabled):
+                table.removeRow(row)
+        finally:
+            table.blockSignals(signals_were_blocked)
+        if table.rowCount():
+            table.selectRow(min(disabled[0], table.rowCount() - 1))
+        self._update_batch_row_buttons()
+        self._commit_batch_change()
+
+    @Slot()
+    def _auto_frames_for_selected_rows(self):
+        rows = self._selected_batch_rows()
+        if not rows:
+            return
+        safe_jump = max(float(self._safe_jump_spin.value()), 1e-12)
+        frames_column = BATCH_SCHEMA.index("frames")
+        table = self._batch_table
+        signals_were_blocked = table.blockSignals(True)
+        try:
+            for row in rows:
+                values = self._batch_row_values(row)
+                largest_range = 0.0
+                for start_name, stop_name in (
+                    ("Vbg_start", "Vbg_stop"),
+                    ("Vtg_start", "Vtg_stop"),
+                    ("Vbias_start", "Vbias_stop"),
+                ):
+                    start = _safe_float(values.get(start_name))
+                    stop = _safe_float(values.get(stop_name))
+                    if start is not None and stop is not None:
+                        largest_range = max(
+                            largest_range, abs(float(stop) - float(start))
+                        )
+                frames = (
+                    1
+                    if largest_range <= 1e-12
+                    else int(np.ceil(largest_range / safe_jump)) + 1
+                )
+                item = table.item(row, frames_column)
+                if item is not None:
+                    item.setText(str(max(frames, 1)))
+        finally:
+            table.blockSignals(signals_were_blocked)
+        self._commit_batch_change()
+
+    def _batch_validation_issues(self) -> List[str]:
+        issues: List[str] = []
+        loop_df, batch_df = self._draft_frames()
+        for row, error in self._validate_when_rows(loop_df, batch_df):
+            issues.append(f"Row {row + 1} When: {error}")
+
+        raw = _read_batch_table(self._batch_table)
+        for row_index, row in raw.iterrows():
+            row_number = int(row_index) + 1
+            if _to_bool(row.get("Run", True)) and not str(
+                row.get("condition_label", "")
+            ).strip():
+                issues.append(f"Row {row_number}: condition label is empty.")
+            for name in ("repeat", "frames"):
+                try:
+                    value = int(str(row.get(name, "")).strip())
+                    if value < 1:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    issues.append(
+                        f"Row {row_number}: {name} must be a positive integer."
+                    )
+            for name in (
+                "Vbg_start",
+                "Vbg_stop",
+                "Vtg_start",
+                "Vtg_stop",
+            ):
+                if _safe_float(row.get(name)) is None:
+                    issues.append(
+                        f"Row {row_number}: {name} must be numeric."
+                    )
+            for name in ("Vbias_start", "Vbias_stop"):
+                value = str(row.get(name, "")).strip()
+                if value and _safe_float(value) is None:
+                    issues.append(
+                        f"Row {row_number}: {name} must be numeric or blank."
+                    )
+
+        if issues:
+            return issues
+        try:
+            seq, enabled_batch, _total = _build_plan(
+                loop_df,
+                batch_df,
+                mode=self._mode_combo.currentText(),
+            )
+        except ValueError as exc:
+            return [f"Plan: {exc}"]
+        issues.extend(
+            _validate_safe_jumps(
+                seq,
+                enabled_batch,
+                float(self._safe_jump_spin.value()),
+            )
+        )
+        return issues
+
+    @Slot()
+    def _show_batch_validation(self):
+        issues = self._batch_validation_issues()
+        if issues:
+            shown = "\n".join(f"• {issue}" for issue in issues[:12])
+            if len(issues) > 12:
+                shown += f"\n• …and {len(issues) - 12} more issue(s)."
+            QMessageBox.warning(
+                self,
+                "Batch validation",
+                shown,
+            )
+            return
+        QMessageBox.information(
+            self,
+            "Batch validation",
+            "All batch rows and safe-jump limits are valid.",
+        )
 
     def _move_batch_row(self, offset: int):
         source = self._selected_batch_row_index()
@@ -3440,7 +4136,7 @@ class PresetsPanel(QWidget):
         if updates_were_enabled:
             table.viewport().update()
         self._update_batch_row_buttons()
-        self._on_draft_edited()
+        self._commit_batch_change()
 
     @Slot()
     def _move_batch_row_up(self):
@@ -3453,7 +4149,7 @@ class PresetsPanel(QWidget):
     @Slot(QTableWidgetItem)
     def _on_batch_item_changed(self, item: Optional[QTableWidgetItem]):
         if item is None:
-            self._on_draft_edited()
+            self._commit_batch_change()
             return
 
         col_name = BATCH_SCHEMA[item.column()]
@@ -3463,7 +4159,7 @@ class PresetsPanel(QWidget):
             self._batch_table.setItem(item.row(), item.column(), normalized_item)
             self._batch_table.blockSignals(False)
 
-        self._on_draft_edited()
+        self._commit_batch_change()
 
     @Slot(dict)
     def _on_calculator_add_row(self, row_dict: dict):
@@ -3485,7 +4181,7 @@ class PresetsPanel(QWidget):
             f"Added row \"{row_dict.get('condition_label', '')}\" "
             f"at position {new_row_idx + 1} from Sweep Line Calculator."
         )
-        self._on_draft_edited()
+        self._commit_batch_change()
 
     # ── apply / plan ──────────────────────────────────────────────────────────
 

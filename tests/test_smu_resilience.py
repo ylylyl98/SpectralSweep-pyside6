@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import unittest
+import importlib.util
+import importlib.machinery
 import json
+import os
+import sys
 import tempfile
 import threading
+import types
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,10 +16,37 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+if "pylablib" not in sys.modules and importlib.util.find_spec("pylablib") is None:
+    pylablib_stub = types.ModuleType("pylablib")
+    devices_stub = types.ModuleType("pylablib.devices")
+    pylablib_stub.__spec__ = importlib.machinery.ModuleSpec("pylablib", loader=None)
+    devices_stub.__spec__ = importlib.machinery.ModuleSpec("pylablib.devices", loader=None)
+    devices_stub.Thorlabs = types.SimpleNamespace(ElliptecMotor=object)
+    pylablib_stub.devices = devices_stub
+    sys.modules.setdefault("pylablib", pylablib_stub)
+    sys.modules.setdefault("pylablib.devices", devices_stub)
+if "nidaqmx" not in sys.modules:
+    try:
+        import nidaqmx  # noqa: F401
+    except ModuleNotFoundError:
+        sys.modules["nidaqmx"] = types.SimpleNamespace(Task=object)
+if "pyvisa" not in sys.modules:
+    try:
+        import pyvisa  # noqa: F401
+    except ModuleNotFoundError:
+        sys.modules["pyvisa"] = types.SimpleNamespace(ResourceManager=object)
+
 from app.devices.iv_adapter import IVDevice, SMUCommunicationError
 from controllers.smu_controller import _SMUWorker
 from iv_automation import KeithControl, PyvisaInstrument
-from ui.presets_panel import _RunWorker
+from ui.presets_panel import (
+    _RunWorker,
+    _format_current_readback,
+    _required_smu_roles,
+    _smu_readiness_issues,
+)
 from utils.config import cfg
 from utils.hardware_incidents import (
     HardwareIncidentRecorder,
@@ -89,13 +121,18 @@ class _FailsDuringPostAcquisitionRead(_PowerCycledInstrument):
 
 
 class _FakeLFAdapter:
+    def __init__(self):
+        self.acquire_calls = 0
+
     def acquire(self):
+        self.acquire_calls += 1
         return np.array([700.0, 701.0]), np.array([10.0, 11.0])
 
 
 class _FakeLFController:
-    is_connected = True
-    adapter = _FakeLFAdapter()
+    def __init__(self):
+        self.is_connected = True
+        self.adapter = _FakeLFAdapter()
 
     def apply_settings(self, *_args):
         return None
@@ -123,7 +160,198 @@ class _FakeXChannels:
         return self.instrument
 
 
+class _HealthyRunDevice:
+    health_states = {"Vbg": "ready", "Vtg": "ready", "Vbias": "ready"}
+    requires_reconnect = False
+
+    def __init__(self, roles=("Vbg", "Vtg")):
+        self.roles = set(roles)
+        self.current_reads = 0
+
+    def role_is_available(self, role):
+        return role in self.roles
+
+    def set_operation_context(self, **_context):
+        return None
+
+    def clear_operation_context(self):
+        return None
+
+    def read_current_gates(self, *, strict=False):
+        return 0.01, 0.02
+
+    def read_current_bias(self, *, strict=False):
+        return 0.03
+
+    def set_gates(self, **_kwargs):
+        return None
+
+    def set_bias(self, **_kwargs):
+        return None
+
+    def read_currents(self, *, strict=False):
+        self.current_reads += 1
+        return 1.25e-9, -2.5e-9, 3.75e-9 if "Vbias" in self.roles else None
+
+    def ramp_all_to_zero_report(self, **_kwargs):
+        return {
+            role: {"status": "reached_zero"}
+            for role in self.roles
+        }
+
+
 class SMUResilienceTests(unittest.TestCase):
+    @staticmethod
+    def _batch_row(**overrides):
+        row = {
+            "Run": True,
+            "When": "",
+            "MeasurePower": False,
+            "condition_label": "dual-gate",
+            "repeat": 1,
+            "frames": 1,
+            "Vbg_start": 0.0,
+            "Vbg_stop": 0.0,
+            "Vtg_start": 0.0,
+            "Vtg_stop": 0.0,
+            "Vbias_start": "",
+            "Vbias_stop": "",
+        }
+        row.update(overrides)
+        return row
+
+    @staticmethod
+    def _run_meta():
+        return {
+            "device_id": "sample",
+            "point": "p1",
+            "tag": "",
+            "temperature": "4K",
+            "measurement_mode": "PL",
+            "laser_nm": "633",
+            "power_uw": "1",
+            "power_coefficient": 1.0,
+            "subfolder": "Initial Data",
+        }
+
+    def test_required_smu_roles_include_vbias_only_when_an_applicable_row_uses_it(self):
+        sequence = [{"Center Wavelength (nm)": 700.0}]
+        batch = pd.DataFrame([
+            self._batch_row(),
+            self._batch_row(
+                When="Center_Wavelength == 700",
+                Vbias_start=-0.1,
+                Vbias_stop=0.2,
+            ),
+        ])
+
+        self.assertEqual(
+            _required_smu_roles(sequence, batch),
+            ("Vbg", "Vtg", "Vbias"),
+        )
+
+        batch.loc[1, "When"] = "Center_Wavelength == 800"
+        self.assertEqual(
+            _required_smu_roles(sequence, batch),
+            ("Vbg", "Vtg"),
+        )
+
+    def test_smu_readiness_reports_disconnected_and_partial_keithley_roles(self):
+        self.assertEqual(
+            _smu_readiness_issues(None, ("Vbg", "Vtg")),
+            ["Required Keithley channels are not connected: Vbg, Vtg."],
+        )
+
+        device = _HealthyRunDevice(("Vbg",))
+        smu = SimpleNamespace(is_connected=True, device=device)
+        self.assertEqual(
+            _smu_readiness_issues(smu, ("Vbg", "Vtg")),
+            ["Required Keithley channels are missing: Vtg."],
+        )
+
+        gates_only = _HealthyRunDevice(("Vbg", "Vtg"))
+        smu = SimpleNamespace(is_connected=True, device=gates_only)
+        self.assertEqual(
+            _smu_readiness_issues(smu, ("Vbg", "Vtg")),
+            [],
+        )
+        self.assertEqual(
+            _smu_readiness_issues(smu, ("Vbg", "Vtg", "Vbias")),
+            ["Required Keithley channels are missing: Vbias."],
+        )
+
+    def test_worker_never_acquires_without_required_keithleys(self):
+        sequence = [{
+            "Center Wavelength (nm)": 700.0,
+            "Exposure Time (ms)": 1.0,
+            "Accumulations (EPF)": 1,
+        }]
+        batch = pd.DataFrame([self._batch_row()])
+        lf6 = _FakeLFController()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = _RunWorker(
+                sequence,
+                batch,
+                lf6_ctrl=lf6,
+                smu_ctrl=None,
+                out_dir=Path(tmp),
+                run_meta=self._run_meta(),
+                filename_parts=["device_id"],
+                stop_event=threading.Event(),
+            )
+            finished = []
+            worker.finished.connect(lambda success, message: finished.append((success, message)))
+            worker.run()
+
+        self.assertEqual(lf6.adapter.acquire_calls, 0)
+        self.assertFalse(finished[0][0])
+        self.assertIn("Keithley channels are not connected", finished[0][1])
+
+    def test_worker_logs_saved_current_readback_without_an_extra_current_read(self):
+        sequence = [{
+            "Center Wavelength (nm)": 700.0,
+            "Exposure Time (ms)": 1.0,
+            "Accumulations (EPF)": 1,
+        }]
+        batch = pd.DataFrame([self._batch_row()])
+        device = _HealthyRunDevice()
+        smu = SimpleNamespace(is_connected=True, device=device)
+        logs = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = _RunWorker(
+                sequence,
+                batch,
+                lf6_ctrl=_FakeLFController(),
+                smu_ctrl=smu,
+                out_dir=Path(tmp),
+                run_meta=self._run_meta(),
+                filename_parts=["device_id"],
+                stop_event=threading.Event(),
+            )
+            worker.log.connect(logs.append)
+            with (
+                patch.object(cfg.ramp, "delay_s", 0.0),
+                patch.object(cfg.ramp, "settle_s", 0.0),
+            ):
+                worker.run()
+
+        self.assertEqual(device.current_reads, 1)
+        self.assertTrue(
+            any(
+                "Keithley current readback: Ibg=1.2500e-09 A, "
+                "Itg=-2.5000e-09 A" in line
+                for line in logs
+            ),
+            logs,
+        )
+        self.assertEqual(
+            _format_current_readback(1e-9, 2e-9, None, include_bias=True),
+            "Keithley current readback: Ibg=1.0000e-09 A, "
+            "Itg=2.0000e-09 A, Ibias=unavailable",
+        )
+
     def test_visa_timeout_is_finite(self):
         rm = _FakeResourceManager()
         inst = PyvisaInstrument(
@@ -312,7 +540,7 @@ class SMUResilienceTests(unittest.TestCase):
         instrument = _FailsDuringPostAcquisitionRead(stop_event)
 
         def _get_x(key):
-            if key == "Vbg":
+            if key in ("Vbg", "Vtg"):
                 return 0.0
             raise KeyError(key)
 
@@ -324,7 +552,11 @@ class SMUResilienceTests(unittest.TestCase):
         )
         device = IVDevice(
             setup,
-            role_map={"Vbg": "GPIB1::2::INSTR", "Vtg": None, "Vbias": None},
+            role_map={
+                "Vbg": "GPIB1::2::INSTR",
+                "Vtg": "GPIB1::2::INSTR",
+                "Vbias": None,
+            },
         )
         smu = SimpleNamespace(is_connected=True, device=device)
         batch = pd.DataFrame([{
@@ -388,7 +620,7 @@ class SMUResilienceTests(unittest.TestCase):
         self.assertEqual(len(incidents), 1)
         self.assertFalse(finished[0][0])
         self.assertIn("Hardware incident", finished[0][1])
-        self.assertEqual(records[0]["hardware"]["role"], "Vbg")
+        self.assertIn(records[0]["hardware"]["role"], ("Vbg", "Vtg"))
         self.assertEqual(records[0]["run_context"]["frame"], 1)
         self.assertEqual(
             records[0]["hardware"]["diagnosis"]["classification"],

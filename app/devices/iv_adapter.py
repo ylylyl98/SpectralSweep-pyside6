@@ -466,6 +466,10 @@ class IVDevice:
 
         return False
 
+    def role_is_available(self, name: str) -> bool:
+        """Return whether a role has a real instrument-backed channel."""
+        return self.has_role(name) and self._instrument_for_role(name) is not None
+
     def _write_x_only(self, values: Dict[str, float]) -> bool:
         """
         Fast path: update X setpoints and call each owning instrument.write_x()
@@ -808,14 +812,28 @@ class IVDevice:
         if Vbg is not None:
             if ramp_step and ramp_step > 0:
                 self.ramp_to("Vbg", Vbg, ramp_step, delay_s, stop_cb=stop_cb, stop_exc=stop_exc)
-            else:
-                self._safe_x_goto("Vbg", Vbg, delay_s)
+            elif not self._safe_x_goto("Vbg", Vbg, delay_s):
+                raise SMUCommunicationError(
+                    "Vbg set failed because no mapped instrument accepted the command",
+                    role="Vbg",
+                    address=self.role_map.get("Vbg"),
+                    operation="set_voltage",
+                    command=f":SOUR:VOLT:LEV {float(Vbg):.9g}",
+                    context=self._operation_context,
+                )
 
         if Vtg is not None:
             if ramp_step and ramp_step > 0:
                 self.ramp_to("Vtg", Vtg, ramp_step, delay_s, stop_cb=stop_cb, stop_exc=stop_exc)
-            else:
-                self._safe_x_goto("Vtg", Vtg, delay_s)
+            elif not self._safe_x_goto("Vtg", Vtg, delay_s):
+                raise SMUCommunicationError(
+                    "Vtg set failed because no mapped instrument accepted the command",
+                    role="Vtg",
+                    address=self.role_map.get("Vtg"),
+                    operation="set_voltage",
+                    command=f":SOUR:VOLT:LEV {float(Vtg):.9g}",
+                    context=self._operation_context,
+                )
 
     def set_bias(
         self,
@@ -833,8 +851,15 @@ class IVDevice:
         if Vbias is not None:
             if ramp_step and ramp_step > 0:
                 self.ramp_to("Vbias", Vbias, ramp_step, delay_s, stop_cb=stop_cb, stop_exc=stop_exc)
-            else:
-                self._safe_x_goto("Vbias", Vbias, delay_s)
+            elif not self._safe_x_goto("Vbias", Vbias, delay_s):
+                raise SMUCommunicationError(
+                    "Vbias set failed because no mapped instrument accepted the command",
+                    role="Vbias",
+                    address=self.role_map.get("Vbias"),
+                    operation="set_voltage",
+                    command=f":SOUR:VOLT:LEV {float(Vbias):.9g}",
+                    context=self._operation_context,
+                )
 
     def read_leakages(self) -> Tuple[float, float]:
         """Return (Vbg_leakage, Vtg_leakage); if missing, return 0.0."""

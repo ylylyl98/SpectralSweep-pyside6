@@ -353,12 +353,20 @@ class SMUController(QObject):
         if not self.is_connected:
             return False
         device = self._worker.device
-        role_map = getattr(device, "_role_map", None)
-        if isinstance(role_map, dict):
-            vbias_role = role_map.get("Vbias")
-            if vbias_role is not None:
-                return True
-        return True
+        availability_check = getattr(device, "role_is_available", None)
+        if callable(availability_check):
+            try:
+                return bool(availability_check("Vbias"))
+            except Exception:
+                return False
+        has_role = getattr(device, "has_role", None)
+        if callable(has_role):
+            try:
+                return bool(has_role("Vbias"))
+            except Exception:
+                return False
+        role_map = getattr(device, "role_map", None)
+        return bool(isinstance(role_map, dict) and role_map.get("Vbias"))
 
     # ── cleanup ───────────────────────────────────────────────────────────────
 
