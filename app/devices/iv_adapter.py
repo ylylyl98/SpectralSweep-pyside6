@@ -618,6 +618,7 @@ class IVDevice:
         step: float,
         delay_s: float = 0.05,
         *,
+        start_value: Optional[float] = None,
         stop_cb: Optional[Callable[[], bool]] = None,
         stop_exc: Optional[Type[BaseException]] = None,
     ) -> bool:
@@ -647,19 +648,25 @@ class IVDevice:
                 time.sleep(float(delay_s))
             return True
 
-        x0 = self._safe_read_live_x(name)
+        try:
+            x0 = float(start_value) if start_value is not None else float("nan")
+        except (TypeError, ValueError):
+            x0 = float("nan")
+        if not math.isfinite(x0):
+            x0 = self._safe_read_live_x(name)
         if not math.isfinite(x0):
             x0 = self._safe_read_x(name)
         if not math.isfinite(x0):
             x0 = 0.0
 
         dx = target - float(x0)
-        n = max(1, int(math.ceil(abs(dx) / max(step, 1e-12))))
+        ratio = abs(dx) / max(step, 1e-12)
+        n = max(1, int(math.ceil(ratio - 1e-12)))
 
         for i in range(1, n + 1):
             self._check_stop(stop_cb, stop_exc)
             f = i / n
-            xi = float(x0) + dx * f
+            xi = target if i == n else float(x0) + dx * f
             if not self._set_x_fast(name, float(xi)):
                 raise SMUCommunicationError(
                     f"{name} ramp failed because no mapped instrument accepted the command",
@@ -672,19 +679,8 @@ class IVDevice:
             if delay_s and float(delay_s) > 0:
                 time.sleep(float(delay_s))
 
-        # exact final snap (should be equal already, but keep it explicit)
-        self._check_stop(stop_cb, stop_exc)
-        if not self._set_x_fast(name, target):
-            raise SMUCommunicationError(
-                f"{name} final ramp setpoint could not be applied",
-                role=name,
-                address=self.role_map.get(name),
-                operation="set_voltage",
-                command=f":SOUR:VOLT:LEV {target:.9g}",
-                context=self._operation_context,
-            )
-        if delay_s and float(delay_s) > 0:
-            time.sleep(float(delay_s))
+        # The final loop iteration writes the exact target; do not send the
+        # same command and wait a second time.
         return True
 
     def ramp_to(
@@ -694,6 +690,7 @@ class IVDevice:
         step: float,
         delay_s: float = 0.05,
         *,
+        start_value: Optional[float] = None,
         stop_cb: Optional[Callable[[], bool]] = None,
         stop_exc: Optional[Type[BaseException]] = None,
     ) -> bool:
@@ -709,9 +706,32 @@ class IVDevice:
             float(value),
             float(step),
             float(delay_s),
+            start_value=start_value,
             stop_cb=stop_cb,
             stop_exc=stop_exc,
         )
+
+    def set_role_voltage_fast(
+        self, role: str, target: float, delay_s: float = 0.0
+    ) -> bool:
+        """Set one role once, using a caller-maintained confirmed setpoint."""
+        if role not in ("Vbg", "Vtg", "Vbias"):
+            raise ValueError(f"Unknown Keithley role: {role}")
+        if not self.has_role(role):
+            return False
+        target = float(target)
+        if not math.isfinite(target):
+            raise ValueError(f"Invalid {role} target: {target}")
+        if not self._safe_x_goto(role, target, delay_s):
+            raise SMUCommunicationError(
+                f"{role} set failed because no mapped instrument accepted the command",
+                role=role,
+                address=self.role_map.get(role),
+                operation="set_voltage",
+                command=f":SOUR:VOLT:LEV {target:.9g}",
+                context=self._operation_context,
+            )
+        return True
 
     def _ramp_gates_together(
         self,
@@ -952,12 +972,14 @@ class IVDevice:
         Ib  = self._safe_read_y("Vbias_leakage", strict=strict) if self.has_role("Vbias") else None
         return Ibg, Itg, Ib
 
-    def _read_measured_role(
+    def read_role_snapshot(
         self, role: str, *, strict: bool = False
-    ) -> Optional[float]:
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Read one Keithley once and return its (voltage, current)."""
         if not self.has_role(role):
-            return None
+            return None, None
         meas_key = f"measured_{role}"
+        current_key = f"{role}_leakage"
         try:
             inst = self.setup.y_channel_collection.get_instrument(meas_key)
             if inst:
@@ -969,13 +991,15 @@ class IVDevice:
                     action=inst.read_y,
                 )
             self.setup.y_channel_collection.receive_y(meas_key)
-            value = float(self.setup.get_single_y_value(meas_key))
-            self._update_x_cache(role, value)
-            return value
+            self.setup.y_channel_collection.receive_y(current_key)
+            voltage = float(self.setup.get_single_y_value(meas_key))
+            current = float(self.setup.get_single_y_value(current_key))
+            self._update_x_cache(role, voltage)
+            return voltage, current
         except SMUCommunicationError:
             if strict:
                 raise
-            return None
+            return None, None
         except Exception as exc:
             if strict:
                 address = getattr(locals().get("inst"), "address", "unknown address")
@@ -987,12 +1011,26 @@ class IVDevice:
                     command=":READ?",
                     context=self._operation_context,
                 ) from exc
-            return None
+            return None, None
+
+    def _read_measured_role(
+        self, role: str, *, strict: bool = False
+    ) -> Optional[float]:
+        voltage, _current = self.read_role_snapshot(role, strict=strict)
+        return voltage
 
     def read_current_bias(self, *, strict: bool = False) -> Optional[float]:
         if not self.has_role("Vbias"):
             return None
         return self._read_measured_role("Vbias", strict=strict)
+
+    def read_role_voltage(
+        self, role: str, *, strict: bool = False
+    ) -> Optional[float]:
+        """Read the live output voltage for one mapped Keithley role."""
+        if role not in ("Vbg", "Vtg", "Vbias"):
+            raise ValueError(f"Unknown Keithley role: {role}")
+        return self._read_measured_role(role, strict=strict)
 
     def read_current_gates(self, *, strict: bool = False):
         """

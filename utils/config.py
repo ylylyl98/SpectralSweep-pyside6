@@ -70,6 +70,8 @@ class SMUConfig:
     """Keithley SMU defaults (applied at connect time)."""
     curr_compliance_A: float = 1e-6   # A   — smu_compliance_by_addr default
     volt_compliance_V: float = 20.0   # V   — smu_compliance_by_addr default
+    compliance_by_addr: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    manual_step_V: float = 0.1
     visa_timeout_ms: int = 5000       # bounded I/O so Stop can recover from a dead SMU
     vbg_resource: str = ""
     vtg_resource: str = ""

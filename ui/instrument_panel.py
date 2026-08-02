@@ -290,6 +290,20 @@ class _SMUSection(QWidget):
         self._visa_resources: list[str] = []
         self._pending_role_map: dict[str, Optional[str]] = {}
         self._pending_termination_text = cfg.smu.termination or r"\n"
+        self._compliance_by_addr: dict[str, dict[str, float]] = {}
+        raw_compliance = getattr(cfg.smu, "compliance_by_addr", {})
+        if isinstance(raw_compliance, dict):
+            for address, values in raw_compliance.items():
+                if not isinstance(values, dict):
+                    continue
+                try:
+                    self._compliance_by_addr[str(address)] = {
+                        "curr": float(values.get("curr", cfg.smu.curr_compliance_A)),
+                        "volt": float(values.get("volt", cfg.smu.volt_compliance_V)),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        self._role_last_addr: dict[str, str] = {}
         self._build()
         self._populate_role_combos(prefer_saved=True)
         self._wire()
@@ -320,44 +334,81 @@ class _SMUSection(QWidget):
         self._scan_status.setStyleSheet("color: gray; font-size: 10px;")
         lay.addWidget(self._scan_status)
 
-        # Role mapping
-        form = QFormLayout()
+        # Role mapping + per-address compliance. The stacked rows fit the
+        # narrow instrument sidebar without horizontal scrolling.
         self._role_vbg   = QComboBox()
         self._role_vtg   = QComboBox()
         self._role_vbias = QComboBox()
-        for combo, tip in (
-            (self._role_vbg,   "VISA address of the SMU channel used as back-gate (Vbg)."),
-            (self._role_vtg,   "VISA address of the SMU channel used as top-gate (Vtg)."),
-            (self._role_vbias, "VISA address of the SMU channel used as source-drain bias (Vbias)."),
-        ):
+        self._role_combos = {
+            "Vbg": self._role_vbg,
+            "Vtg": self._role_vtg,
+            "Vbias": self._role_vbias,
+        }
+        self._curr_comp_by_role: dict[str, QDoubleSpinBox] = {}
+        self._volt_comp_by_role: dict[str, QDoubleSpinBox] = {}
+        role_tips = {
+            "Vbg": "VISA address of the SMU channel used as back-gate (Vbg).",
+            "Vtg": "VISA address of the SMU channel used as top-gate (Vtg).",
+            "Vbias": "VISA address of the SMU channel used as source-drain bias (Vbias).",
+        }
+        for role, combo in self._role_combos.items():
             combo.addItem("<none>")
-            combo.setToolTip(tip)
-        form.addRow("Vbg addr:", self._role_vbg)
-        form.addRow("Vtg addr:", self._role_vtg)
-        form.addRow("Vbias addr:", self._role_vbias)
-        lay.addLayout(form)
+            combo.setToolTip(role_tips[role])
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(8)
+            combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
 
-        # Compliance
-        comp_form = QFormLayout()
-        self._curr_comp = QDoubleSpinBox()
-        self._curr_comp.setRange(0.001, 1_000_000_000.0)   # 0.001 nA – 1 A
-        self._curr_comp.setDecimals(3)
-        self._curr_comp.setSingleStep(100.0)
-        self._curr_comp.setValue(cfg.smu.curr_compliance_A * 1e9)  # A → nA
-        self._curr_comp.setSuffix(" nA")
-        self._curr_comp.setToolTip(
-            "Maximum allowed current through the SMU channel (compliance limit).\n"
-            "Displayed in nA — the backend stores and applies the value in Amperes."
-        )
-        self._volt_comp = QDoubleSpinBox()
-        self._volt_comp.setRange(0.1, 200.0)
-        self._volt_comp.setDecimals(1)
-        self._volt_comp.setValue(cfg.smu.volt_compliance_V)
-        self._volt_comp.setSuffix(" V")
-        self._volt_comp.setToolTip("Maximum allowed voltage across the SMU channel (compliance limit).")
-        comp_form.addRow("Current compliance:", self._curr_comp)
-        comp_form.addRow("Voltage compliance:", self._volt_comp)
-        lay.addLayout(comp_form)
+            addr_row = QHBoxLayout()
+            addr_label = QLabel(f"{role} addr:")
+            addr_label.setMinimumWidth(58)
+            addr_row.addWidget(addr_label)
+            addr_row.addWidget(combo, stretch=1)
+            lay.addLayout(addr_row)
+
+            curr = QDoubleSpinBox()
+            curr.setRange(0.001, 1_000_000_000.0)
+            curr.setDecimals(3)
+            curr.setSingleStep(100.0)
+            curr.setValue(cfg.smu.curr_compliance_A * 1e9)
+            curr.setSuffix(" nA")
+            curr.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            curr.setToolTip(
+                f"Current compliance for the Keithley assigned to {role}.\n"
+                "Displayed in nA; the instrument receives Amperes."
+            )
+            volt = QDoubleSpinBox()
+            volt.setRange(0.1, 200.0)
+            volt.setDecimals(1)
+            volt.setValue(cfg.smu.volt_compliance_V)
+            volt.setSuffix(" V")
+            volt.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            volt.setToolTip(
+                f"Voltage compliance/range for the Keithley assigned to {role}."
+            )
+            self._curr_comp_by_role[role] = curr
+            self._volt_comp_by_role[role] = volt
+
+            curr_row = QHBoxLayout()
+            curr_row.setContentsMargins(18, 0, 0, 0)
+            curr_label = QLabel("Current limit:")
+            curr_label.setMinimumWidth(72)
+            curr_row.addWidget(curr_label)
+            curr_row.addWidget(curr, stretch=1)
+            lay.addLayout(curr_row)
+
+            volt_row = QHBoxLayout()
+            volt_row.setContentsMargins(18, 0, 0, 3)
+            volt_label = QLabel("Voltage limit:")
+            volt_label.setMinimumWidth(72)
+            volt_row.addWidget(volt_label)
+            volt_row.addWidget(volt, stretch=1)
+            lay.addLayout(volt_row)
+
+            combo.currentTextChanged.connect(
+                lambda text, r=role: self._on_role_address_changed(r, text)
+            )
 
         btn_row = QHBoxLayout()
         self._connect_btn = QPushButton("Connect")
@@ -369,6 +420,69 @@ class _SMUSection(QWidget):
 
         self._status = _status_label("Disconnected", "gray")
         lay.addWidget(self._status)
+
+    @staticmethod
+    def _usable_address(text: str) -> str:
+        text = str(text or "").strip()
+        return "" if text == "<none>" else text
+
+    def _remember_role_compliance(self, role: str, address: Optional[str] = None) -> None:
+        address = self._usable_address(
+            address if address is not None else self._role_combos[role].currentText()
+        )
+        if not address:
+            return
+        self._compliance_by_addr[address] = {
+            "curr": self._curr_comp_by_role[role].value() * 1e-9,
+            "volt": self._volt_comp_by_role[role].value(),
+        }
+
+    def _remember_visible_compliance(self) -> None:
+        for role in self._role_combos:
+            self._remember_role_compliance(role)
+
+    def _load_role_compliance(self, role: str, address: str) -> None:
+        address = self._usable_address(address)
+        values = self._compliance_by_addr.get(address, {})
+        try:
+            curr_A = float(values.get("curr", cfg.smu.curr_compliance_A))
+        except (TypeError, ValueError):
+            curr_A = cfg.smu.curr_compliance_A
+        try:
+            volt_V = float(values.get("volt", cfg.smu.volt_compliance_V))
+        except (TypeError, ValueError):
+            volt_V = cfg.smu.volt_compliance_V
+        curr = self._curr_comp_by_role[role]
+        volt = self._volt_comp_by_role[role]
+        curr.blockSignals(True)
+        volt.blockSignals(True)
+        curr.setValue(curr_A * 1e9)
+        volt.setValue(volt_V)
+        curr.blockSignals(False)
+        volt.blockSignals(False)
+        curr.setEnabled(bool(address))
+        volt.setEnabled(bool(address))
+        selected_text = address or "No Keithley assigned"
+        self._role_combos[role].setToolTip(
+            f"Keithley assigned to {role}.\nSelected: {selected_text}"
+        )
+        self._role_last_addr[role] = address
+
+    @Slot(str, str)
+    def _on_role_address_changed(self, role: str, text: str) -> None:
+        old_address = self._role_last_addr.get(role, "")
+        if old_address:
+            self._remember_role_compliance(role, old_address)
+        self._load_role_compliance(role, text)
+
+    def compliance_by_addr(self) -> dict[str, dict[str, float]]:
+        self._remember_visible_compliance()
+        result: dict[str, dict[str, float]] = {}
+        for combo in self._role_combos.values():
+            address = self._usable_address(combo.currentText())
+            if address and address in self._compliance_by_addr:
+                result[address] = dict(self._compliance_by_addr[address])
+        return result
 
     def _wire(self):
         self._refresh_btn.clicked.connect(self._on_refresh)
@@ -416,15 +530,16 @@ class _SMUSection(QWidget):
 
     def _populate_role_combos(self, *, prefer_saved: bool = False):
         """Fill Vbg/Vtg/Vbias combos with all currently listed resources."""
+        self._remember_visible_compliance()
         options = ["<none>"]
         for resource in self._saved_smu_resources() + self._visa_resources:
             if resource.startswith("GPIB") and resource not in options:
                 options.append(resource)
 
-        for combo, saved in (
-            (self._role_vbg, cfg.smu.vbg_resource),
-            (self._role_vtg, cfg.smu.vtg_resource),
-            (self._role_vbias, cfg.smu.vbias_resource),
+        for role, combo, saved in (
+            ("Vbg", self._role_vbg, cfg.smu.vbg_resource),
+            ("Vtg", self._role_vtg, cfg.smu.vtg_resource),
+            ("Vbias", self._role_vbias, cfg.smu.vbias_resource),
         ):
             prev = combo.currentText()
             wanted = str(saved or "").strip() if prefer_saved else prev
@@ -436,6 +551,7 @@ class _SMUSection(QWidget):
             idx = combo.findText(wanted)
             combo.setCurrentIndex(max(0, idx))
             combo.blockSignals(False)
+            self._load_role_compliance(role, combo.currentText())
 
     @Slot()
     def _on_connect(self):
@@ -455,14 +571,14 @@ class _SMUSection(QWidget):
         if any(not addr.startswith("GPIB") for addr in visa_addrs):
             self._status.setText("Keithley resources must be GPIB addresses.")
             return
+        if len(set(visa_addrs)) != len(visa_addrs):
+            self._status.setText("Assign a different Keithley address to each role.")
+            return
 
         term_text = self._termination.currentText()
         termination = "" if term_text == "<none>" else term_text.replace("\\n", "\n").replace("\\r", "\r")
 
-        comp = {
-            addr: {"curr": self._curr_comp.value() * 1e-9, "volt": self._volt_comp.value()}
-            for addr in visa_addrs
-        }
+        comp = self.compliance_by_addr()
 
         self._pending_role_map = role_map.copy()
         self._pending_termination_text = term_text
@@ -490,8 +606,19 @@ class _SMUSection(QWidget):
         cfg.smu.vtg_resource = role_map.get("Vtg") or ""
         cfg.smu.vbias_resource = role_map.get("Vbias") or ""
         cfg.smu.termination = self._pending_termination_text
-        cfg.smu.curr_compliance_A = self._curr_comp.value() * 1e-9
-        cfg.smu.volt_compliance_V = self._volt_comp.value()
+        self._remember_visible_compliance()
+        cfg.smu.compliance_by_addr = {
+            address: dict(values)
+            for address, values in self._compliance_by_addr.items()
+        }
+        if opened:
+            first = cfg.smu.compliance_by_addr.get(opened[0], {})
+            cfg.smu.curr_compliance_A = float(
+                first.get("curr", cfg.smu.curr_compliance_A)
+            )
+            cfg.smu.volt_compliance_V = float(
+                first.get("volt", cfg.smu.volt_compliance_V)
+            )
         try:
             cfg.save()
         except Exception as exc:
@@ -507,390 +634,477 @@ class _SMUSection(QWidget):
 
 # ── Manual Control (Keithley) ─────────────────────────────────────────────────
 
-class _SetReadWorker(QObject):
-    """
-    Read all voltages + currents, OR ramp one channel to a target voltage.
-
-    Safety guarantee
-    ────────────────
-    Before ramping, the worker reads the actual current hardware voltage for the
-    requested channel.  It then steps from that measured value to the target in
-    increments ≤ ramp_step_V so the gate voltage never jumps more than one safe
-    step — even if the UI spinbox shows a value far from where the hardware is.
-    """
-    # (channel, V_actual, Ibg_A, Itg_A, Ibias_A)
-    readings_ready = Signal(str, float, float, float, float)
-    # emitted after a successful ramp with (channel, V_arrived)
-    set_done       = Signal(str, float)
-    log            = Signal(str)
-    finished       = Signal()
-    error          = Signal(str)
-
-    def __init__(self, smu_ctrl, mode: str,
-                 channel: str = "", target_V: float = 0.0,
-                 ramp_step_V: float = 0.5, delay_s: float = 0.05):
-        """
-        mode: "read" — read all channels and emit readings_ready three times
-              "set"  — ramp `channel` to `target_V`, then read and emit
-        """
-        super().__init__()
-        self._ctrl       = smu_ctrl
-        self._mode       = mode
-        self._channel    = channel
-        self._target_V   = target_V
-        self._ramp_step  = max(abs(ramp_step_V), 1e-4)
-        self._delay      = delay_s
-
-    @Slot()
-    def run(self):
-        import numpy as np, time
-        try:
-            dev = self._ctrl.device
-
-            def _read_all():
-                try:
-                    Vbg_now, Vtg_now = dev.read_current_gates()
-                except Exception:
-                    Vbg_now = Vtg_now = float("nan")
-                try:
-                    Vbias_now = float(dev.read_current_bias())
-                except Exception:
-                    Vbias_now = float("nan")
-                try:
-                    Ibg, Itg, Ib = dev.read_currents()
-                    Ibg = float(Ibg or 0.0)
-                    Itg = float(Itg or 0.0)
-                    Ib  = float(Ib  or 0.0)
-                except Exception:
-                    Ibg = Itg = Ib = float("nan")
-                return float(Vbg_now), float(Vtg_now), float(Vbias_now), Ibg, Itg, Ib
-
-            if self._mode == "read":
-                Vbg, Vtg, Vbias, Ibg, Itg, Ib = _read_all()
-                self.readings_ready.emit("Vbg",   Vbg,   Ibg, Itg, Ib)
-                self.readings_ready.emit("Vtg",   Vtg,   Ibg, Itg, Ib)
-                self.readings_ready.emit("Vbias", Vbias, Ibg, Itg, Ib)
-                self.log.emit(
-                    f"Vbg={Vbg:+.4g} V  Vtg={Vtg:+.4g} V  "
-                    f"Ibg={Ibg*1e9:.4g} nA  Itg={Itg*1e9:.4g} nA  "
-                    f"Ib={Ib*1e9:.4g} nA"
-                )
-
-            else:  # "set"
-                # 1. Read current hardware voltage for this channel
-                try:
-                    Vbg_now, Vtg_now = dev.read_current_gates()
-                    if self._channel == "Vbg":
-                        v_now = float(Vbg_now)
-                    elif self._channel == "Vtg":
-                        v_now = float(Vtg_now)
-                    else:  # Vbias
-                        try:
-                            v_now = float(dev.read_current_bias())
-                        except Exception:
-                            v_now = 0.0
-                except Exception:
-                    v_now = 0.0   # fallback — will still ramp safely from 0
-
-                self.log.emit(
-                    f"{self._channel}: hardware at {v_now:+.4g} V  "
-                    f"→ target {self._target_V:+.4g} V  "
-                    f"(ramp step {self._ramp_step:.3g} V)"
-                )
-
-                # 2. Build ramp from actual current position
-                span = abs(self._target_V - v_now)
-                if span < 1e-6:
-                    self.log.emit(f"{self._channel}: already at target.")
-                else:
-                    n = max(int(round(span / self._ramp_step)) + 1, 2)
-                    voltages = np.linspace(v_now, self._target_V, n).tolist()
-                    for v in voltages:
-                        if self._channel == "Vbg":
-                            dev.set_gates(Vbg=v,
-                                          ramp_step=self._ramp_step,
-                                          delay_s=self._delay)
-                        elif self._channel == "Vtg":
-                            dev.set_gates(Vtg=v,
-                                          ramp_step=self._ramp_step,
-                                          delay_s=self._delay)
-                        else:
-                            dev.set_bias(Vbias=v,
-                                         ramp_step=self._ramp_step,
-                                         delay_s=self._delay)
-                        time.sleep(self._delay)
-
-                # 3. Read back after arriving
-                Vbg, Vtg, Vbias_rb, Ibg, Itg, Ib = _read_all()
-                if self._channel == "Vbg":
-                    v_arrived = Vbg
-                elif self._channel == "Vtg":
-                    v_arrived = Vtg
-                else:
-                    # If read_current_bias succeeded use it, else use target
-                    v_arrived = Vbias_rb if Vbias_rb == Vbias_rb else self._target_V
-                self.set_done.emit(self._channel, v_arrived)
-                self.readings_ready.emit("Vbg",   Vbg,      Ibg, Itg, Ib)
-                self.readings_ready.emit("Vtg",   Vtg,      Ibg, Itg, Ib)
-                self.readings_ready.emit("Vbias", Vbias_rb, Ibg, Itg, Ib)
-                self.log.emit(
-                    f"{self._channel} arrived at {v_arrived:+.4g} V  |  "
-                    f"Ibg={Ibg*1e9:.4g} nA  Itg={Itg*1e9:.4g} nA  "
-                    f"Ib={Ib*1e9:.4g} nA"
-                )
-
-        except Exception as exc:
-            self.error.emit(str(exc))
-        finally:
-            self.finished.emit()
-
-
 class _ManualControlSection(QWidget):
-    """
-    Set & Read panel for manual Keithley gate control.
+    """Compact, collapsible front-panel controls for each Keithley role."""
 
-    Layout — one row per channel:
-      Channel | Current V (read-only) | Target V spinbox | [Set] button
-
-    Safety: before every ramp the worker reads the actual hardware voltage and
-    ramps from there, so the gate never jumps more than one safe step regardless
-    of what the spinbox shows.
-    """
-
-    # channels in display order
-    _CHANNELS = ["Vbg", "Vtg", "Vbias"]
+    _CHANNELS = ("Vbg", "Vtg", "Vbias")
 
     def __init__(self, smu_ctrl, parent=None):
         super().__init__(parent)
-        self._ctrl   = smu_ctrl
-        self._thread: Optional[QThread]        = None
-        self._worker: Optional[_SetReadWorker] = None
+        self._ctrl = smu_ctrl
+        self._busy = False
+        self._readback_timer = QTimer(self)
+        self._readback_timer.setSingleShot(True)
+        self._readback_timer.setInterval(200)
+        self._readback_timer.timeout.connect(self._on_debounced_readback)
+        self._confirmed_voltage: dict[str, float] = {}
+        self._requested_voltage: dict[str, float] = {}
+        self._pending_targets: dict[str, float] = {}
+        self._pending_order: list[str] = []
+        self._fast_active_role: Optional[str] = None
+        self._fast_active_target: Optional[float] = None
+        self._readback_role: Optional[str] = None
+        self._last_step_role: Optional[str] = None
+        self._background_read_queue: list[str] = []
+        self._background_read_active: Optional[str] = None
         self._build()
         self._wire()
+        self._set_controls_enabled()
 
-    def _build(self):
+    def _build(self) -> None:
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 4, 0, 4)
-        lay.setSpacing(6)
+        lay.setSpacing(5)
 
-        # ── per-channel rows ──────────────────────────────────────────────
-        self._cur_lbl:    dict[str, QLabel]         = {}
-        self._target_spn: dict[str, QDoubleSpinBox] = {}
-        self._set_btn:    dict[str, QPushButton]    = {}
-
-        for ch in self._CHANNELS:
-            row = QHBoxLayout()
-            row.setSpacing(4)
-
-            lbl = QLabel(f"<b>{ch}</b>")
-            lbl.setFixedWidth(42)
-            row.addWidget(lbl)
-
-            cur = QLabel("— V")
-            cur.setFixedWidth(80)
-            cur.setStyleSheet("color: gray;")
-            cur.setToolTip(f"Last measured {ch} voltage (click Read All to refresh).")
-            self._cur_lbl[ch] = cur
-            row.addWidget(cur)
-
-            spn = QDoubleSpinBox()
-            spn.setRange(-200.0, 200.0)
-            spn.setDecimals(3)
-            spn.setSuffix(" V")
-            spn.setToolTip(
-                f"Target voltage for {ch}.\n"
-                "The system reads the actual hardware voltage first, then ramps\n"
-                f"from there in steps ≤ ramp_step (Settings page) to protect the sample."
-            )
-            self._target_spn[ch] = spn
-            row.addWidget(spn)
-
-            btn = QPushButton("Set")
-            btn.setFixedWidth(46)
-            btn.setToolTip(
-                f"Ramp {ch} safely from its current hardware voltage to the target.\n"
-                "The ramp step limit is taken from Settings → Ramp step."
-            )
-            self._set_btn[ch] = btn
-            btn.clicked.connect(lambda _=False, c=ch: self._on_set(c))
-            row.addWidget(btn)
-
-            lay.addLayout(row)
-
-        # ── current readings display ──────────────────────────────────────
-        self._i_lbl = QLabel("Ibg: —   Itg: —   Ibias: —")
-        self._i_lbl.setStyleSheet("color: gray; font-size: 10px;")
-        lay.addWidget(self._i_lbl)
-
-        # ── buttons ───────────────────────────────────────────────────────
-        btn_row = QHBoxLayout()
-        self._read_btn = QPushButton("Read All")
-        self._read_btn.setToolTip(
-            "Read current voltages and currents from all SMU channels."
+        step_row = QHBoxLayout()
+        step_row.addWidget(QLabel("Step size:"))
+        self._step_spn = QDoubleSpinBox()
+        self._step_spn.setRange(0.001, 200.0)
+        self._step_spn.setDecimals(3)
+        self._step_spn.setSingleStep(0.1)
+        self._step_spn.setValue(
+            max(0.001, float(getattr(cfg.smu, "manual_step_V", 0.1)))
         )
-        self._zero_btn = QPushButton("All → 0 V")
-        self._zero_btn.setToolTip(
-            "Ramp ALL channels to 0 V safely (respects ramp step limit).\n"
-            "Reads hardware voltage first for each channel before ramping."
+        self._step_spn.setSuffix(" V")
+        self._step_spn.setToolTip(
+            "Voltage change for each Up or Down click. Default: 0.1 V."
         )
-        self._zero_btn.setStyleSheet("color: darkred;")
-        btn_row.addWidget(self._read_btn)
-        btn_row.addWidget(self._zero_btn)
-        btn_row.addStretch()
-        lay.addLayout(btn_row)
+        step_row.addWidget(self._step_spn, stretch=1)
+        lay.addLayout(step_row)
+
+        self._voltage_lbl: dict[str, QLabel] = {}
+        self._current_lbl: dict[str, QLabel] = {}
+        self._down_btn: dict[str, QPushButton] = {}
+        self._read_btn_by_role: dict[str, QPushButton] = {}
+        self._up_btn: dict[str, QPushButton] = {}
+        self._zero_btn_by_role: dict[str, QPushButton] = {}
+
+        for role in self._CHANNELS:
+            box = QGroupBox(role)
+            box_lay = QVBoxLayout(box)
+            box_lay.setContentsMargins(6, 5, 6, 6)
+            box_lay.setSpacing(3)
+
+            reading_row = QHBoxLayout()
+            voltage = QLabel("Voltage: —")
+            voltage.setStyleSheet("font-weight: 600; color: #444;")
+            voltage.setToolTip(f"Last measured {role} output voltage.")
+            current = QLabel("Current: —")
+            current.setAlignment(Qt.AlignmentFlag.AlignRight)
+            current.setStyleSheet("color: #555;")
+            current.setToolTip(f"Last measured {role} current.")
+            self._voltage_lbl[role] = voltage
+            self._current_lbl[role] = current
+            reading_row.addWidget(voltage, stretch=1)
+            reading_row.addWidget(current, stretch=1)
+            box_lay.addLayout(reading_row)
+
+            button_row = QHBoxLayout()
+            button_row.setSpacing(3)
+            down = QPushButton()
+            read = QPushButton("Read")
+            up = QPushButton()
+            zero = QPushButton("0 V")
+            down.setMinimumWidth(64)
+            read.setMinimumWidth(44)
+            up.setMinimumWidth(64)
+            zero.setMinimumWidth(38)
+            for button in (down, read, up, zero):
+                button.setSizePolicy(
+                    QSizePolicy.Policy.MinimumExpanding,
+                    QSizePolicy.Policy.Fixed,
+                )
+            down.setToolTip(
+                f"Decrease {role} by the selected step. All readings refresh after clicking pauses."
+            )
+            read.setToolTip(f"Refresh only the {role} voltage and current reading.")
+            up.setToolTip(
+                f"Increase {role} by the selected step. All readings refresh after clicking pauses."
+            )
+            zero.setToolTip(f"Read {role}, then ramp it safely to 0 V.")
+            zero.setStyleSheet("color: darkred;")
+            self._down_btn[role] = down
+            self._read_btn_by_role[role] = read
+            self._up_btn[role] = up
+            self._zero_btn_by_role[role] = zero
+            down.clicked.connect(lambda _=False, r=role: self._on_step(r, -1.0))
+            read.clicked.connect(lambda _=False, r=role: self._launch("read_role", r))
+            up.clicked.connect(lambda _=False, r=role: self._on_step(r, 1.0))
+            zero.clicked.connect(lambda _=False, r=role: self._launch("zero", r))
+            button_row.addWidget(down, stretch=1)
+            button_row.addWidget(read)
+            button_row.addWidget(up, stretch=1)
+            button_row.addWidget(zero)
+            box_lay.addLayout(button_row)
+            lay.addWidget(box)
+
+        self._update_step_button_text()
+        self._step_spn.valueChanged.connect(self._update_step_button_text)
+
+        global_row = QHBoxLayout()
+        self._read_all_btn = QPushButton("Read All")
+        self._zero_all_btn = QPushButton("All → 0 V")
+        self._zero_all_btn.setStyleSheet("color: darkred;")
+        self._read_all_btn.setToolTip("Refresh all connected Keithley readings.")
+        self._zero_all_btn.setToolTip("Ramp every connected Keithley safely to 0 V.")
+        self._read_all_btn.clicked.connect(self._on_read)
+        self._zero_all_btn.clicked.connect(lambda: self._launch("zero_all"))
+        global_row.addWidget(self._read_all_btn)
+        global_row.addWidget(self._zero_all_btn)
+        lay.addLayout(global_row)
 
         self._status_lbl = QLabel("Idle — connect SMU first.")
         self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
         self._status_lbl.setWordWrap(True)
         lay.addWidget(self._status_lbl)
 
-        self._read_btn.clicked.connect(self._on_read)
-        self._zero_btn.clicked.connect(self._on_zero_all)
-
-    def _wire(self):
+    def _wire(self) -> None:
         if self._ctrl is None:
             return
         self._ctrl.connected.connect(self._on_smu_connected)
         self._ctrl.disconnected.connect(self._on_smu_disconnected)
         self._ctrl.readings_ready.connect(self._on_controller_readings_ready)
+        manual_finished = getattr(self._ctrl, "manual_finished", None)
+        if manual_finished is not None:
+            manual_finished.connect(self._on_manual_finished)
+        manual_error = getattr(self._ctrl, "manual_error", None)
+        if manual_error is not None:
+            manual_error.connect(self._on_manual_error)
 
-    # ── busy guard ────────────────────────────────────────────────────────
+    @Slot()
+    def _update_step_button_text(self) -> None:
+        text = f"{self._step_spn.value():g}"
+        for role in self._CHANNELS:
+            self._down_btn[role].setText(f"▼ -{text}")
+            self._up_btn[role].setText(f"▲ +{text}")
 
-    def _is_busy(self) -> bool:
-        return bool(self._thread and self._thread.isRunning())
-
-    def _set_busy(self, busy: bool):
-        self._read_btn.setEnabled(not busy)
-        self._zero_btn.setEnabled(not busy)
-        for btn in self._set_btn.values():
-            btn.setEnabled(not busy)
-
-    def _reset_display(self):
-        for lbl in self._cur_lbl.values():
-            lbl.setText("— V")
-            lbl.setStyleSheet("color: gray;")
-        self._i_lbl.setText("Ibg: —   Itg: —   Ibias: —")
-
-    # ── launch worker ─────────────────────────────────────────────────────
-
-    def _launch(self, mode: str, channel: str = "", target_V: float = 0.0):
-        if self._is_busy():
-            return
+    def _role_available(self, role: str) -> bool:
         if not self._ctrl or not getattr(self._ctrl, "is_connected", False):
-            self._status_lbl.setText("SMU not connected.")
-            self._status_lbl.setStyleSheet("color: red; font-size: 10px;")
-            return
+            return False
+        check = getattr(self._ctrl, "role_is_available", None)
+        if callable(check):
+            try:
+                return bool(check(role))
+            except Exception:
+                return False
+        return True
 
-        self._worker = _SetReadWorker(
-            self._ctrl, mode, channel, target_V,
+    def _set_controls_enabled(self) -> None:
+        connected = bool(
+            self._ctrl and getattr(self._ctrl, "is_connected", False)
+        )
+        for role in self._CHANNELS:
+            enabled = connected and self._role_available(role) and not self._busy
+            self._down_btn[role].setEnabled(enabled)
+            self._read_btn_by_role[role].setEnabled(enabled)
+            self._up_btn[role].setEnabled(enabled)
+            self._zero_btn_by_role[role].setEnabled(enabled)
+        self._read_all_btn.setEnabled(connected and not self._busy)
+        self._zero_all_btn.setEnabled(connected and not self._busy)
+        self._step_spn.setEnabled(not self._busy)
+
+    def _launch(self, action: str, role: str = "", value: float = 0.0) -> None:
+        if self._busy:
+            return
+        self._cancel_background_refresh()
+        if not self._ctrl or not getattr(self._ctrl, "is_connected", False):
+            self._on_manual_error("SMU not connected.")
+            return
+        command = getattr(self._ctrl, "manual_control", None)
+        if not callable(command):
+            self._on_manual_error("Manual Keithley control is unavailable.")
+            return
+        self._busy = True
+        self._set_controls_enabled()
+        self._status_lbl.setStyleSheet("color: orange; font-size: 10px;")
+        if action == "read_role":
+            self._status_lbl.setText(f"Reading {role} voltage and current...")
+        elif action == "step":
+            direction = "up" if value > 0 else "down"
+            self._status_lbl.setText(f"Reading {role}, then stepping {direction}…")
+        elif action == "read":
+            self._status_lbl.setText("Reading Keithley voltages and currents…")
+        elif action == "zero_all":
+            self._status_lbl.setText("Ramping all Keithleys to 0 V…")
+        else:
+            self._status_lbl.setText(f"Reading {role}, then ramping to 0 V…")
+        command(
+            action,
+            role,
+            float(value),
             ramp_step_V=cfg.ramp.step_V,
             delay_s=cfg.ramp.delay_s,
         )
-        self._thread = QThread()
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.readings_ready.connect(self._on_readings_ready)
-        self._worker.set_done.connect(self._on_set_done)
-        self._worker.log.connect(self._status_lbl.setText)
-        self._worker.error.connect(self._on_error)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.finished.connect(self._thread.quit)
-        self._thread.start()
-        self._set_busy(True)
-        self._status_lbl.setStyleSheet("color: orange; font-size: 10px;")
 
-    # ── slots ─────────────────────────────────────────────────────────────
+    @Slot(str, float)
+    def _on_step(self, role: str, direction: float) -> None:
+        if self._busy:
+            return
+        if not self._ctrl or not getattr(self._ctrl, "is_connected", False):
+            self._on_manual_error("SMU not connected.")
+            return
+        if not self._role_available(role):
+            self._on_manual_error(f"No connected Keithley is assigned to {role}.")
+            return
+        command = getattr(self._ctrl, "manual_control", None)
+        if not callable(command):
+            self._on_manual_error("Manual Keithley control is unavailable.")
+            return
+
+        self._cancel_background_refresh()
+        base = self._requested_voltage.get(role)
+        if base is None:
+            base = self._confirmed_voltage.get(role)
+        if base is None:
+            self._launch("read_role", role)
+            return
+
+        self._readback_timer.stop()
+        self._readback_role = None
+        self._last_step_role = role
+        target = base + float(direction) * self._step_spn.value()
+        self._requested_voltage[role] = target
+        self._pending_targets[role] = target
+        if role not in self._pending_order:
+            self._pending_order.append(role)
+        self._voltage_lbl[role].setText(f"Voltage: {target:+.3f} V")
+        self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
+        self._status_lbl.setText(f"{role} target: {target:+.3f} V")
+        self._dispatch_next_fast()
+
+    def _dispatch_next_fast(self) -> None:
+        if self._busy or self._fast_active_role is not None:
+            return
+        if not self._ctrl or not getattr(self._ctrl, "is_connected", False):
+            return
+        command = getattr(self._ctrl, "manual_control", None)
+        if not callable(command):
+            return
+        while self._pending_order:
+            role = self._pending_order.pop(0)
+            target = self._pending_targets.pop(role, None)
+            if target is None or not self._role_available(role):
+                continue
+            self._fast_active_role = role
+            self._fast_active_target = target
+            command(
+                "set_fast",
+                role,
+                target,
+                ramp_step_V=cfg.ramp.step_V,
+                delay_s=0.0,
+            )
+            return
+
+    def _cancel_background_refresh(self) -> None:
+        """Cancel delayed and not-yet-started reads, preserving an in-flight read."""
+        self._readback_timer.stop()
+        self._readback_role = None
+        self._background_read_queue.clear()
+
+    def _dispatch_next_background_read(self) -> None:
+        if (
+            self._busy
+            or self._background_read_active is not None
+            or self._fast_active_role is not None
+            or self._pending_targets
+        ):
+            return
+        command = getattr(self._ctrl, "manual_control", None)
+        if not callable(command):
+            self._background_read_queue.clear()
+            return
+        while self._background_read_queue:
+            role = self._background_read_queue.pop(0)
+            if not self._role_available(role):
+                continue
+            self._background_read_active = role
+            command(
+                "read_role",
+                role,
+                0.0,
+                ramp_step_V=cfg.ramp.step_V,
+                delay_s=cfg.ramp.delay_s,
+            )
+            return
 
     @Slot()
-    def _on_read(self):
+    def _on_read(self) -> None:
         self._launch("read")
 
-    @Slot(list)
-    def _on_smu_connected(self, _opened: list):
-        if self._is_busy():
+    @Slot()
+    def _on_debounced_readback(self) -> None:
+        """Refresh every Keithley, adjusted role first, one query at a time."""
+        role = self._readback_role
+        self._readback_role = None
+        if (
+            not role
+            or self._busy
+            or self._fast_active_role is not None
+            or role in self._pending_targets
+            or not self._role_available(role)
+        ):
             return
-        self._status_lbl.setStyleSheet("color: orange; font-size: 10px;")
-        self._status_lbl.setText("SMU connected. Reading live voltages...")
+        self._background_read_queue = [role]
+        self._background_read_queue.extend(
+            candidate
+            for candidate in self._CHANNELS
+            if candidate != role and self._role_available(candidate)
+        )
+        self._dispatch_next_background_read()
+
+    @staticmethod
+    def _finite_float(value) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number == number and abs(number) != float("inf") else None
+
+    @Slot(object)
+    def _on_controller_readings_ready(self, readings: object) -> None:
+        if not isinstance(readings, dict):
+            return
+        for role, voltage_key, current_key in (
+            ("Vbg", "Vbg_meas", "Ibg"),
+            ("Vtg", "Vtg_meas", "Itg"),
+            ("Vbias", "Vbias_meas", "Ibias"),
+        ):
+            if voltage_key not in readings and current_key not in readings:
+                continue
+            voltage = self._finite_float(readings.get(voltage_key))
+            current = self._finite_float(readings.get(current_key))
+            if voltage_key in readings:
+                if voltage is not None:
+                    self._confirmed_voltage[role] = voltage
+                    if (
+                        role != self._fast_active_role
+                        and role not in self._pending_targets
+                    ):
+                        self._requested_voltage[role] = voltage
+                        self._voltage_lbl[role].setText(
+                            f"Voltage: {voltage:+.3f} V"
+                        )
+                elif (
+                    role != self._fast_active_role
+                    and role not in self._pending_targets
+                ):
+                    self._voltage_lbl[role].setText("Voltage: —")
+            if current_key in readings:
+                self._current_lbl[role].setText(
+                    "Current: —"
+                    if current is None
+                    else f"Current: {current * 1e9:.4g} nA"
+                )
+
+    @Slot(list)
+    def _on_smu_connected(self, _opened: list) -> None:
+        self._cancel_background_refresh()
+        self._background_read_active = None
+        self._busy = False
+        self._set_controls_enabled()
+        self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        self._status_lbl.setText("Connected — live readings shown above.")
 
     @Slot()
-    def _on_smu_disconnected(self):
-        if self._is_busy():
-            return
-        self._reset_display()
+    def _on_smu_disconnected(self) -> None:
+        self._cancel_background_refresh()
+        self._busy = False
+        self._confirmed_voltage.clear()
+        self._requested_voltage.clear()
+        self._pending_targets.clear()
+        self._pending_order.clear()
+        self._fast_active_role = None
+        self._fast_active_target = None
+        self._readback_role = None
+        self._last_step_role = None
+        self._background_read_active = None
+        for role in self._CHANNELS:
+            self._voltage_lbl[role].setText("Voltage: —")
+            self._current_lbl[role].setText("Current: —")
+        self._set_controls_enabled()
         self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
         self._status_lbl.setText("Idle — connect SMU first.")
 
-    @Slot()
-    def _on_zero_all(self):
-        # Queue channels sequentially in a single worker call isn't practical —
-        # instead set all targets to 0 and trigger one set per channel in sequence
-        # by chaining: after Vbg done set Vtg, after Vtg done set Vbias.
-        # Simpler: use a single worker that ramps each channel.
-        self._zero_queue = list(self._CHANNELS)
-        self._run_zero_next()
-
-    def _run_zero_next(self):
-        if not self._zero_queue:
-            self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
-            self._status_lbl.setText("All channels at 0 V.")
+    @Slot(str, str, float)
+    def _on_manual_finished(self, action: str, role: str, _voltage: float) -> None:
+        if action == "read_role" and role == self._background_read_active:
+            self._background_read_active = None
+            self._dispatch_next_background_read()
             return
-        ch = self._zero_queue.pop(0)
-        self._launch("set", ch, 0.0)
-        # Chain to next channel via finished signal
-        if self._thread:
-            self._thread.finished.connect(self._run_zero_next, Qt.ConnectionType.SingleShotConnection)
+
+        if action == "set_fast":
+            voltage = self._finite_float(_voltage)
+            if role == self._fast_active_role:
+                if voltage is not None:
+                    self._confirmed_voltage[role] = voltage
+                self._fast_active_role = None
+                self._fast_active_target = None
+            self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
+            if voltage is not None:
+                self._status_lbl.setText(f"{role} set to {voltage:+.3f} V")
+            else:
+                self._status_lbl.setText(f"{role} voltage updated.")
+            if self._pending_order:
+                self._dispatch_next_fast()
+            else:
+                self._readback_role = self._last_step_role or role
+                self._last_step_role = None
+                self._readback_timer.start()
+            return
+
+        was_busy = self._busy
+        self._busy = False
+        self._set_controls_enabled()
+        self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
+        if action == "zero":
+            self._requested_voltage[role] = 0.0
+            self._confirmed_voltage[role] = 0.0
+            self._status_lbl.setText(f"{role} reached 0 V.")
+        elif action == "zero_all":
+            self._status_lbl.setText("All connected Keithleys reached 0 V.")
+        elif action == "read_role":
+            if was_busy:
+                self._status_lbl.setText(f"{role} reading refreshed.")
+        else:
+            self._status_lbl.setText("Keithley readings refreshed.")
+        self._dispatch_next_fast()
 
     @Slot(str)
-    def _on_set(self, channel: str):
-        target = self._target_spn[channel].value()
-        self._launch("set", channel, target)
-
-    @Slot(str, float, float, float, float)
-    def _on_readings_ready(self, channel: str, v: float, ibg: float, itg: float, ib: float):
-        cur = self._cur_lbl.get(channel)
-        if cur:
-            if v == v:   # not nan — update label
-                cur.setText(f"{v:+.3f} V")
-                cur.setStyleSheet("color: black;")
-            # if nan: leave whatever was previously shown (last-set value stays green)
-        self._i_lbl.setText(
-            f"Ibg: {ibg*1e9:.4g} nA   Itg: {itg*1e9:.4g} nA   Ibias: {ib*1e9:.4g} nA"
-        )
-
-    @Slot(object)
-    def _on_controller_readings_ready(self, readings: object):
-        if self._is_busy() or not isinstance(readings, dict):
+    def _on_manual_error(self, message: str) -> None:
+        if self._background_read_active is not None:
+            self._background_read_active = None
+            self._status_lbl.setStyleSheet("color: red; font-size: 10px;")
+            self._status_lbl.setText(f"Read error: {str(message)[:155]}")
+            self._dispatch_next_background_read()
             return
-        ibg = float(readings.get("Ibg") or 0.0)
-        itg = float(readings.get("Itg") or 0.0)
-        ib = float(readings.get("Ibias") or 0.0)
-        for channel, key in (
-            ("Vbg", "Vbg_meas"),
-            ("Vtg", "Vtg_meas"),
-            ("Vbias", "Vbias_meas"),
-        ):
-            value = float(readings.get(key, float("nan")))
-            self._on_readings_ready(channel, value, ibg, itg, ib)
-        self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
-        self._status_lbl.setText("Live voltages refreshed after reconnect.")
 
-    @Slot(str, float)
-    def _on_set_done(self, channel: str, v_arrived: float):
-        lbl = self._cur_lbl.get(channel)
-        if lbl:
-            lbl.setText(f"{v_arrived:+.3f} V")
-            lbl.setStyleSheet("color: green;")
-
-    @Slot(str)
-    def _on_error(self, msg: str):
+        self._readback_timer.stop()
+        self._busy = False
+        failed_role = self._fast_active_role
+        self._fast_active_role = None
+        self._fast_active_target = None
+        self._pending_targets.clear()
+        self._pending_order.clear()
+        self._readback_role = None
+        self._last_step_role = None
+        self._background_read_queue.clear()
+        if failed_role:
+            self._confirmed_voltage.pop(failed_role, None)
+            self._requested_voltage.pop(failed_role, None)
+        self._set_controls_enabled()
         self._status_lbl.setStyleSheet("color: red; font-size: 10px;")
-        self._status_lbl.setText(f"Error: {msg[:120]}")
-
-    @Slot()
-    def _on_finished(self):
-        self._set_busy(False)
-        if self._status_lbl.styleSheet().find("orange") >= 0:
-            self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        self._status_lbl.setText(f"Error: {str(message)[:160]}")
 
 
 # ── Motion / PM workers ───────────────────────────────────────────────────────
@@ -2103,8 +2317,12 @@ class InstrumentPanel(QScrollArea):
                 "vtg_resource": smu._role_vtg.currentText(),
                 "vbias_resource": smu._role_vbias.currentText(),
                 "termination": smu._termination.currentText(),
-                "current_compliance_na": float(smu._curr_comp.value()),
-                "voltage_compliance_v": float(smu._volt_comp.value()),
+                "compliance_by_addr": smu.compliance_by_addr(),
+            }
+        manual_smu = self._sections.get("manual_smu")
+        if isinstance(manual_smu, _ManualControlSection):
+            state["manual_smu"] = {
+                "step_v": float(manual_smu._step_spn.value()),
             }
         for key in ("rot1", "rot2"):
             rotation = self._sections.get(key)
@@ -2157,6 +2375,18 @@ class InstrumentPanel(QScrollArea):
         smu_state = state.get("smu")
         smu = self._sections.get("smu")
         if isinstance(smu_state, dict) and isinstance(smu, _SMUSection):
+            saved_compliance = smu_state.get("compliance_by_addr")
+            if isinstance(saved_compliance, dict):
+                for address, values in saved_compliance.items():
+                    if not isinstance(values, dict):
+                        continue
+                    try:
+                        smu._compliance_by_addr[str(address)] = {
+                            "curr": float(values["curr"]),
+                            "volt": float(values["volt"]),
+                        }
+                    except (KeyError, TypeError, ValueError):
+                        continue
             for key, combo in (
                 ("vbg_resource", smu._role_vbg),
                 ("vtg_resource", smu._role_vtg),
@@ -2166,14 +2396,32 @@ class InstrumentPanel(QScrollArea):
                 value = smu_state.get(key)
                 if isinstance(value, str):
                     _select_or_insert_combo_text(combo, value)
-            for key, spin in (
-                ("current_compliance_na", smu._curr_comp),
-                ("voltage_compliance_v", smu._volt_comp),
-            ):
+            for role, combo in smu._role_combos.items():
+                smu._load_role_compliance(role, combo.currentText())
+
+            if not isinstance(saved_compliance, dict):
                 try:
-                    spin.setValue(float(smu_state[key]))
+                    legacy_curr = float(smu_state["current_compliance_na"])
+                    legacy_volt = float(smu_state["voltage_compliance_v"])
                 except (KeyError, TypeError, ValueError):
                     pass
+                else:
+                    for role, combo in smu._role_combos.items():
+                        if not smu._usable_address(combo.currentText()):
+                            continue
+                        smu._curr_comp_by_role[role].setValue(legacy_curr)
+                        smu._volt_comp_by_role[role].setValue(legacy_volt)
+                        smu._remember_role_compliance(role)
+
+        manual_state = state.get("manual_smu")
+        manual_smu = self._sections.get("manual_smu")
+        if isinstance(manual_state, dict) and isinstance(
+            manual_smu, _ManualControlSection
+        ):
+            try:
+                manual_smu._step_spn.setValue(float(manual_state["step_v"]))
+            except (KeyError, TypeError, ValueError):
+                pass
 
         for key in ("rot1", "rot2"):
             rotation_state = state.get(key)

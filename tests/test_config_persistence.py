@@ -14,6 +14,10 @@ class ConfigPersistenceTests(unittest.TestCase):
             path = Path(tmp) / "config.json"
             source = AppConfig()
             source.lf6.center_nm = 777.5
+            source.smu.compliance_by_addr = {
+                "GPIB0::9::INSTR": {"curr": 6e-7, "volt": 20.0},
+                "GPIB0::11::INSTR": {"curr": 9e-7, "volt": 30.0},
+            }
             source.session.active_tab = "power_sweep"
             source.session.sample_id = "shared-sample"
             source.session.panels = {
@@ -28,6 +32,10 @@ class ConfigPersistenceTests(unittest.TestCase):
             restored = AppConfig()
             restored.load(path)
             self.assertEqual(restored.lf6.center_nm, 777.5)
+            self.assertEqual(
+                restored.smu.compliance_by_addr["GPIB0::11::INSTR"]["volt"],
+                30.0,
+            )
             self.assertEqual(restored.session.schema_version, 2)
             self.assertEqual(restored.session.active_tab, "power_sweep")
             self.assertEqual(restored.session.sample_id, "shared-sample")

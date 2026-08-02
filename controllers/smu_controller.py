@@ -14,12 +14,15 @@
 #   error(str)
 #   readings_ready(dict)      keys: Ibg, Itg, Ibias (A, float|None)
 #                                   Vbg_meas, Vtg_meas, Vbias_meas (V, float|nan)
+#   manual_finished(action, role, resulting_voltage)
+#   manual_error(str)
 #   ramp_complete()
 #
 # Public methods (call from main thread):
 #   connect_instrument(visa_addrs, role_map, termination, compliance_by_addr)
 #   disconnect_instrument()
 #   read_currents()           → readings_ready signal
+#   manual_control(...)       → serialized front-panel read/step/zero operation
 #   ramp_to_zero()            → ramp_complete signal
 #
 # Connection config:
@@ -31,6 +34,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import traceback
 from pathlib import Path
@@ -54,6 +58,8 @@ class _SMUWorker(QObject):
     error          = Signal(str)
     readings_ready = Signal(object) # dict
     ramp_complete  = Signal()
+    manual_finished = Signal(str, str, float)
+    manual_error    = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -65,9 +71,17 @@ class _SMUWorker(QObject):
         if self._device is None:
             return
         try:
-            Ibg, Itg, Ib = self._device.read_currents(strict=strict)
-            Vbg_m, Vtg_m = self._device.read_current_gates(strict=strict)
-            Vbias_m = self._device.read_current_bias(strict=strict)
+            snapshots = {}
+            for role in ("Vbg", "Vtg", "Vbias"):
+                if self._device.has_role(role):
+                    snapshots[role] = self._device.read_role_snapshot(
+                        role, strict=strict
+                    )
+                else:
+                    snapshots[role] = (None, None)
+            Vbg_m, Ibg = snapshots["Vbg"]
+            Vtg_m, Itg = snapshots["Vtg"]
+            Vbias_m, Ib = snapshots["Vbias"]
             self.readings_ready.emit({
                 "Ibg": Ibg,
                 "Itg": Itg,
@@ -80,6 +94,26 @@ class _SMUWorker(QObject):
             self.error.emit(f"SMU live read failed: {exc}")
             if strict:
                 raise
+
+    def _emit_role_reading(self, role: str, *, strict: bool = False) -> None:
+        """Refresh one Keithley and emit only that role's voltage/current keys."""
+        if self._device is None:
+            return
+        voltage, current = self._device.read_role_snapshot(role, strict=strict)
+        voltage_keys = {
+            "Vbg": "Vbg_meas",
+            "Vtg": "Vtg_meas",
+            "Vbias": "Vbias_meas",
+        }
+        current_keys = {
+            "Vbg": "Ibg",
+            "Vtg": "Itg",
+            "Vbias": "Ibias",
+        }
+        self.readings_ready.emit({
+            voltage_keys[role]: voltage,
+            current_keys[role]: current,
+        })
 
     def _close_current_resources(self) -> None:
         if self._device is not None:
@@ -228,6 +262,109 @@ class _SMUWorker(QObject):
         except Exception as exc:
             self.error.emit(f"SMU read_currents failed: {exc}")
 
+    @Slot(str, str, float, float, float)
+    def manual_control(
+        self,
+        action: str,
+        role: str,
+        value: float,
+        ramp_step_V: float,
+        delay_s: float,
+    ) -> None:
+        """Run one front-panel command on the serialized SMU worker thread."""
+        if self._device is None:
+            self.manual_error.emit("SMU not connected.")
+            return
+        try:
+            action = str(action)
+            role = str(role)
+            if action == "read":
+                self._emit_live_readings(strict=True)
+                self.manual_finished.emit(action, role, float("nan"))
+                return
+
+            if action == "zero_all":
+                roles = []
+                availability = getattr(self._device, "role_is_available", None)
+                for candidate in ("Vbias", "Vbg", "Vtg"):
+                    if callable(availability) and availability(candidate):
+                        roles.append(candidate)
+                if not roles:
+                    raise RuntimeError("No connected Keithley roles are available.")
+                for candidate in roles:
+                    measured = self._device.read_role_voltage(
+                        candidate, strict=True
+                    )
+                    if measured is None or not math.isfinite(float(measured)):
+                        raise RuntimeError(
+                            f"Could not read the live {candidate} voltage; "
+                            "that output was not changed."
+                        )
+                    moved = self._device.ramp_to(
+                        candidate,
+                        0.0,
+                        max(abs(float(ramp_step_V)), 1e-4),
+                        max(float(delay_s), 0.0),
+                        start_value=float(measured),
+                    )
+                    if not moved:
+                        raise RuntimeError(
+                            f"{candidate} Keithley is not available."
+                        )
+                self._emit_live_readings(strict=True)
+                self.manual_finished.emit(action, role, 0.0)
+                return
+
+            if role not in ("Vbg", "Vtg", "Vbias"):
+                raise ValueError(f"Unknown Keithley role: {role}")
+            availability = getattr(self._device, "role_is_available", None)
+            if callable(availability) and not availability(role):
+                raise RuntimeError(f"{role} Keithley is not available.")
+
+            if action == "read_role":
+                self._emit_role_reading(role, strict=True)
+                self.manual_finished.emit(action, role, float("nan"))
+                return
+
+            if action == "set_fast":
+                target = float(value)
+                if not math.isfinite(target):
+                    raise ValueError(f"Invalid {role} target: {target}")
+                moved = self._device.set_role_voltage_fast(
+                    role, target, max(float(delay_s), 0.0)
+                )
+                if not moved:
+                    raise RuntimeError(f"{role} Keithley is not available.")
+                self.manual_finished.emit(action, role, target)
+                return
+
+            measured = self._device.read_role_voltage(role, strict=True)
+            if measured is None or not math.isfinite(float(measured)):
+                raise RuntimeError(
+                    f"Could not read the live {role} voltage; output was not changed."
+                )
+            measured = float(measured)
+            if action == "step":
+                target = measured + float(value)
+            elif action == "zero":
+                target = 0.0
+            else:
+                raise ValueError(f"Unknown manual Keithley action: {action}")
+
+            moved = self._device.ramp_to(
+                role,
+                target,
+                max(abs(float(ramp_step_V)), 1e-4),
+                max(float(delay_s), 0.0),
+                start_value=measured,
+            )
+            if not moved:
+                raise RuntimeError(f"{role} Keithley is not available.")
+            self._emit_role_reading(role, strict=True)
+            self.manual_finished.emit(action, role, target)
+        except Exception as exc:
+            self.manual_error.emit(str(exc))
+
     # ── ramp to zero ──────────────────────────────────────────────────────────
 
     @Slot()
@@ -275,10 +412,13 @@ class SMUController(QObject):
     error          = Signal(str)
     readings_ready = Signal(object)
     ramp_complete  = Signal()
+    manual_finished = Signal(str, str, float)
+    manual_error    = Signal(str)
     _connect_requested = Signal(list, dict, str, dict)
     _disconnect_requested = Signal()
     _read_requested = Signal()
     _zero_requested = Signal()
+    _manual_requested = Signal(str, str, float, float, float)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -292,6 +432,8 @@ class SMUController(QObject):
         self._worker.error.connect(self.error)
         self._worker.readings_ready.connect(self.readings_ready)
         self._worker.ramp_complete.connect(self.ramp_complete)
+        self._worker.manual_finished.connect(self.manual_finished)
+        self._worker.manual_error.connect(self.manual_error)
         self._connect_requested.connect(
             self._worker.connect_instrument,
             Qt.ConnectionType.QueuedConnection,
@@ -306,6 +448,10 @@ class SMUController(QObject):
         )
         self._zero_requested.connect(
             self._worker.ramp_to_zero,
+            Qt.ConnectionType.QueuedConnection,
+        )
+        self._manual_requested.connect(
+            self._worker.manual_control,
             Qt.ConnectionType.QueuedConnection,
         )
 
@@ -335,6 +481,22 @@ class SMUController(QObject):
 
     def ramp_to_zero(self) -> None:
         self._zero_requested.emit()
+
+    def manual_control(
+        self,
+        action: str,
+        role: str = "",
+        value: float = 0.0,
+        *,
+        ramp_step_V: Optional[float] = None,
+        delay_s: Optional[float] = None,
+    ) -> None:
+        """Queue a read/step/zero command from the compact manual UI."""
+        step = cfg.ramp.step_V if ramp_step_V is None else ramp_step_V
+        delay = cfg.ramp.delay_s if delay_s is None else delay_s
+        self._manual_requested.emit(
+            str(action), str(role), float(value), float(step), float(delay)
+        )
 
     # ── state ───────────────────────────────────────────────────────────────���─
 
@@ -367,6 +529,18 @@ class SMUController(QObject):
                 return False
         role_map = getattr(device, "role_map", None)
         return bool(isinstance(role_map, dict) and role_map.get("Vbias"))
+
+    def role_is_available(self, role: str) -> bool:
+        """Whether a connected instrument currently backs ``role``."""
+        if not self.is_connected:
+            return False
+        check = getattr(self._worker.device, "role_is_available", None)
+        if callable(check):
+            try:
+                return bool(check(str(role)))
+            except Exception:
+                return False
+        return False
 
     # ── cleanup ───────────────────────────────────────────────────────────────
 
