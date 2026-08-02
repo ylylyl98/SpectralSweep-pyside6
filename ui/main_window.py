@@ -4,7 +4,7 @@
 #
 # Layout:
 #   Left dock  : InstrumentPanel (connection controls, always visible)
-#   Right tabs : Dual Gate | 2D Sweep | BFP | Spectrum | Settings
+#   Right tabs : Dual Gate | 2D Sweep | Motion Sweep | BFP | Spectrum | Settings
 #
 # Controllers are created once here and injected into all panels.
 # Reload of UI modules is possible without dropping controller connections.
@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRect, QSettings, QTimer
+from PySide6.QtCore import Qt, QRect, QSettings, QTimer, QObject
 from PySide6.QtGui  import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QTabWidget, QWidget, QStatusBar, QApplication,
@@ -350,6 +350,39 @@ def _clamp_window_rect(rect: QRect, available: QRect, margin: int = 8) -> QRect:
     return QRect(x, y, width, height)
 
 
+class _SharedSampleIdBinder(QObject):
+    """Keep workflow Sample ID edits synchronized without recursive updates."""
+
+    def __init__(self, edits, initial: str = "", parent=None):
+        super().__init__(parent)
+        self._edits = list(edits)
+        self._value = ""
+        self._updating = False
+        for edit in self._edits:
+            edit.textChanged.connect(self._on_text_changed)
+        self.set_value(initial)
+
+    @property
+    def value(self) -> str:
+        return self._value
+
+    def set_value(self, value: str) -> None:
+        value = str(value)
+        self._value = value
+        self._updating = True
+        try:
+            for edit in self._edits:
+                if edit.text() != value:
+                    edit.setText(value)
+        finally:
+            self._updating = False
+
+    def _on_text_changed(self, value: str) -> None:
+        if self._updating:
+            return
+        self.set_value(value)
+
+
 class MainWindow(QMainWindow):
     """
     Application shell.
@@ -440,14 +473,15 @@ class MainWindow(QMainWindow):
         )
         self._tabs.addTab(self._mega, "2D Sweep")
 
-        # Power Sweep
+        # Motion Sweep
         self._power_sweep = PowerSweepPanel(
             lf6_ctrl=self._lf6,
             stage_ctrl=self._stg,
+            rotation_ctrl=self._rot,
             pm_ctrl=self._pm,
             smu_ctrl=self._smu,
         )
-        self._tabs.addTab(self._power_sweep, "Power Sweep")
+        self._tabs.addTab(self._power_sweep, "Motion Sweep")
 
         # BFP
         self._bfp = BFPPanel(lf6_ctrl=self._lf6)
@@ -482,6 +516,7 @@ class MainWindow(QMainWindow):
         # ── restore geometry ──────────────────────────────────────────────────
         self._restore_geometry()
         self._restore_session()
+        self._initialize_shared_sample_id()
 
         # A short polling debounce also catches dynamic table-cell widgets.
         self._last_observed_session = self._capture_session()
@@ -500,6 +535,33 @@ class MainWindow(QMainWindow):
         widget = self._tabs.currentWidget()
         return self._tab_ids.get(widget, "dual_gate")
 
+    def _initialize_shared_sample_id(self) -> None:
+        edits_by_panel = {
+            self._presets: self._presets._sample_edit,
+            self._mega: self._mega._sample_edit,
+            self._power_sweep: self._power_sweep._devid_edit,
+            self._bfp: self._bfp._dev_edit,
+        }
+        if cfg.session.schema_version >= 2:
+            initial = cfg.session.sample_id
+        else:
+            active_edit = edits_by_panel.get(self._tabs.currentWidget())
+            initial = active_edit.text() if active_edit is not None else ""
+            if not initial:
+                initial = next(
+                    (
+                        edit.text()
+                        for edit in edits_by_panel.values()
+                        if edit.text()
+                    ),
+                    "",
+                )
+        self._sample_id_binder = _SharedSampleIdBinder(
+            edits_by_panel.values(),
+            initial=initial,
+            parent=self,
+        )
+
     def _capture_session(self) -> dict:
         panels = {
             str(key): value
@@ -517,8 +579,13 @@ class MainWindow(QMainWindow):
             if isinstance(value, dict):
                 panels[key] = value
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "active_tab": self._active_tab_id(),
+            "sample_id": (
+                self._sample_id_binder.value
+                if hasattr(self, "_sample_id_binder")
+                else cfg.session.sample_id
+            ),
             "panels": panels,
         }
 
@@ -553,6 +620,7 @@ class MainWindow(QMainWindow):
         session = self._capture_session()
         cfg.session.schema_version = int(session["schema_version"])
         cfg.session.active_tab = str(session["active_tab"])
+        cfg.session.sample_id = str(session["sample_id"])
         cfg.session.panels = session["panels"]
         self._last_observed_session = session
         try:

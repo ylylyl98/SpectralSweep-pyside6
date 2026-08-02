@@ -60,6 +60,10 @@ class SessionStateTests(unittest.TestCase):
     def test_workflow_panels_restore_representative_setup(self):
         power = PowerSweepPanel()
         power._pos_input.setText("(2, 8, 4)")
+        power._motion_combo.setCurrentIndex(
+            power._motion_combo.findData("rot2")
+        )
+        power._motion_settle_spin.setValue(0.75)
         power._center_spin.setValue(731.2)
         power._apply_gates_chk.setChecked(False)
         power._devid_edit.setText("power-device")
@@ -67,6 +71,10 @@ class SessionStateTests(unittest.TestCase):
         power_restored = PowerSweepPanel()
         power_restored.restore_session_state(power_state)
         self.assertEqual(power_restored._pos_input.text(), "(2, 8, 4)")
+        self.assertEqual(power_restored._motion_combo.currentData(), "rot2")
+        self.assertAlmostEqual(
+            power_restored._motion_settle_spin.value(), 0.75
+        )
         self.assertAlmostEqual(power_restored._center_spin.value(), 731.2)
         self.assertFalse(power_restored._apply_gates_chk.isChecked())
         self.assertEqual(power_restored._devid_edit.text(), "power-device")

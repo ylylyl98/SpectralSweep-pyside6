@@ -180,8 +180,9 @@ class RotationConfig:
 class SessionConfig:
     """Last harmless UI/workflow setup; never contains live device state."""
 
-    schema_version: int = 1
+    schema_version: int = 2
     active_tab: str = "dual_gate"
+    sample_id: str = ""
     panels: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
@@ -282,6 +283,9 @@ class AppConfig:
             active_tab = session_data.get("active_tab")
             if isinstance(active_tab, str) and active_tab:
                 self.session.active_tab = active_tab
+            sample_id = session_data.get("sample_id")
+            if isinstance(sample_id, str):
+                self.session.sample_id = sample_id
             panels = session_data.get("panels")
             if isinstance(panels, dict):
                 self.session.panels = {

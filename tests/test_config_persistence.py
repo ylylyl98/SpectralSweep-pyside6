@@ -15,6 +15,7 @@ class ConfigPersistenceTests(unittest.TestCase):
             source = AppConfig()
             source.lf6.center_nm = 777.5
             source.session.active_tab = "power_sweep"
+            source.session.sample_id = "shared-sample"
             source.session.panels = {
                 "power_sweep": {
                     "positions": "(1, 2, 3)",
@@ -27,8 +28,9 @@ class ConfigPersistenceTests(unittest.TestCase):
             restored = AppConfig()
             restored.load(path)
             self.assertEqual(restored.lf6.center_nm, 777.5)
-            self.assertEqual(restored.session.schema_version, 1)
+            self.assertEqual(restored.session.schema_version, 2)
             self.assertEqual(restored.session.active_tab, "power_sweep")
+            self.assertEqual(restored.session.sample_id, "shared-sample")
             self.assertEqual(
                 restored.session.panels["power_sweep"]["positions"],
                 "(1, 2, 3)",

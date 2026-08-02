@@ -117,8 +117,13 @@ If you are working on the UI without hardware access, start with `python main.py
 
 The application automatically restores the last selected workflow tab, window
 layout, instrument connection choices, and editable setup fields for Dual Gate,
-2D Sweep, Power Sweep, BFP, Spectrum, and Settings. Dual Gate keeps the edited
-draft and the last applied tables separately.
+2D Sweep, Motion Sweep, BFP, Spectrum, and Settings. Dual Gate keeps the edited
+draft and the last applied tables separately. Sample ID is shared by all
+measurement tabs, so editing it in one workflow immediately updates the others.
+
+Motion Sweep can use the linear stage, Rot1, or Rot2. The PM100D is optional;
+when it is disconnected, spectra are still acquired and the output omits
+optical-power values.
 
 Live connections, voltage or motion targets, polling, acquired data, plots,
 progress, and logs are deliberately not restored. Connecting instruments and

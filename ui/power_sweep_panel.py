@@ -1,10 +1,11 @@
 # ui/power_sweep_panel.py
 # ──────────────────────────────────────────────────────────────────────────────
-# Power-dependent measurement panel.
+# Motion-dependent measurement panel.
 #
-# Moves the linear stage through user-defined positions. At each position:
-#   1. Moves stage to target position
-#   2. Reads optical power from PM100D (stored in µW)
+# Moves a selected actuator (linear stage, rot1, or rot2) through user-defined
+# positions. At each position:
+#   1. Moves the selected actuator to the target position
+#   2. Reads optical power from PM100D when connected (stored in µW)
 #   3. Acquires a spectrum from the LF6 spectrometer
 #   4. Saves a CSV row with metadata columns + wavelength spectrum
 #
@@ -32,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QLabel, QPushButton, QLineEdit, QDoubleSpinBox, QSpinBox,
     QCheckBox, QSplitter, QScrollArea, QProgressBar,
-    QTextEdit, QMessageBox, QFrame,
+    QTextEdit, QMessageBox, QFrame, QComboBox,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +52,29 @@ pg.setConfigOption("foreground", "k")
 # ── constants ──────────────────────────────────────────────────────────────────
 NAN = float("nan")
 
+_MOTION_SPECS = {
+    "stage": {
+        "label": "Linear Stage",
+        "value_label": "Positions",
+        "unit": "stage units",
+        "column": "stage_pos",
+    },
+    "rot1": {
+        "label": "Rot1",
+        "value_label": "Angles",
+        "unit": "deg",
+        "column": "rot1_deg",
+    },
+    "rot2": {
+        "label": "Rot2",
+        "value_label": "Angles",
+        "unit": "deg",
+        "column": "rot2_deg",
+    },
+}
+_ROTATION_MIN_DEG = -3600.0
+_ROTATION_MAX_DEG = 3600.0
+
 
 # ── stop exception ─────────────────────────────────────────────────────────────
 class _StopRequested(Exception):
@@ -58,7 +82,7 @@ class _StopRequested(Exception):
 
 
 # ── position parsing ───────────────────────────────────────────────────────────
-def _parse_stage_positions(text: str) -> np.ndarray:
+def _parse_sweep_values(text: str) -> np.ndarray:
     """Parse tuple-style linspace spec or a direct list.
 
     (0, 50, 51)   → np.linspace(0, 50, 51)
@@ -88,6 +112,10 @@ def _parse_stage_positions(text: str) -> np.ndarray:
         raise ValueError(
             "Expected (start,stop,count), [v1,v2,...], or a single number."
         )
+
+
+# Compatibility alias for callers/tests that used the old stage-specific name.
+_parse_stage_positions = _parse_sweep_values
 
 
 def _describe_positions(pos: np.ndarray, max_show: int = 5) -> str:
@@ -150,17 +178,35 @@ _SMU_COLUMNS = [
 ]
 
 
-def _scalar_column_names(smu_available: bool) -> list[str]:
-    cols = ["Power_uW", "stage_pos"]
+def _scalar_column_names(
+    smu_available: bool,
+    pm_available: bool = True,
+    motion_column: str = "stage_pos",
+) -> list[str]:
+    cols = []
+    if pm_available:
+        cols.append("Power_uW")
+    cols.extend([motion_column, f"{motion_column}_actual"])
     if smu_available:
         cols.extend(_SMU_COLUMNS)
     return cols
 
 
-def _read_scalar_row(iv, power_uw: float, pos: float, smu_available: bool,
-                    Vbg_set: float = NAN, Vtg_set: float = NAN,
-                    Vbias_set: float = NAN) -> list:
-    values = [power_uw, pos]
+def _read_scalar_row(
+    iv,
+    power_uw: float,
+    target: float,
+    actual: float,
+    smu_available: bool,
+    pm_available: bool = True,
+    Vbg_set: float = NAN,
+    Vtg_set: float = NAN,
+    Vbias_set: float = NAN,
+) -> list:
+    values = []
+    if pm_available:
+        values.append(power_uw)
+    values.extend([target, actual])
     if smu_available and iv is not None:
         vbg_m, vtg_m = _read_gates(iv)
         vbias_m = _read_bias(iv)
@@ -206,7 +252,7 @@ def _build_gate_token(Vbg: float, Vtg: float, Vbias: float) -> str:
 
 # ── worker ─────────────────────────────────────────────────────────────────────
 class _PowerSweepWorker(QObject):
-    """Runs the power-dependent measurement loop in a background QThread."""
+    """Runs the motion-dependent measurement loop in a background QThread."""
 
     log = Signal(str)
     progress = Signal(int, int)
@@ -214,10 +260,14 @@ class _PowerSweepWorker(QObject):
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, params: dict, stage_ctrl, pm_ctrl, lf6_ctrl, smu_ctrl):
+    def __init__(
+        self, params: dict, stage_ctrl, rotation_ctrl, pm_ctrl, lf6_ctrl,
+        smu_ctrl,
+    ):
         super().__init__()
         self._p = params
         self._stg = stage_ctrl
+        self._rot = rotation_ctrl
         self._pm = pm_ctrl
         self._lf6 = lf6_ctrl
         self._smu = smu_ctrl
@@ -237,8 +287,25 @@ class _PowerSweepWorker(QObject):
             self.finished.emit()
 
     def _run_sweep(self, p):
-        stage = self._stg.adapter
-        pm = self._pm.adapter
+        motion_key = p.get("motion_key", "stage")
+        motion_spec = _MOTION_SPECS[motion_key]
+        if motion_key == "stage":
+            motion = self._stg.adapter
+        else:
+            motion = self._rot.adapter(motion_key)
+        motion_label = motion_spec["label"]
+        motion_unit = (
+            getattr(motion, "position_unit", motion_spec["unit"])
+            if motion_key == "stage"
+            else motion_spec["unit"]
+        )
+        start_position = float(motion.get_position())
+
+        pm_ok = (
+            self._pm is not None
+            and getattr(self._pm, "is_connected", False)
+        )
+        pm = self._pm.adapter if pm_ok else None
         spec = self._lf6.adapter
         setup = self._lf6.setup
 
@@ -284,13 +351,20 @@ class _PowerSweepWorker(QObject):
             )
 
         # ── set PM wavelength ────────────────────────────────────────────────
-        try:
-            pm.configure_wavelength(float(p["pm_wl_nm"]))
+        if pm is None:
             self.log.emit(
-                f"[{_ts()}] PM wavelength set to {p['pm_wl_nm']:.1f} nm"
+                f"[{_ts()}] NOTICE: PM100D is not connected. "
+                "The sweep will continue without saving optical power values."
             )
-        except Exception as exc:
-            self.log.emit(f"[{_ts()}] PM wavelength warning: {exc}")
+        else:
+            try:
+                pm.configure_wavelength(float(p["pm_wl_nm"]))
+                self.log.emit(
+                    f"[{_ts()}] PM wavelength set to "
+                    f"{p['pm_wl_nm']:.1f} nm"
+                )
+            except Exception as exc:
+                self.log.emit(f"[{_ts()}] PM wavelength warning: {exc}")
 
         # ── apply gate voltages ──────────────────────────────────────────────
         if p.get("apply_gates") and iv is not None:
@@ -335,7 +409,11 @@ class _PowerSweepWorker(QObject):
             fp = out_path / f"{p['base_name']}_{k:03d}.csv"
             k += 1
 
-        cols = _scalar_column_names(smu_ok)
+        cols = _scalar_column_names(
+            smu_ok,
+            pm_available=pm_ok,
+            motion_column=motion_spec["column"],
+        )
         wl_headers = [f"{float(w):.4f}" for w in wls]
 
         with open(fp, "w", newline="", encoding="utf-8") as fh:
@@ -355,25 +433,30 @@ class _PowerSweepWorker(QObject):
                         raise _StopRequested()
 
                     self.log.emit(
-                        f"[{_ts()}] {done}/{total}: moving stage to {pos:.3f}"
+                        f"[{_ts()}] {done}/{total}: moving "
+                        f"{motion_label} to {pos:.3f} {motion_unit}"
                     )
 
-                    # move stage
+                    # move selected actuator
                     move_ok = True
+                    arrived = NAN
                     try:
-                        stage.move_to(pos)
-                        time.sleep(0.3)
-                        arrived = float(stage.get_position())
+                        motion.move_to(pos)
+                        time.sleep(p.get("motion_settle_s", 0.3))
+                        arrived = float(motion.get_position())
                         self.log.emit(
-                            f"[{_ts()}]   arrived at {arrived:.3f}"
+                            f"[{_ts()}]   arrived at {arrived:.3f} "
+                            f"{motion_unit}"
                         )
                     except Exception as exc:
-                        self.log.emit(f"[{_ts()}]   stage error: {exc}")
+                        self.log.emit(
+                            f"[{_ts()}]   {motion_label} error: {exc}"
+                        )
                         move_ok = False
 
                     # read power
                     power_uw = NAN
-                    if move_ok:
+                    if move_ok and pm is not None:
                         try:
                             power_w = float(pm.get_power())
                             power_uw = power_w * 1e6
@@ -400,7 +483,8 @@ class _PowerSweepWorker(QObject):
 
                     # write row
                     scalar_vals = _read_scalar_row(
-                        iv, power_uw, pos, smu_ok,
+                        iv, power_uw, pos, arrived, smu_ok,
+                        pm_available=pm_ok,
                         Vbg_set=p.get("Vbg_target", NAN),
                         Vtg_set=p.get("Vtg_target", NAN),
                         Vbias_set=p.get("Vbias_target", NAN),
@@ -430,14 +514,18 @@ class _PowerSweepWorker(QObject):
                     self.log.emit(
                         f"[{_ts()}] Gate return-to-zero failed: {exc}"
                     )
-            # return stage to minimum position
-            try:
-                stage.move_to(stage.minimum_position)
-                self.log.emit(
-                    f"[{_ts()}] Stage returned to minimum position."
-                )
-            except Exception as exc:
-                self.log.emit(f"[{_ts()}] Stage return failed: {exc}")
+            # restore the selected actuator to its pre-sweep position
+            if p.get("return_motion_to_start", True):
+                try:
+                    motion.move_to(start_position)
+                    self.log.emit(
+                        f"[{_ts()}] {motion_label} returned to its starting "
+                        f"position ({start_position:.3f} {motion_unit})."
+                    )
+                except Exception as exc:
+                    self.log.emit(
+                        f"[{_ts()}] {motion_label} return failed: {exc}"
+                    )
 
         if self._stop.is_set():
             self.log.emit(
@@ -449,11 +537,12 @@ class _PowerSweepWorker(QObject):
 
 # ── panel ──────────────────────────────────────────────────────────────────────
 class PowerSweepPanel(QWidget):
-    """Power-dependent measurement tab.
+    """Motion-dependent measurement tab.
 
     Usage:
         panel = PowerSweepPanel(
-            lf6_ctrl=lf6, stage_ctrl=stg, pm_ctrl=pm, smu_ctrl=smu
+            lf6_ctrl=lf6, stage_ctrl=stg, rotation_ctrl=rot,
+            pm_ctrl=pm, smu_ctrl=smu
         )
     """
 
@@ -461,6 +550,7 @@ class PowerSweepPanel(QWidget):
         self,
         lf6_ctrl=None,
         stage_ctrl=None,
+        rotation_ctrl=None,
         pm_ctrl=None,
         smu_ctrl=None,
         parent: Optional[QWidget] = None,
@@ -468,6 +558,7 @@ class PowerSweepPanel(QWidget):
         super().__init__(parent)
         self._lf6 = lf6_ctrl
         self._stg = stage_ctrl
+        self._rot = rotation_ctrl
         self._pm = pm_ctrl
         self._smu = smu_ctrl
         self._worker: Optional[_PowerSweepWorker] = None
@@ -479,6 +570,7 @@ class PowerSweepPanel(QWidget):
         self._parse_timer.timeout.connect(self._update_position_preview)
         self._build()
         self._wire()
+        self._on_motion_changed()
         self._update_position_preview()
 
     # ── build ─────────────────────────────────────────────────────────────────
@@ -503,18 +595,23 @@ class PowerSweepPanel(QWidget):
         scroll.setWidget(left)
         splitter.addWidget(scroll)
 
-        # Stage positions
-        pos_grp = QGroupBox("Stage Positions")
-        pos_form = QFormLayout(pos_grp)
+        # Sweep motion
+        self._motion_grp = QGroupBox("Sweep Motion")
+        pos_form = QFormLayout(self._motion_grp)
         pos_form.setContentsMargins(6, 4, 6, 4)
         pos_form.setSpacing(3)
+        self._motion_combo = QComboBox()
+        for key, spec in _MOTION_SPECS.items():
+            self._motion_combo.addItem(spec["label"], key)
+        pos_form.addRow("Actuator:", self._motion_combo)
         self._pos_input = QLineEdit("(0, 50, 51)")
         self._pos_input.setToolTip(
             "Tuple (start, stop, count) → linspace\n"
             "List [v1, v2, ...] → exact positions\n"
             "Single number → one position"
         )
-        pos_form.addRow("Input:", self._pos_input)
+        self._motion_input_lbl = QLabel("Positions:")
+        pos_form.addRow(self._motion_input_lbl, self._pos_input)
         self._pos_preview_lbl = QLabel("")
         self._pos_preview_lbl.setStyleSheet("color: #444; font-size: 10px;")
         self._pos_preview_lbl.setTextInteractionFlags(
@@ -525,7 +622,18 @@ class PowerSweepPanel(QWidget):
         self._pos_count_lbl = QLabel("")
         self._pos_count_lbl.setStyleSheet("color: gray; font-size: 10px;")
         pos_form.addRow("", self._pos_count_lbl)
-        left_lay.addWidget(pos_grp)
+        self._motion_settle_spin = QDoubleSpinBox()
+        self._motion_settle_spin.setRange(0.0, 60.0)
+        self._motion_settle_spin.setDecimals(3)
+        self._motion_settle_spin.setValue(0.3)
+        self._motion_settle_spin.setSuffix(" s")
+        pos_form.addRow("Settle after move:", self._motion_settle_spin)
+        self._return_motion_chk = QCheckBox(
+            "Return actuator to starting position after sweep"
+        )
+        self._return_motion_chk.setChecked(True)
+        pos_form.addRow("", self._return_motion_chk)
+        left_lay.addWidget(self._motion_grp)
 
         # Optical settings
         opt_grp = QGroupBox("Optical Settings")
@@ -613,7 +721,7 @@ class PowerSweepPanel(QWidget):
         meta_form.addRow("Point:", self._point_edit)
         self._laser_edit = QLineEdit("730")
         meta_form.addRow("Laser (nm):", self._laser_edit)
-        self._subfolder_edit = QLineEdit("power_sweep")
+        self._subfolder_edit = QLineEdit("motion_sweep")
         meta_form.addRow("Subfolder:", self._subfolder_edit)
         self._filename_lbl = QLabel("")
         self._filename_lbl.setStyleSheet(
@@ -634,9 +742,27 @@ class PowerSweepPanel(QWidget):
         self._stage_status = QLabel("○ Not connected")
         self._stage_status.setStyleSheet("color: gray; font-weight: bold;")
         hw_form.addRow("Stage:", self._stage_status)
-        self._pm_status = QLabel("○ Not connected")
-        self._pm_status.setStyleSheet("color: gray; font-weight: bold;")
+        self._rot1_status = QLabel("○ Not connected")
+        self._rot1_status.setStyleSheet("color: gray; font-weight: bold;")
+        hw_form.addRow("Rot1:", self._rot1_status)
+        self._rot2_status = QLabel("○ Not connected")
+        self._rot2_status.setStyleSheet("color: gray; font-weight: bold;")
+        hw_form.addRow("Rot2:", self._rot2_status)
+        self._pm_status = QLabel("○ Not connected (optional)")
+        self._pm_status.setStyleSheet(
+            "color: #9a6700; font-weight: bold;"
+        )
         hw_form.addRow("PM:", self._pm_status)
+        self._pm_notice_lbl = QLabel(
+            "PM100D is not connected. The sweep can still run, but no "
+            "optical power values will be saved."
+        )
+        self._pm_notice_lbl.setWordWrap(True)
+        self._pm_notice_lbl.setStyleSheet(
+            "color: #9a6700; background: #fff8c5; border: 1px solid #d4a72c;"
+            " border-radius: 3px; padding: 4px; font-size: 10px;"
+        )
+        hw_form.addRow("", self._pm_notice_lbl)
         self._lf6_status = QLabel("○ Not connected")
         self._lf6_status.setStyleSheet("color: gray; font-weight: bold;")
         hw_form.addRow("LF6:", self._lf6_status)
@@ -681,7 +807,7 @@ class PowerSweepPanel(QWidget):
         # Controls
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(8)
-        self._run_btn = QPushButton("▶  Run Power Sweep")
+        self._run_btn = QPushButton("▶  Run Motion Sweep")
         self._run_btn.setMinimumHeight(32)
         self._run_btn.setMinimumWidth(150)
         self._run_btn.setStyleSheet(
@@ -727,6 +853,10 @@ class PowerSweepPanel(QWidget):
         self._pos_input.textChanged.connect(
             lambda _: self._parse_timer.start()
         )
+        self._motion_combo.currentIndexChanged.connect(
+            self._on_motion_changed
+        )
+        self._motion_settle_spin.valueChanged.connect(self._update_est)
         for w in (
             self._center_spin, self._exp_spin, self._frames_spin,
             self._pm_wl_spin,
@@ -750,6 +880,12 @@ class PowerSweepPanel(QWidget):
                 self._on_stage_connected(
                     getattr(self._stg, "backend_key", "")
                 )
+        if self._rot is not None:
+            self._rot.connected.connect(self._on_rotation_connected)
+            self._rot.disconnected.connect(self._on_rotation_disconnected)
+            for slot in ("rot1", "rot2"):
+                if self._rot.is_connected(slot):
+                    self._set_rotation_status(slot, True)
         if self._pm is not None:
             self._pm.connected.connect(self._on_pm_connected)
             self._pm.disconnected.connect(self._on_pm_disconnected)
@@ -781,6 +917,11 @@ class PowerSweepPanel(QWidget):
         """Capture setup controls, excluding run progress, plots, and hardware state."""
         return {
             "positions": self._pos_input.text(),
+            "motion_axis": self._motion_combo.currentData() or "stage",
+            "motion_settle_s": float(self._motion_settle_spin.value()),
+            "return_motion_to_start": bool(
+                self._return_motion_chk.isChecked()
+            ),
             "center_nm": float(self._center_spin.value()),
             "exposure_ms": float(self._exp_spin.value()),
             "frames": int(self._frames_spin.value()),
@@ -822,6 +963,7 @@ class PowerSweepPanel(QWidget):
             if isinstance(value, str):
                 widget.setText(value)
         for key, widget in (
+            ("motion_settle_s", self._motion_settle_spin),
             ("center_nm", self._center_spin),
             ("exposure_ms", self._exp_spin),
             ("frames", self._frames_spin),
@@ -837,6 +979,15 @@ class PowerSweepPanel(QWidget):
             self._apply_gates_chk.setChecked(bool(state["apply_gates"]))
         if "return_zero" in state:
             self._return_zero_chk.setChecked(bool(state["return_zero"]))
+        if "return_motion_to_start" in state:
+            self._return_motion_chk.setChecked(
+                bool(state["return_motion_to_start"])
+            )
+        motion_axis = state.get("motion_axis", "stage")
+        if isinstance(motion_axis, str):
+            index = self._motion_combo.findData(motion_axis)
+            if index >= 0:
+                self._motion_combo.setCurrentIndex(index)
         sizes = state.get("splitter_sizes")
         if isinstance(sizes, list) and len(sizes) == 2:
             try:
@@ -846,13 +997,29 @@ class PowerSweepPanel(QWidget):
         self._update_position_preview()
         self._update_filename_preview()
 
+    def _on_motion_changed(self, _index=None):
+        key = self._motion_combo.currentData() or "stage"
+        spec = _MOTION_SPECS[key]
+        self._motion_input_lbl.setText(f"{spec['value_label']}:")
+        unit = spec["unit"]
+        if key == "stage" and self._stg is not None and self._stg.is_connected:
+            unit = getattr(self._stg.adapter, "position_unit", unit)
+        self._pos_input.setToolTip(
+            f"Values are interpreted in {unit}.\n"
+            "Tuple (start, stop, count) → linspace\n"
+            "List [v1, v2, ...] → exact values\n"
+            "Single number → one value"
+        )
+        self._update_position_preview()
+        self._update_filename_preview()
+
     # ── position preview ──────────────────────────────────────────────────────
 
     @Slot()
     def _update_position_preview(self):
         text = self._pos_input.text()
         try:
-            self._positions = _parse_stage_positions(text)
+            self._positions = _parse_sweep_values(text)
         except Exception as exc:
             self._pos_preview_lbl.setText(f"⚠ {exc}")
             self._pos_preview_lbl.setStyleSheet(
@@ -870,7 +1037,7 @@ class PowerSweepPanel(QWidget):
         )
         n = len(self._positions)
         self._pos_count_lbl.setText(
-            f"{n} position{'s' if n != 1 else ''}"
+            f"{n} value{'s' if n != 1 else ''}"
         )
         self._update_est()
         self._update_filename_preview()
@@ -881,19 +1048,21 @@ class PowerSweepPanel(QWidget):
             return
         n = len(self._positions)
         exp_s = self._exp_spin.value() / 1000.0 * self._frames_spin.value()
-        per_pt = 1.5 + exp_s
+        per_pt = 1.2 + self._motion_settle_spin.value() + exp_s
         total_s = n * per_pt
         if total_s < 60:
-            self._est_lbl.setText(f"Est: ~{total_s:.0f} s ({n} pos)")
+            self._est_lbl.setText(f"Est: ~{total_s:.0f} s ({n} points)")
         elif total_s < 3600:
             m = total_s // 60
             s = int(total_s % 60)
-            self._est_lbl.setText(f"Est: ~{m:.0f} min {s} s ({n} pos)")
+            self._est_lbl.setText(
+                f"Est: ~{m:.0f} min {s} s ({n} points)"
+            )
         else:
             h = total_s // 3600
             m = int((total_s % 3600) // 60)
             self._est_lbl.setText(
-                f"Est: ~{h:.0f} h {m} min ({n} pos)"
+                f"Est: ~{h:.0f} h {m} min ({n} points)"
             )
 
     # ── filename preview ──────────────────────────────────────────────────────
@@ -902,7 +1071,7 @@ class PowerSweepPanel(QWidget):
     def _update_filename_preview(self):
         try:
             devid = self._devid_edit.text().strip()
-            sub = self._subfolder_edit.text().strip() or "power_sweep"
+            sub = self._subfolder_edit.text().strip() or "motion_sweep"
             laser = self._laser_edit.text().strip()
             center = self._center_spin.value()
             exp_ms = self._exp_spin.value()
@@ -918,7 +1087,10 @@ class PowerSweepPanel(QWidget):
                 center_nm=center,
                 exposure_ms=exp_ms,
                 accumulations=frames,
-                condition_label="power_sweep",
+                condition_label=(
+                    f"motion_sweep_"
+                    f"{self._motion_combo.currentData() or 'stage'}"
+                ),
             )
             enabled = ["laser_power", "center", "exposure", "condition"]
             base = build_base_filename(ctx, enabled)
@@ -950,6 +1122,8 @@ class PowerSweepPanel(QWidget):
         self._stage_status.setStyleSheet(
             "color: green; font-weight: bold;"
         )
+        if self._motion_combo.currentData() == "stage":
+            self._on_motion_changed()
 
     @Slot()
     def _on_stage_disconnected(self):
@@ -958,19 +1132,41 @@ class PowerSweepPanel(QWidget):
             "color: gray; font-weight: bold;"
         )
 
+    def _set_rotation_status(self, slot: str, connected: bool):
+        label = {
+            "rot1": self._rot1_status,
+            "rot2": self._rot2_status,
+        }.get(slot)
+        if label is None:
+            return
+        label.setText("● Connected" if connected else "○ Not connected")
+        label.setStyleSheet(
+            f"color: {'green' if connected else 'gray'}; font-weight: bold;"
+        )
+
+    @Slot(str, str)
+    def _on_rotation_connected(self, slot: str, _backend: str):
+        self._set_rotation_status(slot, True)
+
+    @Slot(str)
+    def _on_rotation_disconnected(self, slot: str):
+        self._set_rotation_status(slot, False)
+
     @Slot()
     def _on_pm_connected(self):
         self._pm_status.setText("● Connected")
         self._pm_status.setStyleSheet(
             "color: green; font-weight: bold;"
         )
+        self._pm_notice_lbl.setVisible(False)
 
     @Slot()
     def _on_pm_disconnected(self):
-        self._pm_status.setText("○ Not connected")
+        self._pm_status.setText("○ Not connected (optional)")
         self._pm_status.setStyleSheet(
-            "color: gray; font-weight: bold;"
+            "color: #9a6700; font-weight: bold;"
         )
+        self._pm_notice_lbl.setVisible(True)
 
     @Slot(list)
     def _on_lf6_connected(self, _experiments=None):
@@ -1020,29 +1216,38 @@ class PowerSweepPanel(QWidget):
     def _validate(self) -> bool:
         if self._positions.size == 0:
             QMessageBox.critical(
-                self, "No positions",
-                "Enter at least one stage position."
+                self, "No sweep values",
+                "Enter at least one position or angle."
             )
             return False
 
-        if self._stg is None or not self._stg.is_connected:
-            QMessageBox.critical(
-                self, "Stage not connected",
-                "Connect the linear stage before running a power sweep."
+        motion_key = self._motion_combo.currentData() or "stage"
+        motion_spec = _MOTION_SPECS[motion_key]
+        if motion_key == "stage":
+            motion_connected = (
+                self._stg is not None and self._stg.is_connected
             )
-            return False
-
-        if self._pm is None or not self._pm.is_connected:
+            adapter = self._stg.adapter if motion_connected else None
+        else:
+            motion_connected = (
+                self._rot is not None
+                and self._rot.is_connected(motion_key)
+            )
+            adapter = (
+                self._rot.adapter(motion_key) if motion_connected else None
+            )
+        if not motion_connected or adapter is None:
             QMessageBox.critical(
-                self, "Power meter not connected",
-                "Connect the PM100D before running a power sweep."
+                self, f"{motion_spec['label']} not connected",
+                f"Connect {motion_spec['label']} before running this "
+                "motion sweep."
             )
             return False
 
         if self._lf6 is None or not self._lf6.is_connected:
             QMessageBox.critical(
                 self, "LF6 not connected",
-                "Connect the spectrometer before running a power sweep."
+                "Connect the spectrometer before running a motion sweep."
             )
             return False
 
@@ -1055,16 +1260,20 @@ class PowerSweepPanel(QWidget):
                 )
                 return False
 
-        # Check positions against stage limits
-        adapter = self._stg.adapter
-        lo, hi = adapter.minimum_position, adapter.maximum_position
-        unit = getattr(adapter, "position_unit", "units")
+        # Check values against the selected actuator's limits.
+        if motion_key == "stage":
+            lo = float(adapter.minimum_position)
+            hi = float(adapter.maximum_position)
+            unit = getattr(adapter, "position_unit", "stage units")
+        else:
+            lo, hi = _ROTATION_MIN_DEG, _ROTATION_MAX_DEG
+            unit = "deg"
         for i, pos in enumerate(self._positions):
-            if pos < lo or pos > hi:
+            if not math.isfinite(float(pos)) or pos < lo or pos > hi:
                 QMessageBox.critical(
-                    self, "Position out of range",
-                    f"Position {pos:.3f} (index {i}) is outside the\n"
-                    f"stage range [{lo:g}, {hi:g}] {unit}."
+                    self, "Sweep value out of range",
+                    f"Value {pos:.3f} (index {i}) is outside the\n"
+                    f"{motion_spec['label']} range [{lo:g}, {hi:g}] {unit}."
                 )
                 return False
 
@@ -1090,7 +1299,7 @@ class PowerSweepPanel(QWidget):
             return
 
         devid = self._devid_edit.text().strip() or "SampleID"
-        sub = self._subfolder_edit.text().strip() or "power_sweep"
+        sub = self._subfolder_edit.text().strip() or "motion_sweep"
         out_path = str(Path(cfg.filename.base_out) / devid / sub)
 
         # read gate snapshot for filename token + cache setpoints for CSV
@@ -1111,7 +1320,10 @@ class PowerSweepPanel(QWidget):
                 center_nm=self._center_spin.value(),
                 exposure_ms=self._exp_spin.value(),
                 accumulations=self._frames_spin.value(),
-                condition_label="power_sweep",
+                condition_label=(
+                    f"motion_sweep_"
+                    f"{self._motion_combo.currentData() or 'stage'}"
+                ),
                 point=self._point_edit.text().strip(),
             )
             enabled = ["laser_power", "center", "exposure", "condition"]
@@ -1130,6 +1342,9 @@ class PowerSweepPanel(QWidget):
 
         params = {
             "positions": self._positions,
+            "motion_key": self._motion_combo.currentData() or "stage",
+            "motion_settle_s": self._motion_settle_spin.value(),
+            "return_motion_to_start": self._return_motion_chk.isChecked(),
             "center_nm": self._center_spin.value(),
             "exp_ms": self._exp_spin.value(),
             "frames": self._frames_spin.value(),
@@ -1147,6 +1362,7 @@ class PowerSweepPanel(QWidget):
         }
 
         self._run_btn.setEnabled(False)
+        self._motion_grp.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._progress.setValue(0)
         self._log.clear()
@@ -1154,7 +1370,7 @@ class PowerSweepPanel(QWidget):
         self._status_lbl.setStyleSheet("color: #b26a00; font-size: 11px;")
 
         self._worker = _PowerSweepWorker(
-            params, self._stg, self._pm, self._lf6, self._smu,
+            params, self._stg, self._rot, self._pm, self._lf6, self._smu,
         )
         self._thread = QThread()
         self._worker.moveToThread(self._thread)
@@ -1201,6 +1417,7 @@ class PowerSweepPanel(QWidget):
     @Slot()
     def _on_finished(self):
         self._run_btn.setEnabled(True)
+        self._motion_grp.setEnabled(True)
         self._stop_btn.setEnabled(False)
         if self._status_lbl.text() not in ("Error", "Stopping…"):
             self._status_lbl.setText("Ready")

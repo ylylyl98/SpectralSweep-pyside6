@@ -6,6 +6,7 @@ import math
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -17,6 +18,7 @@ from PySide6.QtGui import QFont, QPolygonF
 from PySide6.QtWidgets import (
     QButtonGroup,
     QAbstractSpinBox,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QGraphicsPolygonItem,
     QGraphicsRectItem,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -37,6 +40,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QTextEdit,
     QToolButton,
@@ -70,6 +75,8 @@ _SETTINGS_TWO_COLUMN_BREAKPOINT = 570
 _SPLITTER_HANDLE_WIDTH = 8
 _COMPACT_FIELD_MIN_WIDTH = 86
 _COMPACT_FIELD_MAX_WIDTH = 132
+_OPTICAL_TABLE_MIN_HEIGHT = 126
+_OPTICAL_TABLE_MAX_HEIGHT = 214
 
 
 class _NoWheelDoubleSpinBox(QDoubleSpinBox):
@@ -122,6 +129,291 @@ def _configure_compact_form(form: QFormLayout) -> None:
     form.setLabelAlignment(
         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
     )
+
+
+class _OpticalSequenceWidget(QWidget):
+    """Editable ordered list of optical recipes, one full map per row."""
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(7, 5, 7, 6)
+        layout.setSpacing(5)
+
+        caption = QLabel("One complete 2D map and output file per enabled row.")
+        caption.setWordWrap(True)
+        caption.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        caption.setStyleSheet("color: #5f6b78; font-size: 10px;")
+        layout.addWidget(caption)
+
+        self._table = QTableWidget(0, 5)
+        headers = ["Run", "Name", "Center λ", "Exposure", "Frames/EPF"]
+        self._table.setHorizontalHeaderLabels(headers)
+        for column, title in enumerate(headers):
+            self._table.horizontalHeaderItem(column).setToolTip(title)
+        self._table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+        self._table.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self._table.setMinimumWidth(0)
+        self._table.setMinimumHeight(_OPTICAL_TABLE_MIN_HEIGHT)
+        self._table.setMaximumHeight(_OPTICAL_TABLE_MAX_HEIGHT)
+        header = self._table.horizontalHeader()
+        header.setMinimumSectionSize(24)
+        for column in range(5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        for column, width in enumerate((26, 38, 60, 66, 60)):
+            self._table.setColumnWidth(column, width)
+        self._table.cellChanged.connect(self._on_cell_changed)
+        layout.addWidget(self._table)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(4)
+        self._add_btn = QPushButton("Add")
+        self._duplicate_btn = QPushButton("Duplicate")
+        self._remove_btn = QPushButton("Remove")
+        self._up_btn = QPushButton("↑")
+        self._down_btn = QPushButton("↓")
+        for button, width in (
+            (self._add_btn, 42),
+            (self._duplicate_btn, 64),
+            (self._remove_btn, 56),
+            (self._up_btn, 28),
+            (self._down_btn, 28),
+        ):
+            button.setFixedWidth(width)
+        for button in (
+            self._add_btn,
+            self._duplicate_btn,
+            self._remove_btn,
+            self._up_btn,
+            self._down_btn,
+        ):
+            button.setMinimumHeight(24)
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+
+        self._add_btn.clicked.connect(self._add_condition)
+        self._duplicate_btn.clicked.connect(self._duplicate_selected)
+        self._remove_btn.clicked.connect(self._remove_selected)
+        self._up_btn.clicked.connect(lambda: self._move_selected(-1))
+        self._down_btn.clicked.connect(lambda: self._move_selected(1))
+
+        self.set_conditions([
+            OpticalCondition(
+                enabled=True,
+                name="C1",
+                center_nm=float(cfg.lf6.center_nm),
+                exposure_ms=float(cfg.lf6.exposure_ms),
+                frames=int(cfg.lf6.accumulations),
+            )
+        ])
+
+    def _make_center_spin(self, value: float) -> _NoWheelDoubleSpinBox:
+        spin = _NoWheelDoubleSpinBox()
+        spin.setRange(200, 2000)
+        spin.setDecimals(2)
+        spin.setValue(float(value))
+        spin.setSuffix(" nm")
+        _set_compact_editor(spin, minimum=56, maximum=74)
+        spin.valueChanged.connect(self.changed)
+        return spin
+
+    def _make_exposure_spin(self, value: float) -> _NoWheelDoubleSpinBox:
+        spin = _NoWheelDoubleSpinBox()
+        spin.setRange(1, 600000)
+        spin.setDecimals(1)
+        spin.setValue(float(value))
+        spin.setSuffix(" ms")
+        _set_compact_editor(spin, minimum=60, maximum=78)
+        spin.valueChanged.connect(self.changed)
+        return spin
+
+    def _make_frames_spin(self, value: int) -> _NoWheelSpinBox:
+        spin = _NoWheelSpinBox()
+        spin.setRange(1, 1000)
+        spin.setValue(int(value))
+        _set_compact_editor(spin, minimum=48, maximum=62)
+        spin.valueChanged.connect(self.changed)
+        return spin
+
+    def _append_row(self, condition: OpticalCondition) -> None:
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        enabled_item = QTableWidgetItem()
+        enabled_item.setFlags(
+            Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsUserCheckable
+        )
+        enabled_item.setCheckState(
+            Qt.CheckState.Checked
+            if condition.enabled
+            else Qt.CheckState.Unchecked
+        )
+        self._table.setItem(row, 0, enabled_item)
+        self._table.setItem(row, 1, QTableWidgetItem(condition.name))
+        self._table.setCellWidget(row, 2, self._make_center_spin(condition.center_nm))
+        self._table.setCellWidget(row, 3, self._make_exposure_spin(condition.exposure_ms))
+        self._table.setCellWidget(row, 4, self._make_frames_spin(condition.frames))
+        self._set_row_enabled(row, condition.enabled)
+        self._table.setRowHeight(row, 28)
+
+    def _set_row_enabled(self, row: int, enabled: bool) -> None:
+        for column in (1, 2, 3, 4):
+            widget = self._table.cellWidget(row, column)
+            if widget is not None:
+                widget.setEnabled(enabled)
+        name_item = self._table.item(row, 1)
+        if name_item is not None:
+            flags = name_item.flags()
+            if enabled:
+                flags |= Qt.ItemFlag.ItemIsEditable
+            else:
+                flags &= ~Qt.ItemFlag.ItemIsEditable
+            name_item.setFlags(flags)
+
+    def _on_cell_changed(self, row: int, column: int) -> None:
+        if column == 0:
+            item = self._table.item(row, 0)
+            if item is not None:
+                self._set_row_enabled(
+                    row, item.checkState() == Qt.CheckState.Checked
+                )
+        self.changed.emit()
+
+    def conditions(self, *, enabled_only: bool = False) -> list[OpticalCondition]:
+        result: list[OpticalCondition] = []
+        for row in range(self._table.rowCount()):
+            enabled_item = self._table.item(row, 0)
+            name_item = self._table.item(row, 1)
+            center = self._table.cellWidget(row, 2)
+            exposure = self._table.cellWidget(row, 3)
+            frames = self._table.cellWidget(row, 4)
+            if not isinstance(center, QDoubleSpinBox):
+                continue
+            if not isinstance(exposure, QDoubleSpinBox):
+                continue
+            if not isinstance(frames, QSpinBox):
+                continue
+            condition = OpticalCondition(
+                enabled=(
+                    enabled_item is not None
+                    and enabled_item.checkState() == Qt.CheckState.Checked
+                ),
+                name=(name_item.text().strip() if name_item else "") or f"C{row + 1}",
+                center_nm=float(center.value()),
+                exposure_ms=float(exposure.value()),
+                frames=int(frames.value()),
+            )
+            if condition.enabled or not enabled_only:
+                result.append(condition)
+        return result
+
+    def set_conditions(self, conditions: list[OpticalCondition | dict]) -> None:
+        parsed: list[OpticalCondition] = []
+        for index, condition in enumerate(conditions):
+            if isinstance(condition, OpticalCondition):
+                parsed.append(condition)
+                continue
+            if not isinstance(condition, dict):
+                continue
+            try:
+                parsed.append(OpticalCondition(
+                    enabled=bool(condition.get("enabled", True)),
+                    name=str(condition.get("name", f"C{index + 1}")),
+                    center_nm=float(condition["center_nm"]),
+                    exposure_ms=float(
+                        condition.get("exposure_ms", condition.get("exp_ms"))
+                    ),
+                    frames=int(condition["frames"]),
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not parsed:
+            parsed = [OpticalCondition(True, "C1", 720.0, 30.0, 1)]
+        self._table.blockSignals(True)
+        self._table.setRowCount(0)
+        for condition in parsed:
+            self._append_row(condition)
+        self._table.blockSignals(False)
+        self._table.selectRow(0)
+        self.changed.emit()
+
+    def first_editors(self) -> tuple[QDoubleSpinBox, QDoubleSpinBox, QSpinBox]:
+        return (
+            self._table.cellWidget(0, 3),
+            self._table.cellWidget(0, 2),
+            self._table.cellWidget(0, 4),
+        )
+
+    def _selected_row(self) -> int:
+        row = self._table.currentRow()
+        return row if row >= 0 else max(0, self._table.rowCount() - 1)
+
+    def _add_condition(self) -> None:
+        conditions = self.conditions()
+        previous = conditions[-1]
+        conditions.append(OpticalCondition(
+            True,
+            f"C{len(conditions) + 1}",
+            previous.center_nm,
+            previous.exposure_ms,
+            previous.frames,
+        ))
+        self.set_conditions(conditions)
+        self._table.selectRow(len(conditions) - 1)
+
+    def _duplicate_selected(self) -> None:
+        conditions = self.conditions()
+        row = self._selected_row()
+        source = conditions[row]
+        conditions.insert(row + 1, OpticalCondition(
+            source.enabled,
+            f"{source.name}_copy",
+            source.center_nm,
+            source.exposure_ms,
+            source.frames,
+        ))
+        self.set_conditions(conditions)
+        self._table.selectRow(row + 1)
+
+    def _remove_selected(self) -> None:
+        if self._table.rowCount() <= 1:
+            return
+        conditions = self.conditions()
+        row = self._selected_row()
+        conditions.pop(row)
+        self.set_conditions(conditions)
+        self._table.selectRow(min(row, len(conditions) - 1))
+
+    def _move_selected(self, delta: int) -> None:
+        conditions = self.conditions()
+        row = self._selected_row()
+        target = row + int(delta)
+        if not 0 <= target < len(conditions):
+            return
+        conditions[row], conditions[target] = conditions[target], conditions[row]
+        self.set_conditions(conditions)
+        self._table.selectRow(target)
 
 
 class _CollapsibleSection(QFrame):
@@ -213,6 +505,26 @@ class _CollapsibleSection(QFrame):
 class _MegaSweepStopRequested(Exception):
     """Internal control-flow exception used to unwind to the safety ramp."""
     pass
+
+
+@dataclass(frozen=True)
+class OpticalCondition:
+    """One complete 2D-map acquisition recipe."""
+
+    enabled: bool
+    name: str
+    center_nm: float
+    exposure_ms: float
+    frames: int
+
+    def as_dict(self) -> dict:
+        return {
+            "enabled": bool(self.enabled),
+            "name": str(self.name),
+            "center_nm": float(self.center_nm),
+            "exposure_ms": float(self.exposure_ms),
+            "frames": int(self.frames),
+        }
 
 
 class CoordSystem(Enum):
@@ -489,11 +801,26 @@ def build_megasweep_filename(params: dict) -> str:
     parts = [sample, sweep_token, fixed_token]
     if laser_power_token:
         parts.append(laser_power_token)
+    condition_index = params.get("condition_index")
+    if condition_index is not None:
+        index_value = int(condition_index)
+        condition_name = sanitize_token(params.get("condition_name", ""))[:24]
+        condition_token = f"C{index_value:02d}"
+        default_names = {f"c{index_value}", f"c{index_value:02d}"}
+        if condition_name and condition_name.lower() not in default_names:
+            condition_token = f"{condition_token}_{condition_name}"
+        parts.append(condition_token)
     parts.extend([optical_token, tag])
     return "~".join(parts)
 
 
-def _build_csv_metadata_text(params: dict, wls: np.ndarray) -> str:
+def _build_csv_metadata_text(
+    params: dict,
+    wls: np.ndarray,
+    *,
+    status: str = "Running",
+    completed_points: int = 0,
+) -> str:
     axis_a_desc = params["axis_a_desc"]
     axis_b_desc = params["axis_b_desc"]
     ramp_rate = params["ramp_step"] / max(params["step_delay_s"], EPS)
@@ -505,6 +832,8 @@ def _build_csv_metadata_text(params: dict, wls: np.ndarray) -> str:
     lines = [
         "# MegaSweep Data File",
         f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"# Status: {status}",
+        f"# CompletedPoints: {int(completed_points)}",
         "#",
         "# === Sweep Configuration ===",
         f"# CoordinateSystem: {'Raw' if params['coord'] == CoordSystem.RAW else 'Physical'}",
@@ -559,9 +888,12 @@ def _build_csv_metadata_text(params: dict, wls: np.ndarray) -> str:
         f"# RampRate_Vs: {ramp_rate:.2f}",
         "#",
         "# === Optical ===",
+        f"# Condition_Index: {int(params.get('condition_index', 1))}",
+        f"# Condition_Count: {int(params.get('condition_count', 1))}",
+        f"# Condition_Name: {params.get('condition_name', 'C1')}",
         f"# Center_nm: {params['center_nm']:.2f}",
         f"# Exposure_ms: {params['exp_ms']}",
-        f"# Frames: {params['frames']}",
+        f"# Frames_EPF: {params['frames']}",
         f"# Wavelength_start_nm: {float(wls[0]):.2f}",
         f"# Wavelength_end_nm: {float(wls[-1]):.2f}",
         f"# Wavelength_pixels: {int(wls.size)}",
@@ -1496,6 +1828,7 @@ class _MegaSweepWorker(QObject):
     log = Signal(str)
     progress = Signal(int, int)
     point_done = Signal(int)
+    map_started = Signal(int, int, str)
     finished = Signal()
     error = Signal(str)
 
@@ -1535,35 +1868,136 @@ class _MegaSweepWorker(QObject):
         lf6 = self._lf6.setup if self._lf6 and self._lf6.is_connected else None
         out_path: Path = p["out_path"]
         out_path.mkdir(parents=True, exist_ok=True)
-        if lf6 is not None:
-            try:
-                if hasattr(lf6, "change_spectra_center"):
-                    lf6.change_spectra_center(f"{p['center_nm']:.0f}")
-                    time.sleep(0.15)
-                if hasattr(lf6, "change_expose_time"):
-                    lf6.change_expose_time(float(p["exp_ms"]))
-                    time.sleep(0.10)
-                for fn in ("set_accumulations", "set_frames", "change_frame_to_combine"):
-                    if hasattr(lf6, fn):
-                        getattr(lf6, fn)(int(p["frames"]))
-                        break
-            except Exception as exc:
-                self._emit_log(f"LF6 settings warning: {exc}")
+        points = p["valid_points"]
+        if not points:
+            raise RuntimeError("No sweep points within safety limits.")
 
+        conditions = [
+            dict(condition)
+            for condition in p.get("optical_conditions", [])
+            if bool(condition.get("enabled", True))
+        ]
+        if not conditions:
+            conditions = [{
+                "enabled": True,
+                "name": "C1",
+                "center_nm": float(p["center_nm"]),
+                "exposure_ms": float(p["exp_ms"]),
+                "frames": int(p["frames"]),
+            }]
+
+        map_count = len(conditions)
+        total_acquisitions = len(points) * map_count
+        self._emit_log(
+            f"Starting optical sequence: {map_count} complete map(s), "
+            f"{total_acquisitions} total acquisitions."
+        )
+        for map_offset, condition in enumerate(conditions):
+            if self._stop.is_set():
+                break
+            map_index = map_offset + 1
+            condition_name = str(condition.get("name", "")).strip() or f"C{map_index}"
+            map_p = dict(p)
+            map_p.update({
+                "condition_index": map_index,
+                "condition_count": map_count,
+                "condition_name": condition_name,
+                "center_nm": float(condition["center_nm"]),
+                "exp_ms": float(
+                    condition.get("exposure_ms", condition.get("exp_ms"))
+                ),
+                "frames": int(condition["frames"]),
+            })
+            map_p["base_name"] = build_megasweep_filename(map_p)
+            description = (
+                f"{condition_name}: {map_p['center_nm']:g} nm, "
+                f"{map_p['exp_ms']:g} ms, {map_p['frames']} EPF"
+            )
+            self.map_started.emit(map_index, map_count, description)
+            self._emit_log(f"Map {map_index}/{map_count} - {description}")
+            ramp_ok = True
+            try:
+                self._run_map(
+                    map_p,
+                    iv=iv,
+                    spec=spec,
+                    lf6=lf6,
+                    global_done_before=map_offset * len(points),
+                    total_acquisitions=total_acquisitions,
+                )
+            except _MegaSweepStopRequested:
+                break
+            finally:
+                # Each output file is a fully independent gate map. Return to
+                # the safe state before applying the next optical recipe.
+                ramp_ok = self._safe_ramp_to_zero(iv)
+            if not ramp_ok:
+                raise RuntimeError(
+                    "Return-to-zero failed; the optical sequence was aborted."
+                )
+
+        if self._stop.is_set():
+            self._emit_log("Optical sequence stopped. Completed files were preserved.")
+        else:
+            self._emit_log("Optical sequence complete.")
+
+    def _apply_optical_settings(self, p: dict, spec, lf6) -> None:
+        target = spec if spec is not None else lf6
+        if target is None:
+            return
+        try:
+            if not hasattr(target, "change_spectra_center"):
+                raise AttributeError("center-wavelength setter is unavailable")
+            target.change_spectra_center(float(p["center_nm"]))
+            time.sleep(0.15)
+
+            if not hasattr(target, "change_expose_time"):
+                raise AttributeError("exposure setter is unavailable")
+            target.change_expose_time(float(p["exp_ms"]))
+            time.sleep(0.10)
+
+            for fn in (
+                "set_accumulations",
+                "set_frames",
+                "change_frame_to_combine",
+            ):
+                if hasattr(target, fn):
+                    getattr(target, fn)(int(p["frames"]))
+                    break
+            else:
+                raise AttributeError("Frames/EPF setter is unavailable")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not apply optical condition "
+                f"{p.get('condition_index', 1)} ({p.get('condition_name', 'C1')}): {exc}"
+            ) from exc
+
+    def _run_map(
+        self,
+        p: dict,
+        *,
+        iv,
+        spec,
+        lf6,
+        global_done_before: int,
+        total_acquisitions: int,
+    ) -> None:
+        self._apply_optical_settings(p, spec, lf6)
+        points = p["valid_points"]
         self._emit_log("Acquiring wavelength calibration...")
         wls = _get_wavelengths(spec, lf6, float(p["center_nm"]), tol_nm=1.0)
         if wls.size <= 2:
-            raise RuntimeError("Could not obtain wavelength calibration. Aborting.")
+            raise RuntimeError(
+                f"Could not obtain wavelength calibration for "
+                f"{p['center_nm']:g} nm. Aborting."
+            )
 
+        out_path: Path = p["out_path"]
         fp = out_path / f"{p['base_name']}.csv"
         k = 2
         while fp.exists():
             fp = out_path / f"{p['base_name']}_{k:03d}.csv"
             k += 1
-
-        points = p["valid_points"]
-        if not points:
-            raise RuntimeError("No sweep points within safety limits.")
 
         cols = [
             f"{p['axis_a']}_axis_a_set", f"{p['axis_b']}_axis_b_set",
@@ -1573,8 +2007,12 @@ class _MegaSweepWorker(QObject):
         wl_str = np.array([f"{x:g}" for x in wls], dtype="U")
         header = np.concatenate((np.array(cols, dtype="U"), wl_str)).reshape(1, -1)
         meta_fp = fp.with_suffix(".meta.txt")
+        completed_points = 0
+        status = "Running"
         with open(meta_fp, "w", encoding="utf-8", newline="") as meta_fh:
-            meta_fh.write(_build_csv_metadata_text(p, wls))
+            meta_fh.write(_build_csv_metadata_text(
+                p, wls, status=status, completed_points=completed_points
+            ))
         with open(fp, "w", newline="") as fh:
             np.savetxt(fh, header, fmt="%s", delimiter=",")
         self._emit_log(f"Writing data to {fp}")
@@ -1642,9 +2080,13 @@ class _MegaSweepWorker(QObject):
                     ], dtype=np.float64)
                     row = np.concatenate((prefix, y)).reshape(1, -1)
                     np.savetxt(fh, row, fmt="%.6e", delimiter=",")
+                    completed_points = done
                     if done % _FLUSH_EVERY_POINTS == 0 or done == total:
                         fh.flush()
-                    self.progress.emit(done, total)
+                    self.progress.emit(
+                        global_done_before + done,
+                        total_acquisitions,
+                    )
                     if done % _PLOT_UPDATE_EVERY_POINTS == 0 or done == total:
                         self.point_done.emit(done)
                     point_msg = (
@@ -1655,18 +2097,28 @@ class _MegaSweepWorker(QObject):
                     if done == 1 or done % _UI_LOG_EVERY_POINTS == 0 or done == total:
                         self._emit_log(point_msg)
         except _MegaSweepStopRequested:
+            status = "Stopped"
             self._emit_log("Stopped by user.")
-        finally:
-            self._safe_ramp_to_zero(iv)
-
-        if self._stop.is_set():
-            self._emit_log(f"Stopped. Partial data saved -> {fp.name}")
+            raise
+        except Exception:
+            status = "Failed"
+            raise
         else:
-            self._emit_log(f"Done. Saved -> {fp.name}")
+            status = "Complete"
+        finally:
+            with open(meta_fp, "w", encoding="utf-8", newline="") as meta_fh:
+                meta_fh.write(_build_csv_metadata_text(
+                    p,
+                    wls,
+                    status=status,
+                    completed_points=completed_points,
+                ))
 
-    def _safe_ramp_to_zero(self, iv):
+        self._emit_log(f"Map complete. Saved -> {fp.name}")
+
+    def _safe_ramp_to_zero(self, iv) -> bool:
         if iv is None:
-            return
+            return True
         try:
             self._emit_log("Ramping all connected channels to 0 V...")
             iv.ramp_all_to_zero(
@@ -1674,8 +2126,10 @@ class _MegaSweepWorker(QObject):
                 delay_s=_SAFETY_RAMP_DELAY_S,
             )
             self._emit_log("All connected channels are at 0 V.")
+            return True
         except Exception as exc:
             self._emit_log(f"Return-to-zero failed: {exc}")
+            return False
 
 
 class MegaSweepPanel(QWidget):
@@ -1686,6 +2140,8 @@ class MegaSweepPanel(QWidget):
         self._worker: Optional[_MegaSweepWorker] = None
         self._thread: Optional[QThread] = None
         self._run_inner_count = 1
+        self._current_map_index = 0
+        self._map_count = 1
         self._last_preview: dict = {"all_points": [], "valid_points": []}
         self._run_failed = False
         self._step_linking = False
@@ -1809,31 +2265,11 @@ class MegaSweepPanel(QWidget):
             expanded=False,
         )
 
-        optical = QWidget()
-        optical_form = QFormLayout(optical)
-        _configure_compact_form(optical_form)
-        self._exp_spin = _NoWheelDoubleSpinBox()
-        self._exp_spin.setRange(1, 600000)
-        self._exp_spin.setDecimals(1)
-        self._exp_spin.setValue(cfg.lf6.exposure_ms)
-        self._exp_spin.setSuffix(" ms")
-        _set_compact_editor(self._exp_spin)
-        self._center_spin = _NoWheelDoubleSpinBox()
-        self._center_spin.setRange(200, 2000)
-        self._center_spin.setDecimals(2)
-        self._center_spin.setValue(cfg.lf6.center_nm)
-        self._center_spin.setSuffix(" nm")
-        _set_compact_editor(self._center_spin)
-        self._frames_spin = _NoWheelSpinBox()
-        self._frames_spin.setRange(1, 1000)
-        self._frames_spin.setValue(cfg.lf6.accumulations)
-        _set_compact_editor(self._frames_spin)
-        optical_form.addRow("Exposure", self._exp_spin)
-        optical_form.addRow("Center λ", self._center_spin)
-        optical_form.addRow("Frames", self._frames_spin)
+        self._optical_widget = _OpticalSequenceWidget()
+        self._sync_primary_optical_aliases()
         self._optical_group = _CollapsibleSection(
-            "Optical Settings",
-            optical,
+            "Optical Sequence",
+            self._optical_widget,
             expanded=True,
         )
 
@@ -2225,10 +2661,9 @@ class MegaSweepPanel(QWidget):
                     0, self._refresh_settings_scroll_range
                 )
             )
-        for w in (
-            self._exp_spin, self._center_spin, self._frames_spin,
-        ):
-            w.valueChanged.connect(self._schedule_preview)
+        self._optical_widget.changed.connect(
+            self._on_optical_sequence_changed
+        )
         for w in (self._sample_edit, self._tag_edit, self._laser_edit, self._power_edit):
             w.textChanged.connect(self._schedule_preview)
         self._run_btn.clicked.connect(self._on_run)
@@ -2236,6 +2671,19 @@ class MegaSweepPanel(QWidget):
         if self._smu is not None:
             self._smu.connected.connect(lambda *_: self._sync_vbias_availability())
             self._smu.disconnected.connect(self._sync_vbias_availability)
+
+    def _sync_primary_optical_aliases(self) -> None:
+        """Keep legacy first-row attributes available to callers and tests."""
+        exposure, center, frames = self._optical_widget.first_editors()
+        self._exp_spin = exposure
+        self._center_spin = center
+        self._frames_spin = frames
+
+    @Slot()
+    def _on_optical_sequence_changed(self) -> None:
+        self._sync_primary_optical_aliases()
+        self._install_settings_wheel_redirects()
+        self._schedule_preview()
 
     def capture_session_state(self) -> dict:
         """Capture the editable sweep recipe, never controller/runtime state."""
@@ -2248,6 +2696,8 @@ class MegaSweepPanel(QWidget):
                 "mode": widget._mode.currentText(),
             }
 
+        optical_conditions = self._optical_widget.conditions()
+        primary = optical_conditions[0]
         return {
             "coordinate_system": self._coord_widget.coord_system().value,
             "ratio": float(self._coord_widget.ratio()),
@@ -2266,10 +2716,13 @@ class MegaSweepPanel(QWidget):
                 "advanced_open": bool(self._timing_widget._toggle.isChecked()),
             },
             "optical": {
-                "exposure_ms": float(self._exp_spin.value()),
-                "center_nm": float(self._center_spin.value()),
-                "frames": int(self._frames_spin.value()),
+                "exposure_ms": float(primary.exposure_ms),
+                "center_nm": float(primary.center_nm),
+                "frames": int(primary.frames),
             },
+            "optical_sequence": [
+                condition.as_dict() for condition in optical_conditions
+            ],
             "metadata": {
                 "sample_id": self._sample_edit.text(),
                 "tag": self._tag_edit.text(),
@@ -2362,20 +2815,25 @@ class MegaSweepPanel(QWidget):
             if "advanced_open" in timing:
                 self._timing_widget._toggle.setChecked(bool(timing["advanced_open"]))
 
-        optical = state.get("optical")
-        if isinstance(optical, dict):
-            for key, spin in (
-                ("exposure_ms", self._exp_spin),
-                ("center_nm", self._center_spin),
-            ):
+        optical_sequence = state.get("optical_sequence")
+        if isinstance(optical_sequence, list) and optical_sequence:
+            self._optical_widget.set_conditions(optical_sequence)
+            self._sync_primary_optical_aliases()
+        else:
+            # Older sessions stored only one optical recipe.
+            optical = state.get("optical")
+            if isinstance(optical, dict):
                 try:
-                    spin.setValue(float(optical[key]))
+                    self._optical_widget.set_conditions([{
+                        "enabled": True,
+                        "name": "C1",
+                        "center_nm": float(optical["center_nm"]),
+                        "exposure_ms": float(optical["exposure_ms"]),
+                        "frames": int(optical["frames"]),
+                    }])
+                    self._sync_primary_optical_aliases()
                 except (KeyError, TypeError, ValueError):
                     pass
-            try:
-                self._frames_spin.setValue(int(optical["frames"]))
-            except (KeyError, TypeError, ValueError):
-                pass
         metadata = state.get("metadata")
         if isinstance(metadata, dict):
             for key, edit in (
@@ -2584,15 +3042,26 @@ class MegaSweepPanel(QWidget):
             f"{step_txt:<18} -> {desc['points']:>4d} pts"
         )
 
-    def _estimate_duration_s(self, valid_points: list[dict]) -> float:
-        exp_s = float(self._exp_spin.value()) / 1000.0 * int(self._frames_spin.value())
+    def _estimate_duration_s(
+        self,
+        valid_points: list[dict],
+        conditions: list[OpticalCondition] | None = None,
+    ) -> float:
+        if conditions is None:
+            conditions = self._optical_widget.conditions(enabled_only=True)
         ramp_rate = self._timing_widget.ramp_step() / max(self._timing_widget.step_delay_s(), EPS)
         avg_ramp_time = self._timing_widget.ramp_step() / max(ramp_rate, EPS)
-        return len(valid_points) * (
+        common_per_point = (
             self._timing_widget.settle()
             + avg_ramp_time
-            + exp_s
             + self._timing_widget.extra_overhead_s()
+        )
+        return sum(
+            len(valid_points) * (
+                common_per_point
+                + condition.exposure_ms / 1000.0 * condition.frames
+            )
+            for condition in conditions
         )
 
     def _format_duration(self, total_s: float) -> str:
@@ -2673,7 +3142,11 @@ class MegaSweepPanel(QWidget):
         )
 
         fixed_txt = ", ".join(f"{k} = {v:.4f} V" for k, v in data["fixed"].items()) if data["fixed"] else "None"
-        est_s = self._estimate_duration_s(valid_points)
+        conditions = self._optical_widget.conditions(enabled_only=True)
+        est_s = self._estimate_duration_s(valid_points, conditions)
+        preview_condition = conditions[0] if conditions else OpticalCondition(
+            False, "None", self._center_spin.value(), self._exp_spin.value(), self._frames_spin.value()
+        )
         filename_preview = build_megasweep_filename({
             "coord": data["coord"],
             "axis_a": data["axis_a"],
@@ -2682,9 +3155,12 @@ class MegaSweepPanel(QWidget):
             "axis_b_desc": self._axis_b.describe(),
             "fixed": data["fixed"],
             "ratio": data["ratio"],
-            "center_nm": float(self._center_spin.value()),
-            "exp_ms": float(self._exp_spin.value()),
-            "frames": int(self._frames_spin.value()),
+            "center_nm": float(preview_condition.center_nm),
+            "exp_ms": float(preview_condition.exposure_ms),
+            "frames": int(preview_condition.frames),
+            "condition_index": 1,
+            "condition_count": len(conditions),
+            "condition_name": preview_condition.name,
             "laser_nm": self._laser_edit.text().strip(),
             "power_uw": self._power_edit.text().strip(),
             "tag": self._tag_edit.text().strip() or "2DSweep",
@@ -2694,7 +3170,10 @@ class MegaSweepPanel(QWidget):
         sample = self._sample_edit.text().strip() or "SampleID"
         folder_preview = Path(cfg.filename.base_out) / sample / "megasweep"
         full_preview = folder_preview / f"{filename_preview}.csv"
-        exp_s_per_pt = float(self._exp_spin.value()) / 1000.0 * int(self._frames_spin.value())
+        optical_txt = "; ".join(
+            f"{index}: {condition.center_nm:g} nm/{condition.exposure_ms:g} ms/{condition.frames} EPF"
+            for index, condition in enumerate(conditions, start=1)
+        ) or "No enabled conditions"
         lines = [
             self._format_axis_summary(f"Outer ({data['axis_a']})", self._axis_a.describe()),
             self._format_axis_summary(f"Inner ({data['axis_b']})", self._axis_b.describe()),
@@ -2702,14 +3181,18 @@ class MegaSweepPanel(QWidget):
             f"Folder:           {folder_preview}",
             f"Filename:         {filename_preview}.csv",
             f"Full path:        {full_preview}",
+            f"Optical maps:     {len(conditions)} ({optical_txt})",
             f"Total planned:    {len(all_points)}    In-bounds: {len(valid_points)}    Skipped: {skipped}",
+            f"Total spectra:    {len(valid_points) * len(conditions)}",
             f"Est. duration:    {self._format_duration(est_s)}   "
-            f"(settle {self._timing_widget.settle():.3f} s + exposure {exp_s_per_pt:.3f} s + "
-            f"ramp ~{self._timing_widget.step_delay_s():.3f} s + overhead {self._timing_widget.extra_overhead_s():.3f} s, per pt)",
+            f"({len(conditions)} complete gate map(s), with a zero ramp between maps)",
             f"Run output cadence: flush every {_FLUSH_EVERY_POINTS} pts, plot every {_PLOT_UPDATE_EVERY_POINTS} pts, UI log every {_UI_LOG_EVERY_POINTS} pts",
         ]
         color = "#5a5a5a"
-        if len(valid_points) == 0:
+        if not conditions:
+            color = "#b42318"
+            lines.append("Warning: Enable at least one optical condition.")
+        elif len(valid_points) == 0:
             color = "#b42318"
             lines.append("Warning: No points within the safety limits.")
         elif len(all_points) > 0 and len(valid_points) < max(1, int(0.1 * len(all_points))):
@@ -2724,14 +3207,16 @@ class MegaSweepPanel(QWidget):
         data = dict(self._last_preview)
         sample = self._sample_edit.text().strip() or "SampleID"
         tag = self._tag_edit.text().strip() or "2DSweep"
-        exp_ms = float(self._exp_spin.value())
-        frames = int(self._frames_spin.value())
-        center_nm = float(self._center_spin.value())
-        exp_s = f"{int(exp_ms // 1000)}" if exp_ms % 1000 == 0 else f"{exp_ms / 1000:.3g}"
+        conditions = self._optical_widget.conditions()
+        enabled_conditions = [c for c in conditions if c.enabled]
+        primary = enabled_conditions[0] if enabled_conditions else conditions[0]
         data.update({
-            "exp_ms": exp_ms,
-            "center_nm": center_nm,
-            "frames": frames,
+            "exp_ms": float(primary.exposure_ms),
+            "center_nm": float(primary.center_nm),
+            "frames": int(primary.frames),
+            "optical_conditions": [
+                condition.as_dict() for condition in conditions
+            ],
             "sample": sample,
             "tag": tag,
             "snake": self._axis_selector.snake(),
@@ -2746,10 +3231,27 @@ class MegaSweepPanel(QWidget):
             "lf6_connected": bool(self._lf6 is not None and self._lf6.is_connected),
             "out_path": Path(cfg.filename.base_out) / sample / "megasweep",
         })
+        data.update({
+            "condition_index": 1,
+            "condition_count": len(enabled_conditions),
+            "condition_name": primary.name,
+        })
         data["base_name"] = build_megasweep_filename(data)
         return data
 
     def _validate(self, params: dict) -> bool:
+        enabled_conditions = [
+            condition
+            for condition in params.get("optical_conditions", [])
+            if bool(condition.get("enabled", True))
+        ]
+        if not enabled_conditions:
+            QMessageBox.critical(
+                self,
+                "No optical conditions",
+                "Enable at least one optical condition before running.",
+            )
+            return False
         if params["coord"] == CoordSystem.PHYSICAL and abs(params["ratio"]) < EPS:
             QMessageBox.critical(self, "Invalid ratio", "Ratio r = 0 is invalid - the doping/efield transform is undefined.")
             return False
@@ -2773,8 +3275,21 @@ class MegaSweepPanel(QWidget):
             reply = QMessageBox.warning(self, "Many points will be skipped", f"Only {valid} of {total} planned points are within the safety limits.\nContinue anyway?", QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel)
             if reply != QMessageBox.Ok:
                 return False
-        if self._estimate_duration_s(params["valid_points"]) > 3600:
-            reply = QMessageBox.warning(self, "Long sweep", f"Estimated sweep time is {self._format_duration(self._estimate_duration_s(params['valid_points']))}.\nContinue anyway?", QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel)
+        estimate = self._estimate_duration_s(
+            params["valid_points"],
+            [
+                OpticalCondition(
+                    True,
+                    str(condition.get("name", "")),
+                    float(condition["center_nm"]),
+                    float(condition["exposure_ms"]),
+                    int(condition["frames"]),
+                )
+                for condition in enabled_conditions
+            ],
+        )
+        if estimate > 3600:
+            reply = QMessageBox.warning(self, "Long sweep", f"Estimated sequence time is {self._format_duration(estimate)}.\nContinue anyway?", QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel)
             if reply != QMessageBox.Ok:
                 return False
         if not self._vbias_available() and abs(params["fixed"].get("Vbias", 0.0)) > EPS:
@@ -2816,6 +3331,7 @@ class MegaSweepPanel(QWidget):
         self._worker.log.connect(self._on_log)
         self._worker.progress.connect(self._on_progress)
         self._worker.point_done.connect(self._on_point_done)
+        self._worker.map_started.connect(self._on_map_started)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._thread.start()
@@ -2841,6 +3357,22 @@ class MegaSweepPanel(QWidget):
     @Slot(int, int)
     def _on_progress(self, done: int, total: int):
         self._progress.setValue(int(100 * done / total) if total > 0 else 0)
+
+    @Slot(int, int, str)
+    def _on_map_started(
+        self,
+        map_index: int,
+        map_count: int,
+        description: str,
+    ) -> None:
+        self._current_map_index = int(map_index)
+        self._map_count = max(1, int(map_count))
+        self._preview.clear_progress()
+        self._set_status(
+            f"Map {map_index}/{map_count}",
+            "#b26a00",
+        )
+        self._status_lbl.setToolTip(description)
 
     @Slot(int)
     def _on_point_done(self, done: int):
