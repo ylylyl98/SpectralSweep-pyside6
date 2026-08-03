@@ -160,6 +160,10 @@ class SettingsPanel(QWidget):
         self._power_coeff.setDecimals(6)
         self._power_coeff.setSingleStep(0.1)
         self._power_coeff.setFixedWidth(130)
+        self._power_coeff.setToolTip(
+            "Multiplier applied to manual or PM100D power in generated filenames. "
+            "Example: 1100 µW × 2 = 2200 µW."
+        )
         form.addRow("Power coefficient:", self._power_coeff)
 
         hint = QLabel(

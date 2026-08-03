@@ -2600,7 +2600,7 @@ class PresetsPanel(QWidget):
         self._power_edit     = QLineEdit(); self._power_edit.setPlaceholderText("Power µW")
         self._power_edit.setFixedWidth(80)
         self._power_edit.setToolTip(
-            "Laser power in µW — recorded in filename.\n"
+            "Laser power in µW — multiplied by Coeff for the filename.\n"
             "Overwritten by a live PM100D reading when MeasurePower is enabled."
         )
         self._subfolder_edit = QLineEdit(); self._subfolder_edit.setPlaceholderText("Initial Data")
@@ -2626,7 +2626,8 @@ class PresetsPanel(QWidget):
         self._power_coeff_edit.setFixedWidth(66)
         self._power_coeff_edit.setText(f"{float(cfg.filename.power_coefficient):g}")
         self._power_coeff_edit.setToolTip(
-            "Multiplier applied to measured power before it is written into filenames."
+            "Multiplier applied to manual or measured power before it is written "
+            "into filenames. Example: Power 1100 × Coeff 2 = 2200 µW."
         )
         self._tag_edit.hide()
         self._tag_label.hide()

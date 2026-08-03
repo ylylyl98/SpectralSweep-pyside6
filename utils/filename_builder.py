@@ -153,15 +153,18 @@ def format_stage_position_token(position: Any) -> str:
 
 
 def resolve_power_uw(ctx: FilenameContext) -> Tuple[Optional[float], str]:
-    corrected = None
-    if ctx.measure_power and ctx.measured_power_uw is not None:
-        corrected = float(ctx.measured_power_uw) * float(ctx.power_coefficient)
-        return corrected, "measured"
+    coefficient = _coerce_float(ctx.power_coefficient)
+    if coefficient is None:
+        coefficient = 1.0
 
-    nominal = _coerce_float(ctx.nominal_power_uw)
-    if nominal is None:
+    measured = _coerce_float(ctx.measured_power_uw)
+    if ctx.measure_power and measured is not None:
+        return measured * coefficient, "measured"
+
+    manual = _coerce_float(ctx.nominal_power_uw)
+    if manual is None:
         return None, "missing"
-    return nominal, "nominal"
+    return manual * coefficient, "nominal"
 
 
 def format_power_uw_decimal(value: float) -> str:
