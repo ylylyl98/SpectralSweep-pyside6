@@ -1,6 +1,6 @@
 # SpectralSweep
 
-SpectralSweep is a PySide6 desktop application for spectra acquisition and sweep-driven optical measurement workflows. The repository is now organized around the current desktop UI and its instrument-control runtime. The older LabRunner/Streamlit implementation is no longer a supported product.
+SpectralSweep is a PySide6 desktop application for spectra acquisition and sweep-driven optical measurement workflows. The repository is organized around the current desktop UI and its instrument-control runtime.
 
 The application is intended for lab setups that combine Princeton Instruments LightField spectroscopy with voltage control, motion control, and optional optical power measurements. The desktop UI keeps instrument connections, sweep setup, live preview, and data capture in one operator-facing workflow.
 
@@ -52,14 +52,7 @@ pip install -r requirements.txt
 SpectralSweep-pyside6/
 |-- app/
 |   |-- devices/
-|   |-- engine/
-|   `-- steps/
-|-- archive_streamlit_labrunner/
-|   |-- app/
-|   |-- docs/
-|   |-- misc/
-|   |-- requirements/
-|   `-- scripts/
+|   `-- engine/
 |-- controllers/
 |-- ui/
 |-- utils/
@@ -68,24 +61,20 @@ SpectralSweep-pyside6/
 |-- launch.bat
 |-- main.py
 |-- requirements.txt
-|-- TLPM.py
 |-- TLPMX.py
-|-- TLPM_64.dll
 `-- TLPMX_64.dll
 ```
 
 ## Folder Guide
 
 - `app/`
-  Shared runtime pieces used by the desktop UI: hardware adapters, sweep engine helpers, CSV writing, and recipe/step definitions.
+  Shared runtime pieces used by the desktop UI: hardware adapters and CSV writing.
 - `controllers/`
   Qt-facing controller layer that owns live instrument connections and exposes them to the UI panels.
 - `ui/`
   PySide6 widgets, tabs, and the main application window.
 - `utils/`
   Non-UI support code such as persistent config handling and LF6 mocking.
-- `archive_streamlit_labrunner/`
-  Archived LabRunner / Streamlit files retained for reference only. They are not part of the supported application.
 
 ## Main Runtime Modules
 
@@ -108,7 +97,7 @@ Some modules depend on lab-specific hardware and vendor runtimes:
 
 - `lf6_automation.py` integrates with Princeton Instruments LightField through `pythonnet`.
 - `iv_automation.py` uses VISA and NI-DAQ related interfaces for supported measurement workflows.
-- `TLPMX.py` and the bundled DLLs support Thorlabs PM100D discovery and readout.
+- `TLPMX.py` and its bundled DLL support Thorlabs PM100D discovery and readout.
 - Motion-stage adapters under `app/devices/` rely on the corresponding device libraries and connection paths available on the host machine.
 
 If you are working on the UI without hardware access, start with `python main.py --mock`.
@@ -146,7 +135,3 @@ Event Status Register Power-On bit, output state, and the oldest system error.
 A failed role is quarantined after the incident: the run does not resume, and a
 new run is blocked until the SMUs are disconnected and reconnected. The
 software never turns an output back on as part of diagnosis or recovery.
-
-## Legacy Cleanup Note
-
-The previous Streamlit/LabRunner implementation has been moved into `archive_streamlit_labrunner/` instead of being kept in the active application path. Those files are preserved only as a legacy reference and are no longer maintained as a supported workflow.

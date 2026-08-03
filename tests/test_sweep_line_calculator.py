@@ -27,11 +27,39 @@ if importlib.util.find_spec("pylablib") is None:
     sys.modules.setdefault("pylablib", pylablib_stub)
     sys.modules.setdefault("pylablib.devices", devices_stub)
 
-from ui.presets_panel import BATCH_SCHEMA, PresetsPanel, _solve_condition_line
+from ui.presets_panel import (
+    BATCH_SCHEMA,
+    PresetsPanel,
+    _parse_sweep_constants,
+    _solve_condition_line,
+)
 from utils.when_condition import evaluate_when_expression, validate_when_expression
 
 
 class SweepLineSolverTests(unittest.TestCase):
+    def test_constant_parser_accepts_arrays_and_inclusive_ranges(self):
+        self.assertEqual(_parse_sweep_constants("4"), [4.0])
+        self.assertEqual(
+            _parse_sweep_constants("[-4, -2, 0, 2, 4]"),
+            [-4.0, -2.0, 0.0, 2.0, 4.0],
+        )
+        self.assertEqual(
+            _parse_sweep_constants("-4:2:4, 7"),
+            [-4.0, -2.0, 0.0, 2.0, 4.0, 7.0],
+        )
+        self.assertEqual(
+            _parse_sweep_constants("4:-2:-4"),
+            [4.0, 2.0, 0.0, -2.0, -4.0],
+        )
+
+    def test_constant_parser_rejects_invalid_ranges(self):
+        with self.assertRaisesRegex(ValueError, "zero step"):
+            _parse_sweep_constants("-4:0:4")
+        with self.assertRaisesRegex(ValueError, "reverse the step sign"):
+            _parse_sweep_constants("-4:-1:4")
+        with self.assertRaisesRegex(ValueError, "At most 500"):
+            _parse_sweep_constants("-200:0.001:200")
+
     def test_constant_efield_line_is_clipped_by_doping_limits(self):
         result = _solve_condition_line(
             "−", 0.5, 0.0,
@@ -102,12 +130,63 @@ class SweepLinePanelTests(unittest.TestCase):
         self.assertAlmostEqual(restored._sweep_calc._efield_min_spin.value(), -2.25)
         self.assertAlmostEqual(restored._sweep_calc._efield_max_spin.value(), 3.25)
 
+    def test_constant_expression_round_trips_and_documents_range_syntax(self):
+        panel = PresetsPanel()
+        panel._sweep_calc._constant_edit.setText("[-4, 0, 4:2:8]")
+
+        restored = PresetsPanel()
+        restored.restore_session_state(panel.capture_session_state())
+
+        self.assertEqual(
+            restored._sweep_calc._constant_edit.text(),
+            "[-4, 0, 4:2:8]",
+        )
+        tooltip = restored._sweep_calc._constant_edit.toolTip()
+        self.assertIn("start:step:stop", tooltip)
+        self.assertIn("-4:2:4", tooltip)
+
+    def test_calculator_array_builds_and_bulk_inserts_all_rows(self):
+        panel = PresetsPanel()
+        calc = panel._sweep_calc
+        calc._op_combo.setCurrentText("−")
+        calc._ratio_spin.setValue(0.5)
+        calc._constant_edit.setText("-1:1:1")
+        calc._recalculate()
+
+        self.assertEqual(len(calc._calculated_rows), 3)
+        self.assertFalse(calc._multi_preview.isHidden())
+        self.assertEqual(calc._multi_preview.rowCount(), 3)
+        self.assertEqual(calc._multi_preview.columnCount(), 4)
+        self.assertEqual(
+            calc._multi_preview.horizontalScrollBarPolicy(),
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+        )
+        self.assertIn("Add All 3 Rows", calc._add_btn.text())
+        self.assertEqual(
+            [row["condition_label"] for row in calc._calculated_rows],
+            ["TG−0.5BG=-1", "TG−0.5BG=0", "TG−0.5BG=1"],
+        )
+
+        panel._batch_table.selectRow(0)
+        history_before = panel._batch_history_index
+        calc._on_add_clicked()
+
+        self.assertEqual(panel._batch_table.rowCount(), 4)
+        self.assertEqual(panel._batch_history_index, history_before + 1)
+        self.assertEqual(
+            [
+                panel._batch_table.item(row, BATCH_SCHEMA.index("condition_label")).text()
+                for row in range(1, 4)
+            ],
+            ["TG−0.5BG=-1", "TG−0.5BG=0", "TG−0.5BG=1"],
+        )
+
     def test_calculator_outputs_obey_physical_limits(self):
         panel = PresetsPanel()
         calc = panel._sweep_calc
         calc._op_combo.setCurrentText("−")
         calc._ratio_spin.setValue(0.5)
-        calc._constant_spin.setValue(0.0)
+        calc._constant_edit.setText("0")
         calc._vtg_min_spin.setValue(-10.0)
         calc._vtg_max_spin.setValue(10.0)
         calc._vbg_min_spin.setValue(-10.0)
@@ -134,7 +213,7 @@ class SweepLinePanelTests(unittest.TestCase):
         calc = panel._sweep_calc
         calc._op_combo.setCurrentText("−")
         calc._ratio_spin.setValue(1.05)
-        calc._constant_spin.setValue(40.0)
+        calc._constant_edit.setText("40")
         calc._vtg_min_spin.setValue(-25.0)
         calc._vtg_max_spin.setValue(30.0)
         calc._vbg_min_spin.setValue(-25.0)
@@ -159,7 +238,7 @@ class SweepLinePanelTests(unittest.TestCase):
         calc = panel._sweep_calc
         calc._op_combo.setCurrentText("−")
         calc._ratio_spin.setValue(1.05)
-        calc._constant_spin.setValue(39.0)
+        calc._constant_edit.setText("39")
         calc._vtg_min_spin.setValue(-25.0)
         calc._vtg_max_spin.setValue(30.0)
         calc._vbg_min_spin.setValue(-25.0)

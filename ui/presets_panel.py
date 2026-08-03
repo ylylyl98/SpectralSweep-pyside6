@@ -608,6 +608,63 @@ def _compute_frames_from_step(vbg_start: float, vbg_stop: float, vbg_step: float
     return max(2, int(round(vbg_range / max(float(vbg_step), 1e-12))) + 1)
 
 
+def _parse_sweep_constants(text: str, *, max_values: int = 500) -> List[float]:
+    """Parse one constant, a comma list, or inclusive start:step:stop ranges."""
+    expression = str(text).strip()
+    if not expression:
+        raise ValueError("Enter a constant or an array of constants.")
+    if expression.startswith("[") or expression.endswith("]"):
+        if not (expression.startswith("[") and expression.endswith("]")):
+            raise ValueError("Array brackets must include both '[' and ']'.")
+        expression = expression[1:-1].strip()
+    if not expression:
+        raise ValueError("The constant array is empty.")
+
+    values: List[float] = []
+    for raw_token in expression.split(","):
+        token = raw_token.strip()
+        if not token:
+            raise ValueError("Remove the empty item between commas.")
+        if ":" not in token:
+            try:
+                value = float(token)
+            except ValueError as exc:
+                raise ValueError(f"'{token}' is not a number.") from exc
+            if not np.isfinite(value):
+                raise ValueError(f"'{token}' must be a finite number.")
+            values.append(value)
+        else:
+            parts = [part.strip() for part in token.split(":")]
+            if len(parts) != 3 or any(not part for part in parts):
+                raise ValueError(
+                    f"'{token}' must use the range form start:step:stop."
+                )
+            try:
+                start, step, stop = (float(part) for part in parts)
+            except ValueError as exc:
+                raise ValueError(f"'{token}' contains a non-numeric range value.") from exc
+            if not all(np.isfinite(value) for value in (start, step, stop)):
+                raise ValueError(f"'{token}' must contain only finite numbers.")
+            if abs(step) < 1e-15:
+                raise ValueError(f"'{token}' has a zero step.")
+            if start != stop and (stop - start) * step < 0:
+                raise ValueError(
+                    f"'{token}' steps away from its stop value; reverse the step sign."
+                )
+            span = (stop - start) / step
+            count = 1 if start == stop else int(np.floor(span + 1e-12)) + 1
+            if len(values) + count > max_values:
+                raise ValueError(f"At most {max_values} constants can be calculated at once.")
+            values.extend(start + index * step for index in range(count))
+        if len(values) > max_values:
+            raise ValueError(f"At most {max_values} constants can be calculated at once.")
+
+    for value in values:
+        if value < -200.0 or value > 200.0:
+            raise ValueError("Constants must be between -200 and 200 V.")
+    return values
+
+
 def _format_condition_label(op: str, ratio: float, constant: float) -> str:
     def _fmt(x: float) -> str:
         if abs(x - round(x)) < 1e-12:
@@ -910,7 +967,7 @@ class _SafeSpinBox(QSpinBox):
 
 
 class _SweepLineCalculator(QGroupBox):
-    add_row_requested = Signal(dict)
+    add_rows_requested = Signal(list)
     expanded_changed = Signal(bool)
 
     def __init__(self, smu_ctrl=None, safe_jump_spin=None, parent=None):
@@ -919,6 +976,7 @@ class _SweepLineCalculator(QGroupBox):
         self._safe_jump_spin = safe_jump_spin
         self._label_auto = True
         self._body_visible = False
+        self._calculated_rows: List[dict] = []
         self._calc_timer = QTimer(self)
         self._calc_timer.setSingleShot(True)
         self._calc_timer.setInterval(50)
@@ -1028,20 +1086,27 @@ class _SweepLineCalculator(QGroupBox):
         )
         bg_lbl = QLabel("× BG =")
         bg_lbl.setStyleSheet("font-weight: 600;")
-        self._constant_spin = _SafeDoubleSpinBox()
-        self._constant_spin.setRange(-200.0, 200.0)
-        self._constant_spin.setDecimals(4)
-        self._constant_spin.setValue(0.0)
-        self._constant_spin.setMinimumWidth(96)
-        self._constant_spin.setSizePolicy(
+        self._constant_edit = QLineEdit("0")
+        self._constant_edit.setPlaceholderText("0  or  [-4, 0, 4]  or  -4:2:4")
+        self._constant_edit.setMinimumWidth(150)
+        self._constant_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._constant_edit.setToolTip(
+            "Enter one or more condition constants:\n"
+            "  Single value:  4\n"
+            "  Array:  [-4, -2, 0, 2, 4]\n"
+            "  Comma list:  -4, -2, 0, 2, 4\n"
+            "  Range:  -4:2:4  (start:step:stop)\n"
+            "Ranges include the stop when the step lands on it. Lists and ranges "
+            "can be mixed, for example: -4:2:0, 3, 5."
         )
         eq.addWidget(cond_lbl, 0, 0)
         eq.addWidget(tg_lbl, 0, 1)
         eq.addWidget(self._op_combo, 0, 2)
         eq.addWidget(self._ratio_spin, 0, 3)
         eq.addWidget(bg_lbl, 0, 4)
-        eq.addWidget(self._constant_spin, 0, 5)
+        eq.addWidget(self._constant_edit, 0, 5)
         eq.setColumnStretch(3, 1)
         eq.setColumnStretch(5, 1)
 
@@ -1201,6 +1266,46 @@ class _SweepLineCalculator(QGroupBox):
         )
         right_layout.addWidget(self._derived_range_lbl)
 
+        self._multi_preview = QTableWidget(0, 4)
+        self._multi_preview.setHorizontalHeaderLabels(
+            ["Condition", "Vtg start → stop", "Vbg start → stop", "Frames"]
+        )
+        self._multi_preview.verticalHeader().setVisible(False)
+        self._multi_preview.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._multi_preview.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self._multi_preview.setAlternatingRowColors(True)
+        self._multi_preview.setMaximumHeight(150)
+        self._multi_preview.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        preview_header = self._multi_preview.horizontalHeader()
+        for column in range(3):
+            preview_header.setSectionResizeMode(
+                column, QHeaderView.ResizeMode.Stretch
+            )
+        preview_header.setSectionResizeMode(
+            3, QHeaderView.ResizeMode.ResizeToContents
+        )
+        preview_header.setMinimumSectionSize(42)
+        for column, tooltip in enumerate(
+            (
+                "Generated condition label.",
+                "Top-gate voltage from sweep start to stop.",
+                "Back-gate voltage from sweep start to stop.",
+                "Number of sweep points.",
+            )
+        ):
+            header_item = self._multi_preview.horizontalHeaderItem(column)
+            if header_item is not None:
+                header_item.setToolTip(tooltip)
+        self._multi_preview.setToolTip(
+            "Preview of every batch row generated from the constant array."
+        )
+        self._multi_preview.hide()
+        right_layout.addWidget(self._multi_preview)
+
         row_c = QHBoxLayout()
         row_c.setSpacing(6)
         row_c.addWidget(QLabel("Frames"))
@@ -1240,7 +1345,6 @@ class _SweepLineCalculator(QGroupBox):
         for w in (
             self._op_combo,
             self._ratio_spin,
-            self._constant_spin,
             self._vbg_step_spin,
             self._vtg_min_spin,
             self._vtg_max_spin,
@@ -1257,7 +1361,7 @@ class _SweepLineCalculator(QGroupBox):
                 w.currentTextChanged.connect(self._on_equation_changed)
         self._op_combo.currentTextChanged.connect(self._on_equation_changed)
         self._ratio_spin.valueChanged.connect(self._on_equation_changed)
-        self._constant_spin.valueChanged.connect(self._on_equation_changed)
+        self._constant_edit.textChanged.connect(self._on_equation_changed)
         self._condition_edit.textEdited.connect(self._on_label_edited)
         self._frames_spin.valueChanged.connect(self._update_result_step_labels)
         for w in (self._vtg_start_spin, self._vtg_stop_spin, self._vbg_start_spin, self._vbg_stop_spin):
@@ -1274,6 +1378,7 @@ class _SweepLineCalculator(QGroupBox):
         self.expanded_changed.emit(bool(checked))
 
     def _schedule_recalc(self, *_args):
+        self._add_btn.setEnabled(False)
         self._calc_timer.start()
 
     def _on_equation_changed(self, *_args):
@@ -1282,6 +1387,7 @@ class _SweepLineCalculator(QGroupBox):
 
     def _on_label_edited(self, *_args):
         self._label_auto = False
+        self._schedule_recalc()
 
     def _set_status(self, text: str = "", color: str = "#666666"):
         self._status_lbl.setText(text)
@@ -1322,13 +1428,24 @@ class _SweepLineCalculator(QGroupBox):
         )
 
     def _calculated_row_error(self) -> Optional[str]:
+        return self._endpoint_error(
+            (
+                self._vbg_start_spin.value(),
+                self._vbg_stop_spin.value(),
+                self._vtg_start_spin.value(),
+                self._vtg_stop_spin.value(),
+            )
+        )
+
+    def _endpoint_error(self, result_tuple) -> Optional[str]:
         ratio = float(self._ratio_spin.value())
         vtg_tolerance = 0.5 * (10.0 ** -self._vtg_start_spin.decimals()) + 1e-12
         vbg_tolerance = 0.5 * (10.0 ** -self._vbg_start_spin.decimals()) + 1e-12
         physical_tolerance = vtg_tolerance + abs(ratio) * vbg_tolerance
+        vbg_start, vbg_stop, vtg_start, vtg_stop = result_tuple
         endpoints = (
-            (self._vtg_start_spin.value(), self._vbg_start_spin.value()),
-            (self._vtg_stop_spin.value(), self._vbg_stop_spin.value()),
+            (vtg_start, vbg_start),
+            (vtg_stop, vbg_stop),
         )
         limits = (
             ("Vtg", self._vtg_min_spin.value(), self._vtg_max_spin.value(), vtg_tolerance),
@@ -1380,9 +1497,21 @@ class _SweepLineCalculator(QGroupBox):
         return bool(getattr(self._smu, "is_connected", False))
 
     def _recalculate(self):
+        self._calculated_rows = []
+        self._multi_preview.hide()
+        self._add_btn.setText("Add to Batch Table  ▸")
         op = self._op_combo.currentText()
         ratio = float(self._ratio_spin.value())
-        constant = float(self._constant_spin.value())
+        try:
+            constants = _parse_sweep_constants(self._constant_edit.text())
+        except ValueError as exc:
+            self._calculated_rows = []
+            self._multi_preview.hide()
+            self._set_status(f"✗ {exc}", "#b42318")
+            self._add_btn.setText("Add to Batch Table")
+            self._add_btn.setEnabled(False)
+            return
+        constant = constants[0]
         vbg_step = float(self._vbg_step_spin.value())
         vtg_min = float(self._vtg_min_spin.value())
         vtg_max = float(self._vtg_max_spin.value())
@@ -1408,6 +1537,23 @@ class _SweepLineCalculator(QGroupBox):
         if efield_min >= efield_max:
             self._set_status("✗ E-field limit: min must be less than max.", "#b42318")
             self._add_btn.setEnabled(False)
+            return
+
+        if len(constants) > 1:
+            self._recalculate_multiple(
+                constants,
+                op=op,
+                ratio=ratio,
+                vbg_step=vbg_step,
+                vtg_min=vtg_min,
+                vtg_max=vtg_max,
+                vbg_min=vbg_min,
+                vbg_max=vbg_max,
+                doping_min=doping_min,
+                doping_max=doping_max,
+                efield_min=efield_min,
+                efield_max=efield_max,
+            )
             return
 
         result = _solve_condition_line(
@@ -1483,38 +1629,220 @@ class _SweepLineCalculator(QGroupBox):
             msg = f"⚠ Vbias set to {self._vbias_spin.value():.4f} V, but its Keithley channel is unavailable."
             color = "#c26a00"
         self._set_status(msg, color)
+        displayed_result = (
+            self._vbg_start_spin.value(),
+            self._vbg_stop_spin.value(),
+            self._vtg_start_spin.value(),
+            self._vtg_stop_spin.value(),
+        )
+        self._calculated_rows = [
+            self._batch_row_for_result(constant, displayed_result, frames_now, 1)
+        ]
         self._add_btn.setEnabled(True)
 
-    def _on_add_clicked(self):
-        frames = int(self._frames_spin.value())
-        if frames < 2:
-            return
-        error = self._calculated_row_error()
-        if error:
-            self._set_status(f"✗ {error}", "#b42318")
-            self._add_btn.setEnabled(False)
-            return
-        row = {
+    def _batch_row_for_result(
+        self,
+        constant: float,
+        result_tuple,
+        frames: int,
+        total: int,
+    ) -> dict:
+        vbg_start, vbg_stop, vtg_start, vtg_stop = result_tuple
+        auto_label = _format_condition_label(
+            self._op_combo.currentText(), self._ratio_spin.value(), constant
+        )
+        custom_label = self._condition_edit.text().strip()
+        if self._label_auto or not custom_label:
+            label = auto_label
+        elif total == 1:
+            label = custom_label
+        else:
+            constant_token = auto_label.rsplit("=", 1)[-1]
+            label = f"{custom_label}_{constant_token}"
+        return {
             "Run": True,
             "When": "",
             "MeasurePower": False,
-            "condition_label": self._condition_edit.text().strip() or _format_condition_label(self._op_combo.currentText(), self._ratio_spin.value(), self._constant_spin.value()),
+            "condition_label": label,
             "repeat": 1,
-            "frames": frames,
-            "Vbg_start": float(self._vbg_start_spin.value()),
-            "Vbg_stop": float(self._vbg_stop_spin.value()),
-            "Vtg_start": float(self._vtg_start_spin.value()),
-            "Vtg_stop": float(self._vtg_stop_spin.value()),
+            "frames": int(frames),
+            "Vbg_start": float(vbg_start),
+            "Vbg_stop": float(vbg_stop),
+            "Vtg_start": float(vtg_start),
+            "Vtg_stop": float(vtg_stop),
             "Vbias_start": float(self._vbias_spin.value()) if self._include_vbias_chk.isChecked() else "",
             "Vbias_stop": float(self._vbias_spin.value()) if self._include_vbias_chk.isChecked() else "",
         }
+
+    def _show_multi_preview(self, entries: Sequence[Tuple[float, Optional[dict], str]]):
+        table = self._multi_preview
+        table.setRowCount(len(entries))
+        for row_index, (constant, row, error) in enumerate(entries):
+            if row is None:
+                values = [
+                    _format_condition_label(
+                        self._op_combo.currentText(), self._ratio_spin.value(), constant
+                    ),
+                    "Invalid", "", "",
+                ]
+            else:
+                values = [
+                    row["condition_label"],
+                    f"{row['Vtg_start']:.4g} → {row['Vtg_stop']:.4g}",
+                    f"{row['Vbg_start']:.4g} → {row['Vbg_stop']:.4g}",
+                    str(row["frames"]),
+                ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if error:
+                    item.setToolTip(error)
+                    item.setBackground(QColor("#fde8e7"))
+                table.setItem(row_index, column, item)
+        table.setVisible(True)
+
+    def _recalculate_multiple(
+        self,
+        constants: Sequence[float],
+        *,
+        op: str,
+        ratio: float,
+        vbg_step: float,
+        vtg_min: float,
+        vtg_max: float,
+        vbg_min: float,
+        vbg_max: float,
+        doping_min: float,
+        doping_max: float,
+        efield_min: float,
+        efield_max: float,
+    ):
+        entries: List[Tuple[float, Optional[dict], str]] = []
+        rows: List[dict] = []
+        warnings: List[str] = []
+        total = len(constants)
+        safe_jump = (
+            float(self._safe_jump_spin.value())
+            if self._safe_jump_spin is not None
+            else float("inf")
+        )
+
+        for constant in constants:
+            result = _solve_condition_line(
+                op,
+                ratio,
+                constant,
+                vtg_min,
+                vtg_max,
+                vbg_min,
+                vbg_max,
+                doping_min,
+                doping_max,
+                efield_min,
+                efield_max,
+            )
+            if result is None:
+                error = "No valid segment satisfies all voltage and physical limits."
+                entries.append((constant, None, error))
+                continue
+            frames = _compute_frames_from_step(result[0], result[1], vbg_step)
+            if frames < 2:
+                error = "Segment too short for one step."
+                entries.append((constant, None, error))
+                continue
+            displayed_result = tuple(round(float(value), 4) for value in result)
+            error = self._endpoint_error(displayed_result)
+            if error:
+                entries.append((constant, None, error))
+                continue
+            row = self._batch_row_for_result(
+                constant, displayed_result, frames, total
+            )
+            rows.append(row)
+            entries.append((constant, row, ""))
+            vtg_step = abs(row["Vtg_stop"] - row["Vtg_start"]) / max(frames - 1, 1)
+            vbg_step_actual = abs(row["Vbg_stop"] - row["Vbg_start"]) / max(frames - 1, 1)
+            if max(vtg_step, vbg_step_actual) > safe_jump + 1e-12:
+                warnings.append(row["condition_label"])
+
+        self._show_multi_preview(entries)
+        first_valid = next((entry[1] for entry in entries if entry[1] is not None), None)
+        if first_valid is not None:
+            self._update_result(
+                (
+                    first_valid["Vbg_start"],
+                    first_valid["Vbg_stop"],
+                    first_valid["Vtg_start"],
+                    first_valid["Vtg_stop"],
+                ),
+                first_valid["frames"],
+            )
+            if self._label_auto:
+                self._condition_edit.blockSignals(True)
+                self._condition_edit.setText(first_valid["condition_label"])
+                self._condition_edit.blockSignals(False)
+
+        invalid_count = total - len(rows)
+        if invalid_count:
+            first_error = next(error for _constant, _row, error in entries if error)
+            self._calculated_rows = []
+            self._set_status(
+                f"✗ {invalid_count} of {total} constants are invalid. {first_error}",
+                "#b42318",
+            )
+            self._add_btn.setText(f"Add {total} Rows to Batch Table")
+            self._add_btn.setEnabled(False)
+            return
+
+        self._calculated_rows = rows
+        self._add_btn.setText(f"Add All {total} Rows to Batch Table  ▸")
+        if warnings:
+            self._set_status(
+                f"⚠ Calculated {total} rows; {len(warnings)} exceed the configured safe jump.",
+                "#c26a00",
+            )
+        elif self._include_vbias_chk.isChecked() and not self._vbias_available():
+            self._set_status(
+                f"⚠ Calculated {total} rows with Vbias, but its Keithley channel is unavailable.",
+                "#c26a00",
+            )
+        else:
+            self._set_status(f"✓ Calculated {total} sweep rows.", "#23642c")
+        self._add_btn.setEnabled(True)
+
+    def _on_add_clicked(self):
+        if not self._calculated_rows:
+            return
+        if len(self._calculated_rows) == 1:
+            constant = _parse_sweep_constants(self._constant_edit.text())[0]
+            displayed_result = (
+                self._vbg_start_spin.value(),
+                self._vbg_stop_spin.value(),
+                self._vtg_start_spin.value(),
+                self._vtg_stop_spin.value(),
+            )
+            error = self._endpoint_error(displayed_result)
+            if error:
+                self._set_status(f"✗ {error}", "#b42318")
+                self._add_btn.setEnabled(False)
+                return
+            self._calculated_rows = [
+                self._batch_row_for_result(
+                    constant,
+                    displayed_result,
+                    int(self._frames_spin.value()),
+                    1,
+                )
+            ]
         if self._include_vbias_chk.isChecked() and not self._vbias_available():
             QMessageBox.information(
                 self,
                 "Vbias Keithley unavailable",
-                f"The generated row includes Vbias = {self._vbias_spin.value():.4f} V. Run will remain blocked until a healthy Vbias Keithley channel is connected.",
+                f"The generated rows include Vbias = {self._vbias_spin.value():.4f} V. Run will remain blocked until a healthy Vbias Keithley channel is connected.",
             )
-        self.add_row_requested.emit(row)
+        self.add_rows_requested.emit(
+            [dict(row) for row in self._calculated_rows]
+        )
 
 
 # ── Run worker ────────────────────────────────────────────────────────────────
@@ -2530,7 +2858,7 @@ class PresetsPanel(QWidget):
             smu_ctrl=self._smu,
             safe_jump_spin=self._safe_jump_spin if hasattr(self, "_safe_jump_spin") else None,
         )
-        self._sweep_calc.add_row_requested.connect(self._on_calculator_add_row)
+        self._sweep_calc.add_rows_requested.connect(self._on_calculator_add_rows)
         self._sweep_calc.expanded_changed.connect(self._on_calculator_expanded)
         lay_left.addWidget(self._sweep_calc)
 
@@ -2836,7 +3164,7 @@ class PresetsPanel(QWidget):
                 "open": bool(calc._toggle.isChecked()),
                 "operator": calc._op_combo.currentText(),
                 "ratio": float(calc._ratio_spin.value()),
-                "constant": float(calc._constant_spin.value()),
+                "constant": calc._constant_edit.text(),
                 "vbg_step": float(calc._vbg_step_spin.value()),
                 "vtg_min": float(calc._vtg_min_spin.value()),
                 "vtg_max": float(calc._vtg_max_spin.value()),
@@ -2927,9 +3255,11 @@ class PresetsPanel(QWidget):
             operator = calculator.get("operator")
             if isinstance(operator, str) and self._sweep_calc._op_combo.findText(operator) >= 0:
                 self._sweep_calc._op_combo.setCurrentText(operator)
+            constant = calculator.get("constant")
+            if isinstance(constant, (str, int, float)):
+                self._sweep_calc._constant_edit.setText(str(constant))
             for key, spin in (
                 ("ratio", self._sweep_calc._ratio_spin),
-                ("constant", self._sweep_calc._constant_spin),
                 ("vbg_step", self._sweep_calc._vbg_step_spin),
                 ("vtg_min", self._sweep_calc._vtg_min_spin),
                 ("vtg_max", self._sweep_calc._vtg_max_spin),
@@ -4161,27 +4491,24 @@ class PresetsPanel(QWidget):
 
         self._commit_batch_change()
 
-    @Slot(dict)
-    def _on_calculator_add_row(self, row_dict: dict):
-        selected = [idx.row() for idx in self._batch_table.selectionModel().selectedRows()] if self._batch_table.selectionModel() else []
-        insert_after = max(selected) if selected else self._batch_table.rowCount() - 1
-        current_df = _read_batch_table(self._batch_table)
-        new_row_df = _normalize_batch(pd.DataFrame([row_dict]))
-        if current_df.empty:
-            updated_df = new_row_df
-        else:
-            top = current_df.iloc[:insert_after + 1]
-            bottom = current_df.iloc[insert_after + 1:]
-            updated_df = pd.concat([top, new_row_df, bottom], ignore_index=True)
-        _populate_batch_table(self._batch_table, updated_df)
-        new_row_idx = insert_after + 1 if not current_df.empty else 0
-        self._batch_table.selectRow(new_row_idx)
-        self._batch_table.scrollTo(self._batch_table.model().index(new_row_idx, 0))
-        self._log(
-            f"Added row \"{row_dict.get('condition_label', '')}\" "
-            f"at position {new_row_idx + 1} from Sweep Line Calculator."
+    @Slot(list)
+    def _on_calculator_add_rows(self, rows: list):
+        if not rows:
+            return
+        selected = self._selected_batch_rows()
+        target = max(selected) + 1 if selected else self._batch_table.rowCount()
+        self._insert_batch_rows(target, rows)
+        first_position = target + 1
+        last_position = target + len(rows)
+        position_text = (
+            str(first_position)
+            if first_position == last_position
+            else f"{first_position}-{last_position}"
         )
-        self._commit_batch_change()
+        self._log(
+            f"Added {len(rows)} row(s) at position {position_text} "
+            "from Sweep Line Calculator."
+        )
 
     # ── apply / plan ──────────────────────────────────────────────────────────
 

@@ -166,11 +166,11 @@ class _LF6Worker(QObject):
             return np.asarray(self._setup.get_wavelength_calibration(), dtype=float)
         return np.array([], dtype=float)
 
-    # ── direct-call helpers (called by app.steps via lf6 property) ────────────
+    # ── direct-call helpers used by sweep workers ──────────────────
 
     @property
     def adapter(self):
-        """Return the SpectrometerLF6 adapter for use by sweep steps."""
+        """Return the SpectrometerLF6 adapter for use by sweep workers."""
         return self._adapter
 
     @property
