@@ -969,6 +969,8 @@ class _ManualControlSection(QWidget):
         self._pending_order: list[str] = []
         self._fast_active_role: Optional[str] = None
         self._fast_active_target: Optional[float] = None
+        self._ramp_active_role: Optional[str] = None
+        self._target_dirty: set[str] = set()
         self._readback_role: Optional[str] = None
         self._last_step_role: Optional[str] = None
         self._background_read_queue: list[str] = []
@@ -1004,6 +1006,8 @@ class _ManualControlSection(QWidget):
         self._read_btn_by_role: dict[str, QPushButton] = {}
         self._up_btn: dict[str, QPushButton] = {}
         self._zero_btn_by_role: dict[str, QPushButton] = {}
+        self._target_spn: dict[str, QDoubleSpinBox] = {}
+        self._ramp_btn_by_role: dict[str, QPushButton] = {}
 
         for role in self._CHANNELS:
             box = QGroupBox(role)
@@ -1024,6 +1028,40 @@ class _ManualControlSection(QWidget):
             reading_row.addWidget(voltage, stretch=1)
             reading_row.addWidget(current, stretch=1)
             box_lay.addLayout(reading_row)
+
+            target_row = QHBoxLayout()
+            target_row.setSpacing(3)
+            target_row.addWidget(QLabel("Target:"))
+            target = QDoubleSpinBox()
+            target.setRange(-200.0, 200.0)
+            target.setDecimals(3)
+            target.setSingleStep(0.1)
+            target.setSuffix(" V")
+            target.setKeyboardTracking(False)
+            target.setToolTip(
+                f"Requested {role} voltage. The field keeps the requested value "
+                "while the measured voltage remains visible above."
+            )
+            ramp = QPushButton("Ramp")
+            ramp.setMinimumWidth(50)
+            ramp.setToolTip(
+                f"Read the live {role} voltage, then ramp safely to this target."
+            )
+            self._target_spn[role] = target
+            self._ramp_btn_by_role[role] = ramp
+            target.valueChanged.connect(
+                lambda _value, r=role: self._target_dirty.add(r)
+            )
+            target.lineEdit().textEdited.connect(
+                lambda _text, r=role: self._target_dirty.add(r)
+            )
+            target.lineEdit().returnPressed.connect(
+                lambda r=role: self._on_ramp_to(r)
+            )
+            ramp.clicked.connect(lambda _=False, r=role: self._on_ramp_to(r))
+            target_row.addWidget(target, stretch=1)
+            target_row.addWidget(ramp)
+            box_lay.addLayout(target_row)
 
             button_row = QHBoxLayout()
             button_row.setSpacing(3)
@@ -1125,6 +1163,8 @@ class _ManualControlSection(QWidget):
             self._read_btn_by_role[role].setEnabled(enabled)
             self._up_btn[role].setEnabled(enabled)
             self._zero_btn_by_role[role].setEnabled(enabled)
+            self._target_spn[role].setEnabled(enabled)
+            self._ramp_btn_by_role[role].setEnabled(enabled)
         self._read_all_btn.setEnabled(connected and not self._busy)
         self._zero_all_btn.setEnabled(connected and not self._busy)
         self._step_spn.setEnabled(not self._busy)
@@ -1148,19 +1188,44 @@ class _ManualControlSection(QWidget):
         elif action == "step":
             direction = "up" if value > 0 else "down"
             self._status_lbl.setText(f"Reading {role}, then stepping {direction}…")
+        elif action == "ramp_to":
+            self._status_lbl.setText(f"Reading {role}, then ramping to {value:+.3f} V…")
         elif action == "read":
             self._status_lbl.setText("Reading Keithley voltages and currents…")
         elif action == "zero_all":
             self._status_lbl.setText("Ramping all Keithleys to 0 V…")
         else:
             self._status_lbl.setText(f"Reading {role}, then ramping to 0 V…")
+        ramp_step = self._step_spn.value() if action == "ramp_to" else cfg.ramp.step_V
         command(
             action,
             role,
             float(value),
-            ramp_step_V=cfg.ramp.step_V,
+            ramp_step_V=ramp_step,
             delay_s=cfg.ramp.delay_s,
         )
+
+    def _set_target_value(self, role: str, value: float) -> None:
+        target = self._target_spn[role]
+        target.blockSignals(True)
+        try:
+            target.setValue(float(value))
+        finally:
+            target.blockSignals(False)
+
+    @Slot(str)
+    def _on_ramp_to(self, role: str) -> None:
+        if self._busy:
+            return
+        if not self._role_available(role):
+            self._on_manual_error(f"No connected Keithley is assigned to {role}.")
+            return
+        target_editor = self._target_spn[role]
+        target_editor.interpretText()
+        target = float(target_editor.value())
+        self._target_dirty.add(role)
+        self._ramp_active_role = role
+        self._launch("ramp_to", role, target)
 
     @Slot(str, float)
     def _on_step(self, role: str, direction: float) -> None:
@@ -1190,6 +1255,8 @@ class _ManualControlSection(QWidget):
         self._last_step_role = role
         target = base + float(direction) * self._step_spn.value()
         self._requested_voltage[role] = target
+        self._target_dirty.discard(role)
+        self._set_target_value(role, target)
         self._pending_targets[role] = target
         if role not in self._pending_order:
             self._pending_order.append(role)
@@ -1311,6 +1378,13 @@ class _ManualControlSection(QWidget):
                         self._voltage_lbl[role].setText(
                             f"Voltage: {voltage:+.3f} V"
                         )
+                    if (
+                        role not in self._target_dirty
+                        and role != self._ramp_active_role
+                        and role != self._fast_active_role
+                        and role not in self._pending_targets
+                    ):
+                        self._set_target_value(role, voltage)
                 elif (
                     role != self._fast_active_role
                     and role not in self._pending_targets
@@ -1342,12 +1416,15 @@ class _ManualControlSection(QWidget):
         self._pending_order.clear()
         self._fast_active_role = None
         self._fast_active_target = None
+        self._ramp_active_role = None
+        self._target_dirty.clear()
         self._readback_role = None
         self._last_step_role = None
         self._background_read_active = None
         for role in self._CHANNELS:
             self._voltage_lbl[role].setText("Voltage: —")
             self._current_lbl[role].setText("Current: —")
+            self._set_target_value(role, 0.0)
         self._set_controls_enabled()
         self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
         self._status_lbl.setText("Idle — connect SMU first.")
@@ -1383,11 +1460,31 @@ class _ManualControlSection(QWidget):
         self._busy = False
         self._set_controls_enabled()
         self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
-        if action == "zero":
+        if action == "ramp_to":
+            voltage = self._finite_float(_voltage)
+            self._ramp_active_role = None
+            if voltage is not None:
+                self._requested_voltage[role] = voltage
+                self._set_target_value(role, voltage)
+            self._target_dirty.discard(role)
+            self._status_lbl.setText(
+                f"{role} reached {voltage:+.3f} V."
+                if voltage is not None
+                else f"{role} ramp completed."
+            )
+        elif action == "zero":
             self._requested_voltage[role] = 0.0
             self._confirmed_voltage[role] = 0.0
+            self._target_dirty.discard(role)
+            self._set_target_value(role, 0.0)
             self._status_lbl.setText(f"{role} reached 0 V.")
         elif action == "zero_all":
+            for candidate in self._CHANNELS:
+                if self._role_available(candidate):
+                    self._requested_voltage[candidate] = 0.0
+                    self._confirmed_voltage[candidate] = 0.0
+                    self._target_dirty.discard(candidate)
+                    self._set_target_value(candidate, 0.0)
             self._status_lbl.setText("All connected Keithleys reached 0 V.")
         elif action == "read_role":
             if was_busy:
@@ -1410,6 +1507,7 @@ class _ManualControlSection(QWidget):
         failed_role = self._fast_active_role
         self._fast_active_role = None
         self._fast_active_target = None
+        self._ramp_active_role = None
         self._pending_targets.clear()
         self._pending_order.clear()
         self._readback_role = None

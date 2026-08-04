@@ -420,6 +420,10 @@ class _SMUWorker(QObject):
             measured = float(measured)
             if action == "step":
                 target = measured + float(value)
+            elif action == "ramp_to":
+                target = float(value)
+                if not math.isfinite(target):
+                    raise ValueError(f"Invalid {role} target: {target}")
             elif action == "zero":
                 target = 0.0
             else:
@@ -628,7 +632,7 @@ class SMUController(QObject):
         ramp_step_V: Optional[float] = None,
         delay_s: Optional[float] = None,
     ) -> None:
-        """Queue a read/step/zero command from the compact manual UI."""
+        """Queue a read/step/ramp/zero command from the compact manual UI."""
         action = str(action)
         role = str(role)
         if action not in ("read", "read_role"):

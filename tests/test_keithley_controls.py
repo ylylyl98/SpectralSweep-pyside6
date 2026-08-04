@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.devices.iv_adapter import IVDevice
 from controllers.smu_controller import _SMUWorker
+from utils.config import cfg
 from ui.instrument_panel import (
     InstrumentPanel,
     _ManualControlSection,
@@ -279,6 +280,57 @@ class KeithleyControlTests(unittest.TestCase):
         self.assertIn("4 nA", panel._current_lbl["Vtg"].text())
         self.assertTrue(panel._up_btn["Vbg"].isEnabled())
 
+    def test_manual_target_ramps_and_keeps_requested_value_after_readback(self):
+        ctrl = _FakeSMUController()
+        ctrl.is_connected = True
+        ctrl.available_roles = {"Vbg"}
+        panel = _ManualControlSection(ctrl)
+        ctrl.readings_ready.emit({"Vbg_meas": 1.2, "Ibg": 1e-9})
+
+        self.assertAlmostEqual(panel._target_spn["Vbg"].value(), 1.2)
+        self.assertNotIn("Vbg", panel._target_dirty)
+
+        panel._target_spn["Vbg"].setValue(1.5)
+        ctrl.readings_ready.emit({"Vbg_meas": 1.25, "Ibg": 2e-9})
+
+        self.assertAlmostEqual(panel._target_spn["Vbg"].value(), 1.5)
+        self.assertIn("+1.250 V", panel._voltage_lbl["Vbg"].text())
+        self.assertIn("2 nA", panel._current_lbl["Vbg"].text())
+
+        panel._step_spn.setValue(0.05)
+        panel._on_ramp_to("Vbg")
+
+        action, role, value, kwargs = ctrl.manual_calls[-1]
+        self.assertEqual((action, role), ("ramp_to", "Vbg"))
+        self.assertAlmostEqual(value, 1.5)
+        self.assertAlmostEqual(kwargs["ramp_step_V"], 0.05)
+        self.assertAlmostEqual(kwargs["delay_s"], cfg.ramp.delay_s)
+        self.assertFalse(panel._ramp_btn_by_role["Vbg"].isEnabled())
+
+        ctrl.readings_ready.emit({"Vbg_meas": 1.499, "Ibg": 3e-9})
+        ctrl.manual_finished.emit("ramp_to", "Vbg", 1.5)
+
+        self.assertAlmostEqual(panel._target_spn["Vbg"].value(), 1.5)
+        self.assertIn("+1.499 V", panel._voltage_lbl["Vbg"].text())
+        self.assertIn("3 nA", panel._current_lbl["Vbg"].text())
+        self.assertNotIn("Vbg", panel._target_dirty)
+        self.assertTrue(panel._ramp_btn_by_role["Vbg"].isEnabled())
+
+    def test_successful_zero_updates_the_target_field(self):
+        ctrl = _FakeSMUController()
+        ctrl.is_connected = True
+        ctrl.available_roles = {"Vbg"}
+        panel = _ManualControlSection(ctrl)
+        ctrl.readings_ready.emit({"Vbg_meas": 1.2, "Ibg": 1e-9})
+        panel._target_spn["Vbg"].setValue(1.5)
+
+        panel._launch("zero", "Vbg")
+        self.assertAlmostEqual(panel._target_spn["Vbg"].value(), 1.5)
+        ctrl.manual_finished.emit("zero", "Vbg", 0.0)
+
+        self.assertAlmostEqual(panel._target_spn["Vbg"].value(), 0.0)
+        self.assertNotIn("Vbg", panel._target_dirty)
+
     def test_new_step_cancels_remaining_background_keithley_reads(self):
         ctrl = _FakeSMUController()
         ctrl.is_connected = True
@@ -364,6 +416,24 @@ class KeithleyControlTests(unittest.TestCase):
         refresh.assert_called_once_with("Vbg", strict=True)
         self.assertEqual(finished[0][:2], ("step", "Vbg"))
 
+    def test_manual_worker_ramps_to_absolute_target_from_live_voltage(self):
+        worker = _SMUWorker()
+        device = _ManualDevice(measured=1.2)
+        worker._device = device
+        finished = []
+        worker.manual_finished.connect(lambda *args: finished.append(args))
+
+        with patch.object(worker, "_emit_role_reading") as refresh:
+            worker.manual_control("ramp_to", "Vbg", 1.5, 0.05, 0.02)
+
+        self.assertEqual(device.pre_read_calls, ["Vbg"])
+        self.assertEqual(
+            device.ramp_calls,
+            [("Vbg", 1.5, 0.05, 0.02, 1.2)],
+        )
+        refresh.assert_called_once_with("Vbg", strict=True)
+        self.assertEqual(finished, [("ramp_to", "Vbg", 1.5)])
+
     def test_step_refreshes_only_selected_keithley_immediately(self):
         worker = _SMUWorker()
         device = _ManualDevice(roles=("Vbg", "Vtg"))
@@ -446,6 +516,18 @@ class KeithleyControlTests(unittest.TestCase):
         self.assertEqual(device.ramp_calls, [])
         self.assertIn("read timed out", errors[0])
 
+    def test_absolute_ramp_never_writes_when_live_read_fails(self):
+        worker = _SMUWorker()
+        device = _ManualDevice(read_error=TimeoutError("read timed out"))
+        worker._device = device
+        errors = []
+        worker.manual_error.connect(errors.append)
+
+        worker.manual_control("ramp_to", "Vbg", 1.5, 0.05, 0.02)
+
+        self.assertEqual(device.ramp_calls, [])
+        self.assertIn("read timed out", errors[0])
+
     def test_session_restores_step_and_per_address_compliance_without_io(self):
         ctrl = _FakeSMUController()
         panel = InstrumentPanel(smu_ctrl=ctrl)
@@ -455,7 +537,10 @@ class KeithleyControlTests(unittest.TestCase):
         smu._curr_comp_by_role["Vbg"].setValue(700.0)
         smu._volt_comp_by_role["Vbg"].setValue(25.0)
         manual._step_spn.setValue(0.25)
+        manual._target_spn["Vbg"].setValue(1.5)
         state = panel.capture_session_state()
+
+        self.assertEqual(state["manual_smu"], {"step_v": 0.25})
 
         restored_ctrl = _FakeSMUController()
         restored = InstrumentPanel(smu_ctrl=restored_ctrl)
@@ -473,6 +558,7 @@ class KeithleyControlTests(unittest.TestCase):
             restored_smu._curr_range_by_role["Vbg"].currentData(), 1e-6
         )
         self.assertAlmostEqual(restored_manual._step_spn.value(), 0.25)
+        self.assertAlmostEqual(restored_manual._target_spn["Vbg"].value(), 0.0)
         self.assertEqual(restored_ctrl.connect_calls, [])
         self.assertEqual(restored_ctrl.manual_calls, [])
 
