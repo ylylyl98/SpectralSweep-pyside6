@@ -15,7 +15,11 @@ class ConfigPersistenceTests(unittest.TestCase):
             source = AppConfig()
             source.lf6.center_nm = 777.5
             source.smu.compliance_by_addr = {
-                "GPIB0::9::INSTR": {"curr": 6e-7, "volt": 20.0},
+                "GPIB0::9::INSTR": {
+                    "curr": 6e-7,
+                    "curr_range": 100e-6,
+                    "volt": 20.0,
+                },
                 "GPIB0::11::INSTR": {"curr": 9e-7, "volt": 30.0},
             }
             source.session.active_tab = "power_sweep"
@@ -35,6 +39,10 @@ class ConfigPersistenceTests(unittest.TestCase):
             self.assertEqual(
                 restored.smu.compliance_by_addr["GPIB0::11::INSTR"]["volt"],
                 30.0,
+            )
+            self.assertAlmostEqual(
+                restored.smu.compliance_by_addr["GPIB0::9::INSTR"]["curr_range"],
+                100e-6,
             )
             self.assertEqual(restored.session.schema_version, 2)
             self.assertEqual(restored.session.active_tab, "power_sweep")

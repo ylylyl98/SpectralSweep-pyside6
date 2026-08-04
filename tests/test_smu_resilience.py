@@ -280,6 +280,18 @@ class SMUResilienceTests(unittest.TestCase):
             ["Required Keithley channels are missing: Vbias."],
         )
 
+        smu = SimpleNamespace(
+            is_connected=True,
+            device=gates_only,
+            limits_are_applied_for_roles=lambda _roles: False,
+        )
+        self.assertEqual(
+            _smu_readiness_issues(smu, ("Vbg", "Vtg")),
+            ["Apply and verify the compliance settings for: Vbg, Vtg."],
+        )
+        smu.limits_are_applied_for_roles = lambda _roles: True
+        self.assertEqual(_smu_readiness_issues(smu, ("Vbg", "Vtg")), [])
+
     def test_worker_never_acquires_without_required_keithleys(self):
         sequence = [{
             "Center Wavelength (nm)": 700.0,
@@ -388,6 +400,130 @@ class SMUResilienceTests(unittest.TestCase):
         configure.assert_called_once_with(
             curr_compliance=6e-7,
             volt_compliance=20.0,
+        )
+
+    def test_keithley_connection_can_skip_configuration_without_forcing_output_off(self):
+        rm = _FakeResourceManager()
+        with (
+            patch.object(KeithControl, "connect"),
+            patch.object(KeithControl, "get_identity"),
+            patch.object(KeithControl, "set_volt_step") as configure,
+            patch.object(KeithControl, "read_curr") as read_curr,
+            patch.object(KeithControl, "write") as write,
+        ):
+            instrument = KeithControl(
+                "GPIB1::2::INSTR",
+                "Vbg_SMU",
+                "Vbg",
+                rm,
+                configure_on_connect=False,
+            )
+
+        configure.assert_not_called()
+        read_curr.assert_not_called()
+        write.assert_not_called()
+        self.assertEqual(instrument.mode, "unconfigured")
+
+    def test_voltage_step_preserves_existing_level_and_ensures_output_on(self):
+        instrument = object.__new__(KeithControl)
+        instrument._curr_compliance_A = 500e-9
+        instrument._volt_range_V = 20.0
+        writes = []
+        instrument.write = lambda command, print_command=False: writes.append(command)
+
+        instrument.set_volt_step(
+            curr_compliance=500e-9,
+            volt_compliance=20.0,
+        )
+
+        self.assertFalse(any(command.startswith(":SOUR:VOLT:LEV") for command in writes))
+        self.assertEqual(writes[-1], ":OUTP ON")
+
+    def test_500_na_compliance_uses_one_microamp_range(self):
+        self.assertAlmostEqual(
+            KeithControl.recommended_current_range(500e-9),
+            1e-6,
+        )
+
+    def test_live_limits_force_auto_range_for_500_na_without_output(self):
+        instrument = object.__new__(KeithControl)
+        writes = []
+        responses = {
+            ":SENS:CURR:PROT?": "5e-7",
+            ":SENS:CURR:RANG:AUTO?": "0",
+            ":SENS:CURR:RANG?": "1e-6",
+            ":SOUR:VOLT:RANG?": "20",
+        }
+        instrument.write = lambda command, print_command=False: writes.append(command)
+        instrument.query = lambda command: responses[command]
+
+        result = instrument.apply_compliance_settings(500e-9, 100e-6, 20.0)
+
+        self.assertEqual(
+            writes,
+            [
+                ":SENS:CURR:RANG:AUTO OFF",
+                ":SENS:CURR:PROT:RSYN ON",
+                ":SENS:CURR:PROT 5e-07",
+                ":SOUR:VOLT:RANG 20",
+            ],
+        )
+        self.assertNotIn(":OUTP ON", writes)
+        self.assertAlmostEqual(result["curr"], 500e-9)
+        self.assertAlmostEqual(result["curr_range"], 1e-6)
+
+    def test_range_sync_handles_lower_compliance_without_manual_range_write(self):
+        instrument = object.__new__(KeithControl)
+        instrument._curr_compliance_A = 50e-6
+        instrument._curr_range_A = 100e-6
+        instrument._volt_range_V = 21.0
+        writes = []
+        responses = {
+            ":SENS:CURR:PROT?": "1e-5",
+            ":SENS:CURR:RANG:AUTO?": "0",
+            ":SENS:CURR:RANG?": "1e-5",
+            ":SOUR:VOLT:RANG?": "21",
+        }
+        instrument.write = lambda command, print_command=False: writes.append(command)
+        instrument.query = lambda command: responses[command]
+
+        instrument.apply_compliance_settings(10e-6, 10e-6, 21.0)
+
+        self.assertEqual(
+            writes,
+            [
+                ":SENS:CURR:RANG:AUTO OFF",
+                ":SENS:CURR:PROT:RSYN ON",
+                ":SENS:CURR:PROT 1e-05",
+                ":SOUR:VOLT:RANG 21",
+            ],
+        )
+
+    def test_range_sync_avoids_824_when_raising_500_na_to_10_ua(self):
+        instrument = object.__new__(KeithControl)
+        instrument._curr_compliance_A = 500e-9
+        instrument._curr_range_A = 1e-6
+        instrument._volt_range_V = 21.0
+        writes = []
+        responses = {
+            ":SENS:CURR:PROT?": "1e-5",
+            ":SENS:CURR:RANG:AUTO?": "0",
+            ":SENS:CURR:RANG?": "1e-5",
+            ":SOUR:VOLT:RANG?": "21",
+        }
+        instrument.write = lambda command, print_command=False: writes.append(command)
+        instrument.query = lambda command: responses[command]
+
+        instrument.apply_compliance_settings(10e-6, 10e-6, 21.0)
+
+        self.assertEqual(
+            writes,
+            [
+                ":SENS:CURR:RANG:AUTO OFF",
+                ":SENS:CURR:PROT:RSYN ON",
+                ":SENS:CURR:PROT 1e-05",
+                ":SOUR:VOLT:RANG 21",
+            ],
         )
 
     def test_dead_vbg_read_reports_role_and_address(self):

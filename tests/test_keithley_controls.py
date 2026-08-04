@@ -27,6 +27,9 @@ class _FakeSMUController(QObject):
     readings_ready = Signal(object)
     manual_finished = Signal(str, str, float)
     manual_error = Signal(str)
+    limits_result = Signal(str, str, object)
+    limits_error = Signal(str, str, str)
+    limits_state_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -34,6 +37,9 @@ class _FakeSMUController(QObject):
         self.available_roles: set[str] = set()
         self.connect_calls = []
         self.manual_calls = []
+        self.limit_apply_calls = []
+        self.limit_read_calls = []
+        self.dirty_limit_addresses = []
 
     def connect_instrument(self, visa_addrs, role_map, termination, compliance):
         self.connect_calls.append((visa_addrs, role_map, termination, compliance))
@@ -47,6 +53,16 @@ class _FakeSMUController(QObject):
 
     def manual_control(self, action, role, value, **kwargs):
         self.manual_calls.append((action, role, value, kwargs))
+
+    def apply_smu_limits(self, address, curr, curr_range, volt):
+        self.limit_apply_calls.append((address, curr, curr_range, volt))
+
+    def read_smu_limits(self, address):
+        self.limit_read_calls.append(address)
+
+    def mark_smu_limits_dirty(self, address):
+        self.dirty_limit_addresses.append(address)
+        self.limits_state_changed.emit()
 
 
 class _ManualDevice:
@@ -93,7 +109,7 @@ class KeithleyControlTests(unittest.TestCase):
     def _select(combo, address):
         _select_or_insert_combo_text(combo, address)
 
-    def test_connection_builds_independent_compliance_per_address(self):
+    def test_connection_includes_safe_default_limits_per_address(self):
         ctrl = _FakeSMUController()
         section = _SMUSection(ctrl)
         self._select(section._role_vbg, "GPIB0::9::INSTR")
@@ -111,9 +127,16 @@ class KeithleyControlTests(unittest.TestCase):
         self.assertEqual(visa_addrs, ["GPIB0::9::INSTR", "GPIB0::11::INSTR"])
         self.assertEqual(role_map["Vbg"], "GPIB0::9::INSTR")
         self.assertAlmostEqual(compliance["GPIB0::9::INSTR"]["curr"], 600e-9)
+        self.assertAlmostEqual(
+            compliance["GPIB0::9::INSTR"]["curr_range"], 1e-6
+        )
         self.assertAlmostEqual(compliance["GPIB0::9::INSTR"]["volt"], 20.0)
         self.assertAlmostEqual(compliance["GPIB0::11::INSTR"]["curr"], 850e-9)
+        self.assertAlmostEqual(
+            compliance["GPIB0::11::INSTR"]["curr_range"], 1e-6
+        )
         self.assertAlmostEqual(compliance["GPIB0::11::INSTR"]["volt"], 30.0)
+        self.assertEqual(ctrl.limit_apply_calls, [])
 
     def test_compact_sections_fit_the_existing_sidebar(self):
         ctrl = _FakeSMUController()
@@ -121,6 +144,81 @@ class KeithleyControlTests(unittest.TestCase):
         self.assertLessEqual(
             _ManualControlSection(ctrl).minimumSizeHint().width(), 340
         )
+
+    def test_live_compliance_apply_auto_selects_range_for_500_na(self):
+        ctrl = _FakeSMUController()
+        ctrl.is_connected = True
+        section = _SMUSection(ctrl)
+        address = "GPIB0::9::INSTR"
+        self._select(section._role_vbg, address)
+        section._curr_comp_by_role["Vbg"].setValue(500.0)
+        range_combo = section._curr_range_by_role["Vbg"]
+        section._volt_comp_by_role["Vbg"].setValue(20.0)
+
+        section._apply_role_limits("Vbg")
+
+        self.assertEqual(len(ctrl.limit_apply_calls), 1)
+        applied_address, compliance, current_range, voltage_range = (
+            ctrl.limit_apply_calls[0]
+        )
+        self.assertEqual(applied_address, address)
+        self.assertAlmostEqual(compliance, 500e-9)
+        self.assertAlmostEqual(current_range, 1e-6)
+        self.assertAlmostEqual(voltage_range, 20.0)
+
+        with patch("ui.instrument_panel.cfg.save"):
+            ctrl.limits_result.emit(
+                "apply",
+                address,
+                {"curr": 500e-9, "curr_range": 1e-6, "volt": 20.0},
+            )
+        status = section._limit_status_by_role["Vbg"]
+        self.assertEqual(status.text(), "Applied")
+        self.assertIn("500 nA", status.toolTip())
+        self.assertEqual(range_combo.currentText(), "1 µA")
+
+    def test_connect_waits_for_default_limit_verification(self):
+        ctrl = _FakeSMUController()
+        section = _SMUSection(ctrl)
+        address = "GPIB0::9::INSTR"
+        self._select(section._role_vbg, address)
+        ctrl.is_connected = True
+
+        with patch("ui.instrument_panel.cfg.save"):
+            ctrl.connected.emit([address])
+
+        self.assertEqual(ctrl.limit_read_calls, [])
+        self.assertEqual(
+            section._limit_status_by_role["Vbg"].text(),
+            "Verifying...",
+        )
+
+    def test_connected_limit_status_does_not_expand_the_sidebar_cards(self):
+        ctrl = _FakeSMUController()
+        section = _SMUSection(ctrl)
+        addresses = {
+            "Vbg": "GPIB0::9::INSTR",
+            "Vtg": "GPIB0::10::INSTR",
+            "Vbias": "GPIB0::11::INSTR",
+        }
+        for role, address in addresses.items():
+            self._select(section._role_combos[role], address)
+        before = section.sizeHint().height()
+        ctrl.is_connected = True
+
+        with patch("ui.instrument_panel.cfg.save"):
+            ctrl.connected.emit(list(addresses.values()))
+            for address in addresses.values():
+                ctrl.limits_result.emit(
+                    "apply",
+                    address,
+                    {"curr": 500e-9, "curr_range": 1e-6, "volt": 21.0},
+                )
+
+        self.assertLessEqual(section.sizeHint().height(), before + 6)
+        for label in section._limit_status_by_role.values():
+            self.assertFalse(label.wordWrap())
+            self.assertEqual(label.text(), "Applied")
 
     def test_compliance_follows_the_physical_address_when_selection_changes(self):
         section = _SMUSection(_FakeSMUController())
@@ -370,6 +468,9 @@ class KeithleyControlTests(unittest.TestCase):
         )
         self.assertAlmostEqual(
             restored_smu._volt_comp_by_role["Vbg"].value(), 25.0
+        )
+        self.assertAlmostEqual(
+            restored_smu._curr_range_by_role["Vbg"].currentData(), 1e-6
         )
         self.assertAlmostEqual(restored_manual._step_spn.value(), 0.25)
         self.assertEqual(restored_ctrl.connect_calls, [])

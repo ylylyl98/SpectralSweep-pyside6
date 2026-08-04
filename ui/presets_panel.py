@@ -148,6 +148,11 @@ LOOP_MODES = {
     ),
 }
 
+ACQUISITION_GROUPINGS = {
+    "loop_first": "At each loop setting, run all batch rows",
+    "batch_first": "For each batch row, run all loop settings",
+}
+
 _INVALID_CHARS = r'<>:"/\|?*'
 
 # ── Default table contents ─────────────────────────────────────────────────────
@@ -265,8 +270,13 @@ def _validate_stage_position_value(value: Any) -> float:
     return pos
 
 
-def _build_plan(loop_df: pd.DataFrame, batch_df: pd.DataFrame,
-                mode: str = "Synchronize"):
+def _build_plan(
+    loop_df: pd.DataFrame,
+    batch_df: pd.DataFrame,
+    mode: str = "Synchronize",
+    *,
+    acquisition_grouping: str = "loop_first",
+):
     """
     Return (final_sequence, enabled_df_batch, total_acq).
 
@@ -321,28 +331,73 @@ def _build_plan(loop_df: pd.DataFrame, batch_df: pd.DataFrame,
     batch = _normalize_batch(batch_df)
     batch = batch[batch["Run"]].reset_index(drop=True)
 
-    total_acq = 0
-    for ctx in final_sequence:
-        outer = _outer_ctx(ctx)
-        for _, r in batch.iterrows():
-            if _when_ok(r.get("When", ""), outer):
-                total_acq += max(int(r.get("repeat", 1)), 1)
+    schedule = _build_acquisition_schedule(
+        final_sequence,
+        batch,
+        acquisition_grouping=acquisition_grouping,
+    )
+    total_acq = sum(
+        max(int(task["row"].get("repeat", 1)), 1)
+        for task in schedule
+    )
 
     return final_sequence, batch, max(total_acq, 0)
+
+
+def _build_acquisition_schedule(
+    final_sequence: Sequence[Dict[str, Any]],
+    batch_df: pd.DataFrame,
+    *,
+    acquisition_grouping: str = "loop_first",
+) -> List[Dict[str, Any]]:
+    """Flatten loop contexts and batch rows into their exact execution order."""
+    sequence = [dict(ctx) for ctx in final_sequence]
+    batch = _normalize_batch(batch_df)
+    batch = batch[batch["Run"]].reset_index(drop=True)
+    schedule: List[Dict[str, Any]] = []
+
+    def append_if_applicable(seq_i: int, row_i: int) -> None:
+        ctx = sequence[seq_i]
+        row = batch.iloc[row_i].to_dict()
+        if not _when_ok(row.get("When", ""), _outer_ctx(ctx)):
+            return
+        schedule.append(
+            {
+                "seq_i": int(seq_i),
+                "row_i": int(row_i),
+                "ctx": dict(ctx),
+                "row": row,
+            }
+        )
+
+    if acquisition_grouping == "batch_first":
+        for row_i in range(len(batch)):
+            for seq_i in range(len(sequence)):
+                append_if_applicable(seq_i, row_i)
+    else:
+        for seq_i in range(len(sequence)):
+            for row_i in range(len(batch)):
+                append_if_applicable(seq_i, row_i)
+    return schedule
 
 
 def _sweep_point_count(row: Dict[str, Any]) -> int:
     return max(int(row.get("frames", 1) or 1), 1)
 
 
-def _count_total_points(final_sequence: Sequence[Dict[str, Any]], batch_df: pd.DataFrame) -> int:
+def _count_total_points(
+    final_sequence: Sequence[Dict[str, Any]],
+    batch_df: pd.DataFrame,
+    acquisition_schedule: Optional[Sequence[Dict[str, Any]]] = None,
+) -> int:
+    schedule = list(acquisition_schedule) if acquisition_schedule is not None else (
+        _build_acquisition_schedule(final_sequence, batch_df)
+    )
     total_points = 0
-    for ctx in final_sequence:
-        outer = _outer_ctx(ctx)
-        for _, row in batch_df.iterrows():
-            if _when_ok(row.get("When", ""), outer):
-                reps = max(int(row.get("repeat", 1) or 1), 1)
-                total_points += reps * _sweep_point_count(row.to_dict())
+    for task in schedule:
+        row = task["row"]
+        reps = max(int(row.get("repeat", 1) or 1), 1)
+        total_points += reps * _sweep_point_count(row)
     return max(int(total_points), 0)
 
 
@@ -398,39 +453,44 @@ def _resolve_sweep_vectors(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _validate_safe_jumps(final_sequence: Sequence[Dict[str, Any]], batch_df: pd.DataFrame, safe_jump_v: float) -> List[str]:
+def _validate_safe_jumps(
+    final_sequence: Sequence[Dict[str, Any]],
+    batch_df: pd.DataFrame,
+    safe_jump_v: float,
+    acquisition_schedule: Optional[Sequence[Dict[str, Any]]] = None,
+) -> List[str]:
     issues: List[str] = []
     limit = float(safe_jump_v)
-    for seq_i, ctx in enumerate(final_sequence, start=1):
-        outer = _outer_ctx(ctx)
-        for row_i, row in batch_df.iterrows():
-            row_dict = row.to_dict()
-            if not _when_ok(row_dict.get("When", ""), outer):
+    schedule = list(acquisition_schedule) if acquisition_schedule is not None else (
+        _build_acquisition_schedule(final_sequence, batch_df)
+    )
+    for task_i, task in enumerate(schedule, start=1):
+        row_dict = task["row"]
+        row_i = int(task.get("row_i", 0))
+        label = build_condition_display_label(
+            row_dict.get("condition_label", ""),
+            row_dict.get("Vbias_start"),
+            row_dict.get("Vbias_stop"),
+        ) or clean_condition_label(row_dict.get("condition_label", "")) or f"row {row_i + 1}"
+        sweep = _resolve_sweep_vectors(row_dict)
+        frames = int(sweep["frames"])
+        for channel, start_key, stop_key, step_key in (
+            ("Vtg", "vtg_start", "vtg_stop", "vtg_step"),
+            ("Vbg", "vbg_start", "vbg_stop", "vbg_step"),
+            ("Vbias", "vbias_start", "vbias_stop", "vbias_step"),
+        ):
+            start = sweep[start_key]
+            stop = sweep[stop_key]
+            step = sweep[step_key]
+            if start is None or stop is None or step is None:
                 continue
-            label = build_condition_display_label(
-                row_dict.get("condition_label", ""),
-                row_dict.get("Vbias_start"),
-                row_dict.get("Vbias_stop"),
-            ) or clean_condition_label(row_dict.get("condition_label", "")) or f"row {row_i + 1}"
-            sweep = _resolve_sweep_vectors(row_dict)
-            frames = int(sweep["frames"])
-            for channel, start_key, stop_key, step_key in (
-                ("Vtg", "vtg_start", "vtg_stop", "vtg_step"),
-                ("Vbg", "vbg_start", "vbg_stop", "vbg_step"),
-                ("Vbias", "vbias_start", "vbias_stop", "vbias_step"),
-            ):
-                start = sweep[start_key]
-                stop = sweep[stop_key]
-                step = sweep[step_key]
-                if start is None or stop is None or step is None:
-                    continue
-                if step > limit + 1e-12:
-                    issues.append(
-                        f"Unsafe {channel} sweep in Seq {seq_i}, {label}: "
-                        f"start={float(start):g} V, stop={float(stop):g} V, frames={frames} "
-                        f"-> step size={float(step):g} V, which exceeds the safe jump limit of {limit:g} V. "
-                        f"Increase frames or reduce the sweep range."
-                    )
+            if step > limit + 1e-12:
+                issues.append(
+                    f"Unsafe {channel} sweep in step {task_i}, {label}: "
+                    f"start={float(start):g} V, stop={float(stop):g} V, frames={frames} "
+                    f"-> step size={float(step):g} V, which exceeds the safe jump limit of {limit:g} V. "
+                    f"Increase frames or reduce the sweep range."
+                )
     return issues
 
 
@@ -453,20 +513,21 @@ _SMU_ROLE_ORDER = ("Vbg", "Vtg", "Vbias")
 def _required_smu_roles(
     final_sequence: Sequence[Dict[str, Any]],
     batch_df: pd.DataFrame,
+    acquisition_schedule: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Tuple[str, ...]:
     """Return the Keithley roles used by at least one applicable batch row."""
     required = set()
-    for ctx in final_sequence:
-        outer = _outer_ctx(ctx)
-        for _, row in batch_df.iterrows():
-            if not _when_ok(row.get("When", ""), outer):
-                continue
-            required.update(("Vbg", "Vtg"))
-            if (
-                _valid_bias_value(row.get("Vbias_start")) is not None
-                or _valid_bias_value(row.get("Vbias_stop")) is not None
-            ):
-                required.add("Vbias")
+    schedule = list(acquisition_schedule) if acquisition_schedule is not None else (
+        _build_acquisition_schedule(final_sequence, batch_df)
+    )
+    for task in schedule:
+        row = task["row"]
+        required.update(("Vbg", "Vtg"))
+        if (
+            _valid_bias_value(row.get("Vbias_start")) is not None
+            or _valid_bias_value(row.get("Vbias_stop")) is not None
+        ):
+            required.add("Vbias")
     return tuple(role for role in _SMU_ROLE_ORDER if role in required)
 
 
@@ -514,6 +575,12 @@ def _smu_readiness_issues(smu_ctrl, required_roles: Sequence[str]) -> List[str]:
         ]
     if bool(getattr(device, "requires_reconnect", False)):
         return ["Reconnect the Keithley SMUs after the hardware fault."]
+    limits_check = getattr(smu_ctrl, "limits_are_applied_for_roles", None)
+    if callable(limits_check) and not bool(limits_check(roles)):
+        return [
+            "Apply and verify the compliance settings for: "
+            f"{', '.join(roles)}."
+        ]
     return []
 
 
@@ -1313,6 +1380,21 @@ class _SweepLineCalculator(QGroupBox):
         self._frames_spin.setRange(2, 1_000_000)
         self._frames_spin.setFixedWidth(72)
         row_c.addWidget(self._frames_spin)
+        row_c.addSpacing(8)
+        repeat_label = QLabel("Repeat")
+        repeat_label.setToolTip(
+            "Number of file acquisitions assigned to every batch row generated "
+            "by this calculator."
+        )
+        self._repeat_spin = _SafeSpinBox()
+        self._repeat_spin.setRange(1, 100_000)
+        self._repeat_spin.setValue(1)
+        self._repeat_spin.setFixedWidth(68)
+        self._repeat_spin.setToolTip(
+            "Repeat each generated sweep row this many times."
+        )
+        row_c.addWidget(repeat_label)
+        row_c.addWidget(self._repeat_spin)
         self._vtg_step_lbl = QLabel("ΔVtg 0.0000 V")
         self._vbg_step_lbl = QLabel("ΔVbg 0.0000 V")
         self._vtg_step_lbl.setStyleSheet("color: #555555; font-size: 10px;")
@@ -1364,6 +1446,7 @@ class _SweepLineCalculator(QGroupBox):
         self._constant_edit.textChanged.connect(self._on_equation_changed)
         self._condition_edit.textEdited.connect(self._on_label_edited)
         self._frames_spin.valueChanged.connect(self._update_result_step_labels)
+        self._repeat_spin.valueChanged.connect(self._recalculate)
         for w in (self._vtg_start_spin, self._vtg_stop_spin, self._vbg_start_spin, self._vbg_stop_spin):
             w.valueChanged.connect(self._on_result_edited)
         self._include_vbias_chk.toggled.connect(self._recalculate)
@@ -1664,7 +1747,7 @@ class _SweepLineCalculator(QGroupBox):
             "When": "",
             "MeasurePower": False,
             "condition_label": label,
-            "repeat": 1,
+            "repeat": int(self._repeat_spin.value()),
             "frames": int(frames),
             "Vbg_start": float(vbg_start),
             "Vbg_stop": float(vbg_stop),
@@ -1870,6 +1953,7 @@ class _RunWorker(QObject):
         filename_parts: List[str],
         stop_event: threading.Event,
         preview_event: Optional[threading.Event] = None,
+        acquisition_schedule: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> None:
         super().__init__()
         self._seq      = final_sequence
@@ -1884,8 +1968,13 @@ class _RunWorker(QObject):
         self._parts    = list(filename_parts)
         self._stop     = stop_event
         self._preview_event = preview_event
+        self._schedule = list(acquisition_schedule) if acquisition_schedule is not None else (
+            _build_acquisition_schedule(self._seq, self._batch)
+        )
         self._active_run_context: Dict[str, Any] = {}
-        self._required_smu_roles = _required_smu_roles(self._seq, self._batch)
+        self._required_smu_roles = _required_smu_roles(
+            self._seq, self._batch, self._schedule
+        )
 
     def _require_smu_ready(self):
         issues = _smu_readiness_issues(self._smu, self._required_smu_roles)
@@ -1898,12 +1987,12 @@ class _RunWorker(QObject):
         from app.engine.csv_writer import CSVWriter
 
         total_acq = sum(
-            max(int(r.get("repeat", 1)), 1)
-            for ctx in self._seq
-            for _, r in self._batch.iterrows()
-            if _when_ok(r.get("When", ""), _outer_ctx(ctx))
+            max(int(task["row"].get("repeat", 1)), 1)
+            for task in self._schedule
         )
-        total_points = _count_total_points(self._seq, self._batch)
+        total_points = _count_total_points(
+            self._seq, self._batch, self._schedule
+        )
         done = 0
         done_frames = 0
         failed = False
@@ -1919,18 +2008,25 @@ class _RunWorker(QObject):
         try:
             self._require_smu_ready()
             self.log.emit(
-                f"Resolved run plan: {len(self._seq)} sequence(s), "
+                f"Resolved run plan: {len(self._schedule)} ordered step(s), "
+                f"{len(self._seq)} loop context(s), "
                 f"{total_acq} acquisition file(s), {total_points} sweep point(s)."
             )
             self.log.emit(
                 f"Direct-jump mode active. Safe jump limit={float(cfg.ramp.safe_jump_V):g} V. "
                 f"Ramp-to-zero runs after measurement only and at 2x slower speed."
             )
-            for seq_i, ctx in enumerate(self._seq):
+            previous_ctx: Optional[Dict[str, Any]] = None
+            for schedule_i, task in enumerate(self._schedule):
                 if self._stop.is_set():
                     summary = "Run stopped by user."
                     break
 
+                # Keep the existing signal contract: its first index now denotes
+                # an ordered acquisition step, not a unique loop context.
+                seq_i = schedule_i
+                ctx = dict(task["ctx"])
+                target_row_i = int(task["row_i"])
                 center   = float(ctx.get("Center Wavelength (nm)", cfg.lf6.center_nm))
                 exp_ms   = float(ctx.get("Exposure Time (ms)",     cfg.lf6.exposure_ms))
                 accum    = int(ctx.get("Accumulations (EPF)",      cfg.lf6.accumulations))
@@ -1943,31 +2039,37 @@ class _RunWorker(QObject):
                     if key in ctx and ctx.get(key) is not None:
                         ctx_bits.append(f"{key}={ctx.get(key)}")
                 self.log.emit(
-                    f"Sequence {seq_i+1}/{len(self._seq)} resolved: "
+                    f"Step {seq_i+1}/{len(self._schedule)} resolved: "
                     + (", ".join(ctx_bits) if ctx_bits else "(defaults only)")
                 )
 
-                if self._lf6 and self._lf6.is_connected:
-                    self._lf6.apply_settings(exp_ms, center, accum)
-                    time.sleep(0.15)
+                if previous_ctx != ctx:
+                    if self._lf6 and self._lf6.is_connected:
+                        self._lf6.apply_settings(exp_ms, center, accum)
+                        time.sleep(0.15)
 
-                if val_rot1 is not None and self._rot and self._rot.is_connected("rot1"):
-                    self._rot.move_to("rot1", float(val_rot1))
-                if val_rot2 is not None and self._rot and self._rot.is_connected("rot2"):
-                    self._rot.move_to("rot2", float(val_rot2))
-                if val_stage is not None and self._stage and self._stage.is_connected:
-                    stage_target = _validate_stage_position_value(val_stage)
-                    stage_profile = _active_stage_profile()
-                    stage_axis = getattr(self._stage.adapter, "axis", None)
-                    axis_text = f", axis {stage_axis}" if stage_axis is not None else ""
-                    self.log.emit(
-                        f"Linear stage ({stage_profile.display_name}{axis_text}) -> {stage_target:g} "
-                        f"{stage_profile.position_unit}"
-                    )
-                    self._stage.move_to(stage_target)
+                    if val_rot1 is not None and self._rot and self._rot.is_connected("rot1"):
+                        self._rot.move_to("rot1", float(val_rot1))
+                    if val_rot2 is not None and self._rot and self._rot.is_connected("rot2"):
+                        self._rot.move_to("rot2", float(val_rot2))
+                    if val_stage is not None and self._stage and self._stage.is_connected:
+                        stage_target = _validate_stage_position_value(val_stage)
+                        stage_profile = _active_stage_profile()
+                        stage_axis = getattr(self._stage.adapter, "axis", None)
+                        axis_text = f", axis {stage_axis}" if stage_axis is not None else ""
+                        self.log.emit(
+                            f"Linear stage ({stage_profile.display_name}{axis_text}) -> {stage_target:g} "
+                            f"{stage_profile.position_unit}"
+                        )
+                        self._stage.move_to(stage_target)
+                    previous_ctx = dict(ctx)
+                else:
+                    self.log.emit("  Reusing unchanged loop hardware settings.")
 
                 outer = _outer_ctx(ctx)
-                for _, row in self._batch.iterrows():
+                for row_i, row in self._batch.iterrows():
+                    if int(row_i) != target_row_i:
+                        continue
                     if not _when_ok(row.get("When", ""), outer):
                         continue
                     if self._stop.is_set():
@@ -2023,7 +2125,7 @@ class _RunWorker(QObject):
 
                         self.tree_update.emit(seq_i, cond_label, r_i)
                         self.log.emit(
-                            f"Seq {seq_i+1}/{len(self._seq)} | {cond_label} rep {r_i+1}/{n_rep}"
+                            f"Step {seq_i+1}/{len(self._schedule)} | {cond_label} rep {r_i+1}/{n_rep}"
                         )
 
                         measured_power_uw = None
@@ -2082,8 +2184,10 @@ class _RunWorker(QObject):
                                 vbias_set = vbias_points[frame_i - 1] if vbias_points is not None else None
                                 is_start_point = (frame_i == 1)
                                 self._active_run_context = {
-                                    "sequence": seq_i + 1,
+                                    "sequence": int(task.get("seq_i", 0)) + 1,
                                     "sequence_total": len(self._seq),
+                                    "acquisition_step": seq_i + 1,
+                                    "acquisition_step_total": len(self._schedule),
                                     "condition": cond_label,
                                     "repetition": r_i + 1,
                                     "repetition_total": n_rep,
@@ -2537,6 +2641,7 @@ class PresetsPanel(QWidget):
         self._loop_src  = _normalize_loop(_DEFAULT_LOOP)
         self._batch_src = _normalize_batch(_DEFAULT_BATCH)
         self._applied_mode = "Synchronize"
+        self._applied_acquisition_grouping = "loop_first"
         self._tables_dirty = False
         self._last_power_uw: Optional[float] = None
         self._batch_row_clipboard: List[Dict[str, Any]] = []
@@ -2559,6 +2664,7 @@ class PresetsPanel(QWidget):
 
         self._final_seq:   List[dict] = []
         self._df_batch:    pd.DataFrame = self._batch_src.copy()
+        self._acquisition_schedule: List[Dict[str, Any]] = []
         self._total_acq:   int = 0
         self._total_points: int = 0
         self._done_acq: int = 0
@@ -2568,6 +2674,7 @@ class PresetsPanel(QWidget):
         self._current_rep_i: int = 0
         self._current_frame_i: int = 0
         self._current_frame_total: int = 0
+        self._run_outcome: str = "idle"
         self._manual_filename_parts = set(_enabled_filename_parts())
 
         self._build()
@@ -2663,7 +2770,18 @@ class PresetsPanel(QWidget):
         self._workflow_layout = lay_left
 
         # Loop table group
-        loop_grp = QGroupBox("Loop table")
+        loop_grp = QGroupBox("LOOP VARIABLES")
+        loop_grp.setObjectName("DualGateLoopSection")
+        loop_grp.setStyleSheet(
+            "QGroupBox#DualGateLoopSection {"
+            " background: #FAF8FF; border: 1px solid #C4B5FD;"
+            " border-left: 4px solid #7C3AED; border-radius: 7px;"
+            " margin-top: 9px; }"
+            "QGroupBox#DualGateLoopSection::title {"
+            " color: #6D28D9; font-weight: 700; subcontrol-origin: margin;"
+            " left: 9px; padding: 0 4px; }"
+        )
+        self._loop_group = loop_grp
         loop_lay = QVBoxLayout(loop_grp)
         loop_lay.setContentsMargins(6, 8, 6, 6)
         loop_lay.setSpacing(4)
@@ -2693,8 +2811,47 @@ class PresetsPanel(QWidget):
         loop_lay.addLayout(mode_row)
         loop_lay.addWidget(self._mode_hint)
 
+        acquisition_row = QHBoxLayout()
+        acquisition_row.setSpacing(6)
+        acquisition_label = QLabel("Measurement order:")
+        acquisition_label.setToolTip(
+            "Choose which values stay fixed while the other table is traversed."
+        )
+        self._acquisition_group_combo = QComboBox()
+        for key, label in ACQUISITION_GROUPINGS.items():
+            self._acquisition_group_combo.addItem(label, key)
+        self._acquisition_group_combo.setToolTip(
+            "At each loop setting: keep the current loop values fixed and run every "
+            "applicable batch row.\n"
+            "For each batch row: keep its gate sweep fixed and run every loop setting; "
+            "this keeps comparable measurements closer together in time."
+        )
+        acquisition_row.addWidget(acquisition_label)
+        acquisition_row.addWidget(self._acquisition_group_combo, stretch=1)
+        acquisition_row.addStretch()
+        loop_lay.addLayout(acquisition_row)
+        self._measurement_order_indicator = QLabel()
+        self._measurement_order_indicator.setTextFormat(Qt.TextFormat.RichText)
+        self._measurement_order_indicator.setWordWrap(True)
+        self._measurement_order_indicator.setStyleSheet(
+            "background: #FFFFFF; border: 1px solid #E5E7EB;"
+            "border-radius: 4px; padding: 4px 7px; color: #374151;"
+        )
+        self._measurement_order_indicator.setToolTip(
+            "The left item is the outer group that stays fixed while the right item is traversed."
+        )
+        loop_lay.addWidget(self._measurement_order_indicator)
+
         # Loop table itself
         self._loop_table = QTableWidget(0, len(LOOP_SCHEMA))
+        self._loop_table.setObjectName("DualGateLoopTable")
+        self._loop_table.setStyleSheet(
+            "QTableWidget#DualGateLoopTable { background: #FFFFFF; gridline-color: #DDD6FE; }"
+            "QTableWidget#DualGateLoopTable::item { padding: 2px 4px; }"
+            "QHeaderView::section { background: #EDE9FE; color: #5B21B6;"
+            " font-weight: 600; border: 0; border-right: 1px solid #DDD6FE;"
+            " border-bottom: 1px solid #C4B5FD; padding: 4px; }"
+        )
         self._loop_table.setMinimumHeight(80)
         self._loop_table.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -2738,17 +2895,35 @@ class PresetsPanel(QWidget):
         self._loop_del_btn.setToolTip("Delete the selected row(s) from the loop table.")
         loop_btn_row.addWidget(self._loop_add_btn)
         loop_btn_row.addWidget(self._loop_del_btn)
+        for button in (self._loop_add_btn, self._loop_del_btn):
+            button.setStyleSheet(
+                "QPushButton { color: #5B21B6; background: #F5F3FF;"
+                " border: 1px solid #C4B5FD; border-radius: 4px; padding: 4px; }"
+                "QPushButton:hover { background: #EDE9FE; }"
+            )
         loop_btn_row.addStretch()
         loop_lay.addWidget(self._loop_table)
         loop_lay.addLayout(loop_btn_row)
         lay_left.addWidget(loop_grp)
 
         # Batch table group
-        batch_grp = QGroupBox("Batch table")
+        batch_grp = QGroupBox("BATCH SWEEP ROWS")
+        batch_grp.setObjectName("DualGateBatchSection")
+        batch_grp.setStyleSheet(
+            "QGroupBox#DualGateBatchSection {"
+            " background: #F8FBFF; border: 1px solid #93C5FD;"
+            " border-left: 4px solid #2563EB; border-radius: 7px;"
+            " margin-top: 9px; }"
+            "QGroupBox#DualGateBatchSection::title {"
+            " color: #1D4ED8; font-weight: 700; subcontrol-origin: margin;"
+            " left: 9px; padding: 0 4px; }"
+        )
+        self._batch_group = batch_grp
         batch_lay = QVBoxLayout(batch_grp)
         batch_lay.setContentsMargins(6, 8, 6, 6)
         batch_lay.setSpacing(4)
         self._batch_table = QTableWidget(0, len(BATCH_SCHEMA))
+        self._batch_table.setObjectName("DualGateBatchTable")
         self._batch_table.setHorizontalHeaderLabels(BATCH_SCHEMA)
         self._batch_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._batch_table.verticalHeader().setVisible(False)
@@ -2758,7 +2933,11 @@ class PresetsPanel(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._batch_table.setStyleSheet(
-            "QTableWidget::item { padding: 2px 4px; }"
+            "QTableWidget#DualGateBatchTable { background: #FFFFFF; gridline-color: #BFDBFE; }"
+            "QTableWidget#DualGateBatchTable::item { padding: 2px 4px; }"
+            "QHeaderView::section { background: #DBEAFE; color: #1E40AF;"
+            " font-weight: 600; border: 0; border-right: 1px solid #BFDBFE;"
+            " border-bottom: 1px solid #93C5FD; padding: 4px; }"
         )
         # Batch column header tooltips
         _batch_hdr_tips = {
@@ -2851,8 +3030,36 @@ class PresetsPanel(QWidget):
         batch_btn_row.addWidget(self._batch_down_btn)
         batch_btn_row.addWidget(self._batch_actions_btn)
         batch_btn_row.addStretch()
+
+        repeat_btn_row = QHBoxLayout()
+        repeat_btn_row.setSpacing(5)
+        repeat_label = QLabel("Quick repeat:")
+        repeat_label.setToolTip(
+            "Set the repeat count without editing each table cell individually."
+        )
+        self._batch_repeat_spin = _SafeSpinBox()
+        self._batch_repeat_spin.setRange(1, 100_000)
+        self._batch_repeat_spin.setValue(1)
+        self._batch_repeat_spin.setFixedWidth(72)
+        self._batch_repeat_spin.setToolTip(
+            "Repeat count to assign to selected rows or every batch row."
+        )
+        self._batch_repeat_selected_btn = QPushButton("Set Selected")
+        self._batch_repeat_selected_btn.setToolTip(
+            "Assign this repeat count to all currently selected batch rows."
+        )
+        self._batch_repeat_all_btn = QPushButton("Set All")
+        self._batch_repeat_all_btn.setToolTip(
+            "Assign this repeat count to every batch row."
+        )
+        repeat_btn_row.addWidget(repeat_label)
+        repeat_btn_row.addWidget(self._batch_repeat_spin)
+        repeat_btn_row.addWidget(self._batch_repeat_selected_btn)
+        repeat_btn_row.addWidget(self._batch_repeat_all_btn)
+        repeat_btn_row.addStretch()
         batch_lay.addWidget(self._batch_table)
         batch_lay.addLayout(batch_btn_row)
+        batch_lay.addLayout(repeat_btn_row)
         lay_left.addWidget(batch_grp, stretch=1)
 
         self._sweep_calc = _SweepLineCalculator(
@@ -2921,20 +3128,41 @@ class PresetsPanel(QWidget):
         self._readiness_lbl.setObjectName("DualGateReadiness")
         lay_right.addWidget(self._readiness_lbl)
 
-        safety_grp = QGroupBox("Dual Gate Safety")
-        safety_form = QFormLayout(safety_grp)
+        self._safety_bar = QFrame()
+        self._safety_bar.setObjectName("DualGateSafetyBar")
+        self._safety_bar.setMaximumHeight(36)
+        self._safety_bar.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._safety_bar.setStyleSheet(
+            "QFrame#DualGateSafetyBar { background: #FAFBFC;"
+            " border: 1px solid #D7DEE7; border-radius: 5px; }"
+        )
+        safety_row = QHBoxLayout(self._safety_bar)
+        safety_row.setContentsMargins(8, 3, 8, 3)
+        safety_row.setSpacing(6)
+        safety_title = QLabel("Safety")
+        safety_title.setStyleSheet("font-weight: 600; color: #4B5563;")
+        safety_label = QLabel("Max jump / step:")
         self._safe_jump_spin = QDoubleSpinBox()
         self._safe_jump_spin.setRange(0.01, 100.0)
         self._safe_jump_spin.setDecimals(3)
         self._safe_jump_spin.setSingleStep(0.1)
         self._safe_jump_spin.setValue(float(cfg.ramp.safe_jump_V))
         self._safe_jump_spin.setSuffix(" V")
+        self._safe_jump_spin.setFixedWidth(96)
+        self._safe_jump_spin.setMaximumHeight(26)
         self._safe_jump_spin.setToolTip(
             "Maximum allowed direct voltage jump between Dual Gate sweep points. "
             "Runs are blocked if any resolved Vtg, Vbg, or Vbias jump exceeds this limit."
         )
-        safety_form.addRow("Max jump / step:", self._safe_jump_spin)
-        lay_right.addWidget(safety_grp)
+        safety_label.setToolTip(self._safe_jump_spin.toolTip())
+        safety_title.setToolTip(self._safe_jump_spin.toolTip())
+        safety_row.addWidget(safety_title)
+        safety_row.addWidget(safety_label)
+        safety_row.addStretch()
+        safety_row.addWidget(self._safe_jump_spin)
+        lay_right.addWidget(self._safety_bar)
 
         file_grp = QGroupBox("Filename preview")
         file_lay = QVBoxLayout(file_grp)
@@ -2967,8 +3195,15 @@ class PresetsPanel(QWidget):
         file_lay.addWidget(self._upcoming_preview)
         lay_right.addWidget(file_grp)
 
+        sequence_title = QLabel("Measurement sequence preview")
+        sequence_title.setStyleSheet("font-weight: 600;")
+        sequence_title.setToolTip(
+            "Shows loop inputs, batch-row gate sweeps, the exact acquisition order, "
+            "and combinations skipped by When conditions."
+        )
+        lay_right.addWidget(sequence_title)
         self._tree = RunPlanTree()
-        self._tree.setMinimumHeight(150)
+        self._tree.setMinimumHeight(220)
         lay_right.addWidget(self._tree, stretch=1)
 
         self._progress = QProgressBar()
@@ -3075,6 +3310,9 @@ class PresetsPanel(QWidget):
 
         # ── wire ──────────────────────────────────────────────────────────
         self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        self._acquisition_group_combo.currentIndexChanged.connect(
+            self._on_acquisition_order_changed
+        )
         self._apply_btn.clicked.connect(self._on_apply)
         self._discard_btn.clicked.connect(self._on_discard)
         self._loop_add_btn.clicked.connect(self._add_loop_row)
@@ -3085,6 +3323,10 @@ class PresetsPanel(QWidget):
         self._batch_del_btn.clicked.connect(self._del_batch_row)
         self._batch_up_btn.clicked.connect(self._move_batch_row_up)
         self._batch_down_btn.clicked.connect(self._move_batch_row_down)
+        self._batch_repeat_selected_btn.clicked.connect(
+            self._set_selected_rows_repeat
+        )
+        self._batch_repeat_all_btn.clicked.connect(self._set_all_rows_repeat)
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn.clicked.connect(self._on_stop)
         self._spectrum_btn.clicked.connect(self._toggle_spectrum_viewer)
@@ -3111,6 +3353,7 @@ class PresetsPanel(QWidget):
         # Initialise mode UI (sets hint label + Group column visibility)
         self._populate_filename_parts()
         self._on_mode_changed(self._mode_combo.currentText())
+        self._on_acquisition_order_changed()
         self._sweep_calc._safe_jump_spin = self._safe_jump_spin
         self._sweep_calc._recalculate()
         self._update_batch_row_buttons()
@@ -3122,6 +3365,12 @@ class PresetsPanel(QWidget):
             self._smu.disconnected.connect(lambda: self._sweep_calc.set_vbias_available(False))
             self._smu.connected.connect(self._refresh_readiness)
             self._smu.disconnected.connect(self._refresh_readiness)
+            if hasattr(self._smu, "limits_result"):
+                self._smu.limits_result.connect(self._refresh_readiness)
+            if hasattr(self._smu, "limits_error"):
+                self._smu.limits_error.connect(self._refresh_readiness)
+            if hasattr(self._smu, "limits_state_changed"):
+                self._smu.limits_state_changed.connect(self._refresh_readiness)
         if self._lf6 is not None:
             self._lf6.connected.connect(self._refresh_readiness)
             self._lf6.disconnected.connect(self._refresh_readiness)
@@ -3152,6 +3401,8 @@ class PresetsPanel(QWidget):
             },
             "loop_mode": self._mode_combo.currentText(),
             "applied_loop_mode": self._applied_mode,
+            "acquisition_grouping": self._current_acquisition_grouping(),
+            "applied_acquisition_grouping": self._applied_acquisition_grouping,
             "draft_loop": self._session_records(_read_loop_table(self._loop_table)),
             "draft_batch": self._session_records(_read_batch_table(self._batch_table)),
             "applied_loop": self._session_records(self._loop_src),
@@ -3176,6 +3427,7 @@ class PresetsPanel(QWidget):
                 "efield_min": float(calc._efield_min_spin.value()),
                 "efield_max": float(calc._efield_max_spin.value()),
                 "vbias": float(calc._vbias_spin.value()),
+                "repeat": int(calc._repeat_spin.value()),
                 "include_vbias": bool(calc._include_vbias_chk.isChecked()),
                 "condition_label": calc._condition_edit.text(),
             },
@@ -3216,6 +3468,19 @@ class PresetsPanel(QWidget):
             and self._mode_combo.findText(applied_loop_mode) >= 0
         ):
             self._applied_mode = applied_loop_mode
+        grouping = state.get("acquisition_grouping", "loop_first")
+        applied_grouping = state.get(
+            "applied_acquisition_grouping", grouping
+        )
+        self._set_acquisition_grouping(
+            grouping if grouping in ACQUISITION_GROUPINGS else "loop_first"
+        )
+        self._applied_acquisition_grouping = (
+            applied_grouping
+            if applied_grouping in ACQUISITION_GROUPINGS
+            else "loop_first"
+        )
+        self._on_acquisition_order_changed()
         try:
             self._safe_jump_spin.setValue(float(state["safe_jump_v"]))
         except (KeyError, TypeError, ValueError):
@@ -3276,6 +3541,12 @@ class PresetsPanel(QWidget):
                     spin.setValue(float(calculator[key]))
                 except (KeyError, TypeError, ValueError):
                     pass
+            try:
+                self._sweep_calc._repeat_spin.setValue(
+                    max(1, int(calculator["repeat"]))
+                )
+            except (KeyError, TypeError, ValueError):
+                pass
             if "include_vbias" in calculator:
                 self._sweep_calc._include_vbias_chk.setChecked(
                     bool(calculator["include_vbias"])
@@ -3314,6 +3585,37 @@ class PresetsPanel(QWidget):
         # Show/hide the Group column
         show_group = (mode == "Customized")
         self._loop_table.setColumnHidden(3, not show_group)
+        if hasattr(self, "_draft_badge"):
+            self._on_draft_edited()
+
+    def _current_acquisition_grouping(self) -> str:
+        value = self._acquisition_group_combo.currentData()
+        return str(value) if value in ACQUISITION_GROUPINGS else "loop_first"
+
+    def _set_acquisition_grouping(self, grouping: str) -> None:
+        index = self._acquisition_group_combo.findData(grouping)
+        if index >= 0:
+            self._acquisition_group_combo.setCurrentIndex(index)
+
+    @Slot()
+    def _on_acquisition_order_changed(self, *_args):
+        if hasattr(self, "_measurement_order_indicator"):
+            loop = (
+                '<span style="color:#6D28D9; font-weight:700;">LOOP SETTING</span>'
+            )
+            batch = (
+                '<span style="color:#1D4ED8; font-weight:700;">BATCH ROW</span>'
+            )
+            if self._current_acquisition_grouping() == "batch_first":
+                order = f"{batch} &nbsp;→&nbsp; {loop}"
+                explanation = "finish all loop settings for one batch row"
+            else:
+                order = f"{loop} &nbsp;→&nbsp; {batch}"
+                explanation = "finish all batch rows for one loop setting"
+            self._measurement_order_indicator.setText(
+                f"<b>Execution grouping:</b> {order}"
+                f'<span style="color:#6B7280;"> &nbsp;({explanation})</span>'
+            )
         if hasattr(self, "_draft_badge"):
             self._on_draft_edited()
 
@@ -3585,6 +3887,8 @@ class PresetsPanel(QWidget):
                 not loop_df.equals(_normalize_loop(self._loop_src))
                 or not batch_df.equals(_normalize_batch(self._batch_src))
                 or self._mode_combo.currentText() != self._applied_mode
+                or self._current_acquisition_grouping()
+                != self._applied_acquisition_grouping
             )
         except Exception:
             return True
@@ -3612,8 +3916,12 @@ class PresetsPanel(QWidget):
         self._mode_combo.blockSignals(True)
         self._mode_combo.setCurrentText(self._applied_mode)
         self._mode_combo.blockSignals(False)
+        self._acquisition_group_combo.blockSignals(True)
+        self._set_acquisition_grouping(self._applied_acquisition_grouping)
+        self._acquisition_group_combo.blockSignals(False)
         self._refresh_tables()
         self._on_mode_changed(self._applied_mode)
+        self._on_acquisition_order_changed()
         self._refresh_draft_state()
         self._refresh_filename_preview()
 
@@ -3677,11 +3985,18 @@ class PresetsPanel(QWidget):
             issues.append("At least one filename part is required.")
         if not self._lf6 or not self._lf6.is_connected:
             issues.append("LF6 is not connected or in mock mode.")
-        required_smu_roles = _required_smu_roles(self._final_seq, self._df_batch)
+        required_smu_roles = _required_smu_roles(
+            self._final_seq, self._df_batch, self._acquisition_schedule
+        )
         issues.extend(_smu_readiness_issues(self._smu, required_smu_roles))
         if self._hardware_incident_active:
             issues.append("Reconnect the SMUs after the hardware fault.")
-        if not self._final_seq or self._df_batch.empty or self._total_acq <= 0:
+        if (
+            not self._final_seq
+            or self._df_batch.empty
+            or not self._acquisition_schedule
+            or self._total_acq <= 0
+        ):
             issues.append("The applied plan has no runnable acquisitions.")
         if any(
             _to_bool(row.get("MeasurePower", False))
@@ -3689,7 +4004,10 @@ class PresetsPanel(QWidget):
         ) and (not self._pm or not self._pm.is_connected):
             issues.append("MeasurePower requires a connected PM100D.")
         jump_issues = _validate_safe_jumps(
-            self._final_seq, self._df_batch, float(self._safe_jump_spin.value())
+            self._final_seq,
+            self._df_batch,
+            float(self._safe_jump_spin.value()),
+            self._acquisition_schedule,
         )
         if jump_issues:
             issues.append(jump_issues[0])
@@ -3723,7 +4041,9 @@ class PresetsPanel(QWidget):
             )
             self._run_btn.setEnabled(False)
         else:
-            required_roles = _required_smu_roles(self._final_seq, self._df_batch)
+            required_roles = _required_smu_roles(
+                self._final_seq, self._df_batch, self._acquisition_schedule
+            )
             role_status = "/".join(required_roles)
             if "Vbias" not in required_roles:
                 role_status = f"{role_status}; Vbias optional"
@@ -3831,7 +4151,12 @@ class PresetsPanel(QWidget):
     def _draft_loop_and_batch(self) -> Tuple[pd.DataFrame, pd.DataFrame, List[dict], pd.DataFrame]:
         loop_df = _normalize_loop(_read_loop_table(self._loop_table))
         batch_df = _normalize_batch(_read_batch_table(self._batch_table))
-        seq, batch, _total = _build_plan(loop_df, batch_df, mode=self._mode_combo.currentText())
+        seq, batch, _total = _build_plan(
+            loop_df,
+            batch_df,
+            mode=self._mode_combo.currentText(),
+            acquisition_grouping=self._current_acquisition_grouping(),
+        )
         return loop_df, batch_df, seq, batch
 
     def _current_run_meta(self) -> Dict[str, Any]:
@@ -3924,27 +4249,22 @@ class PresetsPanel(QWidget):
             self._preview_note_lbl.setText("Fix the filename inputs before running.")
 
         upcoming: List[str] = []
-        for seq_ctx in seq[:3]:
-            for _, row in batch_df.iterrows():
-                row_dict = row.to_dict()
-                if not _to_bool(row_dict.get("Run", True)):
-                    continue
-                if not _when_ok(row_dict.get("When", ""), _outer_ctx(seq_ctx)):
-                    continue
-                try:
-                    base_name, _fc, _tokens = _build_run_filename_base(
-                        run_meta,
-                        seq_ctx,
-                        row_dict,
-                        enabled_parts=self._selected_filename_parts(),
-                    )
-                    upcoming.append(base_name)
-                except Exception:
-                    continue
-                if len(upcoming) >= 4:
-                    break
-            if len(upcoming) >= 4:
-                break
+        draft_schedule = _build_acquisition_schedule(
+            seq,
+            batch_df,
+            acquisition_grouping=self._current_acquisition_grouping(),
+        )
+        for task in draft_schedule[:4]:
+            try:
+                base_name, _fc, _tokens = _build_run_filename_base(
+                    run_meta,
+                    task["ctx"],
+                    task["row"],
+                    enabled_parts=self._selected_filename_parts(),
+                )
+                upcoming.append(base_name)
+            except Exception:
+                continue
         self._upcoming_preview.setPlainText("\n".join(upcoming) if upcoming else "No upcoming filenames yet.")
 
     def _validate_before_run(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -3965,16 +4285,23 @@ class PresetsPanel(QWidget):
             return None, "Enable at least one filename part."
         if not self._lf6 or not self._lf6.is_connected:
             return None, "LF6 must be connected or running in mock mode before a sweep can start."
-        if self._df_batch.empty or not self._final_seq:
+        if self._df_batch.empty or not self._final_seq or not self._acquisition_schedule:
             return None, "No runnable plan is available."
-        required_smu_roles = _required_smu_roles(self._final_seq, self._df_batch)
+        required_smu_roles = _required_smu_roles(
+            self._final_seq, self._df_batch, self._acquisition_schedule
+        )
         smu_issues = _smu_readiness_issues(self._smu, required_smu_roles)
         if smu_issues:
             return None, smu_issues[0]
         if any(_to_bool(row.get("MeasurePower", False)) for _, row in self._df_batch.iterrows()):
             if not self._pm or not self._pm.is_connected:
                 return None, "MeasurePower rows require a connected PM100D."
-        jump_issues = _validate_safe_jumps(self._final_seq, self._df_batch, float(self._safe_jump_spin.value()))
+        jump_issues = _validate_safe_jumps(
+            self._final_seq,
+            self._df_batch,
+            float(self._safe_jump_spin.value()),
+            self._acquisition_schedule,
+        )
         if jump_issues:
             for issue in jump_issues:
                 self._log(issue)
@@ -3985,11 +4312,11 @@ class PresetsPanel(QWidget):
         except Exception as exc:
             return None, f"Save path is invalid: {exc}"
         try:
-            first_row = self._df_batch.iloc[0].to_dict()
+            first_task = self._acquisition_schedule[0]
             _build_run_filename_base(
                 run_meta,
-                _first_applicable_seq_ctx(self._final_seq, first_row),
-                first_row,
+                first_task["ctx"],
+                first_task["row"],
                 enabled_parts=self._selected_filename_parts(),
             )
         except Exception as exc:
@@ -4120,6 +4447,8 @@ class PresetsPanel(QWidget):
         self._batch_rev_btn.setEnabled(row >= 0)
         self._batch_up_btn.setEnabled(row > 0)
         self._batch_down_btn.setEnabled(0 <= row < self._batch_table.rowCount() - 1)
+        self._batch_repeat_selected_btn.setEnabled(bool(rows))
+        self._batch_repeat_all_btn.setEnabled(self._batch_table.rowCount() > 0)
         self._update_batch_action_states(rows)
 
     def _update_batch_action_states(self, rows: Optional[List[int]] = None):
@@ -4244,6 +4573,48 @@ class PresetsPanel(QWidget):
         self._set_rows_run_state(
             range(self._batch_table.rowCount()),
             enabled,
+        )
+
+    def _set_rows_repeat(self, rows: Sequence[int], repeat: int):
+        table = self._batch_table
+        repeat_column = BATCH_SCHEMA.index("repeat")
+        repeat_value = max(1, int(repeat))
+        valid_rows = sorted(
+            {
+                int(row)
+                for row in rows
+                if 0 <= int(row) < table.rowCount()
+            }
+        )
+        if not valid_rows:
+            return
+
+        signals_were_blocked = table.blockSignals(True)
+        try:
+            for row in valid_rows:
+                item = table.item(row, repeat_column)
+                if item is None:
+                    item = _make_batch_table_item("repeat", repeat_value)
+                    table.setItem(row, repeat_column, item)
+                else:
+                    item.setText(str(repeat_value))
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        finally:
+            table.blockSignals(signals_were_blocked)
+        self._commit_batch_change()
+
+    @Slot()
+    def _set_selected_rows_repeat(self):
+        self._set_rows_repeat(
+            self._selected_batch_rows(),
+            self._batch_repeat_spin.value(),
+        )
+
+    @Slot()
+    def _set_all_rows_repeat(self):
+        self._set_rows_repeat(
+            range(self._batch_table.rowCount()),
+            self._batch_repeat_spin.value(),
         )
 
     @Slot()
@@ -4400,6 +4771,12 @@ class PresetsPanel(QWidget):
                 loop_df,
                 batch_df,
                 mode=self._mode_combo.currentText(),
+                acquisition_grouping=self._current_acquisition_grouping(),
+            )
+            schedule = _build_acquisition_schedule(
+                seq,
+                enabled_batch,
+                acquisition_grouping=self._current_acquisition_grouping(),
             )
         except ValueError as exc:
             return [f"Plan: {exc}"]
@@ -4408,6 +4785,7 @@ class PresetsPanel(QWidget):
                 seq,
                 enabled_batch,
                 float(self._safe_jump_spin.value()),
+                schedule,
             )
         )
         return issues
@@ -4533,8 +4911,14 @@ class PresetsPanel(QWidget):
             )
             return
         mode = self._mode_combo.currentText()
+        acquisition_grouping = self._current_acquisition_grouping()
         try:
-            _build_plan(loop_draft, batch_draft, mode=mode)
+            _build_plan(
+                loop_draft,
+                batch_draft,
+                mode=mode,
+                acquisition_grouping=acquisition_grouping,
+            )
         except ValueError as exc:
             self._summary_lbl.setText(f"Cannot apply: {exc}")
             self._summary_lbl.setStyleSheet("color: #b42318;")
@@ -4544,13 +4928,19 @@ class PresetsPanel(QWidget):
         self._loop_src = loop_draft
         self._batch_src = batch_draft
         self._applied_mode = mode
+        self._applied_acquisition_grouping = acquisition_grouping
         cfg.filename.enabled_parts = [key for key, _label in PART_SPECS if key in self._manual_filename_parts]
         cfg.filename.temperature = self._temp_edit.text().strip() or cfg.filename.temperature
         cfg.filename.measurement_mode = self._mode_combo_name.currentText()
         coeff = _safe_float(self._power_coeff_edit.text())
         cfg.filename.power_coefficient = coeff if coeff is not None else 1.0
         self._update_plan()
-        jump_issues = _validate_safe_jumps(self._final_seq, self._df_batch, float(self._safe_jump_spin.value()))
+        jump_issues = _validate_safe_jumps(
+            self._final_seq,
+            self._df_batch,
+            float(self._safe_jump_spin.value()),
+            self._acquisition_schedule,
+        )
         if jump_issues:
             for issue in jump_issues:
                 self._log(issue)
@@ -4559,14 +4949,27 @@ class PresetsPanel(QWidget):
         self._refresh_filename_preview()
 
     def _update_plan(self):
+        self._run_outcome = "idle"
         mode = self._applied_mode
+        grouping = self._applied_acquisition_grouping
         try:
-            seq, batch, total = _build_plan(self._loop_src, self._batch_src, mode=mode)
+            seq, batch, total = _build_plan(
+                self._loop_src,
+                self._batch_src,
+                mode=mode,
+                acquisition_grouping=grouping,
+            )
+            schedule = _build_acquisition_schedule(
+                seq,
+                batch,
+                acquisition_grouping=grouping,
+            )
         except ValueError as exc:
             self._summary_lbl.setText(f"Plan error: {exc}")
             self._summary_lbl.setStyleSheet("color: red;")
             self._final_seq = []
             self._df_batch = _normalize_batch(pd.DataFrame())
+            self._acquisition_schedule = []
             self._total_acq = 0
             self._total_points = 0
             self._progress.setMaximum(1)
@@ -4576,8 +4979,9 @@ class PresetsPanel(QWidget):
         self._summary_lbl.setStyleSheet("")
         self._final_seq    = seq
         self._df_batch     = batch
+        self._acquisition_schedule = schedule
         self._total_acq    = total
-        total_points = _count_total_points(seq, batch)
+        total_points = _count_total_points(seq, batch, schedule)
         self._total_points = total_points
         self._done_acq = 0
         self._done_frames = 0
@@ -4588,9 +4992,13 @@ class PresetsPanel(QWidget):
         self._current_frame_total = 0
         self._progress.setMaximum(max(total_points, 1))
         self._progress.setValue(0)
+        if grouping == "batch_first":
+            order_label = "batch row → loop settings"
+        else:
+            order_label = "loop setting → batch rows"
         self._summary_lbl.setText(
-            f"{len(seq)} sequence(s) x batch -> {total} file(s), "
-            f"{total_points} sweep point(s)  [mode: {mode}]"
+            f"{len(schedule)} ordered step(s) -> {total} file(s), "
+            f"{total_points} sweep point(s)  [mode: {mode}; order: {order_label}]"
         )
         self._tree.update_plan(
             seq,
@@ -4598,6 +5006,11 @@ class PresetsPanel(QWidget):
             done=0,
             total_acq=total,
             param_order=self._tree_param_order(),
+            acquisition_schedule=schedule,
+            acquisition_grouping=grouping,
+            loop_definition=self._loop_src,
+            loop_mode=mode,
+            run_outcome=self._run_outcome,
         )
         self._update_filename_preview()
         self._refresh_readiness()
@@ -4648,6 +5061,7 @@ class PresetsPanel(QWidget):
         self._current_rep_i = 0
         self._current_frame_i = 0
         self._current_frame_total = 0
+        self._run_outcome = "running"
         self._hardware_incident_active = False
         self._run_thread = QThread(self)
         self._run_worker = _RunWorker(
@@ -4659,6 +5073,7 @@ class PresetsPanel(QWidget):
             filename_parts=self._selected_filename_parts(),
             stop_event=self._stop_event,
             preview_event=self._preview_event,
+            acquisition_schedule=self._acquisition_schedule,
         )
         self._run_worker.moveToThread(self._run_thread)
         self._run_thread.started.connect(self._run_worker.run)
@@ -4677,6 +5092,7 @@ class PresetsPanel(QWidget):
         self._stop_btn.setEnabled(True)
         self._status_lbl.setText("Running…")
         self._status_lbl.setStyleSheet("color: orange;")
+        self._on_progress(0, self._total_acq)
         self._run_thread.start()
 
     @Slot(bool)
@@ -4768,6 +5184,11 @@ class PresetsPanel(QWidget):
             current_frame_i=self._current_frame_i,
             current_frame_total=self._current_frame_total,
             param_order=self._tree_param_order(),
+            acquisition_schedule=self._acquisition_schedule,
+            acquisition_grouping=self._applied_acquisition_grouping,
+            loop_definition=self._loop_src,
+            loop_mode=self._applied_mode,
+            run_outcome=self._run_outcome,
         )
 
     @Slot(int, int)
@@ -4795,6 +5216,11 @@ class PresetsPanel(QWidget):
             current_frame_i=self._current_frame_i,
             current_frame_total=self._current_frame_total,
             param_order=self._tree_param_order(),
+            acquisition_schedule=self._acquisition_schedule,
+            acquisition_grouping=self._applied_acquisition_grouping,
+            loop_definition=self._loop_src,
+            loop_mode=self._applied_mode,
+            run_outcome=self._run_outcome,
         )
 
     @Slot(int, str, int)
@@ -4813,34 +5239,53 @@ class PresetsPanel(QWidget):
             current_frame_i=self._current_frame_i,
             current_frame_total=self._current_frame_total,
             param_order=self._tree_param_order(),
+            acquisition_schedule=self._acquisition_schedule,
+            acquisition_grouping=self._applied_acquisition_grouping,
+            loop_definition=self._loop_src,
+            loop_mode=self._applied_mode,
+            run_outcome=self._run_outcome,
         )
 
     @Slot(bool, str)
     def _on_finished(self, success: bool, message: str):
         self._stop_btn.setEnabled(False)
         if self._hardware_incident_active:
+            self._run_outcome = "failed"
             self._status_lbl.setText("Hardware fault - reconnect SMUs")
             self._status_lbl.setStyleSheet("color: red;")
         elif success:
+            self._run_outcome = "completed"
             self._done_acq = self._total_acq
             self._done_frames = self._total_points
             self._progress.setMaximum(max(self._total_points, 1))
             self._progress.setValue(self._total_points)
-            self._tree.update_plan(
-                self._final_seq,
-                self._df_batch,
-                done=self._total_acq,
-                total_acq=self._total_acq,
-                param_order=self._tree_param_order(),
-            )
             self._status_lbl.setText("Completed")
             self._status_lbl.setStyleSheet("color: green;")
         elif self._stop_event.is_set():
+            self._run_outcome = "stopped"
             self._status_lbl.setText("Stopped")
             self._status_lbl.setStyleSheet("color: gray;")
         else:
+            self._run_outcome = "failed"
             self._status_lbl.setText("Failed")
             self._status_lbl.setStyleSheet("color: red;")
+        self._tree.update_plan(
+            self._final_seq,
+            self._df_batch,
+            done=self._done_acq,
+            total_acq=self._total_acq,
+            current_seq_i=self._current_seq_i,
+            current_label=self._current_label,
+            current_rep_i=self._current_rep_i,
+            current_frame_i=self._current_frame_i,
+            current_frame_total=self._current_frame_total,
+            param_order=self._tree_param_order(),
+            acquisition_schedule=self._acquisition_schedule,
+            acquisition_grouping=self._applied_acquisition_grouping,
+            loop_definition=self._loop_src,
+            loop_mode=self._applied_mode,
+            run_outcome=self._run_outcome,
+        )
         QTimer.singleShot(50, self._refresh_readiness)
 
     @Slot(object)

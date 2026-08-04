@@ -284,6 +284,16 @@ class _LF6Section(QWidget):
 # ── SMU Section ───────────────────────────────────────────────────────────────
 
 class _SMUSection(QWidget):
+    _CURRENT_RANGES = (
+        ("1 µA", 1e-6),
+        ("10 µA", 10e-6),
+        ("100 µA", 100e-6),
+        ("1 mA", 1e-3),
+        ("10 mA", 10e-3),
+        ("100 mA", 100e-3),
+        ("1 A", 1.0),
+    )
+
     def __init__(self, smu_ctrl, parent=None):
         super().__init__(parent)
         self._ctrl = smu_ctrl
@@ -300,6 +310,7 @@ class _SMUSection(QWidget):
                     self._compliance_by_addr[str(address)] = {
                         "curr": float(values.get("curr", cfg.smu.curr_compliance_A)),
                         "volt": float(values.get("volt", cfg.smu.volt_compliance_V)),
+                        "curr_range": values.get("curr_range"),
                     }
                 except (TypeError, ValueError):
                     continue
@@ -346,6 +357,10 @@ class _SMUSection(QWidget):
         }
         self._curr_comp_by_role: dict[str, QDoubleSpinBox] = {}
         self._volt_comp_by_role: dict[str, QDoubleSpinBox] = {}
+        self._curr_range_by_role: dict[str, QComboBox] = {}
+        self._apply_limits_by_role: dict[str, QPushButton] = {}
+        self._limit_status_by_role: dict[str, QLabel] = {}
+        limit_widgets: list[QWidget] = []
         role_tips = {
             "Vbg": "VISA address of the SMU channel used as back-gate (Vbg).",
             "Vtg": "VISA address of the SMU channel used as top-gate (Vtg).",
@@ -368,7 +383,7 @@ class _SMUSection(QWidget):
             lay.addLayout(addr_row)
 
             curr = QDoubleSpinBox()
-            curr.setRange(0.001, 1_000_000_000.0)
+            curr.setRange(1.0, 1_050_000_000.0)
             curr.setDecimals(3)
             curr.setSingleStep(100.0)
             curr.setValue(cfg.smu.curr_compliance_A * 1e9)
@@ -385,26 +400,89 @@ class _SMUSection(QWidget):
             volt.setSuffix(" V")
             volt.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
             volt.setToolTip(
-                f"Voltage compliance/range for the Keithley assigned to {role}."
+                f"Voltage source range for the Keithley assigned to {role}."
             )
+            current_range = QComboBox()
+            for label, value in self._CURRENT_RANGES:
+                current_range.addItem(label, value)
+            current_range.setEnabled(False)
+            current_range.setToolTip(
+                "Selected automatically as the smallest Keithley range that supports "
+                "the requested current compliance."
+            )
+            apply_limits = QPushButton("Apply")
+            apply_limits.setToolTip(
+                f"Apply and verify the current compliance and ranges for {role}."
+            )
+            limit_status = QLabel("Not connected")
+            # Status text must not change the height of the compact sidebar
+            # card. Detailed readback and errors are shown in its tooltip.
+            limit_status.setWordWrap(False)
+            limit_status.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            )
+            limit_status.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            limit_status.setStyleSheet("color: #6B7280; font-size: 10px;")
             self._curr_comp_by_role[role] = curr
             self._volt_comp_by_role[role] = volt
+            self._curr_range_by_role[role] = current_range
+            self._apply_limits_by_role[role] = apply_limits
+            self._limit_status_by_role[role] = limit_status
+
+            limit_widget = QFrame()
+            limit_widget.setObjectName(f"SMULimits{role}")
+            limit_widget.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+            limit_layout = QVBoxLayout(limit_widget)
+            limit_layout.setContentsMargins(4, 3, 4, 5)
+            limit_layout.setSpacing(3)
+            limit_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+            limit_header = QHBoxLayout()
+            role_label = QLabel(role)
+            role_label.setStyleSheet("font-weight: 600;")
+            limit_header.addWidget(role_label)
+            limit_header.addStretch()
+            limit_header.addWidget(limit_status)
+            limit_layout.addLayout(limit_header)
 
             curr_row = QHBoxLayout()
-            curr_row.setContentsMargins(18, 0, 0, 0)
             curr_label = QLabel("Current limit:")
             curr_label.setMinimumWidth(72)
             curr_row.addWidget(curr_label)
             curr_row.addWidget(curr, stretch=1)
-            lay.addLayout(curr_row)
+            limit_layout.addLayout(curr_row)
+
+            range_row = QHBoxLayout()
+            range_label = QLabel("Current range:")
+            range_label.setMinimumWidth(72)
+            range_row.addWidget(range_label)
+            range_row.addWidget(current_range, stretch=1)
+            limit_layout.addLayout(range_row)
 
             volt_row = QHBoxLayout()
-            volt_row.setContentsMargins(18, 0, 0, 3)
-            volt_label = QLabel("Voltage limit:")
+            volt_label = QLabel("Voltage range:")
             volt_label.setMinimumWidth(72)
             volt_row.addWidget(volt_label)
             volt_row.addWidget(volt, stretch=1)
-            lay.addLayout(volt_row)
+            volt_row.addWidget(apply_limits)
+            limit_layout.addLayout(volt_row)
+            limit_widgets.append(limit_widget)
+
+            apply_limits.clicked.connect(
+                lambda _checked=False, r=role: self._apply_role_limits(r)
+            )
+            curr.valueChanged.connect(
+                lambda _value, r=role: self._on_limit_edited(r)
+            )
+            volt.valueChanged.connect(
+                lambda _value, r=role: self._on_limit_edited(r)
+            )
+            current_range.currentIndexChanged.connect(
+                lambda _index, r=role: self._on_limit_edited(r)
+            )
 
             combo.currentTextChanged.connect(
                 lambda text, r=role: self._on_role_address_changed(r, text)
@@ -412,6 +490,10 @@ class _SMUSection(QWidget):
 
         btn_row = QHBoxLayout()
         self._connect_btn = QPushButton("Connect")
+        self._connect_btn.setToolTip(
+            "Connect each assigned Keithley, apply the displayed default "
+            "limits, preserve its voltage setpoint, and ensure its output is ON."
+        )
         self._disconnect_btn = QPushButton("Disconnect")
         self._disconnect_btn.setEnabled(False)
         btn_row.addWidget(self._connect_btn)
@@ -420,6 +502,27 @@ class _SMUSection(QWidget):
 
         self._status = _status_label("Disconnected", "gray")
         lay.addWidget(self._status)
+
+        limits_group = QGroupBox("Compliance and ranges")
+        limits_group.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        limits_group.setToolTip(
+            "Connect applies these values as the initial limits. After connecting, "
+            "edit them and click Apply to update the Keithley live."
+        )
+        limits_layout = QVBoxLayout(limits_group)
+        limits_layout.setContentsMargins(6, 8, 6, 6)
+        limits_layout.setSpacing(2)
+        limits_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        for widget in limit_widgets:
+            limits_layout.addWidget(widget)
+        self._apply_all_limits_btn = QPushButton("Apply all assigned SMUs")
+        self._apply_all_limits_btn.setEnabled(False)
+        self._apply_all_limits_btn.clicked.connect(self._apply_all_limits)
+        limits_layout.addWidget(self._apply_all_limits_btn)
+        self._limits_group = limits_group
+        lay.addWidget(limits_group)
 
     @staticmethod
     def _usable_address(text: str) -> str:
@@ -435,11 +538,34 @@ class _SMUSection(QWidget):
         self._compliance_by_addr[address] = {
             "curr": self._curr_comp_by_role[role].value() * 1e-9,
             "volt": self._volt_comp_by_role[role].value(),
+            "curr_range": self._curr_range_by_role[role].currentData(),
         }
 
     def _remember_visible_compliance(self) -> None:
         for role in self._role_combos:
             self._remember_role_compliance(role)
+
+    @classmethod
+    def _recommended_current_range(cls, compliance_A: float) -> float:
+        compliance_A = float(compliance_A)
+        for _label, current_range_A in cls._CURRENT_RANGES:
+            if (
+                current_range_A * 0.001
+                <= compliance_A
+                <= current_range_A * 1.05
+            ):
+                return current_range_A
+        return cls._CURRENT_RANGES[-1][1]
+
+    def _sync_current_range_for_role(self, role: str) -> float:
+        compliance_A = self._curr_comp_by_role[role].value() * 1e-9
+        recommended = self._recommended_current_range(compliance_A)
+        combo = self._curr_range_by_role[role]
+        index = combo.findData(recommended)
+        combo.blockSignals(True)
+        combo.setCurrentIndex(max(index, 0))
+        combo.blockSignals(False)
+        return recommended
 
     def _load_role_compliance(self, role: str, address: str) -> None:
         address = self._usable_address(address)
@@ -454,14 +580,27 @@ class _SMUSection(QWidget):
             volt_V = cfg.smu.volt_compliance_V
         curr = self._curr_comp_by_role[role]
         volt = self._volt_comp_by_role[role]
+        current_range = self._curr_range_by_role[role]
         curr.blockSignals(True)
         volt.blockSignals(True)
+        current_range.blockSignals(True)
         curr.setValue(curr_A * 1e9)
         volt.setValue(volt_V)
+        recommended_range = self._recommended_current_range(curr_A)
+        range_index = current_range.findData(recommended_range)
+        current_range.setCurrentIndex(range_index)
         curr.blockSignals(False)
         volt.blockSignals(False)
+        current_range.blockSignals(False)
         curr.setEnabled(bool(address))
         volt.setEnabled(bool(address))
+        current_range.setEnabled(False)
+        connected = bool(getattr(self._ctrl, "is_connected", False))
+        self._apply_limits_by_role[role].setEnabled(bool(address) and connected)
+        self._limit_status_by_role[role].setText(
+            "Not applied" if address and connected else "Not connected"
+        )
+        self._limit_status_by_role[role].setToolTip("")
         selected_text = address or "No Keithley assigned"
         self._role_combos[role].setToolTip(
             f"Keithley assigned to {role}.\nSelected: {selected_text}"
@@ -474,6 +613,154 @@ class _SMUSection(QWidget):
         if old_address:
             self._remember_role_compliance(role, old_address)
         self._load_role_compliance(role, text)
+
+    @staticmethod
+    def _format_current_A(value: float) -> str:
+        value = float(value)
+        if abs(value) < 1e-6:
+            return f"{value * 1e9:g} nA"
+        if abs(value) < 1e-3:
+            return f"{value * 1e6:g} µA"
+        return f"{value * 1e3:g} mA"
+
+    def _on_limit_edited(self, role: str) -> None:
+        address = self._usable_address(self._role_combos[role].currentText())
+        if not address:
+            return
+        self._sync_current_range_for_role(role)
+        self._remember_role_compliance(role)
+        mark_dirty = getattr(self._ctrl, "mark_smu_limits_dirty", None)
+        if callable(mark_dirty):
+            mark_dirty(address)
+        self._limit_status_by_role[role].setText("Modified - Apply")
+        self._limit_status_by_role[role].setToolTip(
+            "The displayed limits differ from the instrument. Click Apply."
+        )
+        self._limit_status_by_role[role].setStyleSheet(
+            "color: #92400E; font-size: 10px;"
+        )
+        self._apply_limits_by_role[role].setEnabled(
+            bool(getattr(self._ctrl, "is_connected", False))
+        )
+
+    def _validate_role_limits(self, role: str) -> Optional[str]:
+        compliance_A = self._curr_comp_by_role[role].value() * 1e-9
+        current_range_A = self._curr_range_by_role[role].currentData()
+        if current_range_A is None:
+            return None
+        minimum = float(current_range_A) * 0.001
+        maximum = float(current_range_A) * 1.05
+        if compliance_A < minimum or compliance_A > maximum:
+            return (
+                f"Current limit must be {self._format_current_A(minimum)} to "
+                f"{self._format_current_A(maximum)} for the selected range."
+            )
+        return None
+
+    def _apply_role_limits(self, role: str) -> None:
+        address = self._usable_address(self._role_combos[role].currentText())
+        status = self._limit_status_by_role[role]
+        if not address:
+            status.setText("No SMU")
+            status.setToolTip("No Keithley is assigned to this role.")
+            return
+        if not bool(getattr(self._ctrl, "is_connected", False)):
+            status.setText("Connect first")
+            status.setToolTip("Connect the assigned Keithley before applying limits.")
+            status.setStyleSheet("color: #991B1B; font-size: 10px;")
+            return
+        self._sync_current_range_for_role(role)
+        error = self._validate_role_limits(role)
+        if error:
+            status.setText("Invalid value")
+            status.setToolTip(error)
+            status.setStyleSheet("color: #991B1B; font-size: 10px;")
+            return
+        apply_method = getattr(self._ctrl, "apply_smu_limits", None)
+        if not callable(apply_method):
+            status.setText("Unavailable")
+            status.setToolTip("Controller does not support live limit changes.")
+            status.setStyleSheet("color: #991B1B; font-size: 10px;")
+            return
+        self._remember_role_compliance(role)
+        values = self._compliance_by_addr[address]
+        status.setText("Applying...")
+        status.setToolTip("Applying and reading back the requested limits.")
+        status.setStyleSheet("color: #92400E; font-size: 10px;")
+        self._apply_limits_by_role[role].setEnabled(False)
+        apply_method(
+            address,
+            float(values["curr"]),
+            values.get("curr_range"),
+            float(values["volt"]),
+        )
+
+    @Slot()
+    def _apply_all_limits(self) -> None:
+        seen: set[str] = set()
+        for role, combo in self._role_combos.items():
+            address = self._usable_address(combo.currentText())
+            if address and address not in seen:
+                seen.add(address)
+                self._apply_role_limits(role)
+
+    @Slot(str, str, object)
+    def _on_limits_result(self, action: str, address: str, settings) -> None:
+        values = dict(settings or {})
+        roles = [
+            role
+            for role, combo in self._role_combos.items()
+            if self._usable_address(combo.currentText()) == str(address)
+        ]
+        compliance = float(values.get("curr", 0.0))
+        current_range = values.get("curr_range")
+        voltage_range = float(values.get("volt", 0.0))
+        range_text = (
+            "Auto range"
+            if current_range is None
+            else f"{self._format_current_A(float(current_range))} range"
+        )
+        prefix = "Applied" if action == "apply" else "Instrument readback"
+        details = (
+            f"{prefix}: {self._format_current_A(compliance)}; "
+            f"{range_text}; {voltage_range:g} V"
+        )
+        if action != "apply":
+            details += ". Apply to send the displayed values."
+        if action == "apply":
+            self._compliance_by_addr[str(address)] = {
+                "curr": compliance,
+                "curr_range": current_range,
+                "volt": voltage_range,
+            }
+            cfg.smu.compliance_by_addr = {
+                key: dict(item) for key, item in self._compliance_by_addr.items()
+            }
+            try:
+                cfg.save()
+            except Exception as exc:
+                self._scan_status.setText(f"Limits applied, but config save failed: {exc}")
+        for role in roles:
+            label = self._limit_status_by_role[role]
+            label.setText("Applied" if action == "apply" else "Read back")
+            label.setToolTip(details)
+            label.setStyleSheet(
+                "color: #166534; font-size: 10px;"
+                if action == "apply"
+                else "color: #92400E; font-size: 10px;"
+            )
+            self._apply_limits_by_role[role].setEnabled(True)
+
+    @Slot(str, str, str)
+    def _on_limits_error(self, action: str, address: str, message: str) -> None:
+        for role, combo in self._role_combos.items():
+            if self._usable_address(combo.currentText()) != str(address):
+                continue
+            label = self._limit_status_by_role[role]
+            label.setText("Apply failed" if action == "apply" else "Read failed")
+            label.setToolTip(str(message))
+            label.setStyleSheet("color: #991B1B; font-size: 10px;")
+            self._apply_limits_by_role[role].setEnabled(True)
 
     def compliance_by_addr(self) -> dict[str, dict[str, float]]:
         self._remember_visible_compliance()
@@ -491,6 +778,10 @@ class _SMUSection(QWidget):
         self._ctrl.connected.connect(self._on_connected)
         self._ctrl.disconnected.connect(self._on_disconnected)
         self._ctrl.error.connect(self._on_error)
+        if hasattr(self._ctrl, "limits_result"):
+            self._ctrl.limits_result.connect(self._on_limits_result)
+        if hasattr(self._ctrl, "limits_error"):
+            self._ctrl.limits_error.connect(self._on_limits_error)
         self._scan_thread: Optional[QThread] = None
 
     @Slot()
@@ -578,14 +869,17 @@ class _SMUSection(QWidget):
         term_text = self._termination.currentText()
         termination = "" if term_text == "<none>" else term_text.replace("\\n", "\n").replace("\\r", "\r")
 
-        comp = self.compliance_by_addr()
-
+        for role in self._role_combos:
+            self._sync_current_range_for_role(role)
+        compliance = self.compliance_by_addr()
         self._pending_role_map = role_map.copy()
         self._pending_termination_text = term_text
         self._status.setText("Connecting…")
         self._status.setStyleSheet("color: orange; font-weight: bold;")
         self._connect_btn.setEnabled(False)
-        self._ctrl.connect_instrument(visa_addrs, role_map, termination, comp)
+        self._ctrl.connect_instrument(
+            visa_addrs, role_map, termination, compliance
+        )
 
     @Slot(str)
     def _on_error(self, msg: str):
@@ -601,6 +895,20 @@ class _SMUSection(QWidget):
         self._status.setStyleSheet("color: green; font-weight: bold;")
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
+        opened_set = {str(address) for address in opened}
+        self._apply_all_limits_btn.setEnabled(bool(opened_set))
+        for role, combo in self._role_combos.items():
+            address = self._usable_address(combo.currentText())
+            available = bool(address and address in opened_set)
+            self._apply_limits_by_role[role].setEnabled(available)
+            if available:
+                self._limit_status_by_role[role].setText("Verifying...")
+                self._limit_status_by_role[role].setToolTip(
+                    "Connected; applying and reading back the default limits."
+                )
+                self._limit_status_by_role[role].setStyleSheet(
+                    "color: #92400E; font-size: 10px;"
+                )
         role_map = self._pending_role_map or {}
         cfg.smu.vbg_resource = role_map.get("Vbg") or ""
         cfg.smu.vtg_resource = role_map.get("Vtg") or ""
@@ -630,6 +938,14 @@ class _SMUSection(QWidget):
         self._status.setStyleSheet("color: gray; font-weight: bold;")
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
+        self._apply_all_limits_btn.setEnabled(False)
+        for role in self._role_combos:
+            self._apply_limits_by_role[role].setEnabled(False)
+            self._limit_status_by_role[role].setText("Not connected")
+            self._limit_status_by_role[role].setToolTip("")
+            self._limit_status_by_role[role].setStyleSheet(
+                "color: #6B7280; font-size: 10px;"
+            )
 
 
 # ── Manual Control (Keithley) ─────────────────────────────────────────────────
@@ -2384,6 +2700,7 @@ class InstrumentPanel(QScrollArea):
                         smu._compliance_by_addr[str(address)] = {
                             "curr": float(values["curr"]),
                             "volt": float(values["volt"]),
+                            "curr_range": values.get("curr_range"),
                         }
                     except (KeyError, TypeError, ValueError):
                         continue

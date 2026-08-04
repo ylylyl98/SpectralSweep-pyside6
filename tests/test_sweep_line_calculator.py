@@ -7,6 +7,8 @@ import types
 import unittest
 from unittest.mock import Mock
 
+import pandas as pd
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
@@ -30,6 +32,7 @@ if importlib.util.find_spec("pylablib") is None:
 from ui.presets_panel import (
     BATCH_SCHEMA,
     PresetsPanel,
+    _build_acquisition_schedule,
     _parse_sweep_constants,
     _solve_condition_line,
 )
@@ -37,6 +40,88 @@ from utils.when_condition import evaluate_when_expression, validate_when_express
 
 
 class SweepLineSolverTests(unittest.TestCase):
+    def test_batch_first_uses_same_forward_loop_order_for_every_row(self):
+        sequence = [
+            {"Rotation1 Angle (deg)": 10.0},
+            {"Rotation1 Angle (deg)": 20.0},
+        ]
+        batch = pd.DataFrame(
+            [
+                {"Run": True, "condition_label": "row-1", "repeat": 1},
+                {"Run": True, "condition_label": "row-2", "repeat": 1},
+                {"Run": True, "condition_label": "row-3", "repeat": 1},
+            ]
+        )
+
+        schedule = _build_acquisition_schedule(
+            sequence,
+            batch,
+            acquisition_grouping="batch_first",
+        )
+
+        self.assertEqual(
+            [
+                (task["row"]["condition_label"], task["ctx"]["Rotation1 Angle (deg)"])
+                for task in schedule
+            ],
+            [
+                ("row-1", 10.0),
+                ("row-1", 20.0),
+                ("row-2", 10.0),
+                ("row-2", 20.0),
+                ("row-3", 10.0),
+                ("row-3", 20.0),
+            ],
+        )
+
+    def test_batch_first_schedule_preserves_any_resolved_loop_context(self):
+        sequence = [
+            {"Rotation1 Angle (deg)": 0.0, "Center Wavelength (nm)": 750.0},
+            {"Rotation1 Angle (deg)": 45.0, "Center Wavelength (nm)": 810.0},
+        ]
+        batch = pd.DataFrame(
+            [
+                {
+                    "Run": True,
+                    "condition_label": "conditional",
+                    "repeat": 1,
+                    "When": "Center_Wavelength == 810",
+                },
+                {"Run": True, "condition_label": "all", "repeat": 1},
+            ]
+        )
+
+        schedule = _build_acquisition_schedule(
+            sequence,
+            batch,
+            acquisition_grouping="batch_first",
+        )
+
+        self.assertEqual(
+            [
+                (task["row"]["condition_label"], task["seq_i"])
+                for task in schedule
+            ],
+            [("conditional", 1), ("all", 0), ("all", 1)],
+        )
+        self.assertEqual(schedule[0]["ctx"], sequence[1])
+
+    def test_loop_first_remains_the_default_schedule(self):
+        sequence = [{"Rotation1 Angle (deg)": 10.0}, {"Rotation1 Angle (deg)": 20.0}]
+        batch = pd.DataFrame(
+            [
+                {"Run": True, "condition_label": "row-1", "repeat": 1},
+                {"Run": True, "condition_label": "row-2", "repeat": 1},
+            ]
+        )
+
+        schedule = _build_acquisition_schedule(sequence, batch)
+
+        self.assertEqual(
+            [(task["seq_i"], task["row_i"]) for task in schedule],
+            [(0, 0), (0, 1), (1, 0), (1, 1)],
+        )
+
     def test_constant_parser_accepts_arrays_and_inclusive_ranges(self):
         self.assertEqual(_parse_sweep_constants("4"), [4.0])
         self.assertEqual(
@@ -115,12 +200,52 @@ class SweepLinePanelTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_measurement_order_options_use_action_based_names(self):
+        panel = PresetsPanel()
+        self.assertEqual(
+            [
+                panel._acquisition_group_combo.itemText(index)
+                for index in range(panel._acquisition_group_combo.count())
+            ],
+            [
+                "At each loop setting, run all batch rows",
+                "For each batch row, run all loop settings",
+            ],
+        )
+
+    def test_loop_and_batch_sections_have_matching_semantic_colors(self):
+        panel = PresetsPanel()
+        self.assertEqual(panel._loop_group.title(), "LOOP VARIABLES")
+        self.assertEqual(panel._batch_group.title(), "BATCH SWEEP ROWS")
+        self.assertIn("#7C3AED", panel._loop_group.styleSheet())
+        self.assertIn("#2563EB", panel._batch_group.styleSheet())
+        self.assertIn("#EDE9FE", panel._loop_table.styleSheet())
+        self.assertIn("#DBEAFE", panel._batch_table.styleSheet())
+
+        panel._set_acquisition_grouping("loop_first")
+        panel._on_acquisition_order_changed()
+        loop_first = panel._measurement_order_indicator.text()
+        self.assertLess(loop_first.index("LOOP SETTING"), loop_first.index("BATCH ROW"))
+
+        panel._set_acquisition_grouping("batch_first")
+        panel._on_acquisition_order_changed()
+        batch_first = panel._measurement_order_indicator.text()
+        self.assertLess(batch_first.index("BATCH ROW"), batch_first.index("LOOP SETTING"))
+
+    def test_dual_gate_safety_control_is_a_compact_single_row(self):
+        panel = PresetsPanel()
+        self.assertEqual(panel._safety_bar.maximumHeight(), 36)
+        self.assertEqual(panel._safe_jump_spin.width(), 96)
+        self.assertLessEqual(panel._safety_bar.sizeHint().height(), 36)
+        self.assertEqual(panel._tree.minimumHeight(), 220)
+
     def test_calculator_physical_limits_round_trip_in_session(self):
         panel = PresetsPanel()
         panel._sweep_calc._doping_min_spin.setValue(-7.5)
         panel._sweep_calc._doping_max_spin.setValue(8.5)
         panel._sweep_calc._efield_min_spin.setValue(-2.25)
         panel._sweep_calc._efield_max_spin.setValue(3.25)
+        panel._sweep_calc._repeat_spin.setValue(7)
 
         restored = PresetsPanel()
         restored.restore_session_state(panel.capture_session_state())
@@ -129,6 +254,7 @@ class SweepLinePanelTests(unittest.TestCase):
         self.assertAlmostEqual(restored._sweep_calc._doping_max_spin.value(), 8.5)
         self.assertAlmostEqual(restored._sweep_calc._efield_min_spin.value(), -2.25)
         self.assertAlmostEqual(restored._sweep_calc._efield_max_spin.value(), 3.25)
+        self.assertEqual(restored._sweep_calc._repeat_spin.value(), 7)
 
     def test_constant_expression_round_trips_and_documents_range_syntax(self):
         panel = PresetsPanel()
@@ -150,6 +276,7 @@ class SweepLinePanelTests(unittest.TestCase):
         calc = panel._sweep_calc
         calc._op_combo.setCurrentText("−")
         calc._ratio_spin.setValue(0.5)
+        calc._repeat_spin.setValue(4)
         calc._constant_edit.setText("-1:1:1")
         calc._recalculate()
 
@@ -167,6 +294,11 @@ class SweepLinePanelTests(unittest.TestCase):
             ["TG−0.5BG=-1", "TG−0.5BG=0", "TG−0.5BG=1"],
         )
 
+        self.assertEqual(
+            [row["repeat"] for row in calc._calculated_rows],
+            [4, 4, 4],
+        )
+
         panel._batch_table.selectRow(0)
         history_before = panel._batch_history_index
         calc._on_add_clicked()
@@ -179,6 +311,14 @@ class SweepLinePanelTests(unittest.TestCase):
                 for row in range(1, 4)
             ],
             ["TG−0.5BG=-1", "TG−0.5BG=0", "TG−0.5BG=1"],
+        )
+
+        self.assertEqual(
+            [
+                panel._batch_table.item(row, BATCH_SCHEMA.index("repeat")).text()
+                for row in range(1, 4)
+            ],
+            ["4", "4", "4"],
         )
 
     def test_calculator_outputs_obey_physical_limits(self):
@@ -540,6 +680,37 @@ class SweepLinePanelTests(unittest.TestCase):
         self.assertEqual(
             table.item(1, run_col).checkState(),
             Qt.CheckState.Unchecked,
+        )
+
+    def test_quick_repeat_updates_selected_or_all_rows_as_one_undoable_edit(self):
+        panel = PresetsPanel()
+        panel._batch_table.selectRow(0)
+        panel._add_batch_row()
+        panel._add_batch_row()
+        table = panel._batch_table
+        repeat_col = BATCH_SCHEMA.index("repeat")
+
+        table.selectRow(1)
+        panel._batch_repeat_spin.setValue(4)
+        history_before = panel._batch_history_index
+        panel._set_selected_rows_repeat()
+
+        self.assertEqual(
+            [table.item(row, repeat_col).text() for row in range(3)],
+            ["1", "4", "1"],
+        )
+        self.assertEqual(panel._batch_history_index, history_before + 1)
+        panel._undo_batch_edit()
+        self.assertEqual(
+            [table.item(row, repeat_col).text() for row in range(3)],
+            ["1", "1", "1"],
+        )
+
+        panel._batch_repeat_spin.setValue(6)
+        panel._set_all_rows_repeat()
+        self.assertEqual(
+            [table.item(row, repeat_col).text() for row in range(3)],
+            ["6", "6", "6"],
         )
 
     def test_row_clipboard_paste_and_undo_redo(self):

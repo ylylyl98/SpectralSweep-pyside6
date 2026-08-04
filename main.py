@@ -81,6 +81,9 @@ def main():
     if not icon.isNull():
         app.setWindowIcon(icon)
 
+    from ui.input_safety import install_spinbox_wheel_guard
+    install_spinbox_wheel_guard(app)
+
     from ui.main_window import MainWindow
     win = MainWindow()
     if not icon.isNull():

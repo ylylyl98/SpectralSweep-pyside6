@@ -57,6 +57,22 @@ class SessionStateTests(unittest.TestCase):
         restored._refresh_tables()
         self.assertEqual(restored._loop_table.item(0, 2).text(), "861")
 
+    def test_dual_gate_restores_drift_minimized_acquisition_order(self):
+        panel = PresetsPanel()
+        panel._acquisition_group_combo.setCurrentIndex(
+            panel._acquisition_group_combo.findData("batch_first")
+        )
+        panel._on_apply()
+
+        state = panel.capture_session_state()
+        restored = PresetsPanel()
+        restored.restore_session_state(state)
+
+        self.assertEqual(
+            restored._acquisition_group_combo.currentData(), "batch_first"
+        )
+        self.assertEqual(restored._applied_acquisition_grouping, "batch_first")
+
     def test_workflow_panels_restore_representative_setup(self):
         power = PowerSweepPanel()
         power._pos_input.setText("(2, 8, 4)")

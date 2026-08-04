@@ -1,6 +1,6 @@
 import numpy as np, nidaqmx, time, pyvisa
 import warnings
-from typing import Union
+from typing import Optional, Union
 # connect to the instrument via pyvisa
 
 
@@ -117,6 +117,8 @@ class MonoControl(PyvisaInstrument):
 
 
 class KeithControl(PyvisaInstrument):
+    CURRENT_RANGES_A = (1e-6, 10e-6, 100e-6, 1e-3, 10e-3, 100e-3, 1.0)
+
     def __init__(
         self,
         address: str,
@@ -127,22 +129,27 @@ class KeithControl(PyvisaInstrument):
         curr_compliance: float = 1e-6,
         volt_compliance: float = 20.0,
         timeout_ms: int = 5000,
+        configure_on_connect: bool = True,
     ):
         super().__init__(address, name, '\n', rm, timeout_ms=timeout_ms)
         self.type = 'keithley'
         self.connect()
         self.get_identity()
-        self.mode = 'volt_step'
+        self.mode = 'unconfigured'
+        self._curr_compliance_A = float(curr_compliance)
+        self._volt_range_V = float(volt_compliance)
+        self._curr_range_A = None
         # Configure exactly once. Previously construction used 1 µA and the
         # controller immediately configured the same SMU again.
-        self.set_volt_step(
-            curr_compliance=curr_compliance,
-            volt_compliance=volt_compliance,
-        )
+        if configure_on_connect:
+            self.set_volt_step(
+                curr_compliance=curr_compliance,
+                volt_compliance=volt_compliance,
+            )
         self.x_indexes[variable_name] = 0
         self.y_indexes['measured_'+variable_name] = 0
         self.y_indexes[variable_name + '_leakage'] = 1
-        volt, curr = self.read_curr()
+        volt, curr = self.read_curr() if configure_on_connect else (0.0, 0.0)
         self.x_values = np.array([volt])
         self.y_values = np.array([volt, curr])
 
@@ -150,7 +157,25 @@ class KeithControl(PyvisaInstrument):
         print(self.query('*IDN?'))
 
     # for non-synchronized sweep only
-    def set_volt_sweep(self, curr_compliance=1E-6, delay=0.01, volt_compliance=20):
+    def set_volt_sweep(
+        self,
+        curr_compliance: Optional[float] = None,
+        delay=0.01,
+        volt_compliance: Optional[float] = None,
+    ):
+
+        curr_compliance = (
+            self._curr_compliance_A
+            if curr_compliance is None
+            else float(curr_compliance)
+        )
+        volt_compliance = (
+            self._volt_range_V
+            if volt_compliance is None
+            else float(volt_compliance)
+        )
+        self._curr_compliance_A = float(curr_compliance)
+        self._volt_range_V = float(volt_compliance)
 
         self.write(':SOUR:FUNC VOLT', print_command=True)
         self.write(':SENS:FUNC \'CURR\'', print_command=True)
@@ -171,7 +196,26 @@ class KeithControl(PyvisaInstrument):
         self.mode = 'volt_sweep'
         self.write(':OUTP ON', print_command=True)
 
-    def set_volt_step(self, curr_compliance=1E-6, delay=0.1, volt_compliance=20):
+    def set_volt_step(
+        self,
+        curr_compliance: Optional[float] = None,
+        delay=0.1,
+        volt_compliance: Optional[float] = None,
+        initial_voltage: Optional[float] = None,
+    ):
+
+        curr_compliance = (
+            self._curr_compliance_A
+            if curr_compliance is None
+            else float(curr_compliance)
+        )
+        volt_compliance = (
+            self._volt_range_V
+            if volt_compliance is None
+            else float(volt_compliance)
+        )
+        self._curr_compliance_A = float(curr_compliance)
+        self._volt_range_V = float(volt_compliance)
 
         self.write(':SOUR:FUNC VOLT', print_command=True)
         self.write(':SENS:FUNC \'CURR\'', print_command=True)
@@ -182,8 +226,89 @@ class KeithControl(PyvisaInstrument):
         self.write(':SOUR:VOLT:MODE FIXED', print_command=True)
         self.write(':SOUR:VOLT:RANG %.0f' % volt_compliance, print_command=True)
         self.write('TRIG:COUN 1', print_command=True)
+        if initial_voltage is not None:
+            self.write(
+                ':SOUR:VOLT:LEV %.9g' % float(initial_voltage),
+                print_command=True,
+            )
         self.mode = 'volt_step'
         self.write(':OUTP ON', print_command=True)
+
+    def apply_compliance_settings(
+        self,
+        curr_compliance_A: float,
+        current_range_A: Optional[float],
+        voltage_range_V: float,
+    ) -> dict:
+        """Apply protection and range settings without enabling the output."""
+        curr_compliance_A = float(curr_compliance_A)
+        voltage_range_V = float(voltage_range_V)
+        if not np.isfinite(curr_compliance_A) or curr_compliance_A <= 0:
+            raise ValueError("Current compliance must be greater than zero.")
+        if not np.isfinite(voltage_range_V) or voltage_range_V <= 0:
+            raise ValueError("Voltage source range must be greater than zero.")
+
+        # The 2400 family has a separate compliance range that limits the
+        # highest selectable measurement range. Always derive both from the
+        # requested compliance; accepting a wider manual measurement range can
+        # produce Keithley error +824 ("Cannot exceed compliance range").
+        resolved_range = self.recommended_current_range(curr_compliance_A)
+        if not np.isfinite(resolved_range) or resolved_range <= 0:
+            raise ValueError("Current measurement range must be greater than zero.")
+        minimum = resolved_range * 0.001
+        maximum = resolved_range * 1.05
+        if curr_compliance_A < minimum or curr_compliance_A > maximum:
+            raise ValueError(
+                "Current compliance must be between 0.1% and 105% of "
+                f"the selected current range ({minimum:g} A to {maximum:g} A)."
+            )
+
+        self.write(':SENS:CURR:RANG:AUTO OFF', print_command=True)
+        self.write(':SENS:CURR:PROT:RSYN ON', print_command=True)
+        self.write(
+            ':SENS:CURR:PROT %.9g' % curr_compliance_A,
+            print_command=True,
+        )
+        self.write(
+            ':SOUR:VOLT:RANG %.9g' % voltage_range_V,
+            print_command=True,
+        )
+        self._curr_compliance_A = curr_compliance_A
+        self._curr_range_A = resolved_range
+        self._volt_range_V = voltage_range_V
+        return self.read_compliance_settings()
+
+    @classmethod
+    def recommended_current_range(cls, curr_compliance_A: float) -> float:
+        """Choose the smallest supported range for the requested compliance."""
+        curr_compliance_A = float(curr_compliance_A)
+        for current_range_A in cls.CURRENT_RANGES_A:
+            if (
+                current_range_A * 0.001
+                <= curr_compliance_A
+                <= current_range_A * 1.05
+            ):
+                return current_range_A
+        raise ValueError(
+            f"No Keithley current range supports {curr_compliance_A:g} A compliance."
+        )
+
+    def read_compliance_settings(self) -> dict:
+        """Return live protection and measurement/source range settings."""
+        curr_compliance_A = float(self.query(':SENS:CURR:PROT?'))
+        auto_range = bool(int(float(self.query(':SENS:CURR:RANG:AUTO?'))))
+        current_range_A = float(self.query(':SENS:CURR:RANG?'))
+        voltage_range_V = float(self.query(':SOUR:VOLT:RANG?'))
+        self._curr_compliance_A = curr_compliance_A
+        self._curr_range_A = None if auto_range else current_range_A
+        self._volt_range_V = voltage_range_V
+        return {
+            'curr': curr_compliance_A,
+            'curr_range': None if auto_range else current_range_A,
+            'curr_range_actual': current_range_A,
+            'curr_autorange': auto_range,
+            'volt': voltage_range_V,
+        }
 
     def volt_step(self, volt: float):
         if self.mode != 'volt_step':
