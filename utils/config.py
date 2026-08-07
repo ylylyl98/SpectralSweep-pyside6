@@ -179,6 +179,65 @@ class RotationConfig:
 
 
 @dataclass
+class MagnetConfig:
+    """Attocube APS100 defaults for the attoDRY1000 9 T solenoid."""
+
+    visa_resource: str = "ASRL5::INSTR"
+    baud_rate: int = 9600
+    timeout_ms: int = 1500
+    coil_constant_t_per_a: float = 0.20328
+    maximum_field_t: float = 9.0
+    maximum_current_a: float = 44.27
+    maximum_rate_a_per_s: float = 0.0343
+    mcd_max_field_t: float = 8.0
+    heater_warm_s: float = 60.0
+    heater_cool_s: float = 120.0
+    current_match_tolerance_a: float = 0.01
+    field_tolerance_t: float = 0.002
+    poll_interval_s: float = 0.5
+    allow_remote_heater_control: bool = True
+
+
+@dataclass
+class MCDConfig:
+    """Continuous two-angle MCD workflow defaults."""
+
+    start_field_t: float = -2.0
+    stop_field_t: float = 2.0
+    sample_id: str = ""
+    point: str = ""
+    condition_label: str = ""
+    subfolder: str = "MCD Data"
+    temperature: str = "1.8"
+    measurement_mode: str = "Ref"
+    laser_nm: str = ""
+    power_uw: str = ""
+    power_coefficient: float = 1.0
+    decimal_style: str = "dot"
+    filename_parts: List[str] = field(default_factory=lambda: [
+        "temp_mode",
+        "laser_power",
+        "center",
+        "exposure",
+        "condition",
+    ])
+    rotator: str = "rot1"
+    angle_a_deg: float = 45.0
+    angle_b_deg: float = 135.0
+    gate_ratio: float = 1.0
+    rotation_settle_s: float = 0.3
+    field_poll_s: float = 0.2
+    sweep_mode: str = "one_way"
+    conditions: List[dict] = field(default_factory=list)
+    apply_sample_voltages: bool = False
+    vbg_v: float = 0.0
+    vtg_v: float = 0.0
+    vbias_v: float = 0.0
+    voltage_ramp_step_v: float = 0.1
+    voltage_settle_s: float = 0.1
+
+
+@dataclass
 class SessionConfig:
     """Last harmless UI/workflow setup; never contains live device state."""
 
@@ -199,6 +258,8 @@ class AppConfig:
     bfp_rc: BFPRCConfig = field(default_factory=BFPRCConfig)
     rotation: RotationConfig = field(default_factory=RotationConfig)
     stage: StageConfig = field(default_factory=StageConfig)
+    magnet: MagnetConfig = field(default_factory=MagnetConfig)
+    mcd: MCDConfig = field(default_factory=MCDConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     font_size_pt: int = 9          # UI-wide font size in points
 
@@ -274,6 +335,8 @@ class AppConfig:
         if isinstance(rotation_data.get("rot2"), dict):
             _update_dataclass(self.rotation.rot2, rotation_data["rot2"])
         _update_dataclass(self.stage,    data.get("stage", {}))
+        _update_dataclass(self.magnet,   data.get("magnet", {}))
+        _update_dataclass(self.mcd,      data.get("mcd", {}))
         session_data = data.get("session", {})
         if isinstance(session_data, dict):
             try:

@@ -20,10 +20,11 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRect, QSettings, QTimer, QObject
+from PySide6.QtCore import Qt, QRect, QSettings, QTimer, QObject, Slot
 from PySide6.QtGui  import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QTabWidget, QWidget, QStatusBar, QApplication,
+    QMessageBox,
 )
 
 # ── Global stylesheet ──────────────────────────────────────────────────────────
@@ -311,6 +312,7 @@ from controllers.smu_controller      import SMUController
 from controllers.rotation_controller import RotationController
 from controllers.stage_controller    import StageController
 from controllers.pm100d_controller   import PM100DController
+from controllers.magnet_controller   import MagnetController
 
 from ui.instrument_panel import InstrumentPanel
 from ui.settings_panel   import SettingsPanel
@@ -319,6 +321,7 @@ from ui.presets_panel    import PresetsPanel
 from ui.megasweep_panel  import MegaSweepPanel
 from ui.power_sweep_panel import PowerSweepPanel
 from ui.bfp_panel_integrated import BFPPanel
+from ui.mcd_panel import MCDPanel
 from utils.config import cfg
 
 
@@ -421,6 +424,7 @@ class MainWindow(QMainWindow):
         self._rot  = RotationController(parent=self)
         self._stg  = StageController(parent=self)
         self._pm   = PM100DController(parent=self)
+        self._magnet = MagnetController(parent=self)
 
         # ── status bar ────────────────────────────────────────────────────────
         self._status = QStatusBar()
@@ -432,6 +436,17 @@ class MainWindow(QMainWindow):
         self._lf6.error.connect(lambda m: self._status.showMessage(f"LF6 error: {m[:80]}"))
         self._smu.connected.connect(lambda *_: self._status.showMessage("SMU connected"))
         self._smu.disconnected.connect(lambda: self._status.showMessage("SMU disconnected"))
+        self._magnet.connected.connect(
+            lambda identity: self._status.showMessage(
+                f"APS100 connected: {identity.serial}"
+            )
+        )
+        self._magnet.disconnected.connect(
+            lambda: self._status.showMessage("APS100 disconnected")
+        )
+        self._magnet.error.connect(
+            lambda message: self._status.showMessage(f"APS100 error: {message[:80]}")
+        )
 
         # ── instrument panel dock (left) ──────────────────────────────────────
         self._inst_panel = InstrumentPanel(
@@ -483,6 +498,16 @@ class MainWindow(QMainWindow):
         )
         self._tabs.addTab(self._power_sweep, "Motion Sweep")
 
+        # Continuous magnetic circular dichroism
+        self._mcd = MCDPanel(
+            magnet_ctrl=self._magnet,
+            lf6_ctrl=self._lf6,
+            rotation_ctrl=self._rot,
+            smu_ctrl=self._smu,
+        )
+        self._mcd.run_state_changed.connect(self._on_mcd_run_state_changed)
+        self._tabs.addTab(self._mcd, "MCD")
+
         # BFP
         self._bfp = BFPPanel(lf6_ctrl=self._lf6)
         self._tabs.addTab(self._bfp, "BFP")
@@ -500,6 +525,7 @@ class MainWindow(QMainWindow):
             "dual_gate": self._presets,
             "mega_sweep": self._mega,
             "power_sweep": self._power_sweep,
+            "mcd": self._mcd,
             "bfp": self._bfp,
             "spectrum": self._spectrum,
             "settings": self._settings,
@@ -508,6 +534,7 @@ class MainWindow(QMainWindow):
             self._presets: "dual_gate",
             self._mega: "mega_sweep",
             self._power_sweep: "power_sweep",
+            self._mcd: "mcd",
             self._bfp: "bfp",
             self._spectrum: "spectrum",
             self._settings: "settings",
@@ -541,6 +568,7 @@ class MainWindow(QMainWindow):
             self._mega: self._mega._sample_edit,
             self._power_sweep: self._power_sweep._devid_edit,
             self._bfp: self._bfp._dev_edit,
+            self._mcd: self._mcd._sample_id,
         }
         if cfg.session.schema_version >= 2:
             initial = cfg.session.sample_id
@@ -665,13 +693,52 @@ class MainWindow(QMainWindow):
 
     # ── close ─────────────────────────────────────────────────────────────────
 
+    @Slot(bool)
+    def _on_mcd_run_state_changed(self, running: bool) -> None:
+        """Lock other UI surfaces while MCD owns the shared instruments."""
+        self._inst_panel.setEnabled(not running)
+        for index in range(self._tabs.count()):
+            widget = self._tabs.widget(index)
+            if widget is not self._mcd:
+                self._tabs.setTabEnabled(index, not running)
+        if running:
+            self._tabs.setCurrentWidget(self._mcd)
+            self._status.showMessage("MCD running — other instrument controls locked")
+        else:
+            self._status.showMessage("MCD finished — instrument controls unlocked")
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        try:
+            if not self._mcd.shutdown():
+                QMessageBox.critical(
+                    self,
+                    "MCD acquisition is still stopping",
+                    "The acquisition worker did not stop within 30 seconds. "
+                    "The application will remain open so the APS100 connection is not abandoned.",
+                )
+                event.ignore()
+                return
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Unable to stop MCD safely",
+                f"The application will remain open.\n\n{exc}",
+            )
+            event.ignore()
+            return
         self._session_poll_timer.stop()
         self._session_save_timer.stop()
         self._persist_session()
         self._save_geometry()
         # Shut controllers down gracefully
-        for ctrl in (self._lf6, self._smu, self._rot, self._stg, self._pm):
+        for ctrl in (
+            self._magnet,
+            self._lf6,
+            self._smu,
+            self._rot,
+            self._stg,
+            self._pm,
+        ):
             try:
                 ctrl.shutdown()
             except Exception:

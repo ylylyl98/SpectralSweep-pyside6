@@ -65,6 +65,23 @@ class FilenamePowerTests(unittest.TestCase):
         ctx = _context(nominal_power_uw="", power_coefficient=2)
         self.assertEqual(resolve_power_uw(ctx), (None, "missing"))
 
+    def test_dot_decimal_style_is_opt_in_and_legacy_p_style_remains_default(self):
+        legacy = _context(center_nm=750.25, exposure_ms=125.0)
+        dotted = _context(
+            center_nm=750.25,
+            exposure_ms=125.0,
+            decimal_style="dot",
+        )
+
+        self.assertIn(
+            "750p25nmc_0p125sx1",
+            build_base_filename(legacy, ["center", "exposure"]),
+        )
+        self.assertIn(
+            "750.25nmc_0.125sx1",
+            build_base_filename(dotted, ["center", "exposure"]),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

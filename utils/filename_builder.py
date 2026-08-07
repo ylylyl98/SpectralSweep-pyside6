@@ -40,6 +40,7 @@ class FilenameContext:
     measure_power: bool = False
     measured_power_uw: Optional[float] = None
     power_coefficient: float = 1.0
+    decimal_style: str = "p"
 
 
 def _is_blank(value: Any) -> bool:
@@ -93,14 +94,27 @@ def build_condition_display_label(condition_label: Any, vbias_start: Any = None,
     return "_".join([part for part in (base, vb) if part])
 
 
-def format_decimal_token(value: float, decimals: int = 3) -> str:
+def format_decimal_token(
+    value: float,
+    decimals: int = 3,
+    *,
+    decimal_style: str = "p",
+) -> str:
     txt = f"{float(value):.{decimals}f}".rstrip("0").rstrip(".")
     if txt in {"", "-0"}:
         txt = "0"
+    if str(decimal_style).strip().lower() == "dot":
+        return txt
     return txt.replace(".", "p")
 
 
-def format_compact_number(value: Any, keep_sign: bool = False, decimals: int = 3) -> str:
+def format_compact_number(
+    value: Any,
+    keep_sign: bool = False,
+    decimals: int = 3,
+    *,
+    decimal_style: str = "p",
+) -> str:
     x = _coerce_float(value)
     if x is None:
         return ""
@@ -109,25 +123,34 @@ def format_compact_number(value: Any, keep_sign: bool = False, decimals: int = 3
         sign = "-"
     elif keep_sign and x > 0:
         sign = "+"
-    return sign + format_decimal_token(abs(x), decimals=decimals)
+    return sign + format_decimal_token(
+        abs(x), decimals=decimals, decimal_style=decimal_style
+    )
 
 
-def format_exposure_token(exposure_ms: Any, accumulations: Any) -> str:
+def format_exposure_token(
+    exposure_ms: Any,
+    accumulations: Any,
+    *,
+    decimal_style: str = "p",
+) -> str:
     exp_ms = _coerce_float(exposure_ms)
     if exp_ms is None:
         return ""
     seconds = exp_ms / 1000.0
-    exp_txt = f"{seconds:g}".replace(".", "p")
+    exp_txt = f"{seconds:g}"
+    if str(decimal_style).strip().lower() != "dot":
+        exp_txt = exp_txt.replace(".", "p")
     acc = _coerce_float(accumulations)
     acc_txt = str(int(acc)) if acc is not None else "1"
     return f"{exp_txt}sx{acc_txt}"
 
 
-def format_center_token(center_nm: Any) -> str:
+def format_center_token(center_nm: Any, *, decimal_style: str = "p") -> str:
     center = _coerce_float(center_nm)
     if center is None:
         return ""
-    return f"{format_compact_number(center, decimals=3)}nmc"
+    return f"{format_compact_number(center, decimals=3, decimal_style=decimal_style)}nmc"
 
 
 def format_temperature_mode_token(temperature: Any, mode: Any) -> str:
@@ -138,18 +161,23 @@ def format_temperature_mode_token(temperature: Any, mode: Any) -> str:
     return f"{temp}{mode_txt}" if (temp or mode_txt) else ""
 
 
-def format_rotation_token(index: int, degrees: Any) -> str:
+def format_rotation_token(
+    index: int,
+    degrees: Any,
+    *,
+    decimal_style: str = "p",
+) -> str:
     deg = _coerce_float(degrees)
     if deg is None:
         return ""
-    return f"Rot{index}{format_compact_number(deg, decimals=2)}deg"
+    return f"Rot{index}{format_compact_number(deg, decimals=2, decimal_style=decimal_style)}deg"
 
 
-def format_stage_position_token(position: Any) -> str:
+def format_stage_position_token(position: Any, *, decimal_style: str = "p") -> str:
     pos = _coerce_float(position)
     if pos is None:
         return ""
-    return f"Stage{format_compact_number(pos, decimals=3)}"
+    return f"Stage{format_compact_number(pos, decimals=3, decimal_style=decimal_style)}"
 
 
 def resolve_power_uw(ctx: FilenameContext) -> Tuple[Optional[float], str]:
@@ -193,11 +221,21 @@ def build_part_values(ctx: FilenameContext) -> Dict[str, str]:
     return {
         "temp_mode": format_temperature_mode_token(ctx.temperature, ctx.mode),
         "laser_power": format_laser_power_token(ctx),
-        "center": format_center_token(ctx.center_nm),
-        "exposure": format_exposure_token(ctx.exposure_ms, ctx.accumulations),
-        "rotation1": format_rotation_token(1, ctx.rotation1_deg),
-        "rotation2": format_rotation_token(2, ctx.rotation2_deg),
-        "stage_position": format_stage_position_token(ctx.stage_position),
+        "center": format_center_token(ctx.center_nm, decimal_style=ctx.decimal_style),
+        "exposure": format_exposure_token(
+            ctx.exposure_ms,
+            ctx.accumulations,
+            decimal_style=ctx.decimal_style,
+        ),
+        "rotation1": format_rotation_token(
+            1, ctx.rotation1_deg, decimal_style=ctx.decimal_style
+        ),
+        "rotation2": format_rotation_token(
+            2, ctx.rotation2_deg, decimal_style=ctx.decimal_style
+        ),
+        "stage_position": format_stage_position_token(
+            ctx.stage_position, decimal_style=ctx.decimal_style
+        ),
         "condition": clean_condition_label(ctx.condition_label),
     }
 
