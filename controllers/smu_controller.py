@@ -48,6 +48,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from iv_automation import IVSetup, KeithControl, PyvisaInstrument
 from utils.config import cfg
 
 
@@ -163,24 +164,64 @@ class _SMUWorker(QObject):
             return
         self._connecting = True
         rm = None
-        inst_list = []
+        inst_list: List = []
+        opened: List[str] = []
+        initial_limit_results: List[tuple] = []
+        failures: List[dict] = []
         try:
             import pyvisa
-            from iv_automation import KeithControl, PyvisaInstrument, IVSetup
             from app.devices.iv_adapter import IVDevice
 
             rm = pyvisa.ResourceManager()
             term_arg = termination if termination else None
             timeout_ms = max(250, int(getattr(cfg.smu, "visa_timeout_ms", 5000)))
+            recover_on_open = bool(
+                getattr(cfg.smu, "recover_session_on_open", True)
+            )
+            output_on_connect = bool(
+                getattr(cfg.smu, "output_on_connect", False)
+            )
+            require_live_read = bool(
+                getattr(cfg.smu, "require_live_read_on_connect", False)
+            )
 
-            opened: List[str] = []
-            initial_limit_results: List[tuple[str, dict]] = []
-
-            vbg_src   = role_map.get("Vbg")
-            vtg_src   = role_map.get("Vtg")
+            vbg_src = role_map.get("Vbg")
+            vtg_src = role_map.get("Vtg")
             vbias_src = role_map.get("Vbias")
-            role_addrs = {a for a in (vbg_src, vtg_src, vbias_src) if a}
 
+            print("SMU connection start", flush=True)
+            print("configured roles:", flush=True)
+            for role, source in (
+                ("Vbg", vbg_src),
+                ("Vtg", vtg_src),
+                ("Vbias", vbias_src),
+            ):
+                print(f"    {role} -> {source or '<none>'}", flush=True)
+            print(f"visa addresses to open: {visa_addrs}", flush=True)
+            try:
+                print(
+                    f"VISA resources visible: {rm.list_resources()}",
+                    flush=True,
+                )
+            except Exception as list_exc:
+                print(
+                    f"VISA list_resources failed: "
+                    f"{type(list_exc).__name__}: {list_exc}",
+                    flush=True,
+                )
+            duplicate_addresses = sorted(
+                {addr for addr in visa_addrs if visa_addrs.count(addr) > 1}
+            )
+            if duplicate_addresses:
+                message = (
+                    "SMU connect failed: duplicate VISA address configured "
+                    f"for multiple roles: {duplicate_addresses}"
+                )
+                print(message, flush=True)
+                self.error.emit(message)
+                return
+
+            results: Dict[str, dict] = {}
             for addr in visa_addrs:
                 # Determine if this address carries a gate/bias role
                 role = None
@@ -191,59 +232,139 @@ class _SMUWorker(QObject):
                 elif addr == vbias_src:
                     role = "Vbias"
 
+                print(
+                    f"CONNECT ATTEMPT role={role or '?'} address={addr}",
+                    flush=True,
+                )
                 comp = compliance_by_addr.get(addr, {})
-                curr_c = float(comp.get("curr", cfg.smu.curr_compliance_A))
-                volt_c = float(comp.get("volt", cfg.smu.volt_compliance_V))
-                curr_range = comp.get("curr_range")
-
-                if role in ("Vbg", "Vtg", "Vbias"):
-                    kc = KeithControl(
-                        address=addr,
-                        name=f"{role}_SMU",
-                        variable_name=role,
+                inst = None
+                stage = "OPEN"
+                try:
+                    inst = self._open_smu_session(
+                        addr=addr,
+                        role=role,
                         rm=rm,
-                        curr_compliance=curr_c,
-                        volt_compliance=volt_c,
-                        timeout_ms=timeout_ms,
-                        configure_on_connect=False,
-                    )
-                    if curr_range is None:
-                        curr_range = KeithControl.recommended_current_range(
-                            curr_c
-                        )
-                    settings = kc.apply_compliance_settings(
-                        curr_c,
-                        float(curr_range),
-                        volt_c,
-                    )
-                    kc.set_volt_step(
-                        curr_compliance=curr_c,
-                        volt_compliance=volt_c,
-                    )
-                    settings = kc.read_compliance_settings()
-                    initial_limit_results.append((str(addr), settings))
-                    inst_list.append(kc)
-                else:
-                    # Generic VISA instrument (monochromator, etc.)
-                    inst = PyvisaInstrument(
-                        address=addr,
-                        name=addr,
                         termination=term_arg,
-                        rm=rm,
                         timeout_ms=timeout_ms,
+                        recover_on_open=recover_on_open,
                     )
-                    inst.connect()
+                    stage = "CONFIG"
+                    settings = self._configure_smu_session(
+                        inst,
+                        addr=addr,
+                        role=role,
+                        compliance=comp,
+                        output_on_connect=output_on_connect,
+                    )
                     inst_list.append(inst)
+                    opened.append(addr)
+                    if settings:
+                        initial_limit_results.append((str(addr), settings))
+                    model = (
+                        str(getattr(inst, "identity", {}).get("model") or "")
+                        or str(getattr(inst, "model", "") or "")
+                        or "?"
+                    )
+                    results[str(addr)] = {
+                        "role": role or "?",
+                        "status": "CONNECTED",
+                        "model": model,
+                        "stage": stage,
+                        "error": "",
+                    }
+                    print(
+                        f"CONNECT SUCCESS role={role or '?'} "
+                        f"address={addr} model={model}",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    if inst is None:
+                        inst = (
+                            getattr(exc, "_smu_partial_inst", None)
+                            or getattr(exc, "_keithley_partial", None)
+                        )
+                    failures.append(
+                        self._build_connection_failure(addr, inst, exc, timeout_ms)
+                    )
+                    if inst is not None:
+                        try:
+                            inst.close()
+                        except Exception:
+                            pass
+                    model = (
+                        str(getattr(inst, "identity", {}).get("model") or "")
+                        or str(getattr(inst, "model", "") or "")
+                        or "unknown"
+                    )
+                    results[str(addr)] = {
+                        "role": role or "?",
+                        "status": "FAILED",
+                        "model": model,
+                        "stage": stage,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    print(
+                        f"CONNECT FAILED role={role or '?'} address={addr} "
+                        f"stage={stage} exception={type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
 
-                opened.append(addr)
+            print("SMU CONNECTION SUMMARY", flush=True)
+            for role, source in (
+                ("Vbg", vbg_src),
+                ("Vtg", vtg_src),
+                ("Vbias", vbias_src),
+            ):
+                if not source:
+                    continue
+                result = results.get(str(source))
+                if result is None:
+                    print(
+                        f"{role} address={source} status=NOT_ATTEMPTED",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"{role} address={source} model={result['model']} "
+                        f"status={result['status']} stage={result['stage']} "
+                        f"error={result['error']}",
+                        flush=True,
+                    )
+
+            if not inst_list:
+                if rm is not None:
+                    try:
+                        rm.close()
+                    except Exception:
+                        pass
+                for failure in failures:
+                    self.error.emit(failure["message"])
+                if failures:
+                    self.error.emit(
+                        "SMU connection failed: no instruments could be connected."
+                    )
+                else:
+                    self.error.emit(
+                        "SMU connect failed: no VISA resources were selected."
+                    )
+                return
 
             iv_setup = IVSetup(inst_list)
             self._device = IVDevice(iv_setup, role_map=role_map)
             self._resource_manager = rm
             # Clear the connection-time ESR baseline once. A later Power-On
             # bit can then be attributed to a restart during this connection.
-            self._device.establish_health_baseline(strict=True)
-            self._emit_live_readings(strict=True)
+            baseline_failures = self._device.establish_health_baseline(strict=False)
+            for role, message in baseline_failures.items():
+                failures.append({
+                    "message": f"Post-connect health check failed for {role}: {message}",
+                })
+
+            # A triggered measurement is NOT required to declare a VISA
+            # connection: the live read below is best-effort (or gated by
+            # cfg.smu.require_live_read_on_connect) and never aborts connect.
+            self._emit_live_readings(strict=require_live_read)
+
             self.connected.emit(opened)
             for address, settings in initial_limit_results:
                 self.limits_result.emit("apply", address, settings)
@@ -266,6 +387,221 @@ class _SMUWorker(QObject):
             )
         finally:
             self._connecting = False
+
+        for failure in failures:
+            self.error.emit(failure["message"])
+
+    # ------------------------------------------------------------------
+    # Per-instrument connect helpers
+    # ------------------------------------------------------------------
+
+    def _open_smu_session(
+        self,
+        *,
+        addr: str,
+        role: Optional[str],
+        rm,
+        termination: Optional[str],
+        timeout_ms: int,
+        recover_on_open: bool,
+    ):
+        """
+        Open one instrument (including recovery + *IDN? for Keithleys).
+        Raises on the first failed I/O so the caller can isolate this
+        instrument without touching the others.
+        """
+        inst = None
+        print(
+            f"[SMU CONNECT] opening role={role or '?'} address={addr}",
+            flush=True,
+        )
+        try:
+            if role in ("Vbg", "Vtg", "Vbias"):
+                inst = KeithControl(
+                    address=addr,
+                    name=f"{role}_SMU",
+                    variable_name=role,
+                    rm=rm,
+                    curr_compliance=cfg.smu.curr_compliance_A,
+                    volt_compliance=cfg.smu.volt_compliance_V,
+                    timeout_ms=timeout_ms,
+                    configure_on_connect=False,
+                    recover_on_open=recover_on_open,
+                    rsyn_enabled=cfg.smu.rsyn_enabled,
+                    trace_io=True,
+                )
+            else:
+                # Generic VISA instrument (monochromator, etc.)
+                inst = PyvisaInstrument(
+                    address=addr,
+                    name=addr,
+                    termination=termination,
+                    rm=rm,
+                    timeout_ms=timeout_ms,
+                    trace_io=True,
+                )
+                inst.connect()
+            print(
+                f"[SMU CONNECT] open OK address={addr}",
+                flush=True,
+            )
+            identity_raw = str(getattr(inst, "identity_raw", "") or "").strip()
+            print(
+                f"[SMU CONNECT] IDN={identity_raw or '(no identity query)'}",
+                flush=True,
+            )
+            return inst
+        except Exception as exc:
+            if inst is not None and not hasattr(exc, "_smu_partial_inst"):
+                try:
+                    exc._smu_partial_inst = inst
+                except Exception:
+                    pass
+            raise
+
+    def _configure_smu_session(
+        self,
+        inst,
+        *,
+        addr: str,
+        role: Optional[str],
+        compliance: dict,
+        output_on_connect: bool,
+    ):
+        """Configure one opened Keithley (or return {} for generic VISA)."""
+        if role not in ("Vbg", "Vtg", "Vbias"):
+            return {}
+        curr_c = float(compliance.get("curr", cfg.smu.curr_compliance_A))
+        volt_c = float(compliance.get("volt", cfg.smu.volt_compliance_V))
+        curr_range = compliance.get("curr_range")
+        kc = inst
+        # Establish the trigger state BEFORE source/sense configuration so
+        # nothing downstream can depend on retained trigger state.
+        kc.ensure_trigger_immediate(verify=False)
+        if curr_range is None:
+            curr_range = KeithControl.recommended_current_range(curr_c)
+        settings = kc.apply_compliance_settings(
+            curr_c,
+            float(curr_range),
+            volt_c,
+        )
+        kc.set_volt_step(
+            curr_compliance=curr_c,
+            volt_compliance=volt_c,
+            output_on=output_on_connect,
+        )
+        settings = kc.read_compliance_settings()
+        trigger_source = kc.ensure_trigger_immediate(verify=True)
+        kc.log_stage(
+            "CONFIGURED",
+            "ok",
+            {"trigger_source": trigger_source},
+        )
+        return settings
+
+    def _build_connection_failure(
+        self, addr: str, inst, exc: BaseException, timeout_ms: int
+    ) -> dict:
+        """Structured failure with the primary error and post-failure diagnosis."""
+        last_ok = inst.last_io_entry(status="ok") if inst is not None else None
+        last_err = inst.last_io_entry(status="error") if inst is not None else None
+        diagnosis = self._diagnose_connection_failure(addr, inst, timeout_ms)
+
+        lines = [f"SMU connection failed for {addr}", "", "PRIMARY FAILURE"]
+        if last_err is not None:
+            lines.append(
+                f"{last_err.get('op')} {last_err.get('command')} -> "
+                f"{last_err.get('classification', 'FAILED')} after "
+                f"{last_err.get('elapsed_ms', 0):.0f} ms: "
+                f"{last_err.get('error')}"
+            )
+        else:
+            lines.append(f"{type(exc).__name__}: {exc}")
+        lines.append(f"Exception: {type(exc).__name__}: {exc}")
+        if last_ok is not None:
+            lines.extend([
+                "",
+                "LAST SUCCESSFUL OPERATION",
+                f"{last_ok.get('op')} {last_ok.get('command')} -> OK "
+                f"{last_ok.get('elapsed_ms', 0):.0f} ms",
+            ])
+        lines.extend(["", "POST-FAILURE DIAGNOSTICS"])
+        for key, value in diagnosis.items():
+            lines.append(f"{key}: {value}")
+        if last_ok is not None:
+            lines.extend([
+                "",
+                "The instrument stopped responding after command: "
+                f"{last_ok.get('op')} {last_ok.get('command')}",
+            ])
+        return {
+            "address": str(addr),
+            "message": "\n".join(lines),
+            "exception": exc,
+            "diagnosis": diagnosis,
+        }
+
+    def _diagnose_connection_failure(
+        self, addr: str, inst, timeout_ms: int
+    ) -> dict:
+        """
+        Limited post-failure diagnostics.  Every step is isolated so a dead
+        instrument cannot mask the primary failure; never raises.
+        """
+        diagnosis: dict = {}
+        resource = getattr(inst, "my_instr", None) if inst is not None else None
+        old_timeout = getattr(resource, "timeout", None)
+        timeout_changed = False
+        if resource is not None and old_timeout is not None:
+            try:
+                resource.timeout = min(max(int(old_timeout), 250), 1000)
+                timeout_changed = True
+            except Exception:
+                pass
+        try:
+            if resource is None:
+                closed_after_failure = bool(
+                    inst is not None and getattr(inst, "_closed", False)
+                )
+                diagnosis["session"] = (
+                    "none (resource was closed after the failure)"
+                    if closed_after_failure
+                    else "none (resource was not opened)"
+                )
+                return diagnosis
+            try:
+                resource.clear()
+                diagnosis["VISA clear"] = "success"
+            except Exception as clear_exc:
+                diagnosis["VISA clear"] = f"{type(clear_exc).__name__}: {clear_exc}"
+            if inst is not None:
+                for command in ("*IDN?", "*ESR?", ":SYST:ERR?", ":OUTP?"):
+                    try:
+                        response = str(inst.query(command)).strip()
+                        if command == "*ESR?":
+                            try:
+                                esr = int(float(response))
+                            except (TypeError, ValueError):
+                                esr = None
+                            note = (
+                                " (Power-On bit set)"
+                                if esr is not None and esr & 0x80
+                                else ""
+                            )
+                            diagnosis[command] = f"success -> {response}{note}"
+                        else:
+                            diagnosis[command] = f"success -> {response}"
+                    except Exception as query_exc:
+                        diagnosis[command] = (
+                            f"{type(query_exc).__name__}: {query_exc}"
+                        )
+        finally:
+            if timeout_changed:
+                try:
+                    resource.timeout = old_timeout
+                except Exception:
+                    pass
+        return diagnosis
 
     # ── disconnect ────────────────────────────────────────────────────────────
 

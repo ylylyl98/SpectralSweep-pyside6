@@ -1,6 +1,8 @@
 import numpy as np, nidaqmx, time, pyvisa
 import warnings
-from typing import Optional, Union
+from collections import deque
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Union
 # connect to the instrument via pyvisa
 
 
@@ -8,6 +10,18 @@ class CustomError(Exception):
     def __init__(self, message="A custom error occurred"):
         self.message = message
         super().__init__(self.message)
+
+
+def _classify_io_error(exc: BaseException) -> str:
+    """Return TIMEOUT for VISA timeouts, otherwise FAILED."""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if (
+        "timeout" in text
+        or "timed out" in text
+        or "vi_error_tmo" in text
+    ):
+        return "TIMEOUT"
+    return "FAILED"
 
 
 class PyvisaInstrument:
@@ -18,6 +32,7 @@ class PyvisaInstrument:
         termination: str,
         rm: pyvisa.ResourceManager,
         timeout_ms: int = 5000,
+        trace_io: bool = False,
     ):
         # instrument address
         self.address = address
@@ -34,31 +49,174 @@ class PyvisaInstrument:
         self.y_indexes = {}
         self.x_values = np.array([])
         self.y_values = np.array([])
+        # Structured, timestamped record of every VISA I/O operation.
+        # Each entry: timestamp, address, op (WRITE/QUERY/READ/CLEAR),
+        # command, elapsed_ms, status (ok/error), error.
+        self.io_log: deque = deque(maxlen=300)
+        # Named initialization stages: {stage, status, details, timestamp_utc}.
+        self.stage_log: List[Dict[str, Any]] = []
+        # Session parameters captured at connect time (timeout, terminations,
+        # send_end, query_delay, chunk size, locking).
+        self.session_params: Dict[str, Any] = {}
+        # When True, every I/O operation (including VISA open and the
+        # constructor-time recovery/*IDN? calls) is printed with a timestamp:
+        #   [15:32:01.139] GPIB0::24::INSTR WRITE :SOUR:VOLT:RANG 20 -> OK 16 ms
+        self.trace_io = bool(trace_io)
+        self._closed = False
+
+    # ------------------------------------------------------------------
+    # I/O instrumentation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _utc_now_ms() -> str:
+        return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+    def log_stage(self, stage: str, status: str, details: Optional[dict] = None) -> dict:
+        """Record one named initialization stage (tolerant of partial objects)."""
+        entry = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(
+                timespec="milliseconds"
+            ),
+            "stage": str(stage),
+            "status": str(status),
+            "details": dict(details or {}),
+        }
+        log = getattr(self, "stage_log", None)
+        if log is not None:
+            try:
+                log.append(entry)
+            except Exception:
+                pass
+        return entry
+
+    def _execute_io(self, op: str, command: str, fn: Callable[[], Any]):
+        """Run one VISA operation with timestamp/elapsed/status instrumentation."""
+        started = time.monotonic()
+        started_at = self._utc_now_ms()
+        entry = {
+            "timestamp": started_at,
+            "address": self.address,
+            "op": op,
+            "command": str(command),
+            "status": "running",
+        }
+        try:
+            result = fn()
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            classification = _classify_io_error(exc)
+            entry.update({
+                "status": "error",
+                "elapsed_ms": round(elapsed_ms, 1),
+                "error": f"{type(exc).__name__}: {exc}",
+                "classification": classification,
+            })
+            self.io_log.append(entry)
+            if self.trace_io:
+                print(
+                    f"[{started_at}] {self.address} {op} {command} "
+                    f"-> {classification} after {elapsed_ms:.0f} ms: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            raise
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        entry.update({"status": "ok", "elapsed_ms": round(elapsed_ms, 1)})
+        self.io_log.append(entry)
+        if self.trace_io:
+            print(
+                f"[{started_at}] {self.address} {op} {command} "
+                f"-> OK {elapsed_ms:.0f} ms",
+                flush=True,
+            )
+        return result
+
+    def recent_io(self, limit: int = 20) -> List[dict]:
+        return list(self.io_log)[-max(0, int(limit)):]
+
+    def last_io_entry(self, status: Optional[str] = None) -> Optional[dict]:
+        """Last I/O entry, optionally filtered by status ('ok' or 'error')."""
+        for entry in reversed(self.io_log):
+            if status is None or entry.get("status") == status:
+                return entry
+        return None
+
+    # ------------------------------------------------------------------
+    # Session management
+    # ------------------------------------------------------------------
 
     def connect(self):
-        self.my_instr = self.rm.open_resource(self.address, timeout=self.timeout)
+        if self.trace_io:
+            print(
+                f"[{self._utc_now_ms()}] {self.address} OPEN VISA "
+                f"(timeout={self.timeout} ms) ...",
+                flush=True,
+            )
+        try:
+            self.my_instr = self.rm.open_resource(
+                self.address, timeout=self.timeout
+            )
+        except Exception as exc:
+            if self.trace_io:
+                print(
+                    f"[{self._utc_now_ms()}] {self.address} OPEN VISA FAILED: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+            raise
+        if self.trace_io:
+            print(
+                f"[{self._utc_now_ms()}] {self.address} OPEN VISA OK",
+                flush=True,
+            )
         self.my_instr.read_termination = self.termination
         self.my_instr.write_termination = self.termination
+        self._closed = False
+        try:
+            self.session_params = {
+                "timeout_ms": getattr(self.my_instr, "timeout", None),
+                "read_termination": getattr(self.my_instr, "read_termination", None),
+                "write_termination": getattr(self.my_instr, "write_termination", None),
+                "send_end": getattr(self.my_instr, "send_end", None),
+                "query_delay": getattr(self.my_instr, "query_delay", None),
+                "chunk_size": getattr(self.my_instr, "chunk_size", None),
+                "locking": getattr(self.my_instr, "locking", None),
+            }
+        except Exception:
+            self.session_params = {}
+
+    def clear(self):
+        """Issue a VISA-level clear (viClear) on the open session."""
+        return self._execute_io("CLEAR", "VISA clear", lambda: self.my_instr.clear())
 
     def close(self):
-        self.my_instr.close()
-        self.my_instr = None
+        inst, self.my_instr = self.my_instr, None
+        if inst is not None:
+            try:
+                inst.close()
+            finally:
+                self._closed = True
 
     def query(self, command: str, print_command=False, print_response=False):
-        if print_command:
+        if print_command and not self.trace_io:
             print(command)
-        response = self.my_instr.query(command)
+        response = self._execute_io(
+            "QUERY", command, lambda: self.my_instr.query(command)
+        )
         if print_response:
             print(response)
         return response
-    
+
     def write(self, command: str, print_command=False):
-        if print_command:
+        if print_command and not self.trace_io:
             print(command)
-        return self.my_instr.write(command)
-    
+        return self._execute_io(
+            "WRITE", command, lambda: self.my_instr.write(command)
+        )
+
     def read(self, print_response=False):
-        response = self.my_instr.read()
+        response = self._execute_io("READ", "<read>", lambda: self.my_instr.read())
         if print_response:
             print(response)
         return response
@@ -68,6 +226,54 @@ class PyvisaInstrument:
 
     def send_y(self, variable: str):
         return self.y_values[self.y_indexes[variable]]
+
+
+# ----------------------------------------------------------------------
+# Central RSYN policy (shared by KeithControl and the diagnostic tool)
+# ----------------------------------------------------------------------
+
+# Models whose firmware wedges the GPIB interface for ~10 s when sent
+# :SENS:CURR:PROT:RSYN (confirmed on the Keithley 2400 / A02, 2000-era).
+# Kept for documentation / diagnostics; the automatic decision below is a
+# denylist: only this model skips RSYN.
+RSYN_SKIP_MODELS = frozenset({"2400"})
+
+
+def _model_tokens(model: str) -> List[str]:
+    """Normalize a model / *IDN? string into uppercase whitespace tokens."""
+    return [
+        token
+        for token in str(model or "").upper().replace(",", " ").split()
+        if token
+    ]
+
+
+def model_is_keithley_2400(model: str) -> bool:
+    """
+    True only for an exact MODEL 2400 token.
+
+    Tolerates 'MODEL 2400', bare '2400', and raw *IDN? strings such as
+    'KEITHLEY INSTRUMENTS INC.,MODEL 2400,...'.  Never matches '2401',
+    '2400A', or unrelated models.
+    """
+    return "2400" in _model_tokens(model)
+
+
+def should_send_rsyn(model: str, config_value: Optional[bool]) -> bool:
+    """
+    Central per-instrument RSYN policy.
+
+      config_value True  -> force send (explicit opt-in, rsyn_enabled=True)
+      config_value False -> force skip (explicit opt-out, rsyn_enabled=False)
+      config_value None  -> automatic: skip only the Keithley MODEL 2400
+                            (verified to wedge on RSYN); every other model,
+                            including the MODEL 2401, keeps RSYN.
+    """
+    if config_value is True:
+        return True
+    if config_value is False:
+        return False
+    return not model_is_keithley_2400(model)
 
 
 # monochromator control
@@ -130,31 +336,247 @@ class KeithControl(PyvisaInstrument):
         volt_compliance: float = 20.0,
         timeout_ms: int = 5000,
         configure_on_connect: bool = True,
+        recover_on_open: bool = True,
+        rsyn_enabled: Optional[bool] = None,
+        trace_io: bool = False,
     ):
-        super().__init__(address, name, '\n', rm, timeout_ms=timeout_ms)
+        super().__init__(
+            address,
+            name,
+            '\n',
+            rm,
+            timeout_ms=timeout_ms,
+            trace_io=trace_io,
+        )
         self.type = 'keithley'
-        self.connect()
-        self.get_identity()
         self.mode = 'unconfigured'
         self._curr_compliance_A = float(curr_compliance)
         self._volt_range_V = float(volt_compliance)
         self._curr_range_A = None
-        # Configure exactly once. Previously construction used 1 µA and the
-        # controller immediately configured the same SMU again.
-        if configure_on_connect:
-            self.set_volt_step(
-                curr_compliance=curr_compliance,
-                volt_compliance=volt_compliance,
-            )
-        self.x_indexes[variable_name] = 0
-        self.y_indexes['measured_'+variable_name] = 0
-        self.y_indexes[variable_name + '_leakage'] = 1
-        volt, curr = self.read_curr() if configure_on_connect else (0.0, 0.0)
-        self.x_values = np.array([volt])
-        self.y_values = np.array([volt, curr])
+        # Parsed *IDN? fields and per-model capability state.
+        self.identity_raw = ""
+        self.identity: Dict[str, str] = {}
+        self.model = ""
+        self.firmware = ""
+        self.capabilities: Dict[str, Optional[bool]] = {"rsyn_supported": None}
+        self._rsyn_supported: Optional[bool] = None
+        if rsyn_enabled is True:
+            self.rsyn_policy = "forced_on"
+        elif rsyn_enabled is False:
+            self.rsyn_policy = "forced_off"
+        else:
+            self.rsyn_policy = "auto"
+        self._last_system_errors: List[str] = []
+        self.connect()
+        try:
+            if recover_on_open:
+                # Establish a known communication state WITHOUT *RST (which
+                # could change many instrument settings / output state
+                # unexpectedly).
+                self.recover_session()
+            self.get_identity()
+            # Configure exactly once. Previously construction used 1 µA and
+            # the controller immediately configured the same SMU again.
+            if configure_on_connect:
+                self.set_volt_step(
+                    curr_compliance=curr_compliance,
+                    volt_compliance=volt_compliance,
+                )
+            self.x_indexes[variable_name] = 0
+            self.y_indexes['measured_'+variable_name] = 0
+            self.y_indexes[variable_name + '_leakage'] = 1
+            volt, curr = self.read_curr() if configure_on_connect else (0.0, 0.0)
+            self.x_values = np.array([volt])
+            self.y_values = np.array([volt, curr])
+        except Exception as exc:
+            # Never leak a half-open VISA session (cleanup requirement).
+            try:
+                self.close()
+            except Exception:
+                pass
+            try:
+                exc._keithley_partial = self
+            except Exception:
+                pass
+            raise
 
     def get_identity(self):
-        print(self.query('*IDN?'))
+        raw = str(self.query('*IDN?')).strip()
+        self.identity_raw = raw
+        parts = [p.strip() for p in raw.split(',')]
+        self.identity = {
+            "manufacturer": parts[0] if len(parts) > 0 else "",
+            "model": parts[1] if len(parts) > 1 else "",
+            "serial": parts[2] if len(parts) > 2 else "",
+            "firmware": parts[3] if len(parts) > 3 else "",
+        }
+        self.model = self.identity["model"]
+        self.firmware = self.identity["firmware"]
+        self.log_stage(
+            "IDENTIFY",
+            "ok",
+            {"identity": raw, "model": self.model, "firmware": self.firmware},
+        )
+        print(raw)
+        return raw
+
+    def recover_session(self) -> None:
+        """
+        Conservative startup sequence: VISA clear + *CLS + :ABOR.
+
+        Intentionally does NOT issue *RST; instrument settings that a previous
+        experiment changed are only reset where this application needs them
+        (source mode, trigger source, ranges), so a connected instrument is
+        not silently reconfigured beyond the app's own initialization.
+        """
+        self.log_stage("CLEAR", "running")
+        self.clear()
+        self.write('*CLS')
+        self.write(':ABOR')
+        self.log_stage("CLEAR", "ok")
+
+    def drain_system_errors(self, max_errors: int = 8) -> List[str]:
+        """
+        Drain :SYST:ERR? until '0,"No error"' (or the configured maximum).
+        The complete result is kept on self._last_system_errors.
+        """
+        collected: List[str] = []
+        for _ in range(max(1, int(max_errors))):
+            raw = str(self.query(':SYST:ERR?')).strip()
+            collected.append(raw)
+            if self._is_no_error_response(raw):
+                break
+        self._last_system_errors = list(collected)
+        return collected
+
+    @staticmethod
+    def _is_no_error_response(raw: str) -> bool:
+        text = str(raw).strip().lower()
+        return text.startswith("0") and "no error" in text
+
+    @staticmethod
+    def _looks_like_command_error(raw: str) -> bool:
+        """Recognize SCPI 'invalid/undefined command' errors (e.g. 110/-113)."""
+        text = str(raw).strip().lower()
+        code = None
+        try:
+            code = int(float(text.split(",", 1)[0]))
+        except (ValueError, IndexError, TypeError):
+            pass
+        if code in (110, -113, -110, -100):
+            return True
+        return any(
+            token in text
+            for token in ("command", "header", "undefined")
+        )
+
+    def _ensure_rsyn_capability(self) -> bool:
+        """
+        Decide whether to send :SENS:CURR:PROT:RSYN for this instrument.
+
+        Never probe by sending on the Keithley 2400: its old firmware (e.g.
+        A02) wedges the GPIB interface for ~10 seconds after receiving the
+        command, so the probe itself would hang the connection.  The policy
+        is centralized in should_send_rsyn() and evaluated independently per
+        instrument instance:
+          - "forced_on"  -> always send (cfg.smu.rsyn_enabled=True)
+          - "forced_off" -> never send (cfg.smu.rsyn_enabled=False)
+          - "auto"       -> skip only MODEL 2400; send for every other model.
+        """
+        if self._rsyn_supported is not None:
+            return self._rsyn_supported
+        policy = getattr(self, "rsyn_policy", "auto")
+        config_value = {
+            "forced_on": True,
+            "forced_off": False,
+            "auto": None,
+        }.get(policy)
+        model = getattr(self, "model", "") or ""
+        supported = should_send_rsyn(model, config_value)
+        self._rsyn_supported = bool(supported)
+        capabilities = getattr(self, "capabilities", None)
+        if capabilities is not None:
+            try:
+                capabilities["rsyn_supported"] = self._rsyn_supported
+            except Exception:
+                pass
+        if not self._rsyn_supported:
+            status = "skipped"
+        else:
+            # A stale error queue is drained first so a pre-existing error
+            # is not misattributed to the command.
+            self.drain_system_errors(max_errors=8)
+            self.write(':SENS:CURR:PROT:RSYN ON')
+            errors = self.drain_system_errors(max_errors=4)
+            if any(self._looks_like_command_error(e) for e in errors):
+                self._rsyn_supported = False
+                if capabilities is not None:
+                    try:
+                        capabilities["rsyn_supported"] = False
+                    except Exception:
+                        pass
+                status = "unsupported"
+            else:
+                status = "ok"
+        self.log_stage(
+            "CAPABILITY",
+            status,
+            {
+                "policy": policy,
+                "model": model or "?",
+                "firmware": getattr(self, "firmware", "") or "?",
+            },
+        )
+        result_label = {
+            "ok": "enabled",
+            "skipped": "skipped",
+            "unsupported": "unsupported",
+        }.get(status, status)
+        print(
+            f"[{getattr(self, 'address', '?')}] :SENS:CURR:PROT:RSYN "
+            f"{result_label} "
+            f"(policy={policy}, model={model or '?'}, "
+            f"firmware={getattr(self, 'firmware', '') or '?'})",
+            flush=True,
+        )
+        return self._rsyn_supported
+
+    def ensure_trigger_immediate(self, *, verify: bool = True) -> str:
+        """
+        Explicitly set the trigger source to IMMEDIATE (never assume retained
+        trigger state from a previous experiment) and optionally verify with
+        :TRIG:SOUR?.
+        """
+        self.write(':TRIG:SOUR IMM')
+        self.log_stage("TRIGGER", "running", {"source": "IMM"})
+        if not verify:
+            self.log_stage("TRIGGER", "ok", {"source": "IMM"})
+            return "IMM"
+        source = str(self.query(':TRIG:SOUR?')).strip()
+        status = "ok" if source.upper().startswith("IMM") else "mismatch"
+        self.log_stage("TRIGGER", status, {"source": source})
+        if status == "mismatch":
+            print(
+                f"[{self.address}] WARNING :TRIG:SOUR? returned {source!r}, "
+                "expected IMM",
+                flush=True,
+            )
+        return source
+
+    def read_esr(self) -> int:
+        raw = str(self.query('*ESR?')).strip()
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            raise ValueError(f"Unexpected *ESR? response: {raw!r}") from None
+
+    @staticmethod
+    def esr_power_on(esr: int) -> bool:
+        """ESR bit 7 (Power On) indicates the instrument restarted."""
+        return bool(int(esr) & 0x80)
+
+    def output_state(self) -> str:
+        return str(self.query(':OUTP?')).strip()
 
     # for non-synchronized sweep only
     def set_volt_sweep(
@@ -181,6 +603,8 @@ class KeithControl(PyvisaInstrument):
         self.write(':SENS:FUNC \'CURR\'', print_command=True)
         self.write(':SENS:CURR:PROT %.2e' % curr_compliance, print_command=True)
         self.write(':SOUR:DEL %.3f' % delay, print_command=True)
+        # Never rely on retained trigger state for the subsequent READ?.
+        self.write(':TRIG:SOUR IMM', print_command=True)
         # turn on confield functions
         self.write(':SENS:FUNC:CONC ON', print_command=True)
         # set field reading
@@ -202,6 +626,8 @@ class KeithControl(PyvisaInstrument):
         delay=0.1,
         volt_compliance: Optional[float] = None,
         initial_voltage: Optional[float] = None,
+        *,
+        output_on: bool = True,
     ):
 
         curr_compliance = (
@@ -225,14 +651,23 @@ class KeithControl(PyvisaInstrument):
         self.write(':FORM:ELEM VOLT ,CURR', print_command=True)
         self.write(':SOUR:VOLT:MODE FIXED', print_command=True)
         self.write(':SOUR:VOLT:RANG %.0f' % volt_compliance, print_command=True)
+        # Never rely on retained trigger state: READ? would otherwise wait on
+        # a stale external/bus trigger and time out.
+        self.write(':TRIG:SOUR IMM', print_command=True)
         self.write('TRIG:COUN 1', print_command=True)
         if initial_voltage is not None:
             self.write(
                 ':SOUR:VOLT:LEV %.9g' % float(initial_voltage),
                 print_command=True,
             )
-        self.mode = 'volt_step'
-        self.write(':OUTP ON', print_command=True)
+        if output_on:
+            self.mode = 'volt_step'
+            self.write(':OUTP ON', print_command=True)
+        else:
+            # Configuration only: leave the output OFF and the mode
+            # 'unconfigured' so the first explicit volt_step()/sweep call
+            # re-runs set_volt_step() and enables the output.
+            self.mode = 'unconfigured'
 
     def apply_compliance_settings(
         self,
@@ -263,15 +698,29 @@ class KeithControl(PyvisaInstrument):
                 f"the selected current range ({minimum:g} A to {maximum:g} A)."
             )
 
+        self._ensure_rsyn_capability()
         self.write(':SENS:CURR:RANG:AUTO OFF', print_command=True)
-        self.write(':SENS:CURR:PROT:RSYN ON', print_command=True)
+        if self._rsyn_supported:
+            self.write(':SENS:CURR:PROT:RSYN ON', print_command=True)
         self.write(
             ':SENS:CURR:PROT %.9g' % curr_compliance_A,
+            print_command=True,
+        )
+        # Select the measurement range explicitly so behavior is deterministic
+        # even on firmware without RSYN support (avoids error +824).
+        self.write(
+            ':SENS:CURR:RANG %.9g' % resolved_range,
             print_command=True,
         )
         self.write(
             ':SOUR:VOLT:RANG %.9g' % voltage_range_V,
             print_command=True,
+        )
+        system_errors = self.drain_system_errors(max_errors=8)
+        self.log_stage(
+            "COMPLIANCE",
+            "ok",
+            {"system_errors": system_errors},
         )
         self._curr_compliance_A = curr_compliance_A
         self._curr_range_A = resolved_range

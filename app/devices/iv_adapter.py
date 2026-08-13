@@ -230,14 +230,21 @@ class IVDevice:
             items = [item for item in items if item.get("role") == role]
         return items
 
-    def establish_health_baseline(self, *, strict: bool = True) -> None:
+    def establish_health_baseline(
+        self, *, strict: bool = True
+    ) -> Dict[str, str]:
         """
         Destructively read ESR once after connection.
 
         This clears a pre-existing Power-On bit so a later bit-7 report is
         evidence that the instrument restarted after the connection baseline.
+
+        Returns {role: error_message} for every role whose baseline query
+        failed (empty when all succeeded).  When strict=True the first
+        failure raises instead of being collected.
         """
         seen = set()
+        failures: Dict[str, str] = {}
         for role in ("Vbg", "Vtg", "Vbias"):
             if not self.has_role(role):
                 continue
@@ -251,6 +258,7 @@ class IVDevice:
                 self._set_health(role, "ready", "Connection health baseline established.")
             except Exception as exc:
                 self._baseline_esr[role] = None
+                failures[role] = f"{type(exc).__name__}: {exc}"
                 if strict:
                     address = getattr(inst, "address", self.role_map.get(role))
                     raise SMUCommunicationError(
@@ -262,6 +270,7 @@ class IVDevice:
                         timeout_ms=self._instrument_timeout_ms(inst),
                         context=self._operation_context,
                     ) from exc
+        return failures
 
     def _diagnose_after_failure(
         self,

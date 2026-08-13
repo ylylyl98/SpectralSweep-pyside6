@@ -836,6 +836,17 @@ class _SMUSection(QWidget):
             wanted = str(saved or "").strip() if prefer_saved else prev
             if not wanted or wanted == "<none>":
                 wanted = prev
+            # A saved GPIB role must never silently fall back to "<none>"
+            # just because the current VISA scan does not list it (e.g. the
+            # instrument is unplugged or the scan ran before it powered up).
+            if (
+                prefer_saved
+                and wanted
+                and wanted != "<none>"
+                and wanted.startswith("GPIB")
+                and wanted not in options
+            ):
+                options.append(wanted)
             combo.blockSignals(True)
             combo.clear()
             combo.addItems(options)
@@ -883,7 +894,14 @@ class _SMUSection(QWidget):
 
     @Slot(str)
     def _on_error(self, msg: str):
-        self._status.setText(f"Error: {msg[:100]}")
+        full = str(msg)
+        summary = full.splitlines()[0] if full else "SMU error"
+        if len(summary) > 140:
+            summary = summary[:137] + "..."
+        self._status.setText(f"Error: {summary}")
+        # Full diagnostics (PRIMARY FAILURE / POST-FAILURE DIAGNOSTICS) stay
+        # available on hover; nothing is truncated from the message.
+        self._status.setToolTip(full)
         self._status.setStyleSheet("color: red; font-weight: bold;")
         if not self._ctrl.is_connected:
             self._connect_btn.setEnabled(True)

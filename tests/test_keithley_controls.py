@@ -139,6 +139,24 @@ class KeithleyControlTests(unittest.TestCase):
         self.assertAlmostEqual(compliance["GPIB0::11::INSTR"]["volt"], 30.0)
         self.assertEqual(ctrl.limit_apply_calls, [])
 
+    def test_connect_error_keeps_full_details_in_tooltip(self):
+        ctrl = _FakeSMUController()
+        section = _SMUSection(ctrl)
+        full = (
+            "SMU connection failed for GPIB0::9::INSTR\n\n"
+            "PRIMARY FAILURE\n"
+            "QUERY :SENS:CURR:PROT? -> TIMEOUT after 5001 ms\n\n"
+            "LAST SUCCESSFUL OPERATION\n"
+            "WRITE :SENS:CURR:PROT 6e-07 -> OK 16 ms\n\n"
+            "POST-FAILURE DIAGNOSTICS\n"
+            "VISA clear: success\n"
+            "*IDN?: success -> KEITHLEY INSTRUMENTS INC.,MODEL 2400,1058315,C27\n"
+        )
+        section._on_error(full)
+        self.assertEqual(section._status.toolTip(), full)
+        self.assertLessEqual(len(section._status.text()), 200)
+        self.assertTrue(section._status.text().startswith("Error:"))
+
     def test_compact_sections_fit_the_existing_sidebar(self):
         ctrl = _FakeSMUController()
         self.assertLessEqual(_SMUSection(ctrl).minimumSizeHint().width(), 340)

@@ -73,6 +73,11 @@ class SMUConfig:
     compliance_by_addr: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     manual_step_V: float = 0.1
     visa_timeout_ms: int = 5000       # bounded I/O so Stop can recover from a dead SMU
+    recover_session_on_open: bool = True   # VISA clear + *CLS + :ABOR before configuring
+    output_on_connect: bool = False        # keep SMU outputs OFF after connect; experiments enable them explicitly
+    require_live_read_on_connect: bool = False  # connection verification never depends on READ?
+    max_system_errors_drained: int = 8     # :SYST:ERR? drain limit during connect
+    rsyn_enabled: Optional[bool] = None    # None=auto (skip MODEL 2400 only), True=force on, False=force off
     vbg_resource: str = ""
     vtg_resource: str = ""
     vbias_resource: str = ""
