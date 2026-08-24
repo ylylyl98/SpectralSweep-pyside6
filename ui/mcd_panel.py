@@ -45,12 +45,17 @@ from PySide6.QtWidgets import (
 )
 
 from utils.config import cfg
+from app.experiment_metadata import ExperimentMetadataService
 from utils.filename_builder import (
     FilenameContext,
     build_base_filename,
     format_compact_number,
     make_unique_stem,
     sanitize_token,
+)
+from utils.mcd_common import (
+    mcd_coordinates, vtg_vbg_from_doping_efield,
+    resolve_condition_line as _resolve_mcd_condition_line,
 )
 
 
@@ -97,21 +102,18 @@ MCD_SCALAR_FIELDS = [
 
 
 def _mcd_coordinates(vtg_v: float, vbg_v: float, ratio: float) -> tuple[float, float]:
-    doping = float(vtg_v) + float(ratio) * float(vbg_v)
-    efield = float(vtg_v) - float(ratio) * float(vbg_v)
-    return doping, efield
+    return mcd_coordinates(vtg_v, vbg_v, ratio)
 
 
 def _vtg_vbg_from_doping_efield(
     doping_v: float, efield_v: float, ratio: float
 ) -> tuple[float, float]:
-    if abs(float(ratio)) <= 1e-12:
-        raise ValueError(
-            "Gate ratio r must be non-zero to compute Vtg/Vbg from Doping/E-field"
-        )
-    vtg = (float(doping_v) + float(efield_v)) / 2.0
-    vbg = (float(doping_v) - float(efield_v)) / (2.0 * float(ratio))
-    return vtg, vbg
+    return vtg_vbg_from_doping_efield(doping_v, efield_v, ratio)
+
+
+def resolve_mcd_gate_condition(condition: dict, ratio: float) -> dict:
+    """Compatibility facade used by legacy MCD/preset integrations."""
+    return _resolve_mcd_condition_line(condition, ratio)
 
 
 def build_mcd_filename_base(params: dict) -> str:
@@ -548,13 +550,12 @@ class _ContinuousMCDWorker(QObject):
         setup = self._lf6_ctrl.setup
         if setup is None:
             return
-        setup.change_spectra_center(f"{p['center_nm']:.0f}")
-        setup.change_expose_time(float(p["exposure_ms"]))
-        for name in ("set_accumulations", "set_frames", "change_frame_to_combine"):
-            if hasattr(setup, name):
-                getattr(setup, name)(int(p["frames"]))
-                break
-        self._emit_log("LightField settings applied.")
+        prepare = getattr(self._lf6_ctrl, "configure_for_acquisition", None)
+        if callable(prepare):
+            prepare(center_nm=float(p["center_nm"]), exposure_ms=float(p["exposure_ms"]), frames=int(p["frames"]))
+            self._emit_log("LightField settings applied.")
+            return
+        raise RuntimeError("LF6 acquisition preparation surface is unavailable")
 
     def _apply_voltages(self, p: dict) -> dict:
         """Apply per-condition gates and optional bias; return applied-bias info."""
@@ -756,6 +757,7 @@ class MCDPanel(QWidget):
         self._smu = smu_ctrl
         self._thread: Optional[QThread] = None
         self._worker: Optional[_ContinuousMCDWorker] = None
+        self._externally_busy = False
         self._last_snapshot = None
         self._updating_table = False
         self._voltage_limit = abs(float(cfg.smu.volt_compliance_V))
@@ -1776,6 +1778,11 @@ class MCDPanel(QWidget):
     def _start_run(self) -> None:
         if self._worker is not None:
             return
+        if self._externally_busy:
+            self._run_status.setText(
+                "MCD 2100 is using the shared instruments"
+            )
+            return
         try:
             params = self._collect_params()
         except Exception as exc:
@@ -1842,6 +1849,16 @@ class MCDPanel(QWidget):
             return
 
         self._save_config_from_ui()
+        self._last_run_params = dict(params)
+        try:
+            run_root = self._current_output_dir(params) if hasattr(self, "_current_output_dir") else Path(params["base_output_dir"]) / _safe_name(params["sample_id"]) / _safe_name(params.get("subfolder", "MCD Data"))
+            self._experiment_run = ExperimentMetadataService(run_root).begin(
+                "mcd_aps100", params["sample_id"], output_dir=run_root, settings=params
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Metadata error", f"Experiment metadata could not be created; run blocked.\n\n{exc}")
+            self._magnet.release_exclusive("mcd")
+            return
         self._worker = _ContinuousMCDWorker(
             params, self._magnet, self._lf6, self._rotation, self._smu
         )
@@ -1908,6 +1925,25 @@ class MCDPanel(QWidget):
             self._run_status.setText("Finished")
         self._magnet.release_exclusive("mcd")
         self._magnet.refresh_snapshot()
+        run = getattr(self, "_experiment_run", None)
+        if run is not None:
+            try:
+                for csv_name in result.get("csv_paths", []) or ([result["csv_path"]] if result.get("csv_path") else []):
+                    path = Path(csv_name)
+                    if path.exists():
+                        run.register_file(path, "raw")
+                        for sibling in (path.with_suffix(".log"), path.with_name(f"{path.stem}_summary.json"), path.with_suffix(".meta.json")):
+                            if sibling.exists():
+                                run.register_file(sibling, "intermediate")
+                if result.get("error"):
+                    run.fail(result["error"])
+                elif result.get("stopped"):
+                    run.cancel("MCD stop requested")
+                else:
+                    run.complete()
+            except Exception as exc:
+                self._append_log(f"Metadata finalization error: {exc}")
+                QMessageBox.critical(self, "Metadata error", str(exc))
 
     @Slot()
     def _on_run_thread_finished(self) -> None:
@@ -1916,12 +1952,17 @@ class MCDPanel(QWidget):
         self._set_running(False)
 
     def _set_running(self, running: bool) -> None:
-        self._run_btn.setEnabled(not running)
+        self._run_btn.setEnabled(not running and not self._externally_busy)
         self._stop_btn.setEnabled(running)
         self._disconnect_btn.setEnabled(not running)
         self._driven_btn.setEnabled(not running)
         self._persistent_btn.setEnabled(not running)
         self.run_state_changed.emit(bool(running))
+
+    def set_externally_busy(self, busy: bool) -> None:
+        """Narrow integration hook for cross-MCD shared-instrument exclusion."""
+        self._externally_busy = bool(busy)
+        self._run_btn.setEnabled(self._worker is None and not self._externally_busy)
 
     def _append_log(self, message: str) -> None:
         self._log.appendPlainText(str(message))
@@ -1975,6 +2016,27 @@ class MCDPanel(QWidget):
             "spectrum_visible": bool(self._show_spectrum_chk.isChecked()),
             "conditions": self._condition_rows(),
         }
+
+    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+        allowed = {
+            "start_t": lambda v: self._start_t.setValue(float(v)),
+            "stop_t": lambda v: self._stop_t.setValue(float(v)),
+            "center_nm": lambda v: self._center.setValue(float(v)),
+            "exposure_ms": lambda v: self._exposure.setValue(float(v)),
+            "frames": lambda v: self._frames.setValue(int(v)),
+            "gate_ratio": lambda v: self._gate_ratio.setValue(float(v)),
+        }
+        skipped = []
+        for key, value in dict(settings or {}).items():
+            setter = allowed.get(key)
+            if setter is None:
+                skipped.append(key)
+                continue
+            try:
+                setter(value)
+            except Exception:
+                skipped.append(key)
+        return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
 
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):

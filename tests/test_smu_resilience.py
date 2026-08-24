@@ -213,6 +213,25 @@ class _FakeLFController:
         return None
 
 
+class _RecordingStopEvent:
+    def __init__(self, *, stop_during_wait=False):
+        self._is_set = False
+        self.stop_during_wait = bool(stop_during_wait)
+        self.wait_calls = []
+
+    def is_set(self):
+        return self._is_set
+
+    def wait(self, timeout):
+        self.wait_calls.append(float(timeout))
+        if self.stop_during_wait:
+            self._is_set = True
+        return self._is_set
+
+    def set(self):
+        self._is_set = True
+
+
 class _FakeYChannels:
     def __init__(self, instrument):
         self.instrument = instrument
@@ -438,6 +457,68 @@ class SMUResilienceTests(unittest.TestCase):
             "Keithley current readback: Ibg=1.0000e-09 A, "
             "Itg=2.0000e-09 A, Ibias=unavailable",
         )
+
+    def test_worker_uses_run_snapshot_settle_before_every_acquisition(self):
+        sequence = [{
+            "Center Wavelength (nm)": 700.0,
+            "Exposure Time (ms)": 1.0,
+            "Accumulations (EPF)": 1,
+        }]
+        batch = pd.DataFrame([self._batch_row(frames=2, Vbg_stop=0.1)])
+        lf6 = _FakeLFController()
+        stop_event = _RecordingStopEvent()
+        run_meta = self._run_meta()
+        run_meta["initial_voltage_settle_s"] = 600.0
+        run_meta["voltage_settle_s"] = 120.0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = _RunWorker(
+                sequence,
+                batch,
+                lf6_ctrl=lf6,
+                smu_ctrl=SimpleNamespace(is_connected=True, device=_HealthyRunDevice()),
+                out_dir=Path(tmp),
+                run_meta=run_meta,
+                filename_parts=["device_id"],
+                stop_event=stop_event,
+            )
+            worker.run()
+
+        self.assertEqual(stop_event.wait_calls, [600.0, 120.0])
+        self.assertEqual(lf6.adapter.acquire_calls, 2)
+
+    def test_stop_interrupts_post_voltage_settle_before_acquisition(self):
+        sequence = [{
+            "Center Wavelength (nm)": 700.0,
+            "Exposure Time (ms)": 1.0,
+            "Accumulations (EPF)": 1,
+        }]
+        lf6 = _FakeLFController()
+        stop_event = _RecordingStopEvent(stop_during_wait=True)
+        run_meta = self._run_meta()
+        run_meta["initial_voltage_settle_s"] = 3600.0
+        run_meta["voltage_settle_s"] = 1.0
+        finished = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            worker = _RunWorker(
+                sequence,
+                pd.DataFrame([self._batch_row()]),
+                lf6_ctrl=lf6,
+                smu_ctrl=SimpleNamespace(is_connected=True, device=_HealthyRunDevice()),
+                out_dir=Path(tmp),
+                run_meta=run_meta,
+                filename_parts=["device_id"],
+                stop_event=stop_event,
+            )
+            worker.finished.connect(
+                lambda success, message: finished.append((success, message))
+            )
+            worker.run()
+
+        self.assertEqual(stop_event.wait_calls, [3600.0])
+        self.assertEqual(lf6.adapter.acquire_calls, 0)
+        self.assertEqual(finished, [(False, "Run stopped by user.")])
 
     def test_visa_timeout_is_finite(self):
         rm = _FakeResourceManager()

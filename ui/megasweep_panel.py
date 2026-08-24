@@ -55,7 +55,18 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pyqtgraph as pg
 from utils.config import cfg
+from app.experiment_metadata import ExperimentMetadataService
 from utils.filename_builder import format_compact_number, format_decimal_token, format_power_uw_decimal, sanitize_token
+from utils.mcd_common import (
+    mcd_coordinates as _mcd_coordinates,
+    vtg_vbg_from_doping_efield as _vtg_vbg_from_doping_efield,
+    resolve_condition_line as _resolve_mcd_condition_line,
+)
+
+
+def resolve_mcd_gate_condition(condition, ratio):
+    """Compatibility facade for the shared D/F gate equations."""
+    return _resolve_mcd_condition_line(condition, ratio)
 
 pg.setConfigOption("background", "w")
 pg.setConfigOption("foreground", "k")
@@ -1946,26 +1957,11 @@ class _MegaSweepWorker(QObject):
         if target is None:
             return
         try:
-            if not hasattr(target, "change_spectra_center"):
-                raise AttributeError("center-wavelength setter is unavailable")
-            target.change_spectra_center(float(p["center_nm"]))
-            time.sleep(0.15)
+            prepare = getattr(self._lf6, "configure_for_acquisition", None)
+            if not callable(prepare):
+                raise AttributeError("LF6 acquisition preparation surface is unavailable")
+            prepare(center_nm=float(p["center_nm"]), exposure_ms=float(p["exp_ms"]), frames=int(p["frames"]))
 
-            if not hasattr(target, "change_expose_time"):
-                raise AttributeError("exposure setter is unavailable")
-            target.change_expose_time(float(p["exp_ms"]))
-            time.sleep(0.10)
-
-            for fn in (
-                "set_accumulations",
-                "set_frames",
-                "change_frame_to_combine",
-            ):
-                if hasattr(target, fn):
-                    getattr(target, fn)(int(p["frames"]))
-                    break
-            else:
-                raise AttributeError("Frames/EPF setter is unavailable")
         except Exception as exc:
             raise RuntimeError(
                 f"Could not apply optical condition "
@@ -2738,6 +2734,24 @@ class MegaSweepPanel(QWidget):
             "splitter_ratio": float(self._horizontal_splitter_ratio),
         }
 
+    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+        allowed = {
+            "center_nm": lambda v: self._optical_widget.set_center(float(v)),
+            "exp_ms": lambda v: self._optical_widget.set_exposure(float(v)),
+            "frames": lambda v: self._optical_widget.set_frames(int(v)),
+        }
+        skipped = []
+        for key, value in dict(settings or {}).items():
+            setter = allowed.get(key)
+            if setter is None:
+                skipped.append(key)
+                continue
+            try:
+                setter(value)
+            except Exception:
+                skipped.append(key)
+        return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
+
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
             return
@@ -3167,7 +3181,7 @@ class MegaSweepPanel(QWidget):
             "sample": self._sample_edit.text().strip() or "SampleID",
             "vbias_available": self._vbias_available(),
         })
-        sample = self._sample_edit.text().strip() or "SampleID"
+        sample = self._sample_edit.text().strip()
         folder_preview = Path(cfg.filename.base_out) / sample / "megasweep"
         full_preview = folder_preview / f"{filename_preview}.csv"
         optical_txt = "; ".join(
@@ -3240,6 +3254,9 @@ class MegaSweepPanel(QWidget):
         return data
 
     def _validate(self, params: dict) -> bool:
+        if not str(params.get("sample", "")).strip():
+            QMessageBox.critical(self, "Sample ID required", "Enter a Sample ID before starting the sweep.")
+            return False
         enabled_conditions = [
             condition
             for condition in params.get("optical_conditions", [])
@@ -3315,6 +3332,17 @@ class MegaSweepPanel(QWidget):
         self._refresh_preview()
         params = self._collect_params()
         if not self._validate(params):
+            return
+        self._run_csv_before = set(Path(params["out_path"]).glob("*.csv"))
+        self._run_files_before = set(Path(params["out_path"]).glob("*"))
+        self._run_metadata_params = dict(params)
+        try:
+            self._experiment_run = ExperimentMetadataService(params["out_path"]).begin(
+                "gate_map_2d", str(params.get("sample", "")).strip(),
+                output_dir=params["out_path"], settings=params,
+            )
+        except Exception as exc:
+            self._on_error(f"Metadata error; run blocked: {exc}")
             return
         self._preview.clear_progress()
         self._progress.setValue(0)
@@ -3395,6 +3423,21 @@ class MegaSweepPanel(QWidget):
             self._set_status("Stopped", "#707070")
         else:
             self._set_status("Done", "#1f7a1f")
+        run = getattr(self, "_experiment_run", None)
+        if run is not None:
+            try:
+                for data_file in Path(run.path.parent).glob("*"):
+                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".txt", ".log", ".json"}:
+                        continue
+                    run.register_file(data_file, "raw" if data_file.suffix.lower() == ".csv" else "intermediate")
+                if self._run_failed:
+                    run.fail("gate map failed")
+                elif worker is not None and worker._stop.is_set():
+                    run.cancel("user stop")
+                else:
+                    run.complete()
+            except Exception as exc:
+                self._on_error(f"Metadata finalization error: {exc}")
         self._update_ratio_validation()
         self._schedule_preview()
 

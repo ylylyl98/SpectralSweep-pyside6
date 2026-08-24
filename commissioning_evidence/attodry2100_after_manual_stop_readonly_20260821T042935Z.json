@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "run_id": "20260821T042935Z",
+  "events": [
+    {
+      "sequence": 1,
+      "timestamp_utc": "2026-08-21T04:29:36.067+00:00",
+      "event": "commissioning_started"
+    },
+    {
+      "sequence": 2,
+      "timestamp_utc": "2026-08-21T04:29:37.600+00:00",
+      "event": "connect_result",
+      "identity": {
+        "backend": "attodry2100",
+        "host": "192.168.1.1",
+        "channel": 0,
+        "details": {
+          "device_type": "attoDRY2100",
+          "device_name": "2100e",
+          "serial": "eNSP 23 S1 0105",
+          "firmware": "1.1.5",
+          "channel_name": "Z"
+        }
+      }
+    },
+    {
+      "sequence": 3,
+      "timestamp_utc": "2026-08-21T04:29:43.453+00:00",
+      "event": "snapshot",
+      "label": "after_manual_stop_holding",
+      "snapshot": {
+        "field_t": 0.010000000000000002,
+        "monotonic_s": 415497.5267537,
+        "setpoint_t": 0.01,
+        "temperature_k": 4.1634,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.010000000000000002,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 4,
+      "timestamp_utc": "2026-08-21T04:29:43.469+00:00",
+      "event": "disconnect_result",
+      "result": true
+    },
+    {
+      "sequence": 5,
+      "timestamp_utc": "2026-08-21T04:29:43.496+00:00",
+      "event": "shutdown_result",
+      "result": true
+    },
+    {
+      "sequence": 6,
+      "timestamp_utc": "2026-08-21T04:29:43.519+00:00",
+      "event": "readonly_inspection_result",
+      "passed": true,
+      "qthread_running": false,
+      "evidence_path": "D:\\Insturment control v3\\SpectralSweep-pyside6\\commissioning_evidence\\attodry2100_after_manual_stop_readonly_20260821T042935Z.json"
+    }
+  ]
+}

@@ -1,0 +1,1671 @@
+{
+  "schema_version": 1,
+  "run_id": "20260821T043538Z",
+  "events": [
+    {
+      "sequence": 1,
+      "timestamp_utc": "2026-08-21T04:35:38.132+00:00",
+      "event": "commissioning_started"
+    },
+    {
+      "sequence": 2,
+      "timestamp_utc": "2026-08-21T04:35:38.166+00:00",
+      "event": "resolved_configuration",
+      "channel": 0,
+      "maximum_field_t": 6.0,
+      "maximum_temperature_k": 7.0,
+      "stabilization": {
+        "abs_tolerance_t": 0.001,
+        "relative_tolerance": 0.0002,
+        "db_dt_t_per_s": 0.0005,
+        "slope_window_s": 1.0,
+        "stable_hold_s": 1.0,
+        "poll_interval_s": 0.2,
+        "settle_timeout_s": 120.0,
+        "operation_timeout_s": 180.0,
+        "cleanup_timeout_s": 30.0
+      }
+    },
+    {
+      "sequence": 3,
+      "timestamp_utc": "2026-08-21T04:35:39.560+00:00",
+      "event": "connect_result",
+      "identity": {
+        "backend": "attodry2100",
+        "host": "192.168.1.1",
+        "channel": 0,
+        "details": {
+          "device_type": "attoDRY2100",
+          "device_name": "2100e",
+          "serial": "eNSP 23 S1 0105",
+          "firmware": "1.1.5",
+          "channel_name": "Z"
+        }
+      }
+    },
+    {
+      "sequence": 4,
+      "timestamp_utc": "2026-08-21T04:35:43.950+00:00",
+      "event": "snapshot",
+      "label": "preflight",
+      "snapshot": {
+        "field_t": 0.010000000000000002,
+        "monotonic_s": 415858.2900704,
+        "setpoint_t": 0.01,
+        "temperature_k": 4.1651,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.010000000000000002,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 5,
+      "timestamp_utc": "2026-08-21T04:35:43.974+00:00",
+      "event": "preflight_passed",
+      "target_field_t": 0.02,
+      "snapshot": {
+        "field_t": 0.010000000000000002,
+        "monotonic_s": 415858.2900704,
+        "setpoint_t": 0.01,
+        "temperature_k": 4.1651,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.010000000000000002,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 6,
+      "timestamp_utc": "2026-08-21T04:35:44.012+00:00",
+      "event": "setpoint_requested",
+      "target_field_t": 0.02
+    },
+    {
+      "sequence": 7,
+      "timestamp_utc": "2026-08-21T04:35:54.094+00:00",
+      "event": "setpoint_result",
+      "result": 0.02
+    },
+    {
+      "sequence": 8,
+      "timestamp_utc": "2026-08-21T04:35:54.117+00:00",
+      "event": "start_field_control_requested"
+    },
+    {
+      "sequence": 9,
+      "timestamp_utc": "2026-08-21T04:35:59.748+00:00",
+      "event": "start_field_control_result",
+      "result": null
+    },
+    {
+      "sequence": 10,
+      "timestamp_utc": "2026-08-21T04:36:05.673+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.011700000000000002,
+        "monotonic_s": 415879.6604033,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1637,
+        "status": {
+          "field_control_state": "RAMPING",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.0151,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 11,
+      "timestamp_utc": "2026-08-21T04:36:05.717+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 5.929183300002478,
+      "field_t": 0.011700000000000002,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1637,
+      "lead_field_t": 0.0151,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "RAMPING",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": false
+    },
+    {
+      "sequence": 12,
+      "timestamp_utc": "2026-08-21T04:36:10.812+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.0158,
+        "monotonic_s": 415885.0238263,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.164,
+        "status": {
+          "field_control_state": "RAMPING",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.0178,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 13,
+      "timestamp_utc": "2026-08-21T04:36:10.838+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 11.050502999976743,
+      "field_t": 0.0158,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.164,
+      "lead_field_t": 0.0178,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "RAMPING",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": false
+    },
+    {
+      "sequence": 14,
+      "timestamp_utc": "2026-08-21T04:36:16.961+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.0181,
+        "monotonic_s": 415891.3871307,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1648,
+        "status": {
+          "field_control_state": "RAMPING",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.019200000000000002,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 15,
+      "timestamp_utc": "2026-08-21T04:36:16.996+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 17.208083399978932,
+      "field_t": 0.0181,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1648,
+      "lead_field_t": 0.019200000000000002,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "RAMPING",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": false
+    },
+    {
+      "sequence": 16,
+      "timestamp_utc": "2026-08-21T04:36:22.712+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.0194,
+        "monotonic_s": 415896.5460868,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1655,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.0198,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 17,
+      "timestamp_utc": "2026-08-21T04:36:22.754+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 22.96647539996775,
+      "field_t": 0.0194,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1655,
+      "lead_field_t": 0.0198,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 18,
+      "timestamp_utc": "2026-08-21T04:36:27.693+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.0199,
+        "monotonic_s": 415901.8078546,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1653,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 19,
+      "timestamp_utc": "2026-08-21T04:36:27.745+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 27.95748049998656,
+      "field_t": 0.0199,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1653,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 20,
+      "timestamp_utc": "2026-08-21T04:36:32.679+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020100000000000003,
+        "monotonic_s": 415906.7676107,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1645,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020100000000000003,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 21,
+      "timestamp_utc": "2026-08-21T04:36:32.705+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 32.91732060001232,
+      "field_t": 0.020100000000000003,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1645,
+      "lead_field_t": 0.020100000000000003,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 22,
+      "timestamp_utc": "2026-08-21T04:36:38.540+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020100000000000003,
+        "monotonic_s": 415912.7515414,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.164,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020100000000000003,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 23,
+      "timestamp_utc": "2026-08-21T04:36:38.585+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 38.79740519996267,
+      "field_t": 0.020100000000000003,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.164,
+      "lead_field_t": 0.020100000000000003,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 24,
+      "timestamp_utc": "2026-08-21T04:36:43.529+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020100000000000003,
+        "monotonic_s": 415917.8417268,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1638,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 25,
+      "timestamp_utc": "2026-08-21T04:36:43.554+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 43.76594379998278,
+      "field_t": 0.020100000000000003,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1638,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 26,
+      "timestamp_utc": "2026-08-21T04:36:49.682+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415923.8633738,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1643,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 27,
+      "timestamp_utc": "2026-08-21T04:36:49.723+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 49.935821099963505,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1643,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 28,
+      "timestamp_utc": "2026-08-21T04:36:54.871+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415929.05426,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1651,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 29,
+      "timestamp_utc": "2026-08-21T04:36:54.926+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 55.13885059999302,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1651,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 30,
+      "timestamp_utc": "2026-08-21T04:36:59.702+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415933.8844746,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1652,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 31,
+      "timestamp_utc": "2026-08-21T04:36:59.759+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 59.971863499959,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1652,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 32,
+      "timestamp_utc": "2026-08-21T04:37:04.861+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415939.0815041,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1646,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 33,
+      "timestamp_utc": "2026-08-21T04:37:04.891+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 65.10367659997428,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1646,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 34,
+      "timestamp_utc": "2026-08-21T04:37:09.660+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415944.0358228,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1638,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 35,
+      "timestamp_utc": "2026-08-21T04:37:09.704+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 69.91619119996903,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1638,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 36,
+      "timestamp_utc": "2026-08-21T04:37:15.641+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415949.7893297,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1633,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 37,
+      "timestamp_utc": "2026-08-21T04:37:15.683+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 75.89505649998318,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1633,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 38,
+      "timestamp_utc": "2026-08-21T04:37:20.858+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415955.1445078,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1634,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 39,
+      "timestamp_utc": "2026-08-21T04:37:20.899+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 81.11158799997065,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1634,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 40,
+      "timestamp_utc": "2026-08-21T04:37:25.415+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415959.6067328,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.164,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 41,
+      "timestamp_utc": "2026-08-21T04:37:25.474+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 85.68597489997046,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.164,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 42,
+      "timestamp_utc": "2026-08-21T04:37:32.140+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415966.3228273,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1645,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 43,
+      "timestamp_utc": "2026-08-21T04:37:32.182+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 92.39433639997151,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1645,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 44,
+      "timestamp_utc": "2026-08-21T04:37:37.023+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415971.2086194,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1644,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 45,
+      "timestamp_utc": "2026-08-21T04:37:37.054+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 97.26591809996171,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1644,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 46,
+      "timestamp_utc": "2026-08-21T04:37:42.722+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415976.9427233,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1638,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 47,
+      "timestamp_utc": "2026-08-21T04:37:42.764+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 102.97594759997446,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1638,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 48,
+      "timestamp_utc": "2026-08-21T04:37:47.741+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415981.8219902,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1632,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 49,
+      "timestamp_utc": "2026-08-21T04:37:47.771+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 107.98293779999949,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1632,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 50,
+      "timestamp_utc": "2026-08-21T04:37:52.903+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415986.707228,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1631,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 51,
+      "timestamp_utc": "2026-08-21T04:37:52.936+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 113.14884589996655,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1631,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 52,
+      "timestamp_utc": "2026-08-21T04:37:57.994+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415992.2968513,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1636,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 53,
+      "timestamp_utc": "2026-08-21T04:37:58.045+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 118.25704279995989,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1636,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 54,
+      "timestamp_utc": "2026-08-21T04:38:03.700+00:00",
+      "event": "snapshot",
+      "label": "stabilization_sample",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 415997.9122726,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1645,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 55,
+      "timestamp_utc": "2026-08-21T04:38:03.745+00:00",
+      "event": "stabilization_sample_evaluation",
+      "elapsed_s": 123.9576270999969,
+      "field_t": 0.020000000000000004,
+      "setpoint_t": 0.02,
+      "temperature_k": 4.1645,
+      "lead_field_t": 0.020000000000000004,
+      "driven_mode": true,
+      "persistent_mode": false,
+      "h_state": "IDLE",
+      "field_control": true,
+      "quench": false,
+      "heater": true,
+      "leads_hot": true,
+      "slope_t_per_s": 0.0,
+      "slope_ready": false,
+      "slope_ok": false,
+      "in_tolerance": true
+    },
+    {
+      "sequence": 56,
+      "timestamp_utc": "2026-08-21T04:38:03.999+00:00",
+      "event": "stabilization_decision",
+      "target_field_t": 0.02,
+      "stable": false,
+      "snapshot": null,
+      "reason": "accepted stabilization timeout"
+    },
+    {
+      "sequence": 57,
+      "timestamp_utc": "2026-08-21T04:38:04.047+00:00",
+      "event": "commissioning_exception",
+      "error_type": "RuntimeError",
+      "error": "field did not stabilize at 0.02 T before timeout",
+      "traceback": "Traceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\scripts\\_run_attodry2100_001_to_002.py\", line 108, in main\n    raise RuntimeError(f\"field did not stabilize at {TARGET_T:g} T before timeout\")\nRuntimeError: field did not stabilize at 0.02 T before timeout\n",
+      "tryagain_occurred": false,
+      "set_succeeded": true,
+      "start_submitted": true,
+      "normal_point_completed": false
+    },
+    {
+      "sequence": 58,
+      "timestamp_utc": "2026-08-21T04:38:04.086+00:00",
+      "event": "stop_requested"
+    },
+    {
+      "sequence": 59,
+      "timestamp_utc": "2026-08-21T04:38:05.014+00:00",
+      "event": "stop_ack",
+      "acknowledgement": null
+    },
+    {
+      "sequence": 60,
+      "timestamp_utc": "2026-08-21T04:38:10.053+00:00",
+      "event": "stop_verification_observation",
+      "snapshot": {
+        "field_t": 0.020000000000000004,
+        "monotonic_s": 416004.4791066,
+        "setpoint_t": 0.02,
+        "temperature_k": 4.1649,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": false
+          }
+        },
+        "lead_field_t": 0.020000000000000004,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 61,
+      "timestamp_utc": "2026-08-21T04:38:10.112+00:00",
+      "event": "disconnect_result",
+      "result": true
+    },
+    {
+      "sequence": 62,
+      "timestamp_utc": "2026-08-21T04:38:10.166+00:00",
+      "event": "shutdown_result",
+      "result": true
+    },
+    {
+      "sequence": 63,
+      "timestamp_utc": "2026-08-21T04:38:10.213+00:00",
+      "event": "commissioning_result",
+      "passed": false,
+      "tryagain_occurred": false,
+      "maximum_temperature_k": 4.1655,
+      "evidence_path": "D:\\Insturment control v3\\SpectralSweep-pyside6\\commissioning_evidence\\attodry2100_001_to_002_20260821T043538Z.json"
+    }
+  ]
+}

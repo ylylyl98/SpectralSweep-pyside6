@@ -171,6 +171,8 @@ class RotationSlotConfig:
     com_port: str = ""
     visa_resource: str = ""
     esp300_axis: int = 1
+    esp300_velocity_fraction: float = 1.0
+    esp300_acceleration_fraction: float = 0.5
 
 
 @dataclass
@@ -201,6 +203,53 @@ class MagnetConfig:
     field_tolerance_t: float = 0.002
     poll_interval_s: float = 0.5
     allow_remote_heater_control: bool = True
+
+
+@dataclass
+class AttoDRY2100Config:
+    """Connection and safety defaults for the attoDRY2100 SDK backend."""
+    sdk_directory: str = r"D:\Insturment control v3\CRYO2100"
+    host: str = "192.168.1.1"
+    channel: int = 0
+    timeout_s: float = 10.0
+    maximum_field_t: Optional[float] = 6.0
+    minimum_temperature_k: Optional[float] = None
+    maximum_temperature_k: Optional[float] = 7.0
+    poll_interval_s: float = 0.5
+
+
+@dataclass
+class MCD2100Config:
+    """Dedicated 2100 workflow settings; APS100 settings remain in MCDConfig."""
+    start_field_t: float = -2.0
+    stop_field_t: float = 2.0
+    sample_id: str = ""
+    settle_timeout_s: float = 120.0
+    operation_timeout_s: float = 180.0
+    polling_interval_s: float = 0.2
+    bidirectional: bool = False
+    angles_deg: List[float] = field(default_factory=lambda: [45.0, 135.0])
+    rotator: str = "rot1"
+    lf_center_nm: float = 860.0
+    lf_exposure_ms: float = 100.0
+    lf_frames: int = 10
+    gate_t: Optional[float] = None
+    vtg_v: float = 0.0
+    vbg_v: float = 0.0
+    vbias_v: float = 0.0
+    gate_ratio: float = 1.0
+    gate_vtg_factor: float = 1.0
+    gate_vbg_factor: float = 1.0
+    conditions: List[dict] = field(default_factory=list)
+    gate_batches: List[dict] = field(default_factory=list)
+    output_dir: str = ""
+    filename_stem: str = "mcd2100_continuous"
+    temperature_control_enabled: bool = False
+    sample_target_k: float = 4.0
+    sample_ramp_rate_k_per_min: float = 1.0
+    temperature_tolerance_k: float = 0.05
+    temperature_stable_s: float = 10.0
+    temperature_timeout_s: float = 3600.0
 
 
 @dataclass
@@ -264,7 +313,9 @@ class AppConfig:
     rotation: RotationConfig = field(default_factory=RotationConfig)
     stage: StageConfig = field(default_factory=StageConfig)
     magnet: MagnetConfig = field(default_factory=MagnetConfig)
+    attodry2100: AttoDRY2100Config = field(default_factory=AttoDRY2100Config)
     mcd: MCDConfig = field(default_factory=MCDConfig)
+    mcd2100: MCD2100Config = field(default_factory=MCD2100Config)
     session: SessionConfig = field(default_factory=SessionConfig)
     font_size_pt: int = 9          # UI-wide font size in points
 
@@ -341,7 +392,14 @@ class AppConfig:
             _update_dataclass(self.rotation.rot2, rotation_data["rot2"])
         _update_dataclass(self.stage,    data.get("stage", {}))
         _update_dataclass(self.magnet,   data.get("magnet", {}))
+        # Accept the names used by early 2100 prototypes as well as the
+        # canonical names written by current versions.
+        _update_dataclass(
+            self.attodry2100,
+            data.get("attodry2100", data.get("2100", data.get("magnet_2100", {}))),
+        )
         _update_dataclass(self.mcd,      data.get("mcd", {}))
+        _update_dataclass(self.mcd2100,  data.get("mcd2100", data.get("MCD2100", {})))
         session_data = data.get("session", {})
         if isinstance(session_data, dict):
             try:

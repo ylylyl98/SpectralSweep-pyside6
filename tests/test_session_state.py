@@ -46,16 +46,32 @@ class SessionStateTests(unittest.TestCase):
         panel._on_apply()
         panel._loop_table.item(0, 2).setText("899")
         panel._sample_edit.setText("device-a")
+        panel._initial_voltage_settle_spin.setValue(600.0)
+        panel._voltage_settle_spin.setValue(120.0)
         state = panel.capture_session_state()
 
         restored = PresetsPanel()
         restored.restore_session_state(state)
         self.assertEqual(restored._sample_edit.text(), "device-a")
+        self.assertAlmostEqual(restored._initial_voltage_settle_spin.value(), 600.0)
+        self.assertAlmostEqual(restored._voltage_settle_spin.value(), 120.0)
         self.assertEqual(restored._loop_table.item(0, 2).text(), "899")
         self.assertEqual(str(restored._loop_src.iloc[0]["Values"]), "861")
 
         restored._refresh_tables()
         self.assertEqual(restored._loop_table.item(0, 2).text(), "861")
+
+    def test_dual_gate_legacy_settle_restores_to_both_timing_controls(self):
+        panel = PresetsPanel()
+        state = panel.capture_session_state()
+        state.pop("initial_voltage_settle_s")
+        state["voltage_settle_s"] = 3.5
+
+        restored = PresetsPanel()
+        restored.restore_session_state(state)
+
+        self.assertAlmostEqual(restored._initial_voltage_settle_spin.value(), 3.5)
+        self.assertAlmostEqual(restored._voltage_settle_spin.value(), 3.5)
 
     def test_dual_gate_restores_drift_minimized_acquisition_order(self):
         panel = PresetsPanel()

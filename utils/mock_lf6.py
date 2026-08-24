@@ -166,6 +166,10 @@ class MockLF6Setup:
         self._center_nm = float(value)
         print(f"[MockLF6] Center wavelength set to {self._center_nm:.1f} nm")
 
+    def set_center_wavelength_when_ready(self, value, **_kwargs) -> None:
+        """Mock the shared guarded setter used by production LightField paths."""
+        self.change_spectra_center(value)
+
     def change_center_wavelength(self, wavelength) -> None:
         """Alias used by older calling code."""
         self.change_spectra_center(wavelength)
@@ -246,6 +250,25 @@ class MockLF6Setup:
     def accumulations(self) -> int:
         return self._accumulations
 
+    @property
+    def is_ready(self) -> bool:
+        return True
+
+    @property
+    def is_busy(self) -> bool:
+        return False
+
+    def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
+        self.set_center_wavelength_when_ready(center_nm)
+        self.change_expose_time(exposure_ms)
+        self.change_frame_to_combine(frames)
+        return {
+            "center_wavelength": {"result": "succeeded", "attempts": 1,
+                                  "requested_value": float(center_nm),
+                                  "readback": float(center_nm)},
+            "exposure_ms": float(exposure_ms), "frames": int(frames),
+        }
+
 
 # ── Adapter shim: same interface as SpectrometerLF6, no lf6_automation import ─
 
@@ -278,7 +301,11 @@ class MockAdapter:
         return self.setup.acquire_2d()
 
     def change_spectra_center(self, center_nm) -> None:
-        self.setup.change_spectra_center(center_nm)
+        self.setup.set_center_wavelength_when_ready(center_nm)
+        self.invalidate_wavelengths()
+
+    def set_center_wavelength_when_ready(self, center_nm, **kwargs) -> None:
+        self.setup.set_center_wavelength_when_ready(center_nm, **kwargs)
         self.invalidate_wavelengths()
 
     def set_accumulations(self, n: int) -> None:

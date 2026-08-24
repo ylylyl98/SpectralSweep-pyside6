@@ -42,6 +42,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pyqtgraph as pg
 from utils.config import cfg
+from app.experiment_metadata import ExperimentMetadataService
 from utils.filename_builder import (
     FilenameContext, build_base_filename, sanitize_token, format_compact_number,
 )
@@ -318,15 +319,11 @@ class _PowerSweepWorker(QObject):
         # ── apply LF6 settings ───────────────────────────────────────────────
         if setup is not None:
             try:
-                setup.change_spectra_center(f"{p['center_nm']:.0f}")
-                time.sleep(0.15)
-                setup.change_expose_time(float(p["exp_ms"]))
-                time.sleep(0.10)
-                for fn in ("set_accumulations", "set_frames",
-                           "change_frame_to_combine"):
-                    if hasattr(setup, fn):
-                        getattr(setup, fn)(int(p["frames"]))
-                        break
+                prepare = getattr(self._lf6, "configure_for_acquisition", None)
+                if callable(prepare):
+                    prepare(center_nm=float(p["center_nm"]), exposure_ms=float(p["exp_ms"]), frames=int(p["frames"]))
+                else:
+                    raise RuntimeError("LF6 acquisition preparation surface is unavailable")
             except Exception as exc:
                 self.log.emit(f"[{_ts()}] LF6 settings warning: {exc}")
 
@@ -940,6 +937,27 @@ class PowerSweepPanel(QWidget):
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
         }
 
+    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+        allowed = {
+            "center_nm": lambda v: self._center_spin.setValue(float(v)),
+            "exp_ms": lambda v: self._exp_spin.setValue(float(v)),
+            "frames": lambda v: self._frames_spin.setValue(int(v)),
+            "Vbg_target": lambda v: self._vbg_spin.setValue(float(v)),
+            "Vtg_target": lambda v: self._vtg_spin.setValue(float(v)),
+            "Vbias_target": lambda v: self._vbias_spin.setValue(float(v)),
+        }
+        skipped = []
+        for key, value in dict(settings or {}).items():
+            setter = allowed.get(key)
+            if setter is None:
+                skipped.append(key)
+                continue
+            try:
+                setter(value)
+            except Exception:
+                skipped.append(key)
+        return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
+
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
             return
@@ -1298,7 +1316,10 @@ class PowerSweepPanel(QWidget):
         if not self._validate():
             return
 
-        devid = self._devid_edit.text().strip() or "SampleID"
+        devid = self._devid_edit.text().strip()
+        if not devid:
+            QMessageBox.warning(self, "Sample ID required", "Enter a Sample ID before starting the sweep.")
+            return
         sub = self._subfolder_edit.text().strip() or "motion_sweep"
         out_path = str(Path(cfg.filename.base_out) / devid / sub)
 
@@ -1341,6 +1362,7 @@ class PowerSweepPanel(QWidget):
             return
 
         params = {
+            "device_id": devid,
             "positions": self._positions,
             "motion_key": self._motion_combo.currentData() or "stage",
             "motion_settle_s": self._motion_settle_spin.value(),
@@ -1362,6 +1384,17 @@ class PowerSweepPanel(QWidget):
         }
 
         self._run_btn.setEnabled(False)
+        self._run_failed = False
+        self._run_metadata_params = dict(params)
+        self._run_csv_before = set(Path(out_path).glob("*.csv"))
+        self._run_files_before = set(Path(out_path).glob("*"))
+        try:
+            self._experiment_run = ExperimentMetadataService(out_path).begin(
+                "motion_sweep", devid, output_dir=out_path, settings=params
+            )
+        except Exception as exc:
+            self._on_error(f"Metadata error; run blocked: {exc}")
+            return
         self._motion_grp.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._progress.setValue(0)
@@ -1413,9 +1446,11 @@ class PowerSweepPanel(QWidget):
         self._log.append(f"ERROR: {msg}")
         self._status_lbl.setText("Error")
         self._status_lbl.setStyleSheet("color: red; font-size: 11px;")
+        self._run_failed = True
 
     @Slot()
     def _on_finished(self):
+        worker = self._worker
         self._run_btn.setEnabled(True)
         self._motion_grp.setEnabled(True)
         self._stop_btn.setEnabled(False)
@@ -1428,4 +1463,19 @@ class PowerSweepPanel(QWidget):
             self._thread.quit()
             self._thread.wait()
             self._thread = None
+        run = getattr(self, "_experiment_run", None)
+        if run is not None:
+            try:
+                for data_file in Path(run.path.parent).glob("*"):
+                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".log", ".json", ".txt"}:
+                        continue
+                    run.register_file(data_file, "raw" if data_file.suffix.lower() == ".csv" else "intermediate")
+                if getattr(self, "_run_failed", False):
+                    run.fail("motion sweep failed")
+                elif worker is not None and worker._stop.is_set():
+                    run.cancel("user stop")
+                else:
+                    run.complete()
+            except Exception as exc:
+                self._on_error(f"Metadata finalization error: {exc}")
         self._worker = None

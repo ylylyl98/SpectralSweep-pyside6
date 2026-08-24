@@ -1,5 +1,6 @@
 # Import the .NET class library
 import clr, ctypes
+import time
 
 # Import python sys module
 import sys, os
@@ -34,6 +35,14 @@ from PrincetonInstruments.LightField.AddIns import CameraSettings
 # Create the LightField Application (true for visible)
 # The 2nd parameter forces LF to load with no experiment
 
+LIGHTFIELD_SETTING_TIMEOUT_S = 15.0
+LIGHTFIELD_POLL_INTERVAL_S = 0.05
+
+
+class LightFieldSettingTimeoutError(TimeoutError):
+    """A LightField setting never became writable within the bounded wait."""
+
+
 class LF6Setup:
     def __init__(self):
         self.auto = Automation(True, List[String]())
@@ -41,6 +50,7 @@ class LF6Setup:
         self.experiment = self.application.Experiment
         self.exp_settings = ExperimentSettings
         self.spectrometer_settings = SpectrometerSettings
+        self._center_wavelength_write_stats = None
 
     def print_saved_experiments(self):
         # Print a list (of type string) of saved experiments
@@ -139,7 +149,8 @@ class LF6Setup:
         return np.copy(resultArray)
 
     def change_center_wavelength(self, wavelength):
-        self.change_spec_setting(SpectrometerSettings.GratingCenterWavelength, wavelength)
+        """Legacy alias; all center writes use the guarded shared setter."""
+        return self.set_center_wavelength_when_ready(wavelength)
 
     def get_wavelength_calibration(self):
         net_array = self.experiment.SystemColumnCalibration
@@ -168,15 +179,348 @@ class LF6Setup:
                                     CameraSettings.ShutterTimingExposureTime))))
 
     def change_spectra_center(self, value):
-        if self.experiment.Exists(SpectrometerSettings.GratingCenterWavelength):
-            self.experiment.SetValue(SpectrometerSettings.GratingCenterWavelength, value)
-            print(String.Format("{0} {1}", "Center Wave Length:",
-                                str(self.experiment.GetValue(
-                                    SpectrometerSettings.GratingCenterWavelength))))
+        """Legacy center setter routed through the guarded shared path."""
+        return self.set_center_wavelength_when_ready(value)
 
-            print(String.Format("{0} {1}", "Grating:",
-                                str(self.experiment.GetValue(
-                                    SpectrometerSettings.Grating))))
+    def _set_center_wavelength_raw(self, value):
+        """Perform exactly one authoritative CenterWavelength SetValue attempt."""
+        setting = SpectrometerSettings.GratingCenterWavelength
+        if not bool(self.experiment.Exists(setting)):
+            raise RuntimeError("LightField setting GratingCenterWavelength is unavailable")
+        self.experiment.SetValue(setting, value)
+        return self._read_center_wavelength(setting)
+
+    def _read_center_wavelength(self, setting):
+        getter = getattr(self.experiment, "GetValue", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter(setting)
+        except BaseException:
+            return None
+
+    @property
+    def center_wavelength_write_stats(self):
+        """Last guarded write outcome, including actual SetValue attempt count."""
+        return dict(self._center_wavelength_write_stats or {})
+
+    @staticmethod
+    def _exception_chain(exc):
+        current = exc
+        seen = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            yield current
+            inner = None
+            for name in ("InnerException", "inner_exception", "inner"):
+                try:
+                    inner = getattr(current, name)
+                except BaseException:
+                    inner = None
+                if inner is not None:
+                    break
+            current = inner
+
+    @classmethod
+    def _frozen_exception(cls, exc):
+        """Return the exact InvalidOperationException frozen-setting cause, if present."""
+        for item in cls._exception_chain(exc):
+            try:
+                get_type = getattr(item, "GetType", None)
+                type_name = str(get_type().FullName if callable(get_type) else type(item).__name__)
+            except BaseException:
+                type_name = type(item).__name__
+            type_name = type_name.rsplit(".", 1)[-1]
+            try:
+                message = getattr(item, "Message")
+            except BaseException:
+                message = str(item)
+            normalized = str(message).strip().rstrip(".")
+            frozen_messages = {
+                "Cannot modify a frozen setting",
+                "Cannot modify a frozen setting (Spectrometer.Grating.CenterWavelength)",
+                "Cannot modify a frozen setting. (Spectrometer.Grating.CenterWavelength)",
+            }
+            if type_name == "InvalidOperationException" and normalized in frozen_messages:
+                return item
+        return None
+
+    @staticmethod
+    def _exception_description(exc) -> str:
+        if exc is None:
+            return ""
+        try:
+            get_type = getattr(exc, "GetType", None)
+            type_name = str(get_type().FullName if callable(get_type) else type(exc).__name__)
+        except BaseException:
+            type_name = type(exc).__name__
+        try:
+            message = getattr(exc, "Message")
+        except BaseException:
+            message = str(exc)
+        return f"{type_name}: {message}"
+
+    @staticmethod
+    def _flag(obj, names, *args):
+        """Read an optional LightField readiness flag without assuming one API."""
+        for name in names:
+            try:
+                value = getattr(obj, name)
+                value = value(*args) if callable(value) else value
+                if isinstance(value, (bool, np.bool_)):
+                    return bool(value)
+            except BaseException:
+                continue
+        return None
+
+    @property
+    def is_ready(self):
+        """Return readiness from explicit state or a usable experiment handshake."""
+        return bool(self.readiness_snapshot["ready"])
+
+    @property
+    def readiness_evidence(self):
+        """Return True/False when LightField exposes explicit readiness evidence."""
+        values = [
+            self._flag(self.application, ("IsReady", "Ready", "IsInitialized", "Initialized")),
+            self._flag(self.experiment, ("IsReady", "Ready", "IsLoaded", "Loaded")),
+        ]
+        explicit = [value for value in values if value is not None]
+        if not explicit:
+            return None
+        return False if any(value is False for value in explicit) else True
+
+    @property
+    def readiness_snapshot(self):
+        """Describe the strongest readiness evidence exposed by this LF version."""
+        explicit = self.readiness_evidence
+        application_present = getattr(self, "application", None) is not None
+        experiment = getattr(self, "experiment", None)
+        experiment_present = experiment is not None
+        busy = self.is_busy if experiment_present else False
+        required = {
+            "center_wavelength": SpectrometerSettings.GratingCenterWavelength,
+            "exposure": CameraSettings.ShutterTimingExposureTime,
+            "frame_combination": ExperimentSettings.OnlineProcessingFrameCombinationFramesCombined,
+        }
+        settings = {}
+        if experiment_present:
+            for label, setting in required.items():
+                try:
+                    settings[label] = bool(experiment.Exists(setting))
+                except BaseException:
+                    settings[label] = False
+        else:
+            settings = {label: False for label in required}
+
+        query_ok = experiment_present
+        saved_experiments = getattr(experiment, "GetSavedExperiments", None) if experiment_present else None
+        if callable(saved_experiments):
+            try:
+                saved_experiments()
+            except BaseException:
+                query_ok = False
+
+        capability_ready = (
+            application_present
+            and experiment_present
+            and query_ok
+            and all(settings.values())
+        )
+        if explicit is False:
+            ready = False
+            reason = "explicit LightField readiness is false"
+        elif busy:
+            ready = False
+            reason = "LightField is busy/loading/acquiring"
+        elif explicit is True:
+            ready = capability_ready
+            reason = "ready" if ready else "required experiment capabilities are unavailable"
+        else:
+            ready = capability_ready
+            reason = "ready via experiment capability handshake" if ready else "readiness capability handshake incomplete"
+        return {
+            "ready": ready,
+            "reason": reason,
+            "explicit_ready": explicit,
+            "busy": busy,
+            "application_present": application_present,
+            "experiment_present": experiment_present,
+            "query_ok": query_ok,
+            "settings": settings,
+        }
+
+    @property
+    def is_busy(self):
+        """Best-effort acquisition/load state; absent APIs are treated as idle."""
+        values = []
+        for obj in (self.application, self.experiment):
+            value = self._flag(
+                obj,
+                ("IsBusy", "Busy", "IsAcquiring", "Acquiring", "IsLoading", "Loading"),
+            )
+            if value is not None:
+                values.append(value)
+        return any(values)
+
+    def setting_is_available(self, setting) -> bool:
+        """Return whether a setting exists and any explicit availability API allows it."""
+        try:
+            if not bool(self.experiment.Exists(setting)):
+                return False
+        except BaseException:
+            return False
+        value = self._flag(
+            self.experiment,
+            ("IsAvailable", "Available", "SettingAvailable"),
+            setting,
+        )
+        return True if value is None else value
+
+    def setting_is_writable(self, setting):
+        """Return explicit writability, or ``None`` when LightField has no such API."""
+        for name in ("IsWritable", "Writable", "CanSetValue", "CanWrite"):
+            try:
+                value = getattr(self.experiment, name)
+                value = value(setting) if callable(value) else value
+                if isinstance(value, (bool, np.bool_)):
+                    return bool(value)
+            except BaseException:
+                continue
+        value = self._flag(self.experiment, ("IsReadOnly", "ReadOnly"), setting)
+        return None if value is None else not value
+
+    def wait_until_setting_writable(
+        self,
+        setting,
+        *,
+        timeout_s: float = LIGHTFIELD_SETTING_TIMEOUT_S,
+        poll_interval_s: float = LIGHTFIELD_POLL_INTERVAL_S,
+    ) -> None:
+        """Wait for readiness/availability before attempting a setting write."""
+        timeout_s = float(timeout_s)
+        poll_interval_s = float(poll_interval_s)
+        if timeout_s <= 0 or poll_interval_s <= 0:
+            raise ValueError("LightField readiness timings must be positive")
+        deadline = time.monotonic() + timeout_s
+        reason = "not ready"
+        label = "GratingCenterWavelength" if "CenterWavelength" in str(setting) else str(setting)
+        while True:
+            if not self.is_ready:
+                reason = "LightField is still starting or loading"
+            elif self.is_busy:
+                reason = "LightField experiment is busy"
+            elif not self.setting_is_available(setting):
+                reason = "setting is unavailable"
+            elif self.setting_is_writable(setting) is False:
+                reason = "setting is read-only/frozen"
+            else:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise LightFieldSettingTimeoutError(
+                    f"LightField setting {label} remained {reason} for {timeout_s:g}s"
+                )
+            time.sleep(min(poll_interval_s, remaining))
+
+    def set_center_wavelength_when_ready(
+        self,
+        value,
+        *,
+        timeout_s: float = LIGHTFIELD_SETTING_TIMEOUT_S,
+        poll_interval_s: float = LIGHTFIELD_POLL_INTERVAL_S,
+    ) -> None:
+        """Write center wavelength after readiness, retrying transient frozen states."""
+        setting = SpectrometerSettings.GratingCenterWavelength
+        timeout_s = float(timeout_s)
+        if timeout_s <= 0:
+            raise ValueError("LightField readiness timeout must be positive")
+        started = time.monotonic()
+        deadline = started + timeout_s
+        last_error = None
+        attempts = 0
+        stats = {
+            "setting": "GratingCenterWavelength",
+            "requested_value": value,
+            "attempts": 0,
+            "result": "pending",
+            "elapsed_s": 0.0,
+            "last_exception": None,
+            "state": {},
+        }
+        self._center_wavelength_write_stats = stats
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                stats.update({
+                    "result": "timeout",
+                    "elapsed_s": time.monotonic() - started,
+                    "last_exception": self._exception_description(last_error) if last_error is not None else None,
+                    "state": self._center_wavelength_state(setting),
+                })
+                detail = (
+                    f"; last exception: {self._exception_description(last_error)}"
+                    if last_error is not None else ""
+                )
+                raise LightFieldSettingTimeoutError(
+                    f"LightField setting GratingCenterWavelength requested={value!r} "
+                    f"remained frozen/unavailable for {stats['elapsed_s']:.3f}s; "
+                    f"SetValue attempts={attempts}; state={stats['state']}{detail}"
+                ) from last_error
+            try:
+                self.wait_until_setting_writable(
+                    setting, timeout_s=remaining, poll_interval_s=poll_interval_s
+                )
+                attempts += 1
+                stats["attempts"] = attempts
+                readback = self._set_center_wavelength_raw(value)
+                stats.update({
+                    "result": "succeeded",
+                    "elapsed_s": time.monotonic() - started,
+                    "readback": readback,
+                    "state": self._center_wavelength_state(setting),
+                })
+                return
+            except LightFieldSettingTimeoutError as exc:
+                # Preserve the bounded state/attempt diagnostics from the wait.
+                stats.update({
+                    "result": "timeout",
+                    "elapsed_s": time.monotonic() - started,
+                    "last_exception": self._exception_description(exc),
+                    "state": self._center_wavelength_state(setting),
+                })
+                raise LightFieldSettingTimeoutError(
+                    f"LightField setting GratingCenterWavelength requested={value!r} "
+                    f"remained frozen/unavailable for {stats['elapsed_s']:.3f}s; "
+                    f"SetValue attempts={attempts}; state={stats['state']}; "
+                    f"last exception: {self._exception_description(exc)}"
+                ) from exc
+            except BaseException as exc:
+                frozen = self._frozen_exception(exc)
+                if frozen is None:
+                    raise
+                last_error = frozen
+                stats["last_exception"] = self._exception_description(frozen)
+                time.sleep(min(float(poll_interval_s), max(0.0, deadline - time.monotonic())))
+
+    def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
+        """Apply the complete mutable run recipe immediately before acquisition."""
+        self.set_center_wavelength_when_ready(float(center_nm))
+        self.change_expose_time(float(exposure_ms))
+        self.change_frame_to_combine(int(frames))
+        return {
+            "center_wavelength": self.center_wavelength_write_stats,
+            "exposure_ms": float(exposure_ms),
+            "frames": int(frames),
+        }
+
+    def _center_wavelength_state(self, setting) -> dict:
+        return {
+            "ready": self.is_ready,
+            "busy": self.is_busy,
+            "available": self.setting_is_available(setting),
+            "writable": self.setting_is_writable(setting),
+        }
 
     def change_roi_FullSensor(self):
         if self.experiment.Exists(CameraSettings.ReadoutControlRegionsOfInterestSelection):

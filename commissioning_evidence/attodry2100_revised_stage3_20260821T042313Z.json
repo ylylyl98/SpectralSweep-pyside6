@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "run_id": "20260821T042313Z",
+  "events": [
+    {
+      "sequence": 1,
+      "timestamp_utc": "2026-08-21T04:23:13.323+00:00",
+      "event": "commissioning_started"
+    },
+    {
+      "sequence": 2,
+      "timestamp_utc": "2026-08-21T04:23:13.354+00:00",
+      "event": "resolved_configuration",
+      "sdk_directory": "D:\\Insturment control v3\\CRYO2100",
+      "host": "192.168.1.1",
+      "channel": 0,
+      "maximum_field_t": 6.0,
+      "maximum_temperature_k": 7.0,
+      "stabilization": {
+        "abs_tolerance_t": 0.001,
+        "relative_tolerance": 0.0002,
+        "db_dt_t_per_s": 0.0005,
+        "slope_window_s": 1.0,
+        "stable_hold_s": 1.0,
+        "poll_interval_s": 0.2,
+        "settle_timeout_s": 120.0,
+        "operation_timeout_s": 180.0,
+        "cleanup_timeout_s": 30.0
+      }
+    },
+    {
+      "sequence": 3,
+      "timestamp_utc": "2026-08-21T04:23:13.519+00:00",
+      "event": "commissioning_exception",
+      "error_type": "AttoDRY2100ConnectionError",
+      "error": "attoDRY2100 connection failed: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions",
+      "traceback": "Traceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\app\\devices\\attodry2100_adapter.py\", line 149, in connect\n    device.connect()\n    ~~~~~~~~~~~~~~^^\n  File \"D:\\Insturment control v3\\CRYO2100\\ACS.py\", line 75, in connect\n    tcp.connect((self.address, self.TCP_PORT))\n    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nPermissionError: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\scripts\\_run_attodry2100_revised_stage3.py\", line 76, in main\n    identity = controller.connect()\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\attodry2100_controller.py\", line 681, in connect\n    return self.connect_async().result(timeout or self.request_timeout_s)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\attodry2100_controller.py\", line 115, in result\n    return self._request.client_future.result(timeout)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^\n  File \"C:\\Users\\commo\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\concurrent\\futures\\_base.py\", line 456, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"C:\\Users\\commo\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\concurrent\\futures\\_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\attodry2100_controller.py\", line 290, in _execute\n    identity = adapter.connect()\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\app\\devices\\attodry2100_adapter.py\", line 195, in connect\n    raise AttoDRY2100ConnectionError(f\"attoDRY2100 connection failed: {exc}\") from exc\napp.devices.attodry2100_adapter.AttoDRY2100ConnectionError: attoDRY2100 connection failed: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions\n",
+      "mutation_started": false,
+      "normal_point_completed": false
+    },
+    {
+      "sequence": 4,
+      "timestamp_utc": "2026-08-21T04:23:13.541+00:00",
+      "event": "disconnect_result",
+      "result": true
+    },
+    {
+      "sequence": 5,
+      "timestamp_utc": "2026-08-21T04:23:13.568+00:00",
+      "event": "shutdown_result",
+      "result": true
+    },
+    {
+      "sequence": 6,
+      "timestamp_utc": "2026-08-21T04:23:13.594+00:00",
+      "event": "commissioning_result",
+      "passed": false,
+      "evidence_path": "D:\\Insturment control v3\\SpectralSweep-pyside6\\commissioning_evidence\\attodry2100_revised_stage3_20260821T042313Z.json"
+    }
+  ]
+}

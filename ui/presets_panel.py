@@ -55,6 +55,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
+from app.experiment_metadata import ExperimentMetadataService
 from utils.hardware_incidents import (
     HardwareIncidentRecorder,
     build_hardware_incident,
@@ -77,6 +78,16 @@ from utils.filename_builder import (
     make_unique_stem,
     resolve_power_uw,
 )
+from utils.mcd_common import (
+    mcd_coordinates as _mcd_coordinates,
+    vtg_vbg_from_doping_efield as _vtg_vbg_from_doping_efield,
+    resolve_condition_line as _resolve_mcd_condition_line,
+)
+
+
+def resolve_mcd_gate_condition(condition, ratio):
+    """Compatibility facade for the shared D/F gate equations."""
+    return _resolve_mcd_condition_line(condition, ratio)
 from ui.preview_widget import RunPlanTree
 from ui.dual_gate_spectrum_viewer import DualGateSpectrumViewer
 from utils.dual_gate_preview import load_last_dual_gate_acquisition
@@ -399,6 +410,25 @@ def _count_total_points(
         reps = max(int(row.get("repeat", 1) or 1), 1)
         total_points += reps * _sweep_point_count(row)
     return max(int(total_points), 0)
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 60.0:
+        return f"{seconds:g} s"
+    if seconds >= 3600.0:
+        hours, remainder = divmod(seconds, 3600.0)
+        minutes, trailing_seconds = divmod(remainder, 60.0)
+        parts = [f"{int(hours)} h"]
+        if minutes >= 1.0:
+            parts.append(f"{int(minutes)} min")
+        if trailing_seconds >= 0.05:
+            parts.append(f"{trailing_seconds:g} s")
+        return " ".join(parts)
+    minutes, remainder = divmod(seconds, 60.0)
+    if remainder < 0.05:
+        return f"{minutes:g} min"
+    return f"{int(minutes)} min {remainder:g} s"
 
 
 def _resolve_sweep_vectors(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1976,6 +2006,27 @@ class _RunWorker(QObject):
             self._seq, self._batch, self._schedule
         )
 
+    def _wait_for_voltage_settle(self, *, initial_ramp: bool) -> None:
+        """Wait after a completed voltage move while keeping Stop responsive."""
+        setting_key = (
+            "initial_voltage_settle_s" if initial_ramp else "voltage_settle_s"
+        )
+        fallback_settle_s = (
+            self._meta.get("voltage_settle_s", cfg.ramp.settle_s)
+            if initial_ramp
+            else cfg.ramp.settle_s
+        )
+        settle_s = max(
+            0.0,
+            float(self._meta.get(setting_key, fallback_settle_s)),
+        )
+        if settle_s <= 0:
+            return
+        phase = "initial ramp" if initial_ramp else "voltage step"
+        self.log.emit(f"    Settling after {phase} for {settle_s:g} s...")
+        if self._stop.wait(settle_s):
+            raise _StopRequested()
+
     def _require_smu_ready(self):
         issues = _smu_readiness_issues(self._smu, self._required_smu_roles)
         if issues:
@@ -2015,6 +2066,24 @@ class _RunWorker(QObject):
             self.log.emit(
                 f"Direct-jump mode active. Safe jump limit={float(cfg.ramp.safe_jump_V):g} V. "
                 f"Ramp-to-zero runs after measurement only and at 2x slower speed."
+            )
+            initial_settle_s = max(
+                0.0,
+                float(
+                    self._meta.get(
+                        "initial_voltage_settle_s",
+                        self._meta.get("voltage_settle_s", cfg.ramp.settle_s),
+                    )
+                ),
+            )
+            point_settle_s = max(
+                0.0,
+                float(self._meta.get("voltage_settle_s", cfg.ramp.settle_s)),
+            )
+            self.log.emit(
+                "Post-voltage settling: "
+                f"{initial_settle_s:g} s after each initial ramp; "
+                f"{point_settle_s:g} s after each later sweep step."
             )
             previous_ctx: Optional[Dict[str, Any]] = None
             for schedule_i, task in enumerate(self._schedule):
@@ -2273,7 +2342,9 @@ class _RunWorker(QObject):
                                     raise
                                 except Exception as e:
                                     raise _RunFlowError("hardware", f"Gate set error: {e}") from e
-                                time.sleep(cfg.ramp.settle_s)
+                                self._wait_for_voltage_settle(
+                                    initial_ramp=is_start_point
+                                )
 
                                 if self._stop.is_set():
                                     summary = "Run stopped by user."
@@ -3160,9 +3231,67 @@ class PresetsPanel(QWidget):
         safety_title.setToolTip(self._safe_jump_spin.toolTip())
         safety_row.addWidget(safety_title)
         safety_row.addWidget(safety_label)
-        safety_row.addStretch()
         safety_row.addWidget(self._safe_jump_spin)
+        safety_row.addStretch()
         lay_right.addWidget(self._safety_bar)
+
+        self._voltage_timing_bar = QFrame()
+        self._voltage_timing_bar.setObjectName("DualGateVoltageTimingBar")
+        self._voltage_timing_bar.setMaximumHeight(36)
+        self._voltage_timing_bar.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._voltage_timing_bar.setStyleSheet(
+            "QFrame#DualGateVoltageTimingBar { background: #FAFBFC;"
+            " border: 1px solid #D7DEE7; border-radius: 5px; }"
+        )
+        timing_row = QHBoxLayout(self._voltage_timing_bar)
+        timing_row.setContentsMargins(8, 3, 8, 3)
+        timing_row.setSpacing(6)
+        timing_title = QLabel("Voltage settling")
+        timing_title.setStyleSheet("font-weight: 600; color: #4B5563;")
+        initial_settle_label = QLabel("After first ramp:")
+        self._initial_voltage_settle_spin = QDoubleSpinBox()
+        self._initial_voltage_settle_spin.setRange(0.0, 3600.0)
+        self._initial_voltage_settle_spin.setDecimals(3)
+        self._initial_voltage_settle_spin.setSingleStep(0.5)
+        self._initial_voltage_settle_spin.setValue(float(cfg.ramp.settle_s))
+        self._initial_voltage_settle_spin.setSuffix(" s")
+        self._initial_voltage_settle_spin.setFixedWidth(88)
+        self._initial_voltage_settle_spin.setMaximumHeight(26)
+        self._initial_voltage_settle_spin.setToolTip(
+            "Wait after ramping from the previous voltage to the first point of "
+            "each sweep or repetition. This can be longer for hysteretic samples. "
+            "Examples: 120 s = 2 min; 600 s = 10 min; 3600 s = 1 hour."
+        )
+        initial_settle_label.setToolTip(
+            self._initial_voltage_settle_spin.toolTip()
+        )
+        point_settle_label = QLabel("After later steps:")
+        self._voltage_settle_spin = QDoubleSpinBox()
+        self._voltage_settle_spin.setRange(0.0, 3600.0)
+        self._voltage_settle_spin.setDecimals(3)
+        self._voltage_settle_spin.setSingleStep(0.1)
+        self._voltage_settle_spin.setValue(float(cfg.ramp.settle_s))
+        self._voltage_settle_spin.setSuffix(" s")
+        self._voltage_settle_spin.setFixedWidth(88)
+        self._voltage_settle_spin.setMaximumHeight(26)
+        self._voltage_settle_spin.setToolTip(
+            "Wait after each subsequent Vbg, Vtg, and optional Vbias sweep step "
+            "before starting the spectrum acquisition. Examples: 120 s = 2 min; "
+            "600 s = 10 min; 3600 s = 1 hour."
+        )
+        point_settle_label.setToolTip(self._voltage_settle_spin.toolTip())
+        timing_title.setToolTip(
+            "Separate settling delays for the larger initial ramp and later sweep steps."
+        )
+        timing_row.addWidget(timing_title)
+        timing_row.addWidget(initial_settle_label)
+        timing_row.addWidget(self._initial_voltage_settle_spin)
+        timing_row.addWidget(point_settle_label)
+        timing_row.addWidget(self._voltage_settle_spin)
+        timing_row.addStretch()
+        lay_right.addWidget(self._voltage_timing_bar)
 
         file_grp = QGroupBox("Filename preview")
         file_lay = QVBoxLayout(file_grp)
@@ -3338,6 +3467,8 @@ class PresetsPanel(QWidget):
         self._mode_combo.currentTextChanged.connect(lambda _mode: self._update_filename_preview())
         self._mode_combo_name.currentTextChanged.connect(self._update_filename_preview)
         self._safe_jump_spin.valueChanged.connect(self._on_safety_changed)
+        self._initial_voltage_settle_spin.valueChanged.connect(self._update_plan)
+        self._voltage_settle_spin.valueChanged.connect(self._update_plan)
         for widget in (
             self._sample_edit,
             self._point_edit,
@@ -3408,6 +3539,10 @@ class PresetsPanel(QWidget):
             "applied_loop": self._session_records(self._loop_src),
             "applied_batch": self._session_records(self._batch_src),
             "safe_jump_v": float(self._safe_jump_spin.value()),
+            "initial_voltage_settle_s": float(
+                self._initial_voltage_settle_spin.value()
+            ),
+            "voltage_settle_s": float(self._voltage_settle_spin.value()),
             "filename_parts": [
                 key for key, _label in PART_SPECS
                 if key in self._manual_filename_parts
@@ -3433,6 +3568,26 @@ class PresetsPanel(QWidget):
             },
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
         }
+
+    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+        allowed = {
+            "safe_jump_v": lambda v: self._safe_jump_spin.setValue(float(v)),
+            "initial_voltage_settle_s": lambda v: (
+                self._initial_voltage_settle_spin.setValue(float(v))
+            ),
+            "voltage_settle_s": lambda v: self._voltage_settle_spin.setValue(float(v)),
+        }
+        skipped = []
+        for key, value in dict(settings or {}).items():
+            setter = allowed.get(key)
+            if setter is None:
+                skipped.append(key)
+                continue
+            try:
+                setter(value)
+            except Exception:
+                skipped.append(key)
+        return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
 
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
@@ -3485,6 +3640,22 @@ class PresetsPanel(QWidget):
             self._safe_jump_spin.setValue(float(state["safe_jump_v"]))
         except (KeyError, TypeError, ValueError):
             pass
+        saved_point_settle = state.get("voltage_settle_s")
+        if saved_point_settle is not None:
+            try:
+                self._voltage_settle_spin.setValue(float(saved_point_settle))
+            except (TypeError, ValueError):
+                pass
+        saved_initial_settle = state.get(
+            "initial_voltage_settle_s", saved_point_settle
+        )
+        if saved_initial_settle is not None:
+            try:
+                self._initial_voltage_settle_spin.setValue(
+                    float(saved_initial_settle)
+                )
+            except (TypeError, ValueError):
+                pass
 
         parts = state.get("filename_parts")
         if isinstance(parts, list):
@@ -4171,6 +4342,10 @@ class PresetsPanel(QWidget):
             "power_uw": self._power_edit.text().strip(),
             "power_coefficient": coeff if coeff is not None else 1.0,
             "subfolder": self._subfolder_edit.text().strip() or "Initial Data",
+            "initial_voltage_settle_s": float(
+                self._initial_voltage_settle_spin.value()
+            ),
+            "voltage_settle_s": float(self._voltage_settle_spin.value()),
         }
 
     def _current_output_dir(self, run_meta: Dict[str, Any]) -> Path:
@@ -4996,9 +5171,18 @@ class PresetsPanel(QWidget):
             order_label = "batch row → loop settings"
         else:
             order_label = "loop setting → batch rows"
+        initial_settle_s = float(self._initial_voltage_settle_spin.value())
+        point_settle_s = float(self._voltage_settle_spin.value())
+        initial_point_count = min(total, total_points)
+        later_point_count = max(total_points - initial_point_count, 0)
+        settle_overhead = _format_duration(
+            initial_point_count * initial_settle_s
+            + later_point_count * point_settle_s
+        )
         self._summary_lbl.setText(
             f"{len(schedule)} ordered step(s) -> {total} file(s), "
-            f"{total_points} sweep point(s)  [mode: {mode}; order: {order_label}]"
+            f"{total_points} sweep point(s)  [mode: {mode}; order: {order_label}; "
+            f"post-voltage settling: +{settle_overhead}]"
         )
         self._tree.update_plan(
             seq,
@@ -5052,6 +5236,16 @@ class PresetsPanel(QWidget):
             self._log(err)
             return
         out_dir = self._current_output_dir(run_meta)
+        self._run_csv_before = set(out_dir.glob("*.csv"))
+        self._run_files_before = set(out_dir.glob("*"))
+        try:
+            self._experiment_run = ExperimentMetadataService(out_dir).begin(
+                "dual_gate_sweep", run_meta["device_id"], output_dir=out_dir, settings=run_meta
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Metadata error", f"Experiment metadata could not be created; run blocked.\n\n{exc}")
+            self._log(f"Metadata error: {exc}")
+            return
 
         self._stop_event.clear()
         self._done_acq = 0
@@ -5090,6 +5284,8 @@ class PresetsPanel(QWidget):
 
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
+        self._initial_voltage_settle_spin.setEnabled(False)
+        self._voltage_settle_spin.setEnabled(False)
         self._status_lbl.setText("Running…")
         self._status_lbl.setStyleSheet("color: orange;")
         self._on_progress(0, self._total_acq)
@@ -5249,6 +5445,8 @@ class PresetsPanel(QWidget):
     @Slot(bool, str)
     def _on_finished(self, success: bool, message: str):
         self._stop_btn.setEnabled(False)
+        self._initial_voltage_settle_spin.setEnabled(True)
+        self._voltage_settle_spin.setEnabled(True)
         if self._hardware_incident_active:
             self._run_outcome = "failed"
             self._status_lbl.setText("Hardware fault - reconnect SMUs")
@@ -5269,6 +5467,22 @@ class PresetsPanel(QWidget):
             self._run_outcome = "failed"
             self._status_lbl.setText("Failed")
             self._status_lbl.setStyleSheet("color: red;")
+        run = getattr(self, "_experiment_run", None)
+        if run is not None:
+            try:
+                for data_file in Path(run.path.parent).glob("*"):
+                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".log", ".json", ".txt"}:
+                        continue
+                    run.register_file(data_file, "raw" if data_file.suffix.lower() == ".csv" else "intermediate")
+                if self._run_outcome == "completed":
+                    run.complete({"message": message})
+                elif self._run_outcome == "stopped":
+                    run.cancel(message)
+                else:
+                    run.fail(message)
+            except Exception as exc:
+                self._log(f"Metadata finalization error: {exc}")
+                QMessageBox.critical(self, "Metadata error", f"Experiment metadata could not be finalized:\n\n{exc}")
         self._tree.update_plan(
             self._final_seq,
             self._df_batch,

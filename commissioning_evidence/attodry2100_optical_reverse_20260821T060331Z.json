@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "run_id": "first-real-optical-reverse",
+  "events": [
+    {
+      "sequence": 1,
+      "timestamp_utc": "2026-08-21T06:03:32.104+00:00",
+      "event": "commissioning_started",
+      "start_t": 0.03,
+      "stop_t": 0.02,
+      "angle_deg": 45.0,
+      "rotator": "rot1",
+      "lightfield": {
+        "center_nm": 730.0,
+        "exposure_ms": 2000.0,
+        "frames": 1
+      },
+      "reverse_return_leg": false,
+      "ramp_rate_changed": false
+    },
+    {
+      "sequence": 2,
+      "timestamp_utc": "2026-08-21T06:03:39.203+00:00",
+      "event": "preflight_passed",
+      "identity": {
+        "backend": "attodry2100",
+        "host": "192.168.1.1",
+        "channel": 0,
+        "details": {
+          "device_type": "attoDRY2100",
+          "device_name": "2100e",
+          "serial": "eNSP 23 S1 0105",
+          "firmware": "1.1.5",
+          "channel_name": "Z"
+        }
+      },
+      "snapshot": {
+        "field_t": 0.03,
+        "monotonic_s": 421133.415891,
+        "setpoint_t": 0.03,
+        "temperature_k": 4.1646,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": true
+          }
+        },
+        "lead_field_t": 0.03,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": true,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      },
+      "values": {
+        "field_t": 0.03,
+        "setpoint_t": 0.03,
+        "temperature_k": 4.1646,
+        "driven_mode": true,
+        "persistent_mode": false,
+        "h_state": "IDLE",
+        "field_control": true,
+        "quench": false,
+        "heater": true,
+        "leads_hot": true,
+        "lead_field_t": 0.03
+      }
+    },
+    {
+      "sequence": 3,
+      "timestamp_utc": "2026-08-21T06:05:05.467+00:00",
+      "event": "commissioning_failed",
+      "error_type": "RuntimeError",
+      "error": "LightField connection failed: LF6 connect failed: Failed to read from an IPC Port: The pipe has been ended.\r\n\r\n\r\nServer stack trace: \r\n   at System.Runtime.Remoting.Channels.Ipc.IpcPort.Read(Byte[] data, Int32 offset, Int32 length)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.ReadFromSocket(Byte[] buffer, Int32 offset, Int32 count)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.Read(Byte[] buffer, Int32 offset, Int32 count)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.ReadAndMatchFourBytes(Byte[] buffer)\r\n   at System.Runtime.Remoting.Channels.Tcp.TcpSocketHandler.ReadAndMatchPreamble()\r\n   at System.Runtime.Remoting.Channels.Tcp.TcpSocketHandler.ReadVersionAndOperation(UInt16& operation)\r\n   at System.Runtime.Remoting.Channels.Ipc.IpcClientHandler.ReadHeaders()\r\n   at System.Runtime.Remoting.Channels.Ipc.IpcClientTransportSink.ProcessMessage(IMessage msg, ITransportHeaders requestHeaders, Stream requestStream, ITransportHeaders& responseHeaders, Stream& responseStream)\r\n   at System.Runtime.Remoting.Channels.BinaryClientFormatterSink.SyncProcessMessage(IMessage msg)\r\n\r\nException rethrown at [0]: \r\n   at System.Runtime.Remoting.Proxies.RealProxy.HandleReturnMessage(IMessage reqMsg, IMessage retMsg)\r\n   at System.Runtime.Remoting.Proxies.RealProxy.PrivateInvoke(MessageData& msgData, Int32 type)\r\n   at PrincetonInstruments.LightField.AddIns.Contracts.IExperimentContract.SetValue(String setting, Object value)\r\n   at PrincetonInstruments.LightField.AddIns.HostSideAdapters.IExperimentContractToViewHostAdapter.SetValue(String setting, Object value)\nTraceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\lf6_controller.py\", line 94, in connect_instrument\n    self._setup.change_spectra_center(cfg.lf6.center_nm)\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\lf6_automation.py\", line 172, in change_spectra_center\n    self.experiment.SetValue(SpectrometerSettings.GratingCenterWavelength, value)\n    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nSystem.Runtime.Remoting.RemotingException: Failed to read from an IPC Port: The pipe has been ended.\r\n\r\n\r\nServer stack trace: \r\n   at System.Runtime.Remoting.Channels.Ipc.IpcPort.Read(Byte[] data, Int32 offset, Int32 length)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.ReadFromSocket(Byte[] buffer, Int32 offset, Int32 count)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.Read(Byte[] buffer, Int32 offset, Int32 count)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.ReadAndMatchFourBytes(Byte[] buffer)\r\n   at System.Runtime.Remoting.Channels.Tcp.TcpSocketHandler.ReadAndMatchPreamble()\r\n   at System.Runtime.Remoting.Channels.Tcp.TcpSocketHandler.ReadVersionAndOperation(UInt16& operation)\r\n   at System.Runtime.Remoting.Channels.Ipc.IpcClientHandler.ReadHeaders()\r\n   at System.Runtime.Remoting.Channels.Ipc.IpcClientTransportSink.ProcessMessage(IMessage msg, ITransportHeaders requestHeaders, Stream requestStream, ITransportHeaders& responseHeaders, Stream& responseStream)\r\n   at System.Runtime.Remoting.Channels.BinaryClientFormatterSink.SyncProcessMessage(IMessage msg)\r\n\r\nException rethrown at [0]: \r\n   at System.Runtime.Remoting.Proxies.RealProxy.HandleReturnMessage(IMessage reqMsg, IMessage retMsg)\r\n   at System.Runtime.Remoting.Proxies.RealProxy.PrivateInvoke(MessageData& msgData, Int32 type)\r\n   at PrincetonInstruments.LightField.AddIns.Contracts.IExperimentContract.SetValue(String setting, Object value)\r\n   at PrincetonInstruments.LightField.AddIns.HostSideAdapters.IExperimentContractToViewHostAdapter.SetValue(String setting, Object value)\n",
+      "traceback": "Traceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\scripts\\_run_attodry2100_optical_reverse.py\", line 166, in main\n    raise RuntimeError(\"LightField connection failed: \" + (lf_errors[-1] if lf_errors else \"unknown error\"))\nRuntimeError: LightField connection failed: LF6 connect failed: Failed to read from an IPC Port: The pipe has been ended.\r\n\r\n\r\nServer stack trace: \r\n   at System.Runtime.Remoting.Channels.Ipc.IpcPort.Read(Byte[] data, Int32 offset, Int32 length)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.ReadFromSocket(Byte[] buffer, Int32 offset, Int32 count)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.Read(Byte[] buffer, Int32 offset, Int32 count)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.ReadAndMatchFourBytes(Byte[] buffer)\r\n   at System.Runtime.Remoting.Channels.Tcp.TcpSocketHandler.ReadAndMatchPreamble()\r\n   at System.Runtime.Remoting.Channels.Tcp.TcpSocketHandler.ReadVersionAndOperation(UInt16& operation)\r\n   at System.Runtime.Remoting.Channels.Ipc.IpcClientHandler.ReadHeaders()\r\n   at System.Runtime.Remoting.Channels.Ipc.IpcClientTransportSink.ProcessMessage(IMessage msg, ITransportHeaders requestHeaders, Stream requestStream, ITransportHeaders& responseHeaders, Stream& responseStream)\r\n   at System.Runtime.Remoting.Channels.BinaryClientFormatterSink.SyncProcessMessage(IMessage msg)\r\n\r\nException rethrown at [0]: \r\n   at System.Runtime.Remoting.Proxies.RealProxy.HandleReturnMessage(IMessage reqMsg, IMessage retMsg)\r\n   at System.Runtime.Remoting.Proxies.RealProxy.PrivateInvoke(MessageData& msgData, Int32 type)\r\n   at PrincetonInstruments.LightField.AddIns.Contracts.IExperimentContract.SetValue(String setting, Object value)\r\n   at PrincetonInstruments.LightField.AddIns.HostSideAdapters.IExperimentContractToViewHostAdapter.SetValue(String setting, Object value)\nTraceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\lf6_controller.py\", line 94, in connect_instrument\n    self._setup.change_spectra_center(cfg.lf6.center_nm)\n    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\lf6_automation.py\", line 172, in change_spectra_center\n    self.experiment.SetValue(SpectrometerSettings.GratingCenterWavelength, value)\n    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nSystem.Runtime.Remoting.RemotingException: Failed to read from an IPC Port: The pipe has been ended.\r\n\r\n\r\nServer stack trace: \r\n   at System.Runtime.Remoting.Channels.Ipc.IpcPort.Read(Byte[] data, Int32 offset, Int32 length)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.ReadFromSocket(Byte[] buffer, Int32 offset, Int32 count)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.Read(Byte[] buffer, Int32 offset, Int32 count)\r\n   at System.Runtime.Remoting.Channels.SocketHandler.ReadAndMatchFourBytes(Byte[] buffer)\r\n   at System.Runtime.Remoting.Channels.Tcp.TcpSocketHandler.ReadAndMatchPreamble()\r\n   at System.Runtime.Remoting.Channels.Tcp.TcpSocketHandler.ReadVersionAndOperation(UInt16& operation)\r\n   at System.Runtime.Remoting.Channels.Ipc.IpcClientHandler.ReadHeaders()\r\n   at System.Runtime.Remoting.Channels.Ipc.IpcClientTransportSink.ProcessMessage(IMessage msg, ITransportHeaders requestHeaders, Stream requestStream, ITransportHeaders& responseHeaders, Stream& responseStream)\r\n   at System.Runtime.Remoting.Channels.BinaryClientFormatterSink.SyncProcessMessage(IMessage msg)\r\n\r\nException rethrown at [0]: \r\n   at System.Runtime.Remoting.Proxies.RealProxy.HandleReturnMessage(IMessage reqMsg, IMessage retMsg)\r\n   at System.Runtime.Remoting.Proxies.RealProxy.PrivateInvoke(MessageData& msgData, Int32 type)\r\n   at PrincetonInstruments.LightField.AddIns.Contracts.IExperimentContract.SetValue(String setting, Object value)\r\n   at PrincetonInstruments.LightField.AddIns.HostSideAdapters.IExperimentContractToViewHostAdapter.SetValue(String setting, Object value)\n\n",
+      "worker_result": null
+    },
+    {
+      "sequence": 4,
+      "timestamp_utc": "2026-08-21T06:05:05.494+00:00",
+      "event": "transport_close_requested"
+    },
+    {
+      "sequence": 5,
+      "timestamp_utc": "2026-08-21T06:05:05.519+00:00",
+      "event": "magnet_shutdown_result",
+      "result": true
+    },
+    {
+      "sequence": 6,
+      "timestamp_utc": "2026-08-21T06:05:05.555+00:00",
+      "event": "rotation_shutdown",
+      "success": true
+    },
+    {
+      "sequence": 7,
+      "timestamp_utc": "2026-08-21T06:05:05.584+00:00",
+      "event": "lightfield_shutdown",
+      "success": true
+    }
+  ]
+}

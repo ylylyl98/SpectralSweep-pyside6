@@ -98,11 +98,28 @@ class SpectrometerLF6:
     # ---- convenience setter that also clears λ cache ----
     def change_spectra_center(self, center_nm) -> None:
         """Accepts '730' or 730.0; forwards to LF6 and invalidates λ cache."""
-        try:
-            self.setup.change_spectra_center(f"{float(center_nm):.0f}")
-        except Exception:
-            self.setup.change_spectra_center(center_nm)
+        method = getattr(self.setup, "set_center_wavelength_when_ready", None)
+        if callable(method):
+            method(float(center_nm))
+        else:
+            raise AttributeError("LF6Setup has no guarded center-wavelength setter")
         self.invalidate_wavelengths()
+
+    def set_center_wavelength_when_ready(self, center_nm, **kwargs) -> None:
+        """Guarded shared center setter used by all production callers."""
+        method = getattr(self.setup, "set_center_wavelength_when_ready", None)
+        if not callable(method):
+            raise AttributeError("LF6Setup has no guarded center-wavelength setter")
+        method(float(center_nm), **kwargs)
+        self.invalidate_wavelengths()
+
+    def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
+        method = getattr(self.setup, "configure_for_acquisition", None)
+        if not callable(method):
+            raise AttributeError("LF6Setup has no acquisition preparation surface")
+        result = method(center_nm=center_nm, exposure_ms=exposure_ms, frames=frames)
+        self.invalidate_wavelengths()
+        return result
 
     # ---- frames/accums convenience ----
     def set_accumulations(self, n: int) -> None:

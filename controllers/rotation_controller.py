@@ -49,6 +49,8 @@ class _RotationWorker(QObject):
     position_ready = Signal(str, float)  # slot, angle_deg
     move_done      = Signal(str, float)  # slot, angle_deg
     axes_scanned   = Signal(str, list)   # slot, [int]
+    motion_profile_ready = Signal(str, object)  # slot, ESP300MotionProfile
+    settings_saved = Signal(str, str)    # slot, resource
 
     def __init__(self) -> None:
         super().__init__()
@@ -71,16 +73,30 @@ class _RotationWorker(QObject):
                 f"{traceback.format_exc()}"
             )
 
-    @Slot(str, str, int)
-    def connect_esp300(self, slot: str, visa_resource: str, axis: int) -> None:
+    @Slot(str, str, int, float, float)
+    def connect_esp300(
+        self,
+        slot: str,
+        visa_resource: str,
+        axis: int,
+        velocity_fraction: float = 1.0,
+        acceleration_fraction: float = 0.5,
+    ) -> None:
         self._close_slot(slot)
         try:
             from app.devices.rotation_esp300_shared_adapter import SharedESP300Rotation
 
-            adapter = SharedESP300Rotation(visa_resource, axis=axis, role=slot)
+            adapter = SharedESP300Rotation(
+                visa_resource,
+                axis=axis,
+                role=slot,
+                velocity_fraction=velocity_fraction,
+                acceleration_fraction=acceleration_fraction,
+            )
             self._adapters[slot] = adapter
             print(f"[Rotation] {slot} mapped to shared ESP300 {visa_resource} axis {axis}")
             self.connected.emit(slot, "esp300")
+            self.motion_profile_ready.emit(slot, adapter.motion_profile)
         except Exception as exc:
             self.error.emit(
                 f"Rotation {slot} (ESP300) connect failed: {exc}\n"
@@ -130,6 +146,47 @@ class _RotationWorker(QObject):
         except Exception as exc:
             self.error.emit(f"Rotation {slot} get_position failed: {exc}")
 
+    @Slot(str)
+    def inspect_motion_profile(self, slot: str) -> None:
+        adapter = self._adapters.get(slot)
+        if adapter is None or not hasattr(adapter, "refresh_motion_profile"):
+            self.error.emit(f"Rotation {slot} is not connected to an ESP300.")
+            return
+        try:
+            self.motion_profile_ready.emit(slot, adapter.refresh_motion_profile())
+        except Exception as exc:
+            self.error.emit(f"Rotation {slot} profile query failed: {exc}")
+
+    @Slot(str, float, float)
+    def apply_motion_profile(
+        self, slot: str, velocity_fraction: float, acceleration_fraction: float
+    ) -> None:
+        adapter = self._adapters.get(slot)
+        if adapter is None or not hasattr(adapter, "apply_fast_safe_motion_profile"):
+            self.error.emit(f"Rotation {slot} is not connected to an ESP300.")
+            return
+        try:
+            profile = adapter.apply_fast_safe_motion_profile(
+                velocity_fraction=float(velocity_fraction),
+                acceleration_fraction=float(acceleration_fraction),
+            )
+            self.motion_profile_ready.emit(slot, profile)
+        except Exception as exc:
+            self.error.emit(f"Rotation {slot} profile apply failed: {exc}")
+
+    @Slot(str)
+    def save_esp300_settings(self, slot: str) -> None:
+        adapter = self._adapters.get(slot)
+        if adapter is None or not hasattr(adapter, "save_settings"):
+            self.error.emit(f"Rotation {slot} is not connected to an ESP300.")
+            return
+        try:
+            adapter.refresh_motion_profile()
+            adapter.save_settings()
+            self.settings_saved.emit(slot, str(getattr(adapter, "address", "")))
+        except Exception as exc:
+            self.error.emit(f"Rotation {slot} settings save failed: {exc}")
+
     # ── axis scan (ESP300 only, temporary open) ───────────────────────────────
 
     @Slot(str, str)
@@ -177,6 +234,11 @@ class RotationController(QObject):
     position_ready = Signal(str, float)
     move_done      = Signal(str, float)
     axes_scanned   = Signal(str, list)
+    motion_profile_ready = Signal(str, object)
+    settings_saved = Signal(str, str)
+    ROTATION_SLOTS = ("rot1", "rot2")
+    # Compatibility spelling retained for older panels.
+    LOGICAL_SLOTS = ROTATION_SLOTS
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -191,16 +253,43 @@ class RotationController(QObject):
         self._worker.position_ready.connect(self.position_ready)
         self._worker.move_done.connect(self.move_done)
         self._worker.axes_scanned.connect(self.axes_scanned)
+        self._worker.motion_profile_ready.connect(self.motion_profile_ready)
+        self._worker.settings_saved.connect(self.settings_saved)
 
         self._thread.start()
+
+    def logical_slots(self) -> tuple[str, ...]:
+        """Stable logical mount names shared by all rotation UIs."""
+        return tuple(self.ROTATION_SLOTS)
+
+    def enumerate_logical_slots(self) -> tuple[str, ...]:
+        """Compatibility method for panels that enumerate controller slots."""
+        return self.logical_slots()
+
+    def get_logical_slots(self) -> tuple[str, ...]:
+        return self.logical_slots()
 
     # ── public API ────────────────────────────────────────────────────────────
 
     def connect_elliptec(self, slot: str, com_port: str) -> None:
         self._worker.connect_elliptec.__func__(self._worker, slot, com_port)
 
-    def connect_esp300(self, slot: str, visa_resource: str, axis: int = 1) -> None:
-        self._worker.connect_esp300.__func__(self._worker, slot, visa_resource, axis)
+    def connect_esp300(
+        self,
+        slot: str,
+        visa_resource: str,
+        axis: int = 1,
+        velocity_fraction: float = 1.0,
+        acceleration_fraction: float = 0.5,
+    ) -> None:
+        self._worker.connect_esp300.__func__(
+            self._worker,
+            slot,
+            visa_resource,
+            axis,
+            velocity_fraction,
+            acceleration_fraction,
+        )
 
     def disconnect(self, slot: str) -> None:
         self._worker.disconnect_slot.__func__(self._worker, slot)
@@ -210,6 +299,19 @@ class RotationController(QObject):
 
     def get_position(self, slot: str) -> None:
         self._worker.get_position.__func__(self._worker, slot)
+
+    def inspect_motion_profile(self, slot: str) -> None:
+        self._worker.inspect_motion_profile.__func__(self._worker, slot)
+
+    def apply_motion_profile(
+        self, slot: str, velocity_fraction: float, acceleration_fraction: float
+    ) -> None:
+        self._worker.apply_motion_profile.__func__(
+            self._worker, slot, velocity_fraction, acceleration_fraction
+        )
+
+    def save_esp300_settings(self, slot: str) -> None:
+        self._worker.save_esp300_settings.__func__(self._worker, slot)
 
     def scan_axes(self, slot: str, visa_resource: str) -> None:
         self._worker.scan_axes.__func__(self._worker, slot, visa_resource)
@@ -226,7 +328,7 @@ class RotationController(QObject):
     # ── cleanup ───────────────────────────────────────────────────────────────
 
     def shutdown(self) -> None:
-        for slot in ("rot1", "rot2"):
+        for slot in self.logical_slots():
             if self._worker.is_connected(slot):
                 self._worker.disconnect_slot.__func__(self._worker, slot)
         self._thread.quit()

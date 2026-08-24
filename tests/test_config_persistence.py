@@ -3,12 +3,59 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 
 from utils.config import AppConfig
 
 
 class ConfigPersistenceTests(unittest.TestCase):
+    def test_rotation_profiles_round_trip_per_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            source = AppConfig()
+            source.rotation.rot1.esp300_velocity_fraction = 1.0
+            source.rotation.rot1.esp300_acceleration_fraction = 0.5
+            source.rotation.rot2.esp300_velocity_fraction = 0.75
+            source.rotation.rot2.esp300_acceleration_fraction = 0.25
+            source.save(path)
+
+            restored = AppConfig()
+            restored.load(path)
+
+            self.assertEqual(restored.rotation.rot1.esp300_velocity_fraction, 1.0)
+            self.assertEqual(restored.rotation.rot1.esp300_acceleration_fraction, 0.5)
+            self.assertEqual(restored.rotation.rot2.esp300_velocity_fraction, 0.75)
+            self.assertEqual(restored.rotation.rot2.esp300_acceleration_fraction, 0.25)
+
+    def test_full_2100_dataclass_asdict_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/"config.json"; source=AppConfig()
+            for key, value in {"sdk_directory":"custom", "host":"h", "channel":4, "timeout_s":3.0, "maximum_field_t":5.0, "minimum_temperature_k":1.2, "maximum_temperature_k":4.0, "poll_interval_s":.25}.items(): setattr(source.attodry2100,key,value)
+            for key, value in {"start_field_t":-1.0, "stop_field_t":1.0, "settle_timeout_s":9.0, "operation_timeout_s":10.0, "polling_interval_s":.1, "temperature_control_enabled":True, "sample_target_k":20.0, "sample_ramp_rate_k_per_min":2.0, "temperature_tolerance_k":.05, "temperature_stable_s":5.0, "temperature_timeout_s":600.0}.items(): setattr(source.mcd2100,key,value)
+            source.save(path); restored=AppConfig(); restored.load(path)
+            self.assertEqual(asdict(restored.attodry2100), asdict(source.attodry2100)); self.assertEqual(asdict(restored.mcd2100), asdict(source.mcd2100))
+            self.assertTrue(restored.mcd2100.temperature_control_enabled)
+            self.assertEqual(restored.mcd2100.sample_target_k, 20.0)
+    def test_2100_sections_round_trip_and_legacy_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            source = AppConfig()
+            source.attodry2100.sdk_directory = "sdk"
+            source.attodry2100.host = "example"
+            source.attodry2100.channel = 3
+            source.attodry2100.maximum_field_t = None
+            source.mcd2100.operation_timeout_s = 42.0
+            source.save(path)
+            restored = AppConfig(); restored.load(path)
+            self.assertEqual(restored.attodry2100.sdk_directory, "sdk")
+            self.assertEqual(restored.attodry2100.channel, 3)
+            self.assertIsNone(restored.attodry2100.maximum_field_t)
+            self.assertEqual(restored.mcd2100.operation_timeout_s, 42.0)
+            path.write_text("{}", encoding="utf-8")
+            legacy = AppConfig(); legacy.load(path)
+            self.assertEqual(legacy.attodry2100.channel, 0)
+            self.assertEqual(legacy.mcd2100.start_field_t, -2.0)
     def test_round_trip_includes_versioned_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"

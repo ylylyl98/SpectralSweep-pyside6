@@ -1,6 +1,8 @@
 # app/devices/rotation_eps300_adapter.py
 from __future__ import annotations
 
+from dataclasses import dataclass
+import math
 from typing import Iterable, List, Optional, Union
 import time
 
@@ -8,6 +10,17 @@ try:
     import pyvisa
 except Exception as e:  # pragma: no cover
     pyvisa = None
+
+
+@dataclass(frozen=True)
+class ESP300MotionProfile:
+    axis: int
+    stage_id: str
+    velocity: float
+    max_velocity: float
+    acceleration: float
+    max_acceleration: float
+    deceleration: float
 
 
 class NewportEPS300:
@@ -203,6 +216,108 @@ class NewportEPS300:
         raise RuntimeError(
             f"Unexpected TP response for axis {ax}: {'; '.join(attempts)}"
         )
+
+    # ---------------------------
+    # Per-axis motion profile
+    # ---------------------------
+    def _query_required_float(self, command: str) -> float:
+        raw = self._query(command)
+        cleaned = self._clean_resp(str(raw)).replace(",", " ")
+        for candidate in (cleaned, str(raw).strip()):
+            for token in candidate.split():
+                try:
+                    value = float(token)
+                except ValueError:
+                    continue
+                if math.isfinite(value):
+                    return value
+        raise RuntimeError(f"ESP300 returned no numeric value for {command}: {raw!r}")
+
+    def get_stage_id(self, *, axis: Optional[int] = None) -> str:
+        ax = int(self._axis if axis is None else axis)
+        raw = str(self._query(f"{ax}ID?")).strip()
+        cleaned = self._clean_resp(raw)
+        return cleaned or raw or "UNKNOWN"
+
+    def get_motion_profile(self, *, axis: Optional[int] = None) -> ESP300MotionProfile:
+        ax = int(self._axis if axis is None else axis)
+        return ESP300MotionProfile(
+            axis=ax,
+            stage_id=self.get_stage_id(axis=ax),
+            velocity=self._query_required_float(f"{ax}VA?"),
+            max_velocity=self._query_required_float(f"{ax}VU?"),
+            acceleration=self._query_required_float(f"{ax}AC?"),
+            max_acceleration=self._query_required_float(f"{ax}AU?"),
+            deceleration=self._query_required_float(f"{ax}AG?"),
+        )
+
+    def apply_fast_safe_motion_profile(
+        self,
+        *,
+        axis: Optional[int] = None,
+        velocity_fraction: float = 1.0,
+        acceleration_fraction: float = 0.5,
+    ) -> ESP300MotionProfile:
+        """Derive an operating profile from this axis's configured maxima.
+
+        Maximum values are discovered, never copied from another axis.  The
+        profile is changed only while the selected axis reports motion done.
+        Successful readback is authoritative.
+        """
+        ax = int(self._axis if axis is None else axis)
+        velocity_fraction = float(velocity_fraction)
+        acceleration_fraction = float(acceleration_fraction)
+        if not 0.0 < velocity_fraction <= 1.0:
+            raise ValueError("velocity_fraction must be greater than 0 and no more than 1")
+        if not 0.0 < acceleration_fraction <= 1.0:
+            raise ValueError("acceleration_fraction must be greater than 0 and no more than 1")
+        if not self.is_motion_done(axis=ax):
+            raise RuntimeError(f"ESP300 axis {ax} must be stopped before changing its motion profile")
+
+        discovered = self.get_motion_profile(axis=ax)
+        if discovered.max_velocity <= 0 or discovered.max_acceleration <= 0:
+            raise RuntimeError(
+                f"ESP300 axis {ax} reported invalid motion limits: "
+                f"VU={discovered.max_velocity:g}, AU={discovered.max_acceleration:g}"
+            )
+        velocity = discovered.max_velocity * velocity_fraction
+        acceleration = discovered.max_acceleration * acceleration_fraction
+        deceleration = discovered.max_acceleration * acceleration_fraction
+
+        # Keep the controller's discovered limits, then set operating values.
+        # This order prevents a requested operating value from exceeding its
+        # corresponding programmed maximum.
+        for command, value in (
+            ("VU", discovered.max_velocity),
+            ("AU", discovered.max_acceleration),
+            ("VA", velocity),
+            ("AC", acceleration),
+            ("AG", deceleration),
+        ):
+            self._write(f"{ax}{command}{value:g}")
+
+        verified = self.get_motion_profile(axis=ax)
+        expected = {
+            "max_velocity": discovered.max_velocity,
+            "max_acceleration": discovered.max_acceleration,
+            "velocity": velocity,
+            "acceleration": acceleration,
+            "deceleration": deceleration,
+        }
+        mismatches = [
+            f"{name} expected {value:g}, read {getattr(verified, name):g}"
+            for name, value in expected.items()
+            if not math.isclose(getattr(verified, name), value, rel_tol=1e-9, abs_tol=1e-9)
+        ]
+        if mismatches:
+            raise RuntimeError(
+                f"ESP300 axis {ax} motion-profile verification failed: " + "; ".join(mismatches)
+            )
+        return verified
+
+    def save_settings(self) -> None:
+        """Persist the complete ESP300 controller configuration to flash."""
+        self._write("SM")
 
     # ---------------------------
     # Discovery Helpers

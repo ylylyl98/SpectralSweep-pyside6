@@ -33,9 +33,11 @@ from ui.presets_panel import (
     BATCH_SCHEMA,
     PresetsPanel,
     _build_acquisition_schedule,
+    _format_duration,
     _parse_sweep_constants,
     _solve_condition_line,
 )
+from utils.config import cfg
 from utils.when_condition import evaluate_when_expression, validate_when_expression
 
 
@@ -236,8 +238,31 @@ class SweepLinePanelTests(unittest.TestCase):
         panel = PresetsPanel()
         self.assertEqual(panel._safety_bar.maximumHeight(), 36)
         self.assertEqual(panel._safe_jump_spin.width(), 96)
+        self.assertEqual(panel._voltage_timing_bar.maximumHeight(), 36)
+        self.assertEqual(panel._initial_voltage_settle_spin.maximum(), 3600.0)
+        self.assertEqual(panel._voltage_settle_spin.maximum(), 3600.0)
+        self.assertEqual(panel._initial_voltage_settle_spin.width(), 88)
+        self.assertEqual(panel._voltage_settle_spin.width(), 88)
+        self.assertAlmostEqual(
+            panel._initial_voltage_settle_spin.value(), cfg.ramp.settle_s
+        )
+        self.assertAlmostEqual(
+            panel._voltage_settle_spin.value(), cfg.ramp.settle_s
+        )
         self.assertLessEqual(panel._safety_bar.sizeHint().height(), 36)
         self.assertEqual(panel._tree.minimumHeight(), 220)
+
+    def test_dual_gate_long_settle_metadata_and_duration_format(self):
+        panel = PresetsPanel()
+        panel._initial_voltage_settle_spin.setValue(600.0)
+        panel._voltage_settle_spin.setValue(120.0)
+
+        run_meta = panel._current_run_meta()
+
+        self.assertEqual(run_meta["initial_voltage_settle_s"], 600.0)
+        self.assertEqual(run_meta["voltage_settle_s"], 120.0)
+        self.assertEqual(_format_duration(600.0), "10 min")
+        self.assertEqual(_format_duration(3661.0), "1 h 1 min 1 s")
 
     def test_calculator_physical_limits_round_trip_in_session(self):
         panel = PresetsPanel()

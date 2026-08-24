@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "run_id": "20260821T042321Z",
+  "events": [
+    {
+      "sequence": 1,
+      "timestamp_utc": "2026-08-21T04:23:21.228+00:00",
+      "event": "commissioning_started"
+    },
+    {
+      "sequence": 2,
+      "timestamp_utc": "2026-08-21T04:23:21.262+00:00",
+      "event": "resolved_configuration",
+      "sdk_directory": "D:\\Insturment control v3\\CRYO2100",
+      "host": "192.168.1.1",
+      "channel": 0,
+      "maximum_field_t": 6.0,
+      "maximum_temperature_k": 7.0,
+      "stabilization": {
+        "abs_tolerance_t": 0.001,
+        "relative_tolerance": 0.0002,
+        "db_dt_t_per_s": 0.0005,
+        "slope_window_s": 1.0,
+        "stable_hold_s": 1.0,
+        "poll_interval_s": 0.2,
+        "settle_timeout_s": 120.0,
+        "operation_timeout_s": 180.0,
+        "cleanup_timeout_s": 30.0
+      }
+    },
+    {
+      "sequence": 3,
+      "timestamp_utc": "2026-08-21T04:23:23.288+00:00",
+      "event": "connect_result",
+      "identity": {
+        "backend": "attodry2100",
+        "host": "192.168.1.1",
+        "channel": 0,
+        "details": {
+          "device_type": "attoDRY2100",
+          "device_name": "2100e",
+          "serial": "eNSP 23 S1 0105",
+          "firmware": "1.1.5",
+          "channel_name": "Z"
+        }
+      }
+    },
+    {
+      "sequence": 4,
+      "timestamp_utc": "2026-08-21T04:23:28.098+00:00",
+      "event": "snapshot",
+      "label": "preflight",
+      "snapshot": {
+        "field_t": 0.010000000000000002,
+        "monotonic_s": 415122.2525207,
+        "setpoint_t": 0.01,
+        "temperature_k": 4.1649,
+        "status": {
+          "field_control_state": "IDLE",
+          "driven_mode": true,
+          "persistent_mode": false,
+          "heater_on": true,
+          "leads_hot": true,
+          "quench": false,
+          "backend_details": {
+            "field_control": false
+          }
+        },
+        "lead_field_t": 0.010000000000000002,
+        "capabilities": {
+          "temperature_readback": true,
+          "quench_reporting": true,
+          "stop_pause": true,
+          "discrete_field_points": false,
+          "continuous_ramp": false,
+          "set_h_setpoint": true,
+          "start_field_control": true,
+          "stop_field_control": true,
+          "ramp_rate_edit": false,
+          "remote_mode": false,
+          "programmable_field_limits": false,
+          "programmable_ramp_rate": false,
+          "persistent_driven_mode": true,
+          "lead_field_readback": true,
+          "lead_current_readback": false
+        }
+      }
+    },
+    {
+      "sequence": 5,
+      "timestamp_utc": "2026-08-21T04:23:28.130+00:00",
+      "event": "setpoint_requested",
+      "target_field_t": 0.01
+    },
+    {
+      "sequence": 6,
+      "timestamp_utc": "2026-08-21T04:23:33.219+00:00",
+      "event": "commissioning_exception",
+      "error_type": "AttoDRY2100CommunicationError",
+      "error": "setHSetPoint channel=0: ('Error! TRYAGAIN', 27)",
+      "traceback": "Traceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\app\\devices\\attodry2100_adapter.py\", line 296, in set_h_setpoint\n    try: self._magnet.setHSetPoint(self.channel, float(target))\n         ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\Insturment control v3\\CRYO2100\\magnet.py\", line 475, in setHSetPoint\n    self.device.handleError(response)\n    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^\n  File \"D:\\Insturment control v3\\CRYO2100\\ACS.py\", line 156, in handleError\n    raise AttoException((\"Error! \" + str(self.system_service.errorNumberToString(self.language ,errNo))), errNo)\n_attodry2100_sdk_ecfdf654fc128d31.ACS.AttoException: ('Error! TRYAGAIN', 27)\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\scripts\\_run_attodry2100_revised_stage3.py\", line 96, in main\n    set_result = controller.set_h_setpoint(TARGET_T)\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\attodry2100_controller.py\", line 687, in set_h_setpoint\n    return self.set_h_setpoint_async(target_t).result(\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        timeout or self.request_timeout_s\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\attodry2100_controller.py\", line 115, in result\n    return self._request.client_future.result(timeout)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^\n  File \"C:\\Users\\commo\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\concurrent\\futures\\_base.py\", line 456, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"C:\\Users\\commo\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\concurrent\\futures\\_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\attodry2100_controller.py\", line 331, in _execute\n    verified = self.adapter.set_h_setpoint(target, stop_event=self.stop_event)\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\app\\devices\\attodry2100_adapter.py\", line 297, in set_h_setpoint\n    except Exception as exc: raise AttoDRY2100CommunicationError(f\"setHSetPoint channel={self.channel}: {exc}\") from exc\n                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\napp.devices.attodry2100_adapter.AttoDRY2100CommunicationError: setHSetPoint channel=0: ('Error! TRYAGAIN', 27)\n",
+      "mutation_started": false,
+      "normal_point_completed": false
+    },
+    {
+      "sequence": 7,
+      "timestamp_utc": "2026-08-21T04:23:33.235+00:00",
+      "event": "disconnect_result",
+      "result": true
+    },
+    {
+      "sequence": 8,
+      "timestamp_utc": "2026-08-21T04:23:33.254+00:00",
+      "event": "shutdown_result",
+      "result": true
+    },
+    {
+      "sequence": 9,
+      "timestamp_utc": "2026-08-21T04:23:33.279+00:00",
+      "event": "commissioning_result",
+      "passed": false,
+      "evidence_path": "D:\\Insturment control v3\\SpectralSweep-pyside6\\commissioning_evidence\\attodry2100_revised_stage3_20260821T042321Z.json"
+    }
+  ]
+}

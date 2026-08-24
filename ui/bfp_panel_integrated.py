@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTabWidget,
@@ -58,6 +60,7 @@ from utils.bfp_io import (
     save_full_image_csv,
 )
 from utils.config import cfg
+from app.experiment_metadata import ExperimentMetadataService
 
 pg.setConfigOption("background", "w")
 pg.setConfigOption("foreground", "k")
@@ -69,6 +72,16 @@ PNG_SIZE_OPTIONS = (
     ("4 × 4 in", (4.0, 4.0)),
     ("3 × 4 in", (3.0, 4.0)),
 )
+
+
+def _bfp_device_id(path: Optional[Path]) -> str:
+    """Recover the existing shared device folder from a BFP output path."""
+    if path is not None:
+        try:
+            return path.parent.parent.name.strip()
+        except Exception:
+            pass
+    return ""
 
 
 def _make_png_size_combo() -> QComboBox:
@@ -178,8 +191,8 @@ def _next_run_index(save_dir: Path, prefix_without_time_and_run: str) -> int:
 
 def _save_figure_atomic(path: Path, fig: Figure, dpi: int = 300) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fig.savefig(tmp, dpi=dpi, bbox_inches="tight")
+    tmp = path.with_name(f".{path.name}.tmp{path.suffix}")
+    fig.savefig(tmp, format=path.suffix.lstrip(".") or "png", dpi=dpi, bbox_inches="tight")
     if not tmp.exists() or tmp.stat().st_size == 0:
         raise IOError(f"Failed to create image file: {path}")
     tmp.replace(path)
@@ -296,16 +309,14 @@ class _AcquireWorker(QObject):
             setup = getattr(spec, "setup", spec)
             if self._auto_apply:
                 self.status.emit("Applying settings...")
-                if hasattr(setup, "change_spectra_center"):
-                    setup.change_spectra_center(f"{self._center_nm:.0f}")
-                    time.sleep(0.15)
-                if hasattr(setup, "change_expose_time"):
-                    setup.change_expose_time(float(self._exposure_ms))
-                    time.sleep(0.10)
-                for fn in ("set_accumulations", "change_frame_to_combine"):
-                    if hasattr(setup, fn):
-                        getattr(setup, fn)(self._epf)
-                        break
+                prepare = getattr(self._ctrl, "configure_for_acquisition", None)
+                if callable(prepare):
+                    prepare(center_nm=float(self._center_nm), exposure_ms=float(self._exposure_ms), frames=int(self._epf))
+                else:
+                    prepare = getattr(spec, "configure_for_acquisition", None)
+                    if not callable(prepare):
+                        raise RuntimeError("LF6 acquisition preparation surface is unavailable")
+                    prepare(center_nm=float(self._center_nm), exposure_ms=float(self._exposure_ms), frames=int(self._epf))
                 roi = (self._roi_mode or "").strip().lower()
                 if roi.startswith("full") and hasattr(setup, "change_roi_FullSensor"):
                     setup.change_roi_FullSensor()
@@ -499,6 +510,8 @@ class _BRCWidget(QWidget):
         self._sample: Optional[np.ndarray] = None
         self._bg_scaled: Optional[np.ndarray] = None
         self._result: Optional[np.ndarray] = None
+        self._rc_run = None
+        self._rc_context_key = None
         self._build()
         self._wire()
         self.load_config()
@@ -628,6 +641,12 @@ class _BRCWidget(QWidget):
 
     @Slot()
     def compute(self):
+        # A new successful computation starts a new export context.  Metadata
+        # is intentionally deferred until the first CSV/PNG export.
+        self._rc_run = None
+        self._rc_context_key = None
+        self._save_csv_btn.setEnabled(False)
+        self._save_png_btn.setEnabled(False)
         self.save_config()
         sample_path = self._sample_edit.text().strip()
         bg_path = self._bg_edit.text().strip()
@@ -676,11 +695,42 @@ class _BRCWidget(QWidget):
             self._sample = sample_show
             self._bg_scaled = bg_show
             self._result = result_show
+            self._rc_context_key = (
+                sample_path, bg_path, self._mode_combo.currentText(),
+                float(self._scale_spin.value()), int(self._order_combo.currentText()),
+                tuple(np.asarray(wl_show).tolist()),
+            )
             self._save_csv_btn.setEnabled(True)
             self._save_png_btn.setEnabled(True)
             self._info_lbl.setText(f"Binned result ready | x = {wl_show.min():.3f} to {wl_show.max():.3f} nm")
         except Exception as exc:
+            self._rc_run = None
+            self._rc_context_key = None
             self._info_lbl.setText(f"Binned RC failed: {exc}")
+
+    def _ensure_rc_run(self):
+        if self._rc_run is not None:
+            return self._rc_run
+        if self._rc_context_key is None:
+            raise RuntimeError("No successful binned RC computation is ready for export")
+        sample_path = Path(self._sample_edit.text().strip())
+        device_id = _bfp_device_id(sample_path)
+        if not device_id:
+            raise ValueError("Sample ID is required for RC output")
+        self._rc_run = ExperimentMetadataService(sample_path.parent).begin(
+            "bfp_binned_rc", device_id, output_dir=sample_path.parent,
+            allow_post_completion=True,
+            settings={"mode": self._mode_combo.currentText(), "scale": self._scale_spin.value(),
+                      "order": self._order_combo.currentText()},
+        )
+        return self._rc_run
+
+    def _finish_rc_export(self, path: Path, role: str):
+        run = self._ensure_rc_run()
+        run.register_file(path, role)
+        if run.metadata.get("status") == "running":
+            run.complete({"context": "binned_rc"})
+        return run
 
     def save_csv(self):
         if self._wl is None or self._result is None:
@@ -689,10 +739,30 @@ class _BRCWidget(QWidget):
             sample_path = Path(self._sample_edit.text().strip())
             suffix = rc_suffix_brc(self._mode_combo.currentText(), int(self._order_combo.currentText()))
             out = sample_path.with_name(f"{sample_path.stem}_{suffix}_c-{self._scale_spin.value():.2f}.csv")
+            run = self._ensure_rc_run()
             save_csv_atomic(out, save_binned_csv, self._wl, self._result)
+            self._finish_rc_export(out, "processed")
             self._info_lbl.setText(f"Saved {out.name}")
         except Exception as exc:
+            if self._rc_run is not None and self._rc_run.metadata.get("status") == "running":
+                try:
+                    self._rc_run.fail(exc)
+                except Exception:
+                    pass
             self._info_lbl.setText(f"Save failed: {exc}")
+
+    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+        allowed = {"scale": lambda v: self._scale_spin.setValue(float(v)), "mode": lambda v: self._mode_combo.setCurrentText(str(v))}
+        skipped = []
+        for key, value in dict(settings or {}).items():
+            if key not in allowed:
+                skipped.append(key)
+                continue
+            try:
+                allowed[key](value)
+            except Exception:
+                skipped.append(key)
+        return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
 
     def save_png(self):
         if self._wl is None or self._result is None or self._sample is None or self._bg_scaled is None:
@@ -701,6 +771,7 @@ class _BRCWidget(QWidget):
             sample_path = Path(self._sample_edit.text().strip())
             suffix = rc_suffix_brc(self._mode_combo.currentText(), int(self._order_combo.currentText()))
             out = sample_path.with_name(f"{sample_path.stem}_{suffix}_c-{self._scale_spin.value():.2f}.png")
+            run = self._ensure_rc_run()
             fig = Figure(figsize=(12, 5), dpi=120)
             ax_left = fig.add_subplot(121)
             ax_right = fig.add_subplot(122)
@@ -715,8 +786,14 @@ class _BRCWidget(QWidget):
             ax_right.grid(True, alpha=0.25)
             fig.tight_layout()
             _save_figure_atomic(out, fig, dpi=300)
+            self._finish_rc_export(out, "figure")
             self._info_lbl.setText(f"Saved {out.name}")
         except Exception as exc:
+            if self._rc_run is not None and self._rc_run.metadata.get("status") == "running":
+                try:
+                    self._rc_run.fail(exc)
+                except Exception:
+                    pass
             self._info_lbl.setText(f"Save failed: {exc}")
 
 
@@ -729,6 +806,8 @@ class _FRCWidget(QWidget):
         self._display_wl: Optional[np.ndarray] = None
         self._display_y: Optional[np.ndarray] = None
         self._display_key: str = "contrast"
+        self._rc_run = None
+        self._rc_context_key = None
         self._build()
         self._wire()
         self.load_config()
@@ -871,6 +950,10 @@ class _FRCWidget(QWidget):
 
     @Slot()
     def compute(self):
+        self._rc_run = None
+        self._rc_context_key = None
+        self._save_csv_btn.setEnabled(False)
+        self._save_png_btn.setEnabled(False)
         self.save_config()
         sample_path = self._sample_edit.text().strip()
         bg_path = self._bg_edit.text().strip()
@@ -926,11 +1009,40 @@ class _FRCWidget(QWidget):
             self._display_wl = wl_crop
             self._display_y = y_crop
             self._display_key = key
+            self._rc_context_key = (
+                sample_path, bg_path, self._calc_combo.currentText(), key,
+                tuple(np.asarray(wl_crop).tolist()), tuple(np.asarray(y_crop).tolist()),
+            )
             self._save_csv_btn.setEnabled(True)
             self._save_png_btn.setEnabled(True)
             self._info_lbl.setText(f"Full-sensor view ready | x = {wl_crop.min():.3f} to {wl_crop.max():.3f} nm")
         except Exception as exc:
+            self._rc_run = None
+            self._rc_context_key = None
             self._info_lbl.setText(f"Full-sensor RC failed: {exc}")
+
+    def _ensure_rc_run(self):
+        if self._rc_run is not None:
+            return self._rc_run
+        if self._rc_context_key is None:
+            raise RuntimeError("No successful full-sensor RC computation is ready for export")
+        sample_path = Path(self._sample_edit.text().strip())
+        device_id = _bfp_device_id(sample_path)
+        if not device_id:
+            raise ValueError("Sample ID is required for RC output")
+        self._rc_run = ExperimentMetadataService(sample_path.parent).begin(
+            "bfp_full_sensor_rc", device_id, output_dir=sample_path.parent,
+            allow_post_completion=True,
+            settings={"calculation": self._calc_combo.currentText(), "display_key": self._display_key},
+        )
+        return self._rc_run
+
+    def _finish_rc_export(self, path: Path, role: str):
+        run = self._ensure_rc_run()
+        run.register_file(path, role)
+        if run.metadata.get("status") == "running":
+            run.complete({"context": "full_sensor_rc"})
+        return run
 
     def save_csv(self):
         if self._display_img is None or self._display_wl is None or self._display_y is None:
@@ -939,10 +1051,30 @@ class _FRCWidget(QWidget):
             sample_path = Path(self._sample_edit.text().strip())
             suffix = rc_suffix_frc(self._calc_combo.currentText(), self._display_key)
             out = sample_path.with_name(f"{sample_path.stem}_{suffix}.csv")
+            self._ensure_rc_run()
             save_csv_atomic(out, save_full_image_csv, self._display_wl, self._display_y, self._display_img)
+            self._finish_rc_export(out, "processed")
             self._info_lbl.setText(f"Saved {out.name}")
         except Exception as exc:
+            if self._rc_run is not None and self._rc_run.metadata.get("status") == "running":
+                try:
+                    self._rc_run.fail(exc)
+                except Exception:
+                    pass
             self._info_lbl.setText(f"Save failed: {exc}")
+
+    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+        allowed = {"calculation": lambda v: self._calc_combo.setCurrentText(str(v))}
+        skipped = []
+        for key, value in dict(settings or {}).items():
+            if key not in allowed:
+                skipped.append(key)
+                continue
+            try:
+                allowed[key](value)
+            except Exception:
+                skipped.append(key)
+        return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
 
     def save_png(self):
         if self._display_img is None or self._display_wl is None or self._display_y is None:
@@ -951,9 +1083,16 @@ class _FRCWidget(QWidget):
             sample_path = Path(self._sample_edit.text().strip())
             suffix = rc_suffix_frc(self._calc_combo.currentText(), self._display_key)
             out = sample_path.with_name(f"{sample_path.stem}_{suffix}.png")
+            self._ensure_rc_run()
             _save_png(out, self._display_img, self._display_wl, y_axis=self._display_y)
+            self._finish_rc_export(out, "figure")
             self._info_lbl.setText(f"Saved {out.name}")
         except Exception as exc:
+            if self._rc_run is not None and self._rc_run.metadata.get("status") == "running":
+                try:
+                    self._rc_run.fail(exc)
+                except Exception:
+                    pass
             self._info_lbl.setText(f"Save failed: {exc}")
 
 
@@ -977,8 +1116,22 @@ class BFPPanel(QWidget):
         left = QWidget()
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0, 0, 0, 0)
-        left.setMaximumWidth(360)
-        splitter.addWidget(left)
+        left.setMinimumSize(0, 0)
+        settings_scroll = QScrollArea()
+        settings_scroll.setObjectName("BFPSettingsScroll")
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        settings_scroll.setMinimumSize(0, 0)
+        settings_scroll.setMinimumWidth(240)
+        settings_scroll.setMaximumWidth(360)
+        settings_scroll.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored
+        )
+        settings_scroll.setWidget(left)
+        self._settings_scroll = settings_scroll
+        splitter.addWidget(settings_scroll)
 
         name_grp = QGroupBox("Save Name")
         name_form = QFormLayout(name_grp)
@@ -1244,6 +1397,30 @@ class BFPPanel(QWidget):
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
         }
 
+    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+        if self._tabs.currentIndex() == 1:
+            return self._brc.apply_saved_experiment_settings(settings)
+        if self._tabs.currentIndex() == 2:
+            return self._frc.apply_saved_experiment_settings(settings)
+        allowed = {
+            "center_nm": lambda v: self._center_spin.setValue(float(v)),
+            "exposure_ms": lambda v: self._exp_spin.setValue(float(v)),
+            "frames": lambda v: self._epf_spin.setValue(int(v)),
+            "repeat": lambda v: self._repeat_spin.setValue(int(v)),
+            "roi_mode": lambda v: self._roi_combo.setCurrentText(str(v)),
+        }
+        skipped = []
+        for key, value in dict(settings or {}).items():
+            setter = allowed.get(key)
+            if setter is None:
+                skipped.append(key)
+                continue
+            try:
+                setter(value)
+            except Exception:
+                skipped.append(key)
+        return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
+
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
             return
@@ -1357,6 +1534,26 @@ class BFPPanel(QWidget):
     @Slot()
     def _on_acquire(self):
         self._persist_ui_config()
+        self._acquire_error = None
+        self._acquire_result_received = False
+        self._acquire_terminalized = False
+        device_id = self._dev_edit.text().strip()
+        if not device_id:
+            self._status_lbl.setText("Sample ID is required before acquisition")
+            self._status_lbl.setStyleSheet("color: red;")
+            return
+        try:
+            self._experiment_run = ExperimentMetadataService(self._out_dir()).begin(
+                "bfp_acquisition", device_id, output_dir=self._out_dir(),
+                allow_post_completion=True,
+                settings={"roi_mode": self._roi_combo.currentText(), "center_nm": self._center_spin.value(),
+                          "exposure_ms": self._exp_spin.value(), "frames": self._epf_spin.value(),
+                          "repeat": self._repeat_spin.value(), "auto_save_csv": self._auto_save_csv_chk.isChecked()},
+            )
+        except Exception as exc:
+            self._status_lbl.setText(f"Metadata error; acquisition blocked: {exc}")
+            self._status_lbl.setStyleSheet("color: red;")
+            return
         self._acquire_btn.setEnabled(False)
         self._status_lbl.setText("Acquiring...")
         self._status_lbl.setStyleSheet("color: orange;")
@@ -1375,12 +1572,13 @@ class BFPPanel(QWidget):
         self._thread.started.connect(self._worker.run)
         self._worker.result.connect(self._on_result)
         self._worker.status.connect(self._status_lbl.setText)
-        self._worker.error.connect(lambda msg: (self._status_lbl.setText(f"Error: {msg[:80]}"), self._status_lbl.setStyleSheet("color: red;")))
+        self._worker.error.connect(self._on_acquire_error)
         self._worker.finished.connect(self._on_acquire_done)
         self._thread.start()
 
     @Slot(object)
     def _on_result(self, record: _AcquiredRecord):
+        self._acquire_result_received = True
         self._record = record
         self._display.update_data(record.data, record.wls, y_axis=record.y_axis)
         for btn in (self._save_csv_btn, self._save_png_btn, self._apply_bg_btn, self._use_sample_btn, self._use_bg_btn):
@@ -1393,19 +1591,52 @@ class BFPPanel(QWidget):
             except Exception as exc:
                 self._status_lbl.setText(f"Auto-save error: {exc}")
                 self._status_lbl.setStyleSheet("color: red;")
+                self._on_acquire_error(f"auto-save: {exc}")
         else:
             self._status_lbl.setText("Acquisition complete")
             self._status_lbl.setStyleSheet("color: green;")
+        run = getattr(self, "_experiment_run", None)
+        if run is not None and run.metadata.get("status") == "running" and not self._auto_save_csv_chk.isChecked():
+            try:
+                run.complete({"mode": record.mode})
+            except Exception as exc:
+                self._status_lbl.setText(f"Metadata finalization error: {exc}")
+                self._status_lbl.setStyleSheet("color: red;")
+                self._on_acquire_error(f"metadata finalization: {exc}")
         self._tabs.setCurrentIndex(0)
 
     @Slot()
     def _on_acquire_done(self):
+        if self._acquire_error and not self._acquire_terminalized:
+            run = getattr(self, "_experiment_run", None)
+            if run is not None and run.metadata.get("status") == "running":
+                try:
+                    run.fail(self._acquire_error)
+                except Exception as exc:
+                    self._status_lbl.setText(f"Metadata failure: {exc}")
+                    self._status_lbl.setStyleSheet("color: red;")
+            self._acquire_terminalized = True
+        elif not self._acquire_result_received and not self._acquire_terminalized:
+            run = getattr(self, "_experiment_run", None)
+            if run is not None and run.metadata.get("status") == "running":
+                try:
+                    run.fail("acquisition ended without a result")
+                except Exception as exc:
+                    self._status_lbl.setText(f"Metadata failure: {exc}")
+                    self._status_lbl.setStyleSheet("color: red;")
+            self._acquire_terminalized = True
         self._acquire_btn.setEnabled(self._ctrl is not None and self._ctrl.is_connected)
         if self._thread is not None:
             self._thread.quit()
             self._thread.wait()
             self._thread = None
             self._worker = None
+
+    @Slot(str)
+    def _on_acquire_error(self, message: str):
+        self._acquire_error = str(message)
+        self._status_lbl.setText(f"Error: {self._acquire_error[:80]}")
+        self._status_lbl.setStyleSheet("color: red;")
 
     @Slot()
     def _on_clear(self):
@@ -1443,6 +1674,12 @@ class BFPPanel(QWidget):
             save_csv_atomic(csv_path, save_binned_csv, record.wls, record.data)
         else:
             save_csv_atomic(csv_path, save_full_image_csv, record.wls, record.y_axis, record.data)
+        run = getattr(self, "_experiment_run", None)
+        if run is None:
+            raise RuntimeError("Acquisition metadata record is missing")
+        run.register_file(csv_path, "raw")
+        if run.metadata.get("status") == "running":
+            run.complete({"mode": record.mode})
         record.csv_path = csv_path
         self._refresh_preview()
         return csv_path
@@ -1467,6 +1704,10 @@ class BFPPanel(QWidget):
             base = self._record.csv_path.with_suffix("") if self._record.csv_path else self._next_base_path()
             png_path = base.with_suffix(".png")
             _save_png(png_path, self._record.data, self._record.wls, y_axis=self._record.y_axis, scale=self._display._scale_combo.currentText(), cmap=self._display._cmap_combo.currentText())
+            run = getattr(self, "_experiment_run", None)
+            if run is None:
+                raise RuntimeError("Acquisition metadata record is missing")
+            run.register_file(png_path, "figure")
             self._status_lbl.setText(f"Saved -> {png_path.name}")
             self._status_lbl.setStyleSheet("color: green;")
         except Exception as exc:

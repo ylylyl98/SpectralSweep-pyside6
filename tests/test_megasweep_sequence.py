@@ -86,6 +86,14 @@ class _FakeLF6Controller:
         self.adapter = _FakeSpectrometer()
         self.setup = self.adapter
 
+    def set_center_wavelength_when_ready(self, value):
+        self.adapter.change_spectra_center(value)
+
+    def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
+        self.adapter.change_spectra_center(center_nm)
+        self.adapter.change_expose_time(exposure_ms)
+        self.adapter.set_accumulations(frames)
+
 
 def _point(a: float, b: float) -> dict:
     return {

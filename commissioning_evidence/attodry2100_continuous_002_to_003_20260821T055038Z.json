@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "run_id": "first-real-continuous-no-optics",
+  "events": [
+    {
+      "sequence": 1,
+      "timestamp_utc": "2026-08-21T05:50:38.084+00:00",
+      "event": "commissioning_started",
+      "start_t": 0.02,
+      "stop_t": 0.03,
+      "gate_t": 0.001,
+      "lightfield_acquisition": false,
+      "reverse_leg": false,
+      "ramp_rate_changed": false
+    },
+    {
+      "sequence": 2,
+      "timestamp_utc": "2026-08-21T05:50:38.606+00:00",
+      "event": "commissioning_failed",
+      "error_type": "AttoDRY2100ConnectionError",
+      "error": "attoDRY2100 connection failed: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions",
+      "tryagain": false,
+      "traceback": "Traceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\app\\devices\\attodry2100_adapter.py\", line 152, in connect\n    device.connect()\n    ~~~~~~~~~~~~~~^^\n  File \"D:\\Insturment control v3\\CRYO2100\\ACS.py\", line 75, in connect\n    tcp.connect((self.address, self.TCP_PORT))\n    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nPermissionError: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\scripts\\_run_attodry2100_continuous_no_optics.py\", line 170, in main\n    identity = resolve(app, controller.connect_async())\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\scripts\\_run_attodry2100_continuous_no_optics.py\", line 97, in resolve\n    result = handle.result(timeout_s)\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\attodry2100_controller.py\", line 119, in result\n    return self._request.client_future.result(timeout)\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^\n  File \"C:\\Users\\commo\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\concurrent\\futures\\_base.py\", line 456, in result\n    return self.__get_result()\n           ~~~~~~~~~~~~~~~~~^^\n  File \"C:\\Users\\commo\\AppData\\Local\\Programs\\Python\\Python313\\Lib\\concurrent\\futures\\_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\controllers\\attodry2100_controller.py\", line 310, in _execute\n    identity = adapter.connect()\n  File \"D:\\Insturment control v3\\SpectralSweep-pyside6\\app\\devices\\attodry2100_adapter.py\", line 198, in connect\n    raise AttoDRY2100ConnectionError(f\"attoDRY2100 connection failed: {exc}\") from exc\napp.devices.attodry2100_adapter.AttoDRY2100ConnectionError: attoDRY2100 connection failed: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions\n",
+      "maximum_temperature_k": null
+    },
+    {
+      "sequence": 3,
+      "timestamp_utc": "2026-08-21T05:50:38.641+00:00",
+      "event": "shutdown_result",
+      "result": true
+    }
+  ]
+}

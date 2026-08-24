@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
     QComboBox, QCheckBox, QScrollArea, QSizePolicy, QFormLayout,
     QDoubleSpinBox, QSpinBox, QFrame, QToolButton, QTableWidget,
-    QTableWidgetItem, QHeaderView, QApplication,
+    QTableWidgetItem, QHeaderView, QApplication, QMessageBox,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -1710,6 +1710,45 @@ class _RotationBlock(QWidget):
         self._mapping_hint.setStyleSheet("color: #666666; font-size: 10px;")
         lay.addWidget(self._mapping_hint)
 
+        self._profile_group = QGroupBox("ESP300 per-axis motion profile")
+        profile_lay = QVBoxLayout(self._profile_group)
+        fraction_row = QHBoxLayout()
+        fraction_row.addWidget(QLabel("Velocity:"))
+        self._velocity_pct = QDoubleSpinBox()
+        self._velocity_pct.setRange(1.0, 100.0)
+        self._velocity_pct.setDecimals(0)
+        self._velocity_pct.setSuffix("% of VU")
+        self._velocity_pct.setValue(
+            100.0 * float(getattr(self._cfg, "esp300_velocity_fraction", 1.0))
+        )
+        fraction_row.addWidget(self._velocity_pct)
+        fraction_row.addWidget(QLabel("Accel/decel:"))
+        self._acceleration_pct = QDoubleSpinBox()
+        self._acceleration_pct.setRange(1.0, 100.0)
+        self._acceleration_pct.setDecimals(0)
+        self._acceleration_pct.setSuffix("% of AU")
+        self._acceleration_pct.setValue(
+            100.0 * float(getattr(self._cfg, "esp300_acceleration_fraction", 0.5))
+        )
+        fraction_row.addWidget(self._acceleration_pct)
+        profile_lay.addLayout(fraction_row)
+        profile_buttons = QHBoxLayout()
+        self._query_profile_btn = QPushButton("Query")
+        self._apply_profile_btn = QPushButton("Apply + verify")
+        self._save_profile_btn = QPushButton("Save controller (SM)")
+        self._save_profile_btn.setToolTip(
+            "Save the complete shared ESP300 configuration for all axes to non-volatile memory."
+        )
+        profile_buttons.addWidget(self._query_profile_btn)
+        profile_buttons.addWidget(self._apply_profile_btn)
+        profile_buttons.addWidget(self._save_profile_btn)
+        profile_lay.addLayout(profile_buttons)
+        self._profile_status = QLabel("Connect to query this axis's limits.")
+        self._profile_status.setWordWrap(True)
+        profile_lay.addWidget(self._profile_status)
+        self._profile_group.setVisible(False)
+        lay.addWidget(self._profile_group)
+
         lay.addWidget(_separator())
 
         # ── position / control (enabled after connect) ────────────────────
@@ -1788,12 +1827,21 @@ class _RotationBlock(QWidget):
         self._ctrl.disconnected.connect(self._on_disconnected)
         self._ctrl.error.connect(lambda msg: self._status.setText(f"Error: {msg[:60]}"))
         self._ctrl.axes_scanned.connect(self._on_axes_scanned)
+        if hasattr(self._ctrl, "motion_profile_ready"):
+            self._ctrl.motion_profile_ready.connect(self._on_motion_profile)
+        if hasattr(self._ctrl, "settings_saved"):
+            self._ctrl.settings_saved.connect(self._on_settings_saved)
         self._rot_scan_thread: Optional[QThread] = None
         self._read_pos_btn.clicked.connect(lambda: self._launch_rot("read"))
         self._move_btn.clicked.connect(self._on_move)
         self._home_btn.clicked.connect(lambda: self._launch_rot("home"))
         self._jog_neg_btn.clicked.connect(lambda: self._on_jog(-1))
         self._jog_pos_btn.clicked.connect(lambda: self._on_jog(+1))
+        self._query_profile_btn.clicked.connect(
+            lambda: self._ctrl.inspect_motion_profile(self._slot)
+        )
+        self._apply_profile_btn.clicked.connect(self._apply_motion_profile)
+        self._save_profile_btn.clicked.connect(self._save_motion_profile)
         self._on_type_changed(self._type_combo.currentText())
         self._apply_saved_address()
         self._apply_mapping_hint()
@@ -1801,6 +1849,13 @@ class _RotationBlock(QWidget):
     def _set_ctrl_enabled(self, enabled: bool):
         for w in self._ctrl_widgets:
             w.setEnabled(enabled)
+
+    def _set_profile_enabled(self, enabled: bool):
+        for widget in (
+            self._query_profile_btn, self._apply_profile_btn, self._save_profile_btn,
+            self._velocity_pct, self._acceleration_pct,
+        ):
+            widget.setEnabled(bool(enabled))
 
     def _launch_rot(self, mode: str, target: float = 0.0):
         if self._rot_thread and self._rot_thread.isRunning():
@@ -1860,6 +1915,8 @@ class _RotationBlock(QWidget):
         }.get(type_str, "none")
         is_esp = type_str == "Newport ESP300 (shared)"
         self._axis_row_widget.setVisible(is_esp)
+        self._profile_group.setVisible(is_esp)
+        self._set_profile_enabled(is_esp and self._ctrl.is_connected(self._slot))
         self._apply_mapping_hint()
 
     @Slot()
@@ -1985,7 +2042,15 @@ class _RotationBlock(QWidget):
                 axis = 1 if self._slot == "rot1" else 2
             self._cfg.visa_resource = addr
             self._cfg.esp300_axis = axis
-            self._ctrl.connect_esp300(self._slot, addr, axis)
+            self._cfg.esp300_velocity_fraction = self._velocity_pct.value() / 100.0
+            self._cfg.esp300_acceleration_fraction = self._acceleration_pct.value() / 100.0
+            self._ctrl.connect_esp300(
+                self._slot,
+                addr,
+                axis,
+                self._cfg.esp300_velocity_fraction,
+                self._cfg.esp300_acceleration_fraction,
+            )
 
     @Slot()
     def _on_disconnect(self):
@@ -2005,6 +2070,7 @@ class _RotationBlock(QWidget):
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._set_ctrl_enabled(True)
+        self._set_profile_enabled(adapter_type == "esp300")
         self._apply_mapping_hint()
         try:
             cfg.save()
@@ -2023,6 +2089,56 @@ class _RotationBlock(QWidget):
         self._set_ctrl_enabled(False)
         self._pos_lbl.setText("— °")
         self._pos_lbl.setStyleSheet("color: gray;")
+        self._set_profile_enabled(False)
+
+    @Slot()
+    def _apply_motion_profile(self):
+        self._cfg.esp300_velocity_fraction = self._velocity_pct.value() / 100.0
+        self._cfg.esp300_acceleration_fraction = self._acceleration_pct.value() / 100.0
+        self._profile_status.setText("Applying profile and verifying readback…")
+        self._ctrl.apply_motion_profile(
+            self._slot,
+            self._cfg.esp300_velocity_fraction,
+            self._cfg.esp300_acceleration_fraction,
+        )
+        try:
+            cfg.save()
+        except Exception:
+            pass
+
+    @Slot()
+    def _save_motion_profile(self):
+        answer = QMessageBox.question(
+            self,
+            "Save ESP300 settings",
+            "This writes the complete shared ESP300 configuration for every axis "
+            "(including any linear stage) to non-volatile memory. Save now?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Save:
+            return
+        self._profile_status.setText("Saving complete ESP300 configuration…")
+        self._ctrl.save_esp300_settings(self._slot)
+
+    @Slot(str, object)
+    def _on_motion_profile(self, slot: str, profile):
+        if slot != self._slot:
+            return
+        self._profile_status.setText(
+            f"Axis {int(profile.axis)} {profile.stage_id}: "
+            f"VA {profile.velocity:g}/{profile.max_velocity:g}, "
+            f"AC {profile.acceleration:g}, AG {profile.deceleration:g}/"
+            f"AU {profile.max_acceleration:g}. Verified."
+        )
+
+    @Slot(str, str)
+    def _on_settings_saved(self, slot: str, resource: str):
+        if slot != self._slot:
+            return
+        self._profile_status.setText(
+            f"Saved complete ESP300 configuration to non-volatile memory ({resource})."
+        )
 
 
 # ── Stage Section ─────────────────────────────────────────────────────────────
@@ -2680,14 +2796,15 @@ class InstrumentPanel(QScrollArea):
             ))
 
         if rotation_ctrl is not None:
-            lay.addWidget(_Expander(
-                "Rotation — ROT1",
-                _RotationBlock("rot1", rotation_ctrl),
-            ))
-            lay.addWidget(_Expander(
-                "Rotation — ROT2",
-                _RotationBlock("rot2", rotation_ctrl),
-            ))
+            slots_getter = getattr(rotation_ctrl, "logical_slots", None)
+            slots = slots_getter() if callable(slots_getter) else getattr(
+                rotation_ctrl, "ROTATION_SLOTS", ("rot1", "rot2")
+            )
+            for slot in tuple(slots):
+                lay.addWidget(_Expander(
+                    f"Rotation — {str(slot).upper()}",
+                    _RotationBlock(str(slot), rotation_ctrl),
+                ))
 
         if stage_ctrl is not None:
             lay.addWidget(_Expander("Linear Stage", _StageSection(stage_ctrl)))
