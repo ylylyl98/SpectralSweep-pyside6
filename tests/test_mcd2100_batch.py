@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import csv
+import json
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.engine.mcd2100_worker import MCD2100Worker
+from app.engine.mcd2100_worker import MCD2100Cancelled, MCD2100Worker
 
 
 class _Handle:
@@ -90,6 +93,65 @@ class _FailOnSecondGate(_Optical):
 
 
 class MCD2100BatchTests(unittest.TestCase):
+    def test_initial_telemetry_phases_and_gate_settling_are_logged_and_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            controller = _Controller(-0.01, 0.01)
+            optical = _Optical()
+            logs, phases = [], []
+            worker = MCD2100Worker(
+                controller, optical, -0.01, 0.01, [0.0], td,
+                apply_voltages=True,
+                conditions=[
+                    {"enabled": True, "vtg_v": 1.0, "vbg_v": 2.0},
+                    {"enabled": True, "vtg_v": 3.0, "vbg_v": 4.0},
+                ],
+                initial_voltage_settle_s=0.001,
+                voltage_settle_s=0.001,
+                filename_temperature_k=4.2,
+                filename_temperature_source="live_sample_readback",
+                poll_interval_s=0.001, gate_timeout_s=0.2,
+                operation_timeout_s=1.0, cleanup_timeout_s=1.0,
+            )
+            worker.set_callbacks(log=logs.append, phase=phases.append)
+            result = worker.run()
+            self.assertEqual(result["status"], "COMPLETED")
+            self.assertTrue(any("Initial magnet telemetry" in line for line in logs))
+            self.assertTrue(any("Ramping gate 1/2" in line for line in phases))
+            self.assertTrue(any("Gate settling after first gate ramp" in line for line in phases))
+            self.assertTrue(any("Gate settling after later gate ramp" in line for line in phases))
+            metadata = json.loads(Path(result["metadata_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(metadata["gate_settling_requested"]["initial_voltage_settle_s"], 0.001)
+            self.assertEqual(metadata["gate_settling_requested"]["voltage_settle_s"], 0.001)
+            self.assertEqual(
+                [item["condition_index"] for item in metadata["gate_settling"]],
+                [1, 2],
+            )
+            self.assertTrue(all(item["completed"] for item in metadata["gate_settling"]))
+            self.assertEqual(
+                metadata["filename_temperature"],
+                {"sample_temperature_k": 4.2, "source": "live_sample_readback"},
+            )
+            self.assertTrue(all("_MCD_4p2K_G" in Path(path).name for path in result["csv_paths"]))
+
+    def test_long_gate_settling_is_cancelable(self):
+        with tempfile.TemporaryDirectory() as td:
+            worker = MCD2100Worker(
+                _Controller(-0.01, 0.01), _Optical(), -0.01, 0.01, [0.0], td,
+                initial_voltage_settle_s=30.0,
+                voltage_settle_s=30.0,
+                poll_interval_s=0.001, gate_timeout_s=0.2,
+                operation_timeout_s=1.0, cleanup_timeout_s=1.0,
+            )
+            timer = threading.Timer(0.02, worker.request_cancel)
+            timer.start()
+            started = time.monotonic()
+            with self.assertRaises(MCD2100Cancelled):
+                worker._wait_for_voltage_settle(
+                    initial_ramp=True, condition_index=1, metadata={}
+                )
+            timer.join()
+            self.assertLess(time.monotonic() - started, 1.0)
+
     def test_round_trip_multi_gate_batch_files_and_order(self):
         with tempfile.TemporaryDirectory() as td:
             controller = _Controller(-0.01, 0.01)
@@ -106,6 +168,7 @@ class MCD2100BatchTests(unittest.TestCase):
                 ],
                 poll_interval_s=0.001, gate_timeout_s=0.2,
                 operation_timeout_s=1.0, cleanup_timeout_s=1.0,
+                metadata={"device_id": "YZ365", "point": "p5n2"},
             )
             durable_row_counts = []
             def observe(event):
@@ -118,6 +181,9 @@ class MCD2100BatchTests(unittest.TestCase):
             self.assertEqual(controller.detach_calls, 1)
             self.assertEqual(controller.stop_calls, 0)
             self.assertEqual(len(result["csv_paths"]), 3)
+            self.assertTrue(
+                all(Path(path).name.startswith("YZ365_p5n2_MCD_") for path in result["csv_paths"])
+            )
             self.assertTrue(all("_G0" in Path(path).name for path in result["csv_paths"]))
             self.assertTrue(all("B-0p01to+0p01T" in Path(path).name for path in result["csv_paths"]))
             self.assertTrue(all("_roundtrip.csv" in path for path in result["csv_paths"]))

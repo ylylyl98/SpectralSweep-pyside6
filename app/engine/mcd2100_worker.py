@@ -406,6 +406,10 @@ class MCD2100Worker:
         temperature_tolerance_k: float = 0.05,
         temperature_stable_s: float = 10.0,
         temperature_timeout_s: float = 3600.0,
+        initial_voltage_settle_s: float = 0.05,
+        voltage_settle_s: float = 0.05,
+        filename_temperature_k: Optional[float] = None,
+        filename_temperature_source: str = "unspecified",
         conditions: Optional[Iterable[Mapping[str, Any]]] = None,
         metadata: Optional[Mapping[str, Any]] = None,
         sleep: Callable[[float], None] = time.sleep,
@@ -439,6 +443,21 @@ class MCD2100Worker:
         self.temperature_tolerance_k = float(temperature_tolerance_k)
         self.temperature_stable_s = float(temperature_stable_s)
         self.temperature_timeout_s = float(temperature_timeout_s)
+        self.initial_voltage_settle_s = float(initial_voltage_settle_s)
+        self.voltage_settle_s = float(voltage_settle_s)
+        self.filename_temperature_k = (
+            self.sample_target_k
+            if filename_temperature_k is None and self.temperature_control_enabled
+            else None if filename_temperature_k is None else float(filename_temperature_k)
+        )
+        requested_temperature_source = str(filename_temperature_source or "unspecified")
+        self.filename_temperature_source = (
+            "controlled_target"
+            if requested_temperature_source == "unspecified"
+            and filename_temperature_k is None
+            and self.temperature_control_enabled
+            else requested_temperature_source
+        )
         self.conditions = self._normalize_conditions(conditions, self.gate_ratio)
         self.sleep, self.clock = sleep, clock
         self.metadata_seed = dict(metadata or {})
@@ -448,10 +467,12 @@ class MCD2100Worker:
         self._magnet_command_issued = False
         self._metadata_path: Optional[Path] = None
         self._metadata: Optional[dict[str, Any]] = None
+        self._initial_snapshot_logged = False
         self._progress_cb: Optional[Callable[..., None]] = None
         self._spectrum_cb: Optional[Callable[..., None]] = None
         self._spectrum_event_cb: Optional[Callable[[Mapping[str, Any]], None]] = None
         self._log_cb: Optional[Callable[..., None]] = None
+        self._phase_cb: Optional[Callable[[str], None]] = None
         self._validate_inputs()
 
     @staticmethod
@@ -485,14 +506,23 @@ class MCD2100Worker:
             # panel performs the authoritative visible validation.
             return result
 
-    def set_callbacks(self, *, progress=None, spectrum=None, spectrum_event=None, log=None) -> None:
+    def set_callbacks(self, *, progress=None, spectrum=None, spectrum_event=None,
+                      log=None, phase=None) -> None:
         """Attach GUI-safe callbacks without changing the worker contract."""
         self._progress_cb, self._spectrum_cb = progress, spectrum
         self._spectrum_event_cb, self._log_cb = spectrum_event, log
+        self._phase_cb = phase
 
     def _emit_log(self, message: str) -> None:
         if callable(self._log_cb):
             self._log_cb(str(message))
+
+    def _emit_phase(self, message: str) -> None:
+        """Publish a user-visible phase and ensure non-GUI callers still log it."""
+        if callable(self._phase_cb):
+            self._phase_cb(str(message))
+        else:
+            self._emit_log(message)
 
     def _emit_progress(self, field_t: float, percent: float, condition_index: int = 1,
                        condition_count: int = 1) -> None:
@@ -509,7 +539,8 @@ class MCD2100Worker:
     def _validate_inputs(self) -> None:
         values = (self.start_field_t, self.stop_field_t, self.gate_ratio,
                   self.poll_interval_s, self.gate_timeout_s,
-                  self.operation_timeout_s, self.cleanup_timeout_s)
+                  self.operation_timeout_s, self.cleanup_timeout_s,
+                  self.initial_voltage_settle_s, self.voltage_settle_s)
         if any(not math.isfinite(v) for v in values):
             raise ValueError("continuous sweep settings must be finite")
         if not self.angles or any(not math.isfinite(v) for v in self.angles):
@@ -519,6 +550,13 @@ class MCD2100Worker:
         if min(self.poll_interval_s, self.gate_timeout_s, self.operation_timeout_s,
                self.cleanup_timeout_s) <= 0:
             raise ValueError("continuous sweep timings must be positive")
+        if min(self.initial_voltage_settle_s, self.voltage_settle_s) < 0:
+            raise ValueError("voltage settling times cannot be negative")
+        if self.filename_temperature_k is not None and (
+            not math.isfinite(self.filename_temperature_k)
+            or not 0.0 < self.filename_temperature_k <= 400.0
+        ):
+            raise ValueError("filename sample temperature must be within 0 to 400 K")
         temperature_values = (
             self.sample_target_k, self.sample_ramp_rate_k_per_min,
             self.temperature_tolerance_k, self.temperature_stable_s,
@@ -637,9 +675,36 @@ class MCD2100Worker:
             }
             self._metadata.setdefault("snapshots", []).append(record)
             self._metadata.setdefault("initial_snapshot", record)
+            if not self._initial_snapshot_logged:
+                self._initial_snapshot_logged = True
+                self._emit_log(self._format_snapshot_log(snapshot))
             if self._metadata_path is not None:
                 self._write_metadata(self._metadata_path, self._metadata)
         return snapshot
+
+    @staticmethod
+    def _format_snapshot_log(snapshot: Any) -> str:
+        status = getattr(snapshot, "status", None)
+        details = getattr(status, "backend_details", {})
+        details = details if isinstance(details, Mapping) else {}
+        field = getattr(snapshot, "field_t", None)
+        temperature = getattr(snapshot, "temperature_k", None)
+        setpoint = getattr(snapshot, "setpoint_t", None)
+        control = details.get(
+            "h_state", getattr(status, "field_control_state", None)
+        )
+        field_control = details.get("field_control")
+        heater = details.get("heater", getattr(status, "heater_on", None))
+        leads = details.get("leads_hot", getattr(status, "leads_hot", None))
+        return (
+            "Initial magnet telemetry: "
+            f"field={field} T, setpoint={setpoint} T, temperature={temperature} K, "
+            f"driven={getattr(status, 'driven_mode', None)}, "
+            f"persistent={getattr(status, 'persistent_mode', None)}, "
+            f"control={control}, field_control={field_control}, "
+            f"quench={getattr(status, 'quench', None)}, heater={heater}, "
+            f"leads_hot={leads}"
+        )
 
     def _read_sample_temperature(self) -> float:
         read = getattr(self.controller, "read_sample_temperature_async", None)
@@ -663,8 +728,8 @@ class MCD2100Worker:
                 "shared attoDRY2100 controller has no sample-temperature control"
             )
         self._emit_log(
-            f"Sample temperature: target={self.sample_target_k:g} K, "
-            f"ramp={self.sample_ramp_rate_k_per_min:g} K/min"
+            f"Sample temperature: target={self.sample_target_k:g} K "
+            "(cryostat automatic sample/VTI coordination; ramp control unchanged)"
         )
         try:
             configured = self._execute_handle(configure(
@@ -763,6 +828,35 @@ class MCD2100Worker:
                 return
             self.sleep(min(remaining, self.poll_interval_s))
 
+    def _wait_for_voltage_settle(self, *, initial_ramp: bool,
+                                 condition_index: int,
+                                 metadata: dict[str, Any]) -> None:
+        settle_s = (
+            self.initial_voltage_settle_s if initial_ramp
+            else self.voltage_settle_s
+        )
+        phase = "first gate ramp" if initial_ramp else "later gate ramp"
+        record = {
+            "condition_index": int(condition_index),
+            "phase": phase,
+            "requested_s": float(settle_s),
+            "started_utc": _utc_now(),
+        }
+        metadata.setdefault("gate_settling", []).append(record)
+        if settle_s <= 0:
+            record.update({"actual_s": 0.0, "completed": True})
+            return
+        self._emit_phase(f"Gate settling after {phase}: {settle_s:g} s")
+        started = self.clock()
+        if self.stop_event.wait(settle_s):
+            record.update({"actual_s": max(0.0, self.clock() - started),
+                           "completed": False, "cancelled": True})
+            raise MCD2100Cancelled("measurement cancelled during gate settling")
+        elapsed = max(0.0, self.clock() - started)
+        record.update({"actual_s": elapsed, "completed": True,
+                       "completed_utc": _utc_now()})
+        self._emit_log(f"Gate settling complete after {elapsed:.3g} s")
+
     def _wait_gate(self, target: float, *, increasing: bool, initial: Any = None) -> Any:
         gate = self._target_gate(target)
         started = self.clock()
@@ -788,6 +882,7 @@ class MCD2100Worker:
 
     def _set_and_start(self, target: float) -> None:
         self._check_cancelled()
+        self._emit_phase(f"Positioning magnet at {target:+g} T")
         # From this point on, cleanup must leave the magnet in Hold if the
         # workflow fails or is cancelled.
         self._magnet_command_issued = True
@@ -826,7 +921,8 @@ class MCD2100Worker:
         return values
 
     def _apply_setup(self, *, condition: Optional[Mapping[str, Any]] = None,
-                     configure: bool = True, apply_gate: bool = True) -> dict[str, Any]:
+                     configure: bool = True, apply_gate: bool = True,
+                     condition_index: int = 1, condition_count: int = 1) -> dict[str, Any]:
         """Apply optical/gate setup once through the existing service surface."""
         applied: dict[str, Any] = {}
         if condition is not None:
@@ -837,16 +933,29 @@ class MCD2100Worker:
         if configure and callable(configure_fn):
             # Complete optical readiness/configuration before any magnet or SMU
             # mutation can begin. This is the MCD2100 preflight boundary.
+            self._emit_phase("Configuring LightField")
             applied["lightfield"] = _jsonable(configure_fn(
                 center_nm=self.lf_center_nm, exposure_ms=self.lf_exposure_ms,
                 frames=self.lf_frames,
             ))
+            self._emit_log("LightField configuration complete")
         apply_gates = getattr(self.optical, "apply_gates", None)
         if apply_gate and self.apply_voltages and callable(apply_gates):
+            self._emit_phase(
+                f"Ramping gate {condition_index}/{condition_count}: "
+                f"Vtg={self.vtg_v:+g} V, Vbg={self.vbg_v:+g} V, "
+                f"Vbias={self.vbias_v:+g} V"
+            )
             applied["smu"] = _jsonable(apply_gates(
                 vtg_v=self.vtg_v, vbg_v=self.vbg_v, vbias_v=self.vbias_v,
                 ratio=self.gate_ratio, stop_cb=self.stop_event.is_set,
             ))
+            observed = applied.get("smu") or {}
+            self._emit_log(
+                f"Gate {condition_index}/{condition_count} ramp complete; "
+                f"readback Vtg={observed.get('Vtg_V', 'N/A')} V, "
+                f"Vbg={observed.get('Vbg_V', 'N/A')} V"
+            )
         return applied
 
     def _paths(self) -> tuple[Path, Path]:
@@ -917,7 +1026,7 @@ class MCD2100Worker:
         leg_label = "forward" if leg == 1 else "backward"
         metadata["current_leg"] = {"leg": leg, "direction": direction,
                                     "start_field_t": start, "target_field_t": target}
-        self._emit_log(
+        self._emit_phase(
             f"Gate {condition_index}/{condition_count}: {direction} leg "
             f"{start:+g} T to {target:+g} T"
         )
@@ -952,6 +1061,9 @@ class MCD2100Worker:
                 first_angle_prepositioned = True
         self._sleep_checked(0.5)
         self._set_and_start(target)
+        self._emit_phase(
+            f"Acquiring spectra while field moves {start:+g} T to {target:+g} T"
+        )
         previous_field, _ = self._snapshot_values(gate_snapshot)
         gate = self._target_gate(target)
         best_progress_field = previous_field
@@ -1011,7 +1123,14 @@ class MCD2100Worker:
                 sample_t0 = self._read_sample_temperature() if self.temperature_control_enabled else None
                 b0 = self._read_field()
                 timestamp_start = _utc_now()
-                acquired = self.optical.acquire(angle, str(angle), self.stop_event)
+                try:
+                    acquired = self.optical.acquire(angle, str(angle), self.stop_event)
+                except BaseException as exc:
+                    if self.stop_event.is_set():
+                        raise MCD2100Cancelled(
+                            "measurement cancelled during optical acquisition"
+                        ) from exc
+                    raise
                 timestamp_end = _utc_now()
                 self._check_cancelled()
                 if not isinstance(acquired, tuple) or len(acquired) != 3:
@@ -1092,14 +1211,19 @@ class MCD2100Worker:
                 self._write_metadata(metadata["_path"], metadata)
             # Complete the angle cycle that started below the direction gate;
             # crossing during that cycle is retained as real data.  The next
-            # loop performs the direction gate check.  A full safety snapshot
-            # is mandatory at the cycle boundary, but never inserted between
-            # B0, acquisition, B1, durable write, and live plot.
-            safety_snapshot = self._read_snapshot()
-            safety_field, _ = self._snapshot_values(safety_snapshot)
+            # loop performs the direction gate check.  Use the timing-critical
+            # field-only read during the sweep so full magnet telemetry does
+            # not add several seconds after every angle cycle. Keep the full
+            # snapshot at the endpoint for authoritative safety validation.
+            safety_field = self._read_field()
             if abs(safety_field - target) <= gate:
+                safety_snapshot = self._read_snapshot()
+                verified_field, _ = self._snapshot_values(safety_snapshot)
+                if not self._direction_reached(verified_field, target, increasing):
+                    previous_field = verified_field
+                    continue
                 self._emit_progress(
-                    safety_field,
+                    verified_field,
                     self._overall_progress_percent(
                         leg=leg, leg_fraction=1.0,
                         condition_index=condition_index,
@@ -1131,11 +1255,21 @@ class MCD2100Worker:
             "temperature_requested": {
                 "enabled": self.temperature_control_enabled,
                 "sample_target_k": self.sample_target_k,
-                "ramp_rate_k_per_min": self.sample_ramp_rate_k_per_min,
+                "ramp_rate_k_per_min": None,
+                "legacy_ramp_rate_setting_k_per_min": self.sample_ramp_rate_k_per_min,
+                "ramp_control": "unchanged",
                 "tolerance_k": self.temperature_tolerance_k,
                 "stable_s": self.temperature_stable_s,
                 "timeout_s": self.temperature_timeout_s,
                 "vti_coordination": "cryostat automatic",
+            },
+            "gate_settling_requested": {
+                "initial_voltage_settle_s": self.initial_voltage_settle_s,
+                "voltage_settle_s": self.voltage_settle_s,
+            },
+            "filename_temperature": {
+                "sample_temperature_k": self.filename_temperature_k,
+                "source": self.filename_temperature_source,
             },
         }
         if self.conditions:
@@ -1148,14 +1282,33 @@ class MCD2100Worker:
         detached_success = False
         completion_snapshot: Any = None
         try:
+            self._emit_phase(
+                f"Starting MCD 2100 run: {len(self.conditions) or 1} gate condition(s), "
+                f"field {self.start_field_t:+g} T to {self.stop_field_t:+g} T"
+            )
+            if self.filename_temperature_k is not None:
+                self._emit_log(
+                    f"Filename sample temperature: {self.filename_temperature_k:g} K "
+                    f"({self.filename_temperature_source})"
+                )
             if self.temperature_control_enabled:
                 self._stabilize_sample_temperature(metadata)
                 self._write_metadata(metadata_path, metadata)
             metadata["setup_applied"] = self._apply_setup(
-                configure=True, apply_gate=not bool(self.conditions)
+                configure=True, apply_gate=False
             )
             wavelengths = self._prepare_wavelengths()
+            self._emit_log(f"Optical wavelength axis prepared: {len(wavelengths)} pixel(s)")
             if not self.conditions:
+                gate_setup = self._apply_setup(
+                    configure=False, apply_gate=True,
+                    condition_index=1, condition_count=1,
+                )
+                metadata["setup_applied"].update(gate_setup)
+                if self.apply_voltages:
+                    self._wait_for_voltage_settle(
+                        initial_ramp=True, condition_index=1, metadata=metadata
+                    )
                 with csv_path.open("w", newline="", encoding="utf-8") as stream:
                     writer = csv.writer(stream)
                     writer.writerow(CONTINUOUS_SCALAR_FIELDS + wavelengths)
@@ -1180,7 +1333,17 @@ class MCD2100Worker:
                 metadata["batch_file_paths"] = []
                 for condition_index, condition in enumerate(enabled, start=1):
                     self._check_cancelled()
-                    applied = self._apply_setup(condition=condition, configure=False, apply_gate=True)
+                    applied = self._apply_setup(
+                        condition=condition, configure=False, apply_gate=True,
+                        condition_index=condition_index,
+                        condition_count=len(enabled),
+                    )
+                    if self.apply_voltages:
+                        self._wait_for_voltage_settle(
+                            initial_ramp=condition_index == 1,
+                            condition_index=condition_index,
+                            metadata=metadata,
+                        )
                     legs = [(1, self.start_field_t, self.stop_field_t, "forward")]
                     # A condition batch is always a round trip.  The legacy
                     # scalar constructor retains its explicit flag.
@@ -1195,6 +1358,8 @@ class MCD2100Worker:
                         vtg_v=condition.get("vtg_v"),
                         vbg_v=condition.get("vbg_v"),
                         vbias_v=condition.get("vbias_v"), ratio=self.gate_ratio,
+                        point=self.metadata_seed.get("point", ""),
+                        temperature_k=self.filename_temperature_k,
                     )
                     batch_path = self.output_dir / batch_name
                     suffix = 1
@@ -1260,13 +1425,19 @@ class MCD2100Worker:
                     detail["spectra_written"] = int(metadata["spectra_written"] - detail["spectra_start"])
                     detail["file_status"] = "complete"
                     detail["complete"] = True
+                    self._emit_log(
+                        f"Gate {condition_index}/{len(enabled)} complete: "
+                        f"{detail['spectra_written']} spectra written"
+                    )
                     self._write_metadata(metadata_path, metadata)
         except MCD2100Cancelled as exc:
             failure_exception = exc
             outcome, error = WorkflowOutcome.CANCELLED, str(exc)
+            self._emit_phase(f"Cancellation: {exc}")
         except BaseException as exc:
             failure_exception = exc
             outcome, error = WorkflowOutcome.FAILED, str(exc)
+            self._emit_phase(f"Run failed: {exc}")
         finally:
             try:
                 cleanup = getattr(self.optical, "cleanup", None)
@@ -1299,6 +1470,9 @@ class MCD2100Worker:
                         completion_snapshot,
                     ), self.cleanup_timeout_s)
                     detached_success = True
+                    self._emit_phase(
+                        f"Completed: {metadata['spectra_written']} spectra written"
+                    )
                 except BaseException as exc:
                     error = str(exc)
                     outcome = WorkflowOutcome.FAILED
@@ -1340,6 +1514,7 @@ class MCD2100Worker:
                 metadata["magnet_stop_reason"] = "no magnet command was issued"
             if stop_required:
                 try:
+                    self._emit_phase("Stopping magnet and performing safe cleanup")
                     metadata["magnet_stop_requested"] = True
                     metadata["magnet_stop_reason"] = (
                         "measurement cancelled" if outcome is WorkflowOutcome.CANCELLED

@@ -74,6 +74,10 @@ class IVDevice:
         }
         self._baseline_esr: Dict[str, Optional[int]] = {}
         self._last_communication_error: Optional[SMUCommunicationError] = None
+        # A communication failure freezes all SMU traffic until reconnect.
+        # This preserves the instruments' last physical/source state and
+        # prevents diagnostics or cleanup from changing it.
+        self._io_frozen = False
 
     # ---------------- internal helpers ----------------
 
@@ -132,6 +136,10 @@ class IVDevice:
     def last_communication_error(self) -> Optional[SMUCommunicationError]:
         return self._last_communication_error
 
+    @property
+    def io_frozen(self) -> bool:
+        return bool(self._io_frozen)
+
     def _set_health(self, role: str, state: str, reason: str) -> None:
         role = str(role)
         old_state = self._role_health.get(role, "ready")
@@ -164,6 +172,16 @@ class IVDevice:
         return None
 
     def _assert_role_ready(self, role: str, inst=None) -> None:
+        if self._io_frozen:
+            if self._last_communication_error is not None:
+                raise self._last_communication_error
+            raise SMUCommunicationError(
+                "SMU I/O is frozen after a communication failure; reconnect is required",
+                role=role,
+                address=getattr(inst, "address", self.role_map.get(role)),
+                operation="frozen",
+                context=self._operation_context,
+            )
         state = self._role_health.get(role, "ready")
         if state == "ready":
             return
@@ -278,119 +296,38 @@ class IVDevice:
         inst,
         failure: BaseException,
     ) -> Dict[str, Any]:
-        """
-        Read-only diagnosis after the failed VISA call has unwound.
-
-        The diagnostic timeout is shortened and the output is never enabled.
-        *ESR? and :SYST:ERR? are destructive reads, which is recorded here.
-        """
+        """Build a passive diagnosis without sending any post-failure I/O."""
         address = getattr(inst, "address", self.role_map.get(role))
-        resource = getattr(inst, "my_instr", None)
-        old_timeout = getattr(resource, "timeout", None) if resource is not None else None
-        timeout_changed = False
-        if resource is not None and old_timeout is not None:
-            try:
-                resource.timeout = min(max(int(old_timeout), 250), 1000)
-                timeout_changed = True
-            except Exception:
-                pass
-
-        responses: Dict[str, Any] = {}
-        errors: Dict[str, str] = {}
-        try:
-            query = getattr(inst, "query", None)
-            if not callable(query):
-                errors["*IDN?"] = "Instrument wrapper does not provide query()."
-            else:
-                try:
-                    responses["*IDN?"] = str(query("*IDN?")).strip()
-                except Exception as exc:
-                    errors["*IDN?"] = f"{type(exc).__name__}: {exc}"
-
-                if "*IDN?" in responses:
-                    for command in ("*ESR?", ":OUTP?", ":SYST:ERR?"):
-                        try:
-                            responses[command] = str(query(command)).strip()
-                        except Exception as exc:
-                            errors[command] = f"{type(exc).__name__}: {exc}"
-        finally:
-            if timeout_changed:
-                try:
-                    resource.timeout = old_timeout
-                except Exception:
-                    pass
-
-        esr = None
-        try:
-            esr = int(float(responses.get("*ESR?", "")))
-        except (TypeError, ValueError):
-            pass
-        power_on_bit = bool(esr is not None and esr & 0x80)
-
-        output_on = None
-        output_raw = str(responses.get(":OUTP?", "")).strip().upper()
-        if output_raw in {"0", "OFF"}:
-            output_on = False
-        elif output_raw in {"1", "ON"}:
-            output_on = True
-
-        responded = "*IDN?" in responses
         timed_out = self._is_timeout_error(failure)
-        if not responded:
-            classification = "unreachable"
-            summary = (
-                f"{role} did not answer the post-failure identity query; it may "
-                "still be unpowered, rebooting, disconnected, or unreachable on GPIB."
-            )
-            state = "unreachable"
-        elif power_on_bit:
-            classification = "power_cycle_detected"
-            summary = (
-                f"{role} responded again and ESR bit 7 (Power On) is set. "
-                "The instrument lost/restarted power after connection and must be reinitialized."
-            )
-            state = "recovered_reinit_required"
-        elif output_on is False:
-            classification = "output_off_after_failure"
-            summary = (
-                f"{role} responded again but its source output is OFF. A power "
-                "restart or another output-off event is suspected; reconnect is required."
-            )
-            state = "recovered_reinit_required"
-        else:
-            classification = "communication_fault"
-            summary = (
-                f"{role} responded to diagnostics after the failed operation, "
-                "but a power cycle was not proven. Reconnect is required before continuing."
-            )
-            state = "reinit_required"
+        classification = "communication_fault_frozen"
+        summary = (
+            f"{role} I/O failed. All SMU communication was frozen immediately; "
+            "no diagnostic, status, readback, or cleanup commands were sent. "
+            "The last commanded source state is being left unchanged."
+        )
+        state = "frozen_reconnect_required"
 
         self._set_health(
             role,
             "timeout" if timed_out else "communication_error",
             f"{type(failure).__name__}: {failure}",
         )
-        if power_on_bit:
-            self._set_health(
-                role,
-                "power_lost",
-                "ESR bit 7 indicates the instrument restarted after the connection baseline.",
-            )
         self._set_health(role, state, summary)
         return {
             "classification": classification,
             "summary": summary,
-            "responded_after_failure": responded,
+            "responded_after_failure": None,
             "timed_out": timed_out,
-            "identity": responses.get("*IDN?"),
+            "identity": getattr(inst, "identity_raw", None),
             "connection_baseline_esr": self._baseline_esr.get(role),
-            "esr": esr,
-            "power_on_bit_set": power_on_bit,
-            "output_on": output_on,
-            "system_error": responses.get(":SYST:ERR?"),
-            "query_responses": responses,
-            "query_errors": errors,
-            "destructive_queries": ["*ESR?", ":SYST:ERR?"],
+            "esr": None,
+            "power_on_bit_set": None,
+            "output_on": None,
+            "system_error": None,
+            "query_responses": {},
+            "query_errors": {},
+            "destructive_queries": [],
+            "post_failure_io_suppressed": True,
             "state_transitions": list(self._health_transitions.get(role, [])),
             "address": address,
         }
@@ -415,6 +352,7 @@ class IVDevice:
             except SMUCommunicationError:
                 raise
             except Exception as exc:
+                self._io_frozen = True
                 self._record_operation(
                     role=role,
                     address=address,
@@ -1068,6 +1006,15 @@ class IVDevice:
         report: Dict[str, Dict[str, Any]] = {}
         role_map = getattr(self, "role_map", {})
         role_health = getattr(self, "_role_health", {})
+        if getattr(self, "_io_frozen", False):
+            for role in ("Vbias", "Vbg", "Vtg"):
+                if self.has_role(role):
+                    report[role] = {
+                        "status": "skipped_frozen_after_error",
+                        "address": role_map.get(role),
+                        "error": "No SMU commands sent; reconnect is required.",
+                    }
+            return report
         for role in ("Vbias", "Vbg", "Vtg"):
             if not self.has_role(role):
                 continue

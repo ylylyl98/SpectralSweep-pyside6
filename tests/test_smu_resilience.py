@@ -64,6 +64,7 @@ _DEFAULT_FAKE_RESPONSES = {
     ":SENS:CURR:RANG?": "1e-06",
     ":SOUR:VOLT:RANG?": "20",
     ":TRIG:SOUR?": "IMM",
+    ":SOUR:CLE:AUTO?": "0",
     "*ESR?": "0",
     ":OUTP?": "0",
     "READ?": "0.0,0.0",
@@ -691,6 +692,7 @@ class SMUResilienceTests(unittest.TestCase):
             ":SOUR:VOLT:MODE FIXED",
             ":TRIG:SOUR IMM",
             "TRIG:COUN 1",
+            ":SOUR:CLE:AUTO OFF",
         ):
             self.assertIn(command, resource.writes)
         # All verification/readback queries remain intact.
@@ -701,6 +703,7 @@ class SMUResilienceTests(unittest.TestCase):
             ":SENS:CURR:RANG?",
             ":SOUR:VOLT:RANG?",
             ":TRIG:SOUR?",
+            ":SOUR:CLE:AUTO?",
             "*ESR?",
             "READ?",
         ):
@@ -1002,7 +1005,10 @@ class SMUResilienceTests(unittest.TestCase):
         self.assertIn("QUERY :SENS:CURR:PROT?", combined)
         self.assertIn("LAST SUCCESSFUL OPERATION", combined)
         self.assertIn("POST-FAILURE DIAGNOSTICS", combined)
-        self.assertIn("VISA clear: success", combined)
+        self.assertIn("post_failure_io: suppressed", combined)
+        self.assertNotIn("VISA clear: success", combined)
+        self.assertEqual(failing.queries[-1], ":SENS:CURR:PROT?")
+        self.assertEqual(failing.clears, 1)
         self.assertTrue(failing.closed)
 
     def test_partial_connection_keeps_successful_instrument(self):
@@ -1055,6 +1061,7 @@ class SMUResilienceTests(unittest.TestCase):
         self.assertNotIn(":OUTP ON", resource.writes)
         self.assertIn(":TRIG:SOUR IMM", resource.writes)
         self.assertIn("TRIG:COUN 1", resource.writes)
+        self.assertIn(":SOUR:CLE:AUTO OFF", resource.writes)
         self.assertIn("*CLS", resource.writes)
         self.assertIn(":ABOR", resource.writes)
         self.assertGreaterEqual(resource.clears, 1)
@@ -1065,6 +1072,7 @@ class SMUResilienceTests(unittest.TestCase):
         instrument._volt_range_V = 20.0
         writes = []
         instrument.write = lambda command, print_command=False: writes.append(command)
+        instrument.query = lambda command, **_kwargs: "0"
 
         instrument.set_volt_step(
             curr_compliance=500e-9,
@@ -1072,7 +1080,39 @@ class SMUResilienceTests(unittest.TestCase):
         )
 
         self.assertFalse(any(command.startswith(":SOUR:VOLT:LEV") for command in writes))
+        self.assertIn(":SOUR:CLE:AUTO OFF", writes)
         self.assertEqual(writes[-1], ":OUTP ON")
+
+    def test_voltage_sweep_disables_source_auto_clear_before_output_on(self):
+        instrument = object.__new__(KeithControl)
+        instrument._curr_compliance_A = 500e-9
+        instrument._volt_range_V = 20.0
+        writes = []
+        instrument.write = lambda command, print_command=False: writes.append(command)
+        instrument.query = lambda command, **_kwargs: "0"
+
+        instrument.set_volt_sweep(
+            curr_compliance=500e-9,
+            volt_compliance=20.0,
+        )
+
+        auto_clear_index = writes.index(":SOUR:CLE:AUTO OFF")
+        first_output_on_index = writes.index(":OUTP ON")
+        self.assertLess(auto_clear_index, first_output_on_index)
+        self.assertNotIn(":OUTP OFF", writes)
+
+    def test_voltage_step_rejects_auto_clear_that_remains_enabled(self):
+        instrument = object.__new__(KeithControl)
+        instrument._curr_compliance_A = 500e-9
+        instrument._volt_range_V = 20.0
+        instrument.write = lambda _command, print_command=False: None
+        instrument.query = lambda _command, **_kwargs: "1"
+
+        with self.assertRaisesRegex(RuntimeError, "persistent-output"):
+            instrument.set_volt_step(
+                curr_compliance=500e-9,
+                volt_compliance=20.0,
+            )
 
     def test_500_na_compliance_uses_one_microamp_range(self):
         self.assertAlmostEqual(
@@ -1235,7 +1275,7 @@ class SMUResilienceTests(unittest.TestCase):
             ["SMU is already connected. Disconnect before reconnecting."],
         )
 
-    def test_power_cycle_is_diagnosed_and_role_is_quarantined(self):
+    def test_failed_io_freezes_without_post_failure_queries(self):
         instrument = _PowerCycledInstrument()
         setup = SimpleNamespace(
             x_channel_collection=_FakeXChannels(instrument),
@@ -1252,21 +1292,21 @@ class SMUResilienceTests(unittest.TestCase):
         error = raised.exception
         self.assertEqual(error.role, "Vbg")
         self.assertEqual(error.operation, "set_voltage")
-        self.assertTrue(error.diagnosis["power_on_bit_set"])
-        self.assertFalse(error.diagnosis["output_on"])
+        self.assertIsNone(error.diagnosis["power_on_bit_set"])
+        self.assertIsNone(error.diagnosis["output_on"])
         self.assertEqual(
             error.diagnosis["classification"],
-            "power_cycle_detected",
+            "communication_fault_frozen",
         )
         self.assertEqual(
             device.health_states["Vbg"],
-            "recovered_reinit_required",
+            "frozen_reconnect_required",
         )
+        self.assertTrue(device.io_frozen)
+        self.assertTrue(error.diagnosis["post_failure_io_suppressed"])
+        self.assertEqual(error.diagnosis["destructive_queries"], [])
         self.assertEqual(error.context["frame"], 28)
-        self.assertEqual(
-            instrument.queries,
-            ["*IDN?", "*ESR?", ":OUTP?", ":SYST:ERR?"],
-        )
+        self.assertEqual(instrument.queries, [])
 
         with self.assertRaises(SMUCommunicationError):
             device.set_gates(Vbg=-5.2, ramp_step=0.0, delay_s=0.0)
@@ -1404,8 +1444,12 @@ class SMUResilienceTests(unittest.TestCase):
         self.assertEqual(records[0]["run_context"]["frame"], 1)
         self.assertEqual(
             records[0]["hardware"]["diagnosis"]["classification"],
-            "power_cycle_detected",
+            "communication_fault_frozen",
         )
+        self.assertTrue(device.io_frozen)
+        self.assertEqual(instrument.queries, [])
+        for result in records[0]["cleanup"].get("roles", {}).values():
+            self.assertEqual(result["status"], "skipped_frozen_after_error")
 
 
 if __name__ == "__main__":

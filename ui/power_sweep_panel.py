@@ -422,6 +422,7 @@ class _PowerSweepWorker(QObject):
         total = len(positions)
         nwls = len(wls)
 
+        failed = False
         try:
             with open(fp, "a", newline="", encoding="utf-8") as fh:
                 writer = csv.writer(fh)
@@ -495,10 +496,18 @@ class _PowerSweepWorker(QObject):
 
         except _StopRequested:
             self.log.emit(f"[{_ts()}] Stopped by user.")
+        except Exception:
+            failed = True
+            raise
 
         finally:
             # return gates to zero
-            if p.get("return_to_zero", True) and iv is not None:
+            if failed and iv is not None:
+                self.log.emit(
+                    f"[{_ts()}] Sweep failed; preserving the last commanded "
+                    "SMU state. No automatic gate cleanup was sent."
+                )
+            elif p.get("return_to_zero", True) and iv is not None:
                 try:
                     iv.ramp_all_to_zero(
                         ramp_step=p.get("ramp_step_V", 0.1),

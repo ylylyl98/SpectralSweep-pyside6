@@ -278,7 +278,7 @@ class AttoDRY2100Adapter:
         capabilities = AttoDRY2100Capabilities(
             sample_temperature_readback=callable(getattr(self._sample, "getTemperature", None)),
             sample_temperature_control=all(callable(getattr(self._sample, name, None)) for name in (
-                "setSetPoint", "setRampRate", "startTempControl", "startRampControl",
+                "getSetPoint", "setSetPoint", "getTempControlStatus", "startTempControl",
             )),
             vti_temperature_readback=callable(getattr(self._vti, "getTemperature", None)),
         )
@@ -364,9 +364,24 @@ class AttoDRY2100Adapter:
     def configure_sample_temperature(self, target_k, ramp_rate_k_per_min, stop_event=None):
         if not self.connected:
             raise AttoDRY2100StateError("attoDRY2100 is not connected")
-        target, ramp_rate = self._validate_temperature_request(target_k, ramp_rate_k_per_min)
+        target, _unused_ramp_rate = self._validate_temperature_request(
+            target_k, ramp_rate_k_per_min
+        )
         if stop_event is not None and stop_event.is_set():
             raise AttoDRY2100StoppedError("stop requested")
+
+        # Routine MCD control delegates ramp behavior and VTI coordination to
+        # the cryostat.  On commissioned hardware the firmware retains its
+        # 100 K/min sample ramp value even after setRampRate(), so that low-level
+        # API is intentionally telemetry-only here.
+        current = self.read_temperature_snapshot()
+        if (
+            current.sample_setpoint_k is not None
+            and abs(current.sample_setpoint_k - target) <= 0.01
+            and current.sample_control_active is True
+        ):
+            return current
+
         self._temperature_call(self._sample, "setSetPoint", target)
         actual_target = self._finite_optional(
             self._temperature_call(self._sample, "getSetPoint"), "sample setpoint"
@@ -375,21 +390,16 @@ class AttoDRY2100Adapter:
             raise AttoDRY2100VerificationError("sample temperature setpoint readback mismatch")
         if stop_event is not None and stop_event.is_set():
             raise AttoDRY2100StoppedError("stop requested")
-        self._temperature_call(self._sample, "setRampRate", ramp_rate)
-        actual_rate = self._finite_optional(
-            self._temperature_call(self._sample, "getRampRate"), "sample ramp rate"
-        )
-        if actual_rate is None or abs(actual_rate - ramp_rate) > 0.01:
-            raise AttoDRY2100VerificationError("sample ramp-rate readback mismatch")
-        if stop_event is not None and stop_event.is_set():
-            raise AttoDRY2100StoppedError("stop requested")
-        self._temperature_call(self._sample, "startTempControl")
-        self._temperature_call(self._sample, "startRampControl")
+        if current.sample_control_active is not True:
+            self._temperature_call(self._sample, "startTempControl")
         snapshot = self.read_temperature_snapshot()
+        if snapshot.sample_setpoint_k is None or abs(snapshot.sample_setpoint_k - target) > 0.01:
+            raise AttoDRY2100VerificationError(
+                "sample temperature target verification failed: "
+                f"requested={target:g} K, actual={snapshot.sample_setpoint_k!r} K"
+            )
         if snapshot.sample_control_active is not True:
             raise AttoDRY2100VerificationError("sample temperature control did not become active")
-        if snapshot.sample_ramp_active is not True:
-            raise AttoDRY2100VerificationError("sample temperature ramp control did not become active")
         return snapshot
 
     def stop_sample_temperature_control(self):

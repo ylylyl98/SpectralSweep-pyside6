@@ -578,6 +578,17 @@ class KeithControl(PyvisaInstrument):
     def output_state(self) -> str:
         return str(self.query(':OUTP?')).strip()
 
+    def ensure_source_auto_clear_off(self) -> str:
+        """Disable and verify the 2400 setting that turns output off after READ?."""
+        self.write(':SOUR:CLE:AUTO OFF', print_command=True)
+        state = str(self.query(':SOUR:CLE:AUTO?')).strip().upper()
+        if state not in {'0', 'OFF'}:
+            raise RuntimeError(
+                "Keithley rejected persistent-output configuration: "
+                f":SOUR:CLE:AUTO? returned {state!r}"
+            )
+        return state
+
     # for non-synchronized sweep only
     def set_volt_sweep(
         self,
@@ -605,6 +616,10 @@ class KeithControl(PyvisaInstrument):
         self.write(':SOUR:DEL %.3f' % delay, print_command=True)
         # Never rely on retained trigger state for the subsequent READ?.
         self.write(':TRIG:SOUR IMM', print_command=True)
+        # The 2400 retains Source Auto Clear across remote sessions.  When it
+        # is enabled, READ?/INIT can turn the source output off at the end of
+        # the trigger cycle even though this controller never sent OUTP OFF.
+        self.ensure_source_auto_clear_off()
         # turn on confield functions
         self.write(':SENS:FUNC:CONC ON', print_command=True)
         # set field reading
@@ -655,6 +670,9 @@ class KeithControl(PyvisaInstrument):
         # a stale external/bus trigger and time out.
         self.write(':TRIG:SOUR IMM', print_command=True)
         self.write('TRIG:COUN 1', print_command=True)
+        # Keep READ? from switching the output off after each measurement if
+        # Source Auto Clear was enabled by a previous program/front-panel use.
+        self.ensure_source_auto_clear_off()
         if initial_voltage is not None:
             self.write(
                 ':SOUR:VOLT:LEV %.9g' % float(initial_voltage),

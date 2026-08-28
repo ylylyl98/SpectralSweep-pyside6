@@ -32,11 +32,14 @@ class ConfigPersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"config.json"; source=AppConfig()
             for key, value in {"sdk_directory":"custom", "host":"h", "channel":4, "timeout_s":3.0, "maximum_field_t":5.0, "minimum_temperature_k":1.2, "maximum_temperature_k":4.0, "poll_interval_s":.25}.items(): setattr(source.attodry2100,key,value)
-            for key, value in {"start_field_t":-1.0, "stop_field_t":1.0, "settle_timeout_s":9.0, "operation_timeout_s":10.0, "polling_interval_s":.1, "temperature_control_enabled":True, "sample_target_k":20.0, "sample_ramp_rate_k_per_min":2.0, "temperature_tolerance_k":.05, "temperature_stable_s":5.0, "temperature_timeout_s":600.0}.items(): setattr(source.mcd2100,key,value)
+            for key, value in {"start_field_t":-1.0, "stop_field_t":1.0, "point":"p5n2", "settle_timeout_s":9.0, "operation_timeout_s":10.0, "polling_interval_s":.1, "initial_voltage_settle_s":600.0, "voltage_settle_s":120.0, "temperature_control_enabled":True, "sample_target_k":20.0, "sample_ramp_rate_k_per_min":2.0, "temperature_tolerance_k":.05, "temperature_stable_s":5.0, "temperature_timeout_s":600.0}.items(): setattr(source.mcd2100,key,value)
             source.save(path); restored=AppConfig(); restored.load(path)
             self.assertEqual(asdict(restored.attodry2100), asdict(source.attodry2100)); self.assertEqual(asdict(restored.mcd2100), asdict(source.mcd2100))
             self.assertTrue(restored.mcd2100.temperature_control_enabled)
             self.assertEqual(restored.mcd2100.sample_target_k, 20.0)
+            self.assertEqual(restored.mcd2100.point, "p5n2")
+            self.assertEqual(restored.mcd2100.initial_voltage_settle_s, 600.0)
+            self.assertEqual(restored.mcd2100.voltage_settle_s, 120.0)
     def test_2100_sections_round_trip_and_legacy_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"

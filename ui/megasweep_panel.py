@@ -1927,6 +1927,7 @@ class _MegaSweepWorker(QObject):
             self.map_started.emit(map_index, map_count, description)
             self._emit_log(f"Map {map_index}/{map_count} - {description}")
             ramp_ok = True
+            map_failed = False
             try:
                 self._run_map(
                     map_p,
@@ -1938,10 +1939,19 @@ class _MegaSweepWorker(QObject):
                 )
             except _MegaSweepStopRequested:
                 break
+            except Exception:
+                map_failed = True
+                raise
             finally:
                 # Each output file is a fully independent gate map. Return to
                 # the safe state before applying the next optical recipe.
-                ramp_ok = self._safe_ramp_to_zero(iv)
+                if map_failed:
+                    self._emit_log(
+                        "Map failed; preserving the last commanded SMU state. "
+                        "No automatic return-to-zero commands were sent."
+                    )
+                else:
+                    ramp_ok = self._safe_ramp_to_zero(iv)
             if not ramp_ok:
                 raise RuntimeError(
                     "Return-to-zero failed; the optical sequence was aborted."

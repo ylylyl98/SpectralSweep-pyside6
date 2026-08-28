@@ -4,12 +4,13 @@ import inspect
 import os
 import tempfile
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEventLoop, QObject, QTimer, Signal
+from PySide6.QtCore import QEventLoop, QObject, QTimer, Qt, Signal
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QGroupBox, QHeaderView, QScrollArea, QSizePolicy, QStatusBar, QTabWidget, QWidget
 
@@ -47,6 +48,7 @@ class FakeController(QObject):
         self.connect_handle = FakeHandle(SimpleNamespace(host="fake-2100"))
         self.connect_calls = 0
         self.stop_calls = 0
+        self.temperature_configure_calls = []
 
     def connect_async(self):
         self.connect_calls += 1
@@ -63,7 +65,16 @@ class FakeController(QObject):
     def read_temperature_snapshot_async(self):
         return FakeHandle(SimpleNamespace(
             sample_temperature_k=12.0, vti_temperature_k=2.0,
-            sample_control_active=True,
+            sample_setpoint_k=12.0, sample_control_active=True,
+            sample_ramp_active=False,
+        ))
+
+    def configure_sample_temperature_async(self, target, ramp_rate):
+        self.temperature_configure_calls.append((float(target), float(ramp_rate)))
+        return FakeHandle(SimpleNamespace(
+            sample_temperature_k=12.0, vti_temperature_k=2.0,
+            sample_setpoint_k=float(target), sample_control_active=True,
+            sample_ramp_active=False, sample_ramp_rate_k_per_min=100.0,
         ))
 
     def request_stop(self):
@@ -200,7 +211,7 @@ class MCD2100PanelTests(unittest.TestCase):
         self.assertGreaterEqual(scroll.verticalScrollBar().maximum(), 0)
         panel.hide()
 
-    def test_short_inputs_are_bounded_and_output_remains_expanding(self):
+    def test_short_inputs_are_bounded_and_filename_preview_remains_expanding(self):
         panel, _, _ = self.make_panel()
         for widget, maximum in (
             (panel.start_field, 140), (panel.stop_field, 140),
@@ -208,18 +219,112 @@ class MCD2100PanelTests(unittest.TestCase):
             (panel.lf_center, 140), (panel.lf_exposure, 140),
             (panel.lf_frames, 100), (panel.vtg, 140),
             (panel.vbg, 140), (panel.vbias, 140), (panel.gate_ratio, 140),
-            (panel._sample_id, 300), (panel.stem, 450),
+            (panel._sample_id, 300), (panel._point, 160), (panel.stem, 450),
         ):
             self.assertLessEqual(widget.maximumWidth(), maximum)
             self.assertEqual(widget.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Fixed)
         self.assertEqual(panel.output.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding)
         self.assertGreater(panel.output.maximumWidth(), 10000)
-        self.assertIsNotNone(panel.output_browse)
+        self.assertTrue(panel.output.isHidden())
+        self.assertTrue(panel.output_browse.isHidden())
+        self.assertTrue(panel.stem.isHidden())
+        self.assertTrue(panel.filename_preview.isReadOnly())
+        self.assertEqual(
+            panel.filename_preview.sizePolicy().horizontalPolicy(),
+            QSizePolicy.Policy.Expanding,
+        )
         self.assertGreater(panel.start_btn.receivers("2clicked(bool)"), 0)
         self.assertGreater(panel.stop_btn.receivers("2clicked(bool)"), 0)
 
+    def test_filename_preview_tracks_point_fields_and_first_enabled_gate(self):
+        panel, _, _ = self.make_panel()
+        panel.gate_vtg_factor.setValue(1.0)
+        panel.gate_vbg_factor.setValue(1.0)
+        panel.start_field.setText("-1")
+        panel.stop_field.setText("1")
+        panel._sample_id.setText("YZ365")
+        derived_output = panel.output.text()
+        panel._point.setText("p5n2")
+        panel._seed_condition_table([
+            {"enabled": False, "vtg_v": 9.0, "vbg_v": 9.0, "vbias_v": 0.0},
+            {"enabled": True, "vtg_v": 0.5, "vbg_v": -0.25, "vbias_v": 0.1},
+        ])
+        panel._update_condition_editable()
+
+        preview = panel.filename_preview.text()
+        self.assertTrue(preview.startswith("YZ365_p5n2_MCD_"), preview)
+        self.assertIn("K_G01_", preview)
+        self.assertIn("_G01_", preview)
+        self.assertIn("_B-1to+1T_", preview)
+        self.assertIn("_Vtg+0p5_", preview)
+        self.assertIn("_Vbg-0p25_", preview)
+        self.assertTrue(preview.endswith("_roundtrip.csv"), preview)
+        self.assertEqual(panel.output.text(), derived_output)
+        self.assertNotIn("p5n2", panel.output.text())
+
+    def test_gate_selection_move_buttons_scroll_and_execution_preview(self):
+        panel, _, _ = self.make_panel()
+        rows = [
+            {"enabled": False, "mode": MODE_DIRECT, "input_a": 1,
+             "input_b": 10, "vbias_v": 0},
+            {"enabled": True, "mode": MODE_DIRECT, "input_a": 2,
+             "input_b": 20, "vbias_v": 0.1},
+            {"enabled": True, "mode": MODE_DOPING_EFIELD, "input_a": 3,
+             "input_b": 30, "vbias_v": 0.2},
+        ]
+        panel._seed_condition_table(rows)
+        panel._update_condition_editable()
+        self.assertTrue(
+            panel._condition_table.item(0, 0).flags() & Qt.ItemFlag.ItemIsSelectable
+        )
+        panel._condition_table.cellClicked.emit(1, 0)
+        self.assertEqual(panel._condition_table.currentRow(), 1)
+        self.assertTrue(panel._move_condition_up_btn.isEnabled())
+        panel._move_condition_up_btn.click()
+        self.assertEqual(panel._condition_table.currentRow(), 0)
+        self.assertEqual(panel._condition_rows()[0]["input_a"], 2.0)
+        self.assertFalse(panel._move_condition_up_btn.isEnabled())
+        self.assertIn("3 total · 2 enabled", panel._condition_summary.text())
+        preview = panel._condition_plan_preview.toPlainText()
+        self.assertIn("G01 · Table row 1", preview)
+        self.assertIn("G02 · Table row 3", preview)
+        self.assertNotIn("G03", preview)
+        self.assertIn("Selected table row 1 (G01)", panel._selected_condition_summary.text())
+
+        many = [
+            {"enabled": True, "mode": MODE_DIRECT, "input_a": index,
+             "input_b": -index, "vbias_v": 0}
+            for index in range(12)
+        ]
+        panel._seed_condition_table(many)
+        panel._update_condition_editable()
+        scrollbar = panel._condition_table.verticalScrollBar()
+        self.app.processEvents()
+        scrollbar.setValue(max(1, scrollbar.maximum() // 2))
+        before = scrollbar.value()
+        panel._condition_table.selectRow(5)
+        panel._move_condition_up_btn.click()
+        self.assertEqual(panel._condition_table.currentRow(), 4)
+        self.assertLessEqual(abs(scrollbar.value() - before), 26)
+
+    def test_live_or_controlled_sample_temperature_updates_filename(self):
+        panel, _, _ = self.make_panel()
+        panel._sample_id.setText("YZ365")
+        panel._on_temperature_snapshot(SimpleNamespace(
+            sample_temperature_k=4.0, vti_temperature_k=3.8,
+            sample_control_active=False,
+        ))
+        self.assertIn("_MCD_4K_G01_", panel.filename_preview.text())
+        panel.temperature_control_enabled.setChecked(True)
+        panel.sample_target.setValue(20.25)
+        self.assertIn("_MCD_20p25K_G01_", panel.filename_preview.text())
+
     def test_gate_table_modes_derived_values_reorder_and_shared_rotator(self):
         panel, _, _ = self.make_panel()
+        panel._seed_condition_table([
+            {"enabled": True, "mode": MODE_DIRECT, "input_a": 0,
+             "input_b": 0, "vbias_v": 0}
+        ])
         self.assertIsInstance(panel.rotator, QComboBox)
         self.assertFalse(panel.rotator.isEditable())
         self.assertGreaterEqual(panel.rotator.count(), 2)
@@ -309,21 +414,58 @@ class MCD2100PanelTests(unittest.TestCase):
             {"enabled": True, "mode": "fixed_efield", "input_a": -2, "input_b": 1, "vbias_v": 0},
         ])
         panel.angles.setText("10, 20, 30")
+        panel._point.setText("p5n2")
         panel.lf_center.setValue(900); panel.lf_exposure.setValue(12); panel.lf_frames.setValue(7)
         panel.temperature_control_enabled.setChecked(True)
         panel.sample_target.setValue(20.0)
         panel.sample_ramp_rate.setValue(2.5)
+        panel.initial_voltage_settle.setValue(600.0)
+        panel.voltage_settle.setValue(120.0)
         snapshot = panel.capture_session_state()
         restored, _, _ = self.make_panel()
         restored.restore_session_state(snapshot)
         self.assertEqual(restored._condition_table.rowCount(), 3)
         self.assertEqual(restored.capture_session_state()["angles"], "10, 20, 30")
+        self.assertEqual(restored.capture_session_state()["point"], "p5n2")
         modes = [restored._condition_table.cellWidget(row, 2).currentData() for row in range(3)]
         self.assertEqual(modes, ["direct", "vtg_from_vbg_ratio", "fixed_efield"])
         self.assertEqual(restored.lf_frames.value(), 7)
         self.assertTrue(restored.temperature_control_enabled.isChecked())
         self.assertEqual(restored.sample_target.value(), 20.0)
         self.assertEqual(restored.sample_ramp_rate.value(), 2.5)
+        self.assertEqual(restored.initial_voltage_settle.value(), 600.0)
+        self.assertEqual(restored.voltage_settle.value(), 120.0)
+
+    def test_compact_layout_activity_feedback_and_collapsed_error_area(self):
+        panel, _, _ = self.make_panel()
+        panel.resize(1100, 700)
+        panel.show()
+        self.app.processEvents()
+        self.assertTrue(panel.error_display.isHidden())
+        self.assertLessEqual(panel._sample_group.height(), 70)
+        self.assertLess(abs(panel._sweep_group.y() - panel._rotation_group.y()), 20)
+
+        panel.worker = FakeWorker()
+        panel._on_phase("Gate settling after first gate ramp: 5 s")
+        self.assertIn("Gate settling", panel.status.text())
+        self.assertIn("Gate settling", panel._log.toPlainText())
+        self.assertIn("Settling", panel.run_activity.text())
+        self.assertIn("remaining", panel.run_activity.text())
+        panel._on_spectrum_event({
+            "label": "A", "wavelengths": [700.0, 701.0], "counts": [1.0, 2.0],
+            "B1_T": -1.0, "direction": "forward", "gate_index": 2,
+            "gate_count": 3, "total_spectra": 7,
+        })
+        self.assertIn("New spectrum", panel.run_activity.text())
+        self.assertIn("Spectrum 7", panel.spectrum_activity.text())
+        self.assertIn("Gate 2/3", panel._plot_overlay.toPlainText())
+        panel._active_phase = "Acquiring spectra while field moves -1 T to +1 T"
+        panel._phase_started_at = time.monotonic() - 100.0
+        panel._last_spectrum_at = time.monotonic() - 100.0
+        panel._refresh_activity()
+        self.assertIn("no recent spectrum", panel.spectrum_activity.text())
+        panel.worker = None
+        panel.hide()
 
     def test_fake_connection_and_telemetry_are_reflected_nonblocking(self):
         controller = FakeController(False)
@@ -341,6 +483,33 @@ class MCD2100PanelTests(unittest.TestCase):
         self.assertEqual(panel.sample_temperature_value.text(), "12 K")
         self.assertEqual(panel.vti_temperature_value.text(), "2 K")
         self.assertEqual(panel.sample_temperature_control_value.text(), "Active")
+        self.assertEqual(panel.sample_temperature_setpoint_value.text(), "12 K")
+
+    def test_apply_temperature_sends_target_immediately_and_reports_ramping(self):
+        panel, controller, _ = self.make_panel()
+        panel.temperature_control_enabled.setChecked(True)
+        panel.sample_target.setValue(20.0)
+        panel.sample_ramp_rate.setValue(2.5)
+
+        panel.apply_temperature_btn.click()
+        self.app.processEvents()
+
+        self.assertEqual(controller.temperature_configure_calls, [(20.0, 2.5)])
+        self.assertEqual(panel.sample_temperature_setpoint_value.text(), "20 K")
+        self.assertIn("Ramping to 20", panel.temperature_apply_status.text())
+        self.assertTrue(panel.apply_temperature_btn.isEnabled())
+
+    def test_apply_temperature_requires_connection_and_is_disabled_during_run(self):
+        disconnected = FakeController(False)
+        panel, _, _ = self.make_panel(controller=disconnected)
+        panel.temperature_control_enabled.setChecked(True)
+        self.assertFalse(panel.apply_temperature_btn.isEnabled())
+
+        connected, _, _ = self.make_panel()
+        connected.temperature_control_enabled.setChecked(True)
+        connected.worker = FakeWorker()
+        connected._refresh_controls()
+        self.assertFalse(connected.apply_temperature_btn.isEnabled())
 
     def test_completed_detach_is_distinguished_and_reconnects_telemetry_only(self):
         controller = FakeController(True)
@@ -556,6 +725,7 @@ class MCD2100PanelTests(unittest.TestCase):
     def test_valid_settings_start_accepted_worker_and_double_start_is_ignored(self):
         gate = threading.Event()
         panel, _, factory = self.make_panel(workers=[FakeWorker(gate=gate)])
+        panel._point.setText("p5n2")
         panel.temperature_control_enabled.setChecked(True)
         panel.sample_target.setValue(20.0)
         panel.start()
@@ -568,6 +738,7 @@ class MCD2100PanelTests(unittest.TestCase):
         self.assertNotIn("settling", kwargs)
         self.assertTrue(kwargs["temperature_control_enabled"])
         self.assertEqual(kwargs["sample_target_k"], 20.0)
+        self.assertEqual(kwargs["metadata"]["point"], "p5n2")
         panel.stop()
         self.wait_terminal(panel)
 

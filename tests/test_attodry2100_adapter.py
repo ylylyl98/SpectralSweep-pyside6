@@ -86,14 +86,64 @@ class AdapterTests(unittest.TestCase):
                 result = adapter.configure_sample_temperature(target, 2.5)
                 self.assertEqual(result.sample_setpoint_k, target)
                 self.assertTrue(result.sample_control_active)
-                self.assertTrue(result.sample_ramp_active)
+                self.assertFalse(result.sample_ramp_active)
                 sample_names = [name for name, _ in device.sample.calls]
                 self.assertIn("setSetPoint", sample_names)
                 self.assertIn("startTempControl", sample_names)
-                self.assertIn("startRampControl", sample_names)
+                self.assertNotIn("setRampRate", sample_names)
+                self.assertNotIn("startRampControl", sample_names)
                 self.assertFalse(any(name.startswith("set") or name.startswith("start")
                                      for name, _ in device.vti.calls))
                 adapter.close()
+
+    def test_automatic_temperature_control_ignores_firmware_owned_ramp_and_reuses_target(self):
+        device = FakeDevice("host")
+        device.sample.ramp_rate = 100.0
+        device.sample.ramp = False
+        device.sample.control = True
+        device.sample.setpoint = 2.5
+        device.sample.temperature = 2.5016
+        adapter = AttoDRY2100Adapter(
+            "unused", maximum_field_t=6.0, maximum_temperature_k=7.0,
+            device_factory=lambda _: device,
+        )
+        adapter.connect()
+        device.sample.calls.clear()
+
+        reused = adapter.configure_sample_temperature(2.5, 1.0)
+
+        self.assertEqual(reused.sample_setpoint_k, 2.5)
+        self.assertTrue(reused.sample_control_active)
+        self.assertFalse(reused.sample_ramp_active)
+        self.assertEqual(reused.sample_ramp_rate_k_per_min, 100.0)
+        names = [name for name, _ in device.sample.calls]
+        self.assertNotIn("setSetPoint", names)
+        self.assertNotIn("setRampRate", names)
+        self.assertNotIn("startRampControl", names)
+        adapter.close()
+
+    def test_automatic_temperature_control_changes_target_without_ramp_mutation(self):
+        device = FakeDevice("host")
+        device.sample.ramp_rate = 100.0
+        device.sample.ramp = False
+        device.sample.control = True
+        adapter = AttoDRY2100Adapter(
+            "unused", maximum_field_t=6.0, maximum_temperature_k=7.0,
+            device_factory=lambda _: device,
+        )
+        adapter.connect()
+        device.sample.calls.clear()
+
+        result = adapter.configure_sample_temperature(2.5, 1.0)
+
+        self.assertEqual(result.sample_setpoint_k, 2.5)
+        self.assertTrue(result.sample_control_active)
+        self.assertEqual(result.sample_ramp_rate_k_per_min, 100.0)
+        names = [name for name, _ in device.sample.calls]
+        self.assertIn("setSetPoint", names)
+        self.assertNotIn("setRampRate", names)
+        self.assertNotIn("startRampControl", names)
+        adapter.close()
 
     def test_temperature_request_validation_and_readback_are_fail_closed(self):
         device = FakeDevice("host")

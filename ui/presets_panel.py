@@ -2503,7 +2503,20 @@ class _RunWorker(QObject):
             self.log.emit(summary)
             self.error.emit(summary)
         finally:
-            if self._smu and self._smu.is_connected:
+            if self._smu and self._smu.is_connected and failed:
+                cleanup_report.update({
+                    "attempted": False,
+                    "status": "skipped_preserve_last_smu_state",
+                    "reason": (
+                        "Run failed; no SMU read, status, diagnostic, or ramp "
+                        "commands were sent after the error."
+                    ),
+                })
+                self.log.emit(
+                    "Run failed: preserving the last commanded SMU state; "
+                    "automatic ramp-to-zero was skipped."
+                )
+            elif self._smu and self._smu.is_connected:
                 self.log.emit("Ramping all channels to zero (2x slower than sweep settings)...")
                 cleanup_report["attempted"] = True
                 try:

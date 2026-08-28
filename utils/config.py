@@ -224,6 +224,7 @@ class MCD2100Config:
     start_field_t: float = -2.0
     stop_field_t: float = 2.0
     sample_id: str = ""
+    point: str = ""
     settle_timeout_s: float = 120.0
     operation_timeout_s: float = 180.0
     polling_interval_s: float = 0.2
@@ -240,6 +241,8 @@ class MCD2100Config:
     gate_ratio: float = 1.0
     gate_vtg_factor: float = 1.0
     gate_vbg_factor: float = 1.0
+    initial_voltage_settle_s: float = 0.05
+    voltage_settle_s: float = 0.05
     conditions: List[dict] = field(default_factory=list)
     gate_batches: List[dict] = field(default_factory=list)
     output_dir: str = ""

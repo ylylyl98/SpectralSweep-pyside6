@@ -544,64 +544,16 @@ class _SMUWorker(QObject):
     def _diagnose_connection_failure(
         self, addr: str, inst, timeout_ms: int
     ) -> dict:
-        """
-        Limited post-failure diagnostics.  Every step is isolated so a dead
-        instrument cannot mask the primary failure; never raises.
-        """
-        diagnosis: dict = {}
-        resource = getattr(inst, "my_instr", None) if inst is not None else None
-        old_timeout = getattr(resource, "timeout", None)
-        timeout_changed = False
-        if resource is not None and old_timeout is not None:
-            try:
-                resource.timeout = min(max(int(old_timeout), 250), 1000)
-                timeout_changed = True
-            except Exception:
-                pass
-        try:
-            if resource is None:
-                closed_after_failure = bool(
-                    inst is not None and getattr(inst, "_closed", False)
-                )
-                diagnosis["session"] = (
-                    "none (resource was closed after the failure)"
-                    if closed_after_failure
-                    else "none (resource was not opened)"
-                )
-                return diagnosis
-            try:
-                resource.clear()
-                diagnosis["VISA clear"] = "success"
-            except Exception as clear_exc:
-                diagnosis["VISA clear"] = f"{type(clear_exc).__name__}: {clear_exc}"
-            if inst is not None:
-                for command in ("*IDN?", "*ESR?", ":SYST:ERR?", ":OUTP?"):
-                    try:
-                        response = str(inst.query(command)).strip()
-                        if command == "*ESR?":
-                            try:
-                                esr = int(float(response))
-                            except (TypeError, ValueError):
-                                esr = None
-                            note = (
-                                " (Power-On bit set)"
-                                if esr is not None and esr & 0x80
-                                else ""
-                            )
-                            diagnosis[command] = f"success -> {response}{note}"
-                        else:
-                            diagnosis[command] = f"success -> {response}"
-                    except Exception as query_exc:
-                        diagnosis[command] = (
-                            f"{type(query_exc).__name__}: {query_exc}"
-                        )
-        finally:
-            if timeout_changed:
-                try:
-                    resource.timeout = old_timeout
-                except Exception:
-                    pass
-        return diagnosis
+        """Describe the freeze policy without sending post-failure commands."""
+        return {
+            "policy": "freeze_last_commanded_state",
+            "post_failure_io": "suppressed",
+            "address": str(addr),
+            "note": (
+                "No VISA clear, identity, status, error-register, output-state, "
+                "or readback commands were sent after the primary failure."
+            ),
+        }
 
     # ── disconnect ────────────────────────────────────────────────────────────
 

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import math
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -13,7 +15,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QHeaderView, QLineEdit, QPlainTextEdit,
-    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTableWidget,
+    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QGridLayout, QSplitter, QWidget,
 )
 
@@ -32,11 +34,12 @@ from utils.mcd_common import (
     MODE_FIXED_EFIELD, MODE_FIXED_DOPING, resolve_condition_line,
     resolve_gate_conditions, validate_gate_conditions, smu_readiness_issues,
     MODE_DOPING_EFIELD, gate_ratio_from_factors, build_condition_batch,
-    parse_numeric_spec,
+    parse_numeric_spec, build_mcd2100_filename,
 )
 
 
 class _LightFieldRotationService:
+    _ACQUISITION_ABORT_TIMEOUT_S = 5.0
     """Narrow optical/gate contract used by the continuous worker."""
 
     def __init__(self, lf6_controller, rotation_controller, rotator: str = "rot1", smu_controller=None):
@@ -122,7 +125,40 @@ class _LightFieldRotationService:
         spectrometer = getattr(self._lf6, "adapter", None)
         if spectrometer is None:
             raise RuntimeError("LightField spectrometer is unavailable")
-        raw = spectrometer.acquire()
+        result = {}
+        completed = threading.Event()
+
+        def capture() -> None:
+            try:
+                result["value"] = spectrometer.acquire()
+            except BaseException as exc:
+                result["error"] = exc
+            finally:
+                completed.set()
+
+        capture_thread = threading.Thread(
+            target=capture, name="LightFieldCapture", daemon=True
+        )
+        capture_thread.start()
+        while not completed.wait(0.05):
+            if not stop_event.is_set():
+                continue
+            abort = getattr(spectrometer, "abort_acquisition", None)
+            try:
+                aborted = bool(abort()) if callable(abort) else False
+            except Exception:
+                aborted = False
+            if not completed.wait(self._ACQUISITION_ABORT_TIMEOUT_S):
+                detail = "LightField abort was not acknowledged" if aborted else (
+                    "LightField exposes no acquisition-abort operation"
+                )
+                raise RuntimeError(
+                    f"LightField acquisition did not stop after cancellation: {detail}"
+                )
+            raise RuntimeError("measurement cancelled during LightField acquisition")
+        if "error" in result:
+            raise result["error"]
+        raw = result.get("value")
         if not isinstance(raw, tuple) or len(raw) < 2:
             raise RuntimeError("LightField returned an invalid spectrum")
         wavelengths = np.asarray(raw[0], dtype=float).ravel()
@@ -142,6 +178,7 @@ class _Runner(QObject):
     spectrum = Signal(object, object, str, float)
     spectrum_event = Signal(object)
     log = Signal(str)
+    phase = Signal(str)
 
     def __init__(self, worker):
         super().__init__()
@@ -150,7 +187,8 @@ class _Runner(QObject):
         if callable(setter):
             try:
                 setter(progress=self.progress.emit, spectrum=self.spectrum.emit,
-                       spectrum_event=self.spectrum_event.emit, log=self.log.emit)
+                       spectrum_event=self.spectrum_event.emit, log=self.log.emit,
+                       phase=self.phase.emit)
             except TypeError:
                 setter(progress=self.progress.emit, spectrum=self.spectrum.emit,
                        log=self.log.emit)
@@ -162,6 +200,22 @@ class _Runner(QObject):
         except BaseException as exc:
             result = {"status": "FAILED", "error": str(exc), "spectra_written": 0}
         self.finished.emit(result)
+
+
+class _SmoothConditionTable(QTableWidget):
+    """Condition table that yields wheel scrolling at its boundaries."""
+
+    def wheelEvent(self, event) -> None:
+        bar = self.verticalScrollBar()
+        delta = event.angleDelta().y()
+        at_boundary = (
+            (delta > 0 and bar.value() <= bar.minimum())
+            or (delta < 0 and bar.value() >= bar.maximum())
+        )
+        if at_boundary:
+            event.ignore()
+            return
+        super().wheelEvent(event)
 
 
 class MCD2100Panel(QWidget):
@@ -192,10 +246,23 @@ class MCD2100Panel(QWidget):
         self._connected = getattr(getattr(controller, "state", None), "name", "") in {"IDLE", "ARMED", "ACTIVE"}
         self._detached_after_completion = getattr(getattr(controller, "state", None), "name", "") == "DETACHED"
         self._last_telemetry_time = None
+        self._last_sample_temperature_k: Optional[float] = None
+        self._last_sample_setpoint_k: Optional[float] = None
+        self._applied_sample_target_k: Optional[float] = None
+        self._last_spectrum_at: Optional[float] = None
+        self._phase_started_at = time.monotonic()
+        self._spectrum_count = 0
+        self._active_phase = "Idle"
+        self._settle_deadline: Optional[float] = None
         self._externally_busy = False
         self._terminal_status = "Disconnected" if not self._connected else "Ready"
         self._connect_handle = None
         self._disconnect_handle = None
+        self._temperature_apply_handle = None
+        self._temperature_monitor_handle = None
+        self._temperature_monitor_timer = QTimer(self)
+        self._temperature_monitor_timer.setInterval(1000)
+        self._temperature_monitor_timer.timeout.connect(self._monitor_applied_temperature)
         self._build_ui()
         self._legacy_table_api = False
         self._wire_controller()
@@ -231,6 +298,7 @@ class MCD2100Panel(QWidget):
         self.temperature_value = QLabel("N/A")
         self.sample_temperature_value = QLabel("N/A")
         self.vti_temperature_value = QLabel("N/A")
+        self.sample_temperature_setpoint_value = QLabel("N/A")
         self.sample_temperature_control_value = QLabel("N/A")
         self.control_value = QLabel("N/A")
         self.quench_value = QLabel("N/A")
@@ -243,23 +311,24 @@ class MCD2100Panel(QWidget):
         telemetry.addWidget(self.connection_status, 0, 1)
         telemetry.addWidget(QLabel("Field"), 0, 2)
         telemetry.addWidget(self.field_value, 0, 3)
-        telemetry.addWidget(QLabel("Magnet temp"), 0, 4)
-        telemetry.addWidget(self.temperature_value, 0, 5)
-        telemetry.addWidget(QLabel("Field control"), 1, 0)
-        telemetry.addWidget(self.control_value, 1, 1)
-        telemetry.addWidget(QLabel("Quench"), 1, 2)
-        telemetry.addWidget(self.quench_value, 1, 3)
-        telemetry.addWidget(QLabel("Current target"), 1, 4)
-        telemetry.addWidget(self.current_target, 1, 5)
-        telemetry.addWidget(QLabel("Sample temp"), 2, 0)
-        telemetry.addWidget(self.sample_temperature_value, 2, 1)
-        telemetry.addWidget(QLabel("VTI temp"), 2, 2)
-        telemetry.addWidget(self.vti_temperature_value, 2, 3)
-        telemetry.addWidget(QLabel("Sample control"), 2, 4)
-        telemetry.addWidget(self.sample_temperature_control_value, 2, 5)
+        telemetry.addWidget(QLabel("Magnet temp"), 1, 0)
+        telemetry.addWidget(self.temperature_value, 1, 1)
+        telemetry.addWidget(QLabel("Field control"), 1, 2)
+        telemetry.addWidget(self.control_value, 1, 3)
+        telemetry.addWidget(QLabel("Quench"), 2, 0)
+        telemetry.addWidget(self.quench_value, 2, 1)
+        telemetry.addWidget(QLabel("Target"), 2, 2)
+        telemetry.addWidget(self.current_target, 2, 3)
+        telemetry.addWidget(QLabel("Sample temp"), 3, 0)
+        telemetry.addWidget(self.sample_temperature_value, 3, 1)
+        telemetry.addWidget(QLabel("VTI temp"), 3, 2)
+        telemetry.addWidget(self.vti_temperature_value, 3, 3)
+        telemetry.addWidget(QLabel("Sample control"), 4, 0)
+        telemetry.addWidget(self.sample_temperature_control_value, 4, 1)
+        telemetry.addWidget(QLabel("Sample target"), 4, 2)
+        telemetry.addWidget(self.sample_temperature_setpoint_value, 4, 3)
         telemetry.setColumnStretch(1, 1)
         telemetry.setColumnStretch(3, 1)
-        telemetry.setColumnStretch(5, 1)
         connection_layout.addLayout(telemetry)
         self.telemetry_note.setWordWrap(True)
         connection_layout.addWidget(self.telemetry_note)
@@ -280,20 +349,32 @@ class MCD2100Panel(QWidget):
         workflow_layout.setSpacing(6)
 
         sample_group = QGroupBox("Sample / Device")
-        sample_form = QFormLayout(sample_group)
+        self._sample_group = sample_group
+        sample_form = QHBoxLayout(sample_group)
         sample_form.setContentsMargins(8, 6, 8, 6)
-        sample_form.setVerticalSpacing(4)
+        sample_form.setSpacing(6)
         self.start_field = QLineEdit()
         self.stop_field = QLineEdit()
         self._sample_id = QLineEdit()
         self._sample_id.setPlaceholderText("Sample ID")
+        self._point = QLineEdit()
+        self._point.setPlaceholderText("p5n2")
+        self._point.setToolTip(
+            "Optional measurement point or location token included in filenames. "
+            "It does not change the Sample ID output folder."
+        )
         self._compact(self.start_field, 100, 140)
         self._compact(self.stop_field, 100, 140)
-        self._compact(self._sample_id, 180, 300)
-        sample_form.addRow("Sample ID", self._sample_id)
+        self._compact(self._sample_id, 150, 300)
+        self._compact(self._point, 80, 160)
+        sample_form.addWidget(QLabel("Sample ID"))
+        sample_form.addWidget(self._sample_id, 1)
+        sample_form.addWidget(QLabel("Point / Location"))
+        sample_form.addWidget(self._point)
         workflow_layout.addWidget(sample_group)
 
         sweep_group = QGroupBox("Field Sweep")
+        self._sweep_group = sweep_group
         sweep_form = QFormLayout(sweep_group)
         sweep_form.setContentsMargins(8, 6, 8, 6)
         sweep_form.setVerticalSpacing(4)
@@ -302,11 +383,13 @@ class MCD2100Panel(QWidget):
         self.bidirectional.setEnabled(False)
         self.bidirectional.setVisible(False)
         self.round_trip_notice = QLabel("Round trip: forward + backward for every enabled gate")
+        self.round_trip_notice.setWordWrap(True)
         sweep_form.addRow("Start field (T)", self.start_field)
         sweep_form.addRow("Stop field (T)", self.stop_field)
         sweep_form.addRow("Sweep", self.round_trip_notice)
 
-        rotation_group = QGroupBox("Polarization / Rotation")
+        rotation_group = QGroupBox("Rotation")
+        self._rotation_group = rotation_group
         rotation_form = QFormLayout(rotation_group)
         rotation_form.setContentsMargins(8, 6, 8, 6)
         rotation_form.setVerticalSpacing(4)
@@ -322,7 +405,7 @@ class MCD2100Panel(QWidget):
         self.rotator.setMinimumWidth(120)
         self.rotator.setMaximumWidth(180)
         self.rotator.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        rotation_form.addRow("Angles (deg)", self.angles)
+        rotation_form.addRow("Angles", self.angles)
         rotation_form.addRow("Rotator", self.rotator)
 
         field_rotation_row = QHBoxLayout()
@@ -331,12 +414,12 @@ class MCD2100Panel(QWidget):
         field_rotation_row.addWidget(rotation_group, 1)
         workflow_layout.addLayout(field_rotation_row)
 
-        temperature_group = QGroupBox("Sample Temperature (optional)")
+        temperature_group = QGroupBox("Temperature")
         self._temperature_group = temperature_group
         temperature_form = QFormLayout(temperature_group)
         temperature_form.setContentsMargins(8, 6, 8, 6)
         temperature_form.setVerticalSpacing(4)
-        self.temperature_control_enabled = QCheckBox("Control sample temperature")
+        self.temperature_control_enabled = QCheckBox("Control temperature")
         self.sample_target = self._spin(1.8, 300.0, 3)
         self.sample_ramp_rate = self._spin(0.1, 100.0, 2)
         self.temperature_tolerance = self._spin(0.001, 20.0, 3)
@@ -347,13 +430,22 @@ class MCD2100Panel(QWidget):
         self.temperature_tolerance.setSuffix(" K")
         self.temperature_stable.setSuffix(" s")
         self.temperature_timeout.setSuffix(" s")
+        self.apply_temperature_btn = QPushButton("Apply temperature")
+        self.apply_temperature_btn.setToolTip(
+            "Immediately send this sample target to the attoDRY2100 and start "
+            "its automatic sample/VTI temperature coordination."
+        )
+        self.temperature_apply_status = QLabel("Not applied")
+        self.temperature_apply_status.setWordWrap(True)
         for widget in (
             self.sample_target, self.sample_ramp_rate, self.temperature_tolerance,
             self.temperature_stable, self.temperature_timeout,
         ):
             self._compact(widget, 105, 150)
         temperature_form.addRow(self.temperature_control_enabled)
-        temperature_form.addRow("Target temperature", self.sample_target)
+        temperature_form.addRow("Target", self.sample_target)
+        temperature_form.addRow(self.apply_temperature_btn)
+        temperature_form.addRow("Apply status", self.temperature_apply_status)
         # These remain persisted compatibility/settings attributes and retain
         # the existing stabilization semantics, but are intentionally not
         # exposed in the routine fixed-temperature workflow.
@@ -369,6 +461,10 @@ class MCD2100Panel(QWidget):
         temperature_note.setWordWrap(True)
         temperature_form.addRow(temperature_note)
         self.temperature_control_enabled.toggled.connect(self._update_temperature_controls)
+        self.temperature_control_enabled.toggled.connect(self._update_condition_preview)
+        self.sample_target.valueChanged.connect(self._update_condition_preview)
+        self.sample_target.valueChanged.connect(self._on_temperature_target_edited)
+        self.apply_temperature_btn.clicked.connect(self.apply_temperature)
 
         lightfield_group = QGroupBox("LightField")
         self._lightfield_group = lightfield_group
@@ -379,9 +475,11 @@ class MCD2100Panel(QWidget):
         self.output.setReadOnly(True)
         self.output.setToolTip("Derived from the shared Sample ID: base output / device / mcd")
         self.stem = QLineEdit("mcd2100_continuous")
-        # Output identity is derived from the shared device and gate context;
-        # legacy stem remains visible for compatibility but is not editable.
+        # These legacy widgets remain available internally for run setup and
+        # compatibility, but the fixed output location is not exposed to users.
         self.stem.setReadOnly(True)
+        self.output.setVisible(False)
+        self.stem.setVisible(False)
         self.output.setMinimumWidth(240)
         self.output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._compact(self.stem, 250, 450)
@@ -422,24 +520,53 @@ class MCD2100Panel(QWidget):
         self.gate_vtg_factor.setValue(1.0)
         self.gate_vbg_factor.setValue(1.0)
         self.gate_ratio_value = QLabel("r = 1")
+        self.initial_voltage_settle = self._spin(0.0, 3600.0, 3)
+        self.voltage_settle = self._spin(0.0, 3600.0, 3)
+        self.initial_voltage_settle.setSuffix(" s")
+        self.voltage_settle.setSuffix(" s")
+        self.initial_voltage_settle.setSingleStep(0.5)
+        self.voltage_settle.setSingleStep(0.1)
+        self._compact(self.initial_voltage_settle, 88, 110)
+        self._compact(self.voltage_settle, 88, 110)
+        self.initial_voltage_settle.setToolTip(
+            "Cancelable wait after ramping to the first enabled gate condition."
+        )
+        self.voltage_settle.setToolTip(
+            "Cancelable wait after ramping to each later enabled gate condition."
+        )
         for widget in (self.vtg, self.vbg, self.vbias):
             self._compact(widget, 100, 140)
             widget.setSuffix(" V")
         self._compact(self.gate_ratio, 100, 140)
         self._compact(self.gate_vtg_factor, 80, 110)
         self._compact(self.gate_vbg_factor, 80, 110)
+        self.gate_vtg_factor.setFixedWidth(110)
+        self.gate_vbg_factor.setFixedWidth(110)
+        self.initial_voltage_settle.setFixedWidth(88)
+        self.voltage_settle.setFixedWidth(88)
         # The table below is authoritative.  These scalar widgets remain as
         # hidden migration attributes for legacy config/session adapters.
         for legacy_widget in (self.vtg, self.vbg, self.vbias):
             legacy_widget.setVisible(False)
         ratio_row = QHBoxLayout()
+        ratio_row.addWidget(QLabel("Weighting"))
+        ratio_row.addWidget(QLabel("TG"))
         ratio_row.addWidget(self.gate_vtg_factor)
-        ratio_row.addWidget(QLabel("× Vtg  ="))
+        ratio_row.addSpacing(6)
+        ratio_row.addWidget(QLabel("BG"))
         ratio_row.addWidget(self.gate_vbg_factor)
-        ratio_row.addWidget(QLabel("× Vbg"))
         ratio_row.addWidget(self.gate_ratio_value)
         ratio_row.addStretch(1)
-        gate_form.addRow("Gate weighting", ratio_row)
+        gate_form.addRow(ratio_row)
+        settle_row = QHBoxLayout()
+        settle_row.addWidget(QLabel("Settle"))
+        settle_row.addWidget(QLabel("First"))
+        settle_row.addWidget(self.initial_voltage_settle)
+        settle_row.addSpacing(8)
+        settle_row.addWidget(QLabel("Later"))
+        settle_row.addWidget(self.voltage_settle)
+        settle_row.addStretch(1)
+        gate_form.addRow(settle_row)
 
         entry_group = QGroupBox("New gate rows")
         entry_layout = QGridLayout(entry_group)
@@ -467,17 +594,18 @@ class MCD2100Panel(QWidget):
         self._gate_entry_status.setWordWrap(True)
         self._gate_edit_row: Optional[int] = None
         entry_layout.addWidget(QLabel("Input type"), 0, 0)
-        entry_layout.addWidget(self._gate_entry_mode, 1, 0)
         entry_layout.addWidget(self._gate_entry_a_label, 0, 1)
-        entry_layout.addWidget(self._gate_entry_a, 1, 1)
         entry_layout.addWidget(self._gate_entry_b_label, 0, 2)
+        entry_layout.addWidget(self._gate_entry_mode, 1, 0)
+        entry_layout.addWidget(self._gate_entry_a, 1, 1)
         entry_layout.addWidget(self._gate_entry_b, 1, 2)
-        entry_layout.addWidget(QLabel("Vbias"), 0, 3)
-        entry_layout.addWidget(self._gate_entry_vbias, 1, 3)
-        entry_layout.addWidget(self._gate_entry_expansion_label, 0, 4)
-        entry_layout.addWidget(self._gate_entry_expansion, 1, 4)
-        entry_layout.addWidget(self._gate_entry_add, 1, 5)
-        entry_layout.addWidget(self._gate_entry_status, 2, 0, 1, 6)
+        entry_layout.addWidget(QLabel("Vbias"), 2, 0)
+        entry_layout.addWidget(self._gate_entry_expansion_label, 2, 1)
+        entry_layout.addWidget(self._gate_entry_vbias, 3, 0)
+        entry_layout.addWidget(self._gate_entry_expansion, 3, 1)
+        entry_layout.addWidget(self._gate_entry_add, 3, 2)
+        entry_layout.addWidget(self._gate_entry_status, 4, 0, 1, 3)
+        entry_layout.setColumnStretch(0, 1)
         entry_layout.setColumnStretch(1, 1)
         entry_layout.setColumnStretch(2, 1)
         gate_form.addRow(entry_group)
@@ -486,7 +614,7 @@ class MCD2100Panel(QWidget):
         self._gate_mode.addItem("Vtg / Vbg", "voltage")
         self._gate_mode.addItem("Doping / E-field", "coordinates")
         self._gate_mode.setToolTip("Choose which coordinate pair is editable in the gate table.")
-        self._condition_table = QTableWidget(1, 10)
+        self._condition_table = _SmoothConditionTable(1, 10)
         self._condition_table.setHorizontalHeaderLabels(
             ["Use", "#", "Input type", "Vtg", "Vbg", "Vbias", "Doping",
              "E-field", "Input A", "Input B"]
@@ -505,7 +633,9 @@ class MCD2100Panel(QWidget):
         self._condition_table.setColumnHidden(9, True)
         self._condition_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._condition_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._condition_table.setFixedHeight(150)
+        self._condition_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._condition_table.verticalHeader().setDefaultSectionSize(26)
+        self._condition_table.verticalScrollBar().setSingleStep(18)
         self._condition_table.setToolTip("One row per gate condition. Mode selects the canonical input line; calculated voltage and D/F columns are read-only.")
         gate_form.addRow(self._condition_table)
         condition_buttons = QHBoxLayout()
@@ -519,6 +649,40 @@ class MCD2100Panel(QWidget):
             condition_buttons.addWidget(button)
         gate_form.addRow(condition_buttons)
 
+        preview_group = QGroupBox("Gate run preview")
+        preview_layout = QVBoxLayout(preview_group)
+        preview_layout.setContentsMargins(8, 6, 8, 6)
+        preview_layout.setSpacing(3)
+        self._condition_summary = QLabel("1 total · 1 enabled")
+        self._condition_summary.setStyleSheet("font-weight: 700;")
+        self._condition_summary.setWordWrap(True)
+        self._condition_summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._selected_condition_summary = QLabel("Select a row to inspect it")
+        self._selected_condition_summary.setWordWrap(True)
+        self._selected_condition_summary.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._condition_plan_preview = QPlainTextEdit()
+        self._condition_plan_preview.setReadOnly(True)
+        self._condition_plan_preview.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.WidgetWidth
+        )
+        self._condition_plan_preview.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._condition_plan_preview.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self._condition_plan_preview.setMinimumHeight(68)
+        self._condition_plan_preview.setMaximumHeight(112)
+        self._condition_plan_preview.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        preview_layout.addWidget(self._condition_summary)
+        preview_layout.addWidget(self._selected_condition_summary)
+        preview_layout.addWidget(self._condition_plan_preview)
+        gate_form.addRow(preview_group)
+
         temperature_lightfield_row = QHBoxLayout()
         temperature_lightfield_row.setSpacing(6)
         temperature_lightfield_row.addWidget(temperature_group, 1)
@@ -526,21 +690,24 @@ class MCD2100Panel(QWidget):
         workflow_layout.addLayout(temperature_lightfield_row)
         workflow_layout.addWidget(gate_group)
 
-        output_group = QGroupBox("Output")
+        output_group = QGroupBox("Filename")
         output_form = QFormLayout(output_group)
         output_form.setContentsMargins(8, 6, 8, 6)
         output_form.setVerticalSpacing(4)
         self.output_browse = QPushButton("Browse…")
         self.output_browse.setEnabled(False)
+        self.output_browse.setVisible(False)
         self.output_browse.setMinimumWidth(82)
         self.output_browse.clicked.connect(self._browse_output)
-        output_row = QHBoxLayout()
-        output_row.setContentsMargins(0, 0, 0, 0)
-        output_row.setSpacing(6)
-        output_row.addWidget(self.output, 1)
-        output_row.addWidget(self.output_browse)
-        output_form.addRow("Output directory", output_row)
-        output_form.addRow("Filename stem", self.stem)
+        self.filename_preview = QLineEdit()
+        self.filename_preview.setReadOnly(True)
+        self.filename_preview.setToolTip(
+            "Preview for the first enabled gate condition. The output folder is fixed automatically."
+        )
+        self.filename_preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        output_form.addRow("Filename preview", self.filename_preview)
         workflow_layout.addWidget(output_group)
         content_layout.addWidget(workflow)
 
@@ -586,8 +753,9 @@ class MCD2100Panel(QWidget):
         status_layout.addLayout(telemetry)
         self.error_display = QPlainTextEdit()
         self.error_display.setReadOnly(True)
-        self.error_display.setMinimumHeight(60)
+        self.error_display.setMinimumHeight(0)
         self.error_display.setMaximumHeight(120)
+        self.error_display.setVisible(False)
         status_layout.addWidget(self.error_display)
         content_layout.addWidget(status_group)
         content_layout.addStretch(1)
@@ -597,7 +765,14 @@ class MCD2100Panel(QWidget):
         display_layout.setContentsMargins(8, 6, 8, 6)
         display_layout.setSpacing(6)
         display_header = QHBoxLayout()
-        display_header.addWidget(QLabel("Live spectrum"))
+        live_title = QLabel("Live spectrum")
+        live_title.setStyleSheet("font-weight: 700;")
+        self.run_activity = QLabel("● Idle")
+        self.run_activity.setStyleSheet("color: #6b7280;")
+        self.spectrum_activity = QLabel("Spectrum 0 · no spectrum yet")
+        display_header.addWidget(live_title)
+        display_header.addWidget(self.run_activity)
+        display_header.addWidget(self.spectrum_activity)
         display_header.addStretch(1)
         self._clear_log_btn = QPushButton("Clear log")
         display_header.addWidget(self._clear_log_btn)
@@ -606,6 +781,9 @@ class MCD2100Panel(QWidget):
         self._plot.setMinimumHeight(180)
         self._plot.setLabel("bottom", "Wavelength", units="nm")
         self._plot.setLabel("left", "Intensity", units="counts")
+        self._plot_overlay = pg.TextItem("No spectrum yet", color="#4b5563", anchor=(0, 0))
+        self._plot_overlay.setPos(0, 0)
+        self._plot.addItem(self._plot_overlay)
         self._curve_a = self._plot.plot(pen=pg.mkPen("#2374c6", width=1.5), name="A")
         self._curve_b = self._plot.plot(pen=pg.mkPen("#c06020", width=1.5), name="B")
         self._plot.addLegend()
@@ -621,7 +799,11 @@ class MCD2100Panel(QWidget):
         self._splitter.addWidget(display)
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
-        self._splitter.setSizes([760, 440])
+        self._splitter.setSizes([680, 520])
+        self._activity_timer = QTimer(self)
+        self._activity_timer.setInterval(500)
+        self._activity_timer.timeout.connect(self._refresh_activity)
+        self._activity_timer.start()
 
         self.connect_btn.clicked.connect(self.connect_instrument)
         self.disconnect_btn.clicked.connect(self.disconnect_instrument)
@@ -630,12 +812,17 @@ class MCD2100Panel(QWidget):
         self.stop_btn.clicked.connect(self.stop)
         self.terminal.connect(self._on_terminal)
         self._clear_log_btn.clicked.connect(self._log.clear)
-        self._sample_id.textChanged.connect(self._update_derived_output)
+        self._sample_id.textChanged.connect(self._on_filename_context_changed)
+        self._point.textChanged.connect(self._update_filename_preview)
+        self.start_field.textChanged.connect(self._update_filename_preview)
+        self.stop_field.textChanged.connect(self._update_filename_preview)
         self.gate_ratio.valueChanged.connect(self._on_gate_ratio_changed)
         self.gate_vtg_factor.valueChanged.connect(self._on_gate_factors_changed)
         self.gate_vbg_factor.valueChanged.connect(self._on_gate_factors_changed)
         self._gate_mode.currentIndexChanged.connect(self._update_condition_editable)
         self._condition_table.itemChanged.connect(self._on_condition_item_changed)
+        self._condition_table.cellClicked.connect(self._select_condition_row)
+        self._condition_table.itemSelectionChanged.connect(self._update_condition_preview)
         for signal in (
             self._gate_entry_mode.currentIndexChanged,
             self._gate_entry_a.textChanged, self._gate_entry_b.textChanged,
@@ -679,6 +866,139 @@ class MCD2100Panel(QWidget):
             self.temperature_stable, self.temperature_timeout,
         ):
             widget.setEnabled(enabled)
+        applying = self._temperature_apply_handle is not None
+        self.apply_temperature_btn.setEnabled(
+            enabled and self._connected and not applying and not self._externally_busy
+        )
+
+    def _on_temperature_target_edited(self, *_args) -> None:
+        if self._temperature_apply_handle is not None:
+            return
+        target = float(self.sample_target.value())
+        if (
+            self._applied_sample_target_k is None
+            or abs(target - self._applied_sample_target_k) > 0.001
+        ):
+            self._temperature_monitor_timer.stop()
+            self.temperature_apply_status.setText("Target edited — click Apply temperature")
+
+    @Slot()
+    def apply_temperature(self) -> None:
+        if self._temperature_apply_handle is not None:
+            return
+        if not self._connected:
+            self._show_error("Connect the attoDRY2100 before applying temperature")
+            return
+        if self.worker is not None or self._externally_busy:
+            self._show_error("Temperature cannot be changed while an MCD workflow is active")
+            return
+        if not self.temperature_control_enabled.isChecked():
+            self._show_error("Enable Control temperature before applying the target")
+            return
+        target = float(self.sample_target.value())
+        ramp_rate = float(self.sample_ramp_rate.value())
+        if self._last_sample_setpoint_k is not None and abs(target - self._last_sample_setpoint_k) >= 25.0:
+            answer = QMessageBox.question(
+                self,
+                "Confirm large temperature change",
+                f"Change the sample target from {self._last_sample_setpoint_k:g} K to {target:g} K?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        configure = getattr(self.controller, "configure_sample_temperature_async", None)
+        if not callable(configure):
+            self._show_error("The connected attoDRY2100 does not expose sample-temperature control")
+            return
+        self._temperature_monitor_timer.stop()
+        self.temperature_apply_status.setText(f"Applying {target:g} K…")
+        self.error_display.clear()
+        self.error_display.setVisible(False)
+        try:
+            self._temperature_apply_handle = configure(target, ramp_rate)
+        except Exception as exc:
+            self._temperature_apply_handle = None
+            self.temperature_apply_status.setText("Apply failed")
+            self._show_error(f"Temperature apply failed: {exc}")
+            self._refresh_controls()
+            return
+        self._refresh_controls()
+        QTimer.singleShot(0, self._poll_apply_temperature)
+
+    def _poll_apply_temperature(self) -> None:
+        handle = self._temperature_apply_handle
+        if handle is None:
+            return
+        if getattr(getattr(handle, "state", None), "name", "") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            QTimer.singleShot(20, self._poll_apply_temperature)
+            return
+        self._temperature_apply_handle = None
+        try:
+            snapshot = handle.result(timeout=0)
+            handle.wait_drained(timeout=0)
+        except Exception as exc:
+            self.temperature_apply_status.setText("Apply failed")
+            self._show_error(f"Temperature apply failed: {exc}")
+        else:
+            self._applied_sample_target_k = float(self.sample_target.value())
+            self._on_temperature_snapshot(snapshot)
+            self._append_log(
+                f"Sample temperature target applied immediately: "
+                f"{self._applied_sample_target_k:g} K"
+            )
+            if not self._temperature_is_stable(snapshot):
+                self._temperature_monitor_timer.start()
+        self._refresh_controls()
+
+    def _temperature_is_stable(self, snapshot) -> bool:
+        sample = getattr(snapshot, "sample_temperature_k", None)
+        setpoint = getattr(snapshot, "sample_setpoint_k", None)
+        active = getattr(snapshot, "sample_control_active", None)
+        if not all(
+            isinstance(value, (int, float)) and math.isfinite(float(value))
+            for value in (sample, setpoint)
+        ) or active is not True:
+            return False
+        return abs(float(sample) - float(setpoint)) <= float(self.temperature_tolerance.value())
+
+    def _monitor_applied_temperature(self) -> None:
+        if (
+            not self._connected or self.worker is not None
+            or self._temperature_apply_handle is not None
+            or self._temperature_monitor_handle is not None
+        ):
+            return
+        read = getattr(self.controller, "read_temperature_snapshot_async", None)
+        if not callable(read):
+            self._temperature_monitor_timer.stop()
+            return
+        try:
+            self._temperature_monitor_handle = read()
+        except Exception as exc:
+            self._temperature_monitor_timer.stop()
+            self._show_error(f"Temperature telemetry failed: {exc}")
+            return
+        QTimer.singleShot(0, self._poll_applied_temperature)
+
+    def _poll_applied_temperature(self) -> None:
+        handle = self._temperature_monitor_handle
+        if handle is None:
+            return
+        if getattr(getattr(handle, "state", None), "name", "") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            QTimer.singleShot(20, self._poll_applied_temperature)
+            return
+        self._temperature_monitor_handle = None
+        try:
+            snapshot = handle.result(timeout=0)
+            handle.wait_drained(timeout=0)
+        except Exception as exc:
+            self._temperature_monitor_timer.stop()
+            self._show_error(f"Temperature telemetry failed: {exc}")
+        else:
+            self._on_temperature_snapshot(snapshot)
+            if self._temperature_is_stable(snapshot):
+                self._temperature_monitor_timer.stop()
 
     def _wire_controller(self):
         for name, slot in (
@@ -693,6 +1013,7 @@ class MCD2100Panel(QWidget):
     def _load_config(self):
         settings = cfg.mcd2100
         self._sample_id.setText(settings.sample_id)
+        self._point.setText(settings.point)
         self.start_field.setText(f"{settings.start_field_t:g}")
         self.stop_field.setText(f"{settings.stop_field_t:g}")
         self.angles.setText(", ".join(f"{value:g}" for value in settings.angles_deg))
@@ -710,6 +1031,12 @@ class MCD2100Panel(QWidget):
             bg_factor = float(settings.gate_ratio)
         self.gate_vtg_factor.setValue(tg_factor)
         self.gate_vbg_factor.setValue(bg_factor)
+        self.initial_voltage_settle.setValue(float(
+            getattr(settings, "initial_voltage_settle_s", cfg.ramp.settle_s)
+        ))
+        self.voltage_settle.setValue(float(
+            getattr(settings, "voltage_settle_s", cfg.ramp.settle_s)
+        ))
         self._on_gate_factors_changed()
         self._seed_condition_table(settings.conditions or [{
             "enabled": True, "vtg_v": settings.vtg_v,
@@ -721,6 +1048,7 @@ class MCD2100Panel(QWidget):
             self._update_gate_entry()
         self._update_derived_output()
         self.stem.setText("mcd2100_continuous")
+        self._update_filename_preview()
         self.temperature_control_enabled.setChecked(settings.temperature_control_enabled)
         self.sample_target.setValue(settings.sample_target_k)
         self.sample_ramp_rate.setValue(settings.sample_ramp_rate_k_per_min)
@@ -733,6 +1061,161 @@ class MCD2100Panel(QWidget):
         device = sanitize_token(self._sample_id.text())
         if device:
             self.output.setText(str(Path(cfg.filename.base_out) / device / "mcd"))
+
+    def _on_filename_context_changed(self, *_args) -> None:
+        self._update_derived_output()
+        self._update_filename_preview()
+
+    def _filename_temperature(self, *, required: bool = True) -> tuple[float, str]:
+        if self.temperature_control_enabled.isChecked():
+            return float(self.sample_target.value()), "controlled_target"
+        if self._last_sample_temperature_k is not None:
+            return float(self._last_sample_temperature_k), "live_sample_readback"
+        # Standalone panels are used by controller/UI tests and saved-setting
+        # editors without a live temperature stream.  Keep those previews
+        # deterministic while the real MainWindow workflow remains fail-closed.
+        if self.parent() is None:
+            text = str(cfg.filename.temperature).strip().upper().removesuffix("K")
+            try:
+                value = float(text.replace("P", "."))
+                if math.isfinite(value) and value > 0:
+                    return value, "configured_default"
+            except (TypeError, ValueError):
+                pass
+        if required:
+            raise ValueError(
+                "Connect temperature telemetry or enable temperature control to create the filename"
+            )
+        return float("nan"), "unavailable"
+
+    def _update_filename_preview(self, *_args) -> None:
+        if not hasattr(self, "filename_preview"):
+            return
+        try:
+            start_field = float(self.start_field.text().strip())
+            stop_field = float(self.stop_field.text().strip())
+            if not math.isfinite(start_field) or not math.isfinite(stop_field):
+                raise ValueError
+            enabled = [row for row in self._condition_rows() if row.get("enabled", True)]
+            if not enabled:
+                self.filename_preview.setText("Enable a gate condition to preview its filename")
+                return
+            condition = enabled[0]
+            temperature_k, _source = self._filename_temperature()
+            filename = build_mcd2100_filename(
+                self._sample_id.text().strip() or "SampleID",
+                1,
+                start_field,
+                stop_field,
+                "roundtrip",
+                doping_v=condition.get("doping_v"),
+                efield_v=condition.get("efield_v"),
+                vtg_v=condition.get("vtg_v"),
+                vbg_v=condition.get("vbg_v"),
+                vbias_v=condition.get("vbias_v"),
+                ratio=self._gate_ratio(),
+                point=self._point.text().strip(),
+                temperature_k=temperature_k,
+            )
+            self.filename_preview.setText(filename)
+        except (TypeError, ValueError) as exc:
+            message = str(exc)
+            self.filename_preview.setText(
+                message if "temperature" in message.lower()
+                else "Enter valid field and gate values to preview the filename"
+            )
+
+    @Slot(int, int)
+    def _select_condition_row(self, row: int, _column: int) -> None:
+        if row >= 0:
+            self._condition_table.selectRow(row)
+
+    def _update_condition_table_height(self) -> None:
+        rows = max(1, self._condition_table.rowCount())
+        visible_rows = min(8, max(4, rows))
+        height = (
+            self._condition_table.horizontalHeader().height()
+            + visible_rows * self._condition_table.verticalHeader().defaultSectionSize()
+            + 4
+        )
+        self._condition_table.setFixedHeight(height)
+
+    @staticmethod
+    def _condition_mode_label(mode: str) -> str:
+        return {
+            MODE_DIRECT: "Direct",
+            MODE_DOPING_EFIELD: "Doping/E-field",
+            MODE_VTG_FROM_VBG_RATIO: "Vtg from Vbg",
+            MODE_VBG_FROM_VTG_RATIO: "Vbg from Vtg",
+            MODE_FIXED_EFIELD: "Fixed E-field",
+            MODE_FIXED_DOPING: "Fixed doping",
+        }.get(str(mode), str(mode))
+
+    def _update_condition_preview(self, *_args) -> None:
+        if not hasattr(self, "_condition_summary"):
+            return
+        try:
+            rows = self._condition_rows()
+        except (TypeError, ValueError) as exc:
+            self._condition_summary.setText(f"Condition preview unavailable: {exc}")
+            return
+        enabled = [(table_row, item) for table_row, item in enumerate(rows, start=1)
+                   if item.get("enabled", True)]
+        count = len(enabled)
+        try:
+            filename_temperature, _source = self._filename_temperature()
+            temperature_summary = f" · filename {filename_temperature:g} K"
+        except ValueError:
+            temperature_summary = " · filename temperature unavailable"
+        self._condition_summary.setText(
+            f"{len(rows)} total · {count} enabled · {count} round trips · "
+            f"{count * 2} field legs · {count} CSV files{temperature_summary}"
+        )
+        lines = []
+        for gate_index, (table_row, item) in enumerate(enabled, start=1):
+            lines.append(
+                f"G{gate_index:02d} · Table row {table_row} · "
+                f"{self._condition_mode_label(item.get('mode', MODE_DIRECT))} · "
+                f"Vtg {float(item.get('vtg_v', 0.0)):+g} V · "
+                f"Vbg {float(item.get('vbg_v', 0.0)):+g} V · "
+                f"Vbias {float(item.get('vbias_v', 0.0)):+g} V · "
+                f"D {float(item.get('doping_v', 0.0)):g} V · "
+                f"F {float(item.get('efield_v', 0.0)):g} V"
+            )
+        self._condition_plan_preview.setPlainText(
+            "\n".join(lines) if lines else "No enabled gate rows"
+        )
+        selected = self._condition_table.currentRow()
+        if 0 <= selected < len(rows):
+            item = rows[selected]
+            execution = next(
+                (index for index, (table_row, _item) in enumerate(enabled, start=1)
+                 if table_row == selected + 1),
+                None,
+            )
+            execution_text = f"G{execution:02d}" if execution is not None else "disabled"
+            self._selected_condition_summary.setText(
+                f"Selected table row {selected + 1} ({execution_text}) · "
+                f"{self._condition_mode_label(item.get('mode', MODE_DIRECT))} · "
+                f"inputs {float(item.get('input_a', 0.0)):g}, "
+                f"{float(item.get('input_b', 0.0)):g} · "
+                f"resolved Vtg {float(item.get('vtg_v', 0.0)):+g} V, "
+                f"Vbg {float(item.get('vbg_v', 0.0)):+g} V"
+            )
+        else:
+            self._selected_condition_summary.setText("Select a row to inspect it")
+        self._update_move_buttons()
+        self._update_filename_preview()
+
+    def _update_move_buttons(self) -> None:
+        if not hasattr(self, "_move_condition_up_btn"):
+            return
+        row = self._condition_table.currentRow()
+        count = self._condition_table.rowCount()
+        self._move_condition_up_btn.setEnabled(row > 0)
+        self._move_condition_down_btn.setEnabled(0 <= row < count - 1)
+        self._edit_condition_btn.setEnabled(row >= 0)
+        self._remove_condition_btn.setEnabled(row >= 0 and count > 1)
 
     def _condition_rows(self) -> list[dict[str, Any]]:
         rows = []
@@ -817,7 +1300,11 @@ class MCD2100Panel(QWidget):
             self._condition_table.setRowCount(max(1, len(conditions)))
             for row, condition in enumerate(conditions):
                 check = QTableWidgetItem()
-                check.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                check.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                )
                 check.setCheckState(Qt.CheckState.Checked if condition.get("enabled", True) else Qt.CheckState.Unchecked)
                 self._condition_table.setItem(row, 0, check)
                 mode = str(condition.get("mode", MODE_DIRECT))
@@ -836,6 +1323,8 @@ class MCD2100Panel(QWidget):
                     self._set_row_value(row, column, 0.0)
         finally:
             self._updating_table = False
+        self._update_condition_table_height()
+        self._update_condition_preview()
 
     def _refresh_condition_row(self, row: int) -> None:
         mode_widget = self._condition_table.cellWidget(row, 2)
@@ -862,6 +1351,7 @@ class MCD2100Panel(QWidget):
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         finally:
             self._updating_table = False
+        self._update_condition_preview()
 
     def _on_gate_ratio_changed(self, _value: float) -> None:
         if not self._syncing_gate_ratio:
@@ -915,6 +1405,7 @@ class MCD2100Panel(QWidget):
             self._set_row_error(row, str(exc))
         finally:
             self._updating_table = False
+        self._update_condition_preview()
 
     def _update_gate_entry(self, *_args) -> None:
         direct = self._gate_entry_mode.currentData() == MODE_DIRECT
@@ -994,6 +1485,7 @@ class MCD2100Panel(QWidget):
             return
         self._gate_edit_row = None
         self.error_display.clear()
+        self.error_display.setVisible(False)
         self._update_gate_entry()
 
     def _edit_selected_condition(self) -> None:
@@ -1058,6 +1550,7 @@ class MCD2100Panel(QWidget):
         rows = self._condition_rows()
         rows.pop(row)
         self._seed_condition_table(rows)
+        self._condition_table.selectRow(min(row, self._condition_table.rowCount() - 1))
         self._gate_edit_row = None
         self._update_condition_editable()
 
@@ -1066,8 +1559,25 @@ class MCD2100Panel(QWidget):
         target = row + int(delta)
         if row < 0 or target < 0 or target >= self._condition_table.rowCount():
             return
-        rows = self._condition_rows(); rows[row], rows[target] = rows[target], rows[row]
-        self._seed_condition_table(rows); self._condition_table.selectRow(target)
+        rows = self._condition_rows()
+        rows[row], rows[target] = rows[target], rows[row]
+        scrollbar = self._condition_table.verticalScrollBar()
+        scroll_value = scrollbar.value()
+        self._condition_table.setUpdatesEnabled(False)
+        try:
+            self._seed_condition_table(rows)
+            self._update_condition_editable()
+            self._condition_table.selectRow(target)
+            scrollbar.setValue(scroll_value)
+            current = self._condition_table.item(target, 1)
+            if current is not None:
+                self._condition_table.scrollToItem(
+                    current, QAbstractItemView.ScrollHint.EnsureVisible
+                )
+        finally:
+            self._condition_table.setUpdatesEnabled(True)
+            self._condition_table.viewport().update()
+        self._update_condition_preview()
 
     @staticmethod
     def _finite_list(text: str, label: str) -> list[float]:
@@ -1094,6 +1604,7 @@ class MCD2100Panel(QWidget):
         except (TypeError, ValueError):
             pass
         settings.sample_id = self._sample_id.text().strip()
+        settings.point = self._point.text().strip()
         settings.bidirectional = True
         settings.angles_deg = self._finite_list(self.angles.text(), "Angles")
         settings.rotator = self.rotator.currentText()
@@ -1104,6 +1615,8 @@ class MCD2100Panel(QWidget):
         settings.gate_ratio = self._gate_ratio()
         settings.gate_vtg_factor = self.gate_vtg_factor.value()
         settings.gate_vbg_factor = self.gate_vbg_factor.value()
+        settings.initial_voltage_settle_s = self.initial_voltage_settle.value()
+        settings.voltage_settle_s = self.voltage_settle.value()
         settings.conditions = self._condition_rows()
         settings.gate_batches = list(self._gate_batch_provenance)
         settings.filename_stem = self.stem.text().strip()
@@ -1116,6 +1629,7 @@ class MCD2100Panel(QWidget):
 
     def apply_saved_experiment_settings(self, settings: dict) -> dict:
         allowed = {
+            "point": lambda v: self._point.setText(str(v)),
             "start_field_t": lambda v: self.start_field.setText(str(v)),
             "stop_field_t": lambda v: self.stop_field.setText(str(v)),
             "lf_center_nm": lambda v: self.lf_center.setValue(float(v)),
@@ -1127,6 +1641,8 @@ class MCD2100Panel(QWidget):
             "gate_ratio": lambda v: self.gate_ratio.setValue(float(v)),
             "gate_vtg_factor": lambda v: self.gate_vtg_factor.setValue(float(v)),
             "gate_vbg_factor": lambda v: self.gate_vbg_factor.setValue(float(v)),
+            "initial_voltage_settle_s": lambda v: self.initial_voltage_settle.setValue(float(v)),
+            "voltage_settle_s": lambda v: self.voltage_settle.setValue(float(v)),
             "gate_conditions": lambda v: self._seed_condition_table(list(v)),
             "conditions": lambda v: self._seed_condition_table(list(v)),
             "gate_batches": lambda v: setattr(self, "_gate_batch_provenance", list(v)),
@@ -1156,6 +1672,7 @@ class MCD2100Panel(QWidget):
     def capture_session_state(self) -> dict:
         return {
             "sample_id": self._sample_id.text(),
+            "point": self._point.text(),
             "start_field_t": self.start_field.text(),
             "stop_field_t": self.stop_field.text(),
             "angles": self.angles.text(),
@@ -1163,11 +1680,13 @@ class MCD2100Panel(QWidget):
             "conditions": self._condition_rows(),
             "gate_conditions": self._condition_rows(),
             "gate_batches": list(self._gate_batch_provenance),
-            "mcd2100_settings_version": 3,
+            "mcd2100_settings_version": 4,
             "gate_mode": self._gate_mode.currentData(),
             "gate_ratio": self._gate_ratio(),
             "gate_vtg_factor": self.gate_vtg_factor.value(),
             "gate_vbg_factor": self.gate_vbg_factor.value(),
+            "initial_voltage_settle_s": self.initial_voltage_settle.value(),
+            "voltage_settle_s": self.voltage_settle.value(),
             "vtg_v": self.vtg.value(), "vbg_v": self.vbg.value(), "vbias_v": self.vbias.value(),
             "lf_center_nm": self.lf_center.value(),
             "lf_exposure_ms": self.lf_exposure.value(),
@@ -1187,6 +1706,8 @@ class MCD2100Panel(QWidget):
             return
         if "sample_id" in state:
             self._sample_id.setText(str(state["sample_id"]))
+        if "point" in state:
+            self._point.setText(str(state["point"]))
         for widget, key in ((self.start_field, "start_field_t"), (self.stop_field, "stop_field_t"),
                             (self.angles, "angles")):
             if key in state:
@@ -1215,6 +1736,13 @@ class MCD2100Panel(QWidget):
             self.gate_vtg_factor.setValue(float(state["gate_vtg_factor"]))
         if "gate_vbg_factor" in state:
             self.gate_vbg_factor.setValue(float(state["gate_vbg_factor"]))
+        legacy_settle = state.get("voltage_settle_s")
+        if "initial_voltage_settle_s" in state:
+            self.initial_voltage_settle.setValue(float(state["initial_voltage_settle_s"]))
+        elif legacy_settle is not None:
+            self.initial_voltage_settle.setValue(float(legacy_settle))
+        if legacy_settle is not None:
+            self.voltage_settle.setValue(float(legacy_settle))
         self._on_gate_factors_changed()
         if state.get("gate_mode") in {"voltage", "coordinates"}:
             self._gate_mode.setCurrentIndex(self._gate_mode.findData(state["gate_mode"]))
@@ -1291,7 +1819,11 @@ class MCD2100Panel(QWidget):
 
     @Slot()
     def disconnect_instrument(self):
-        if not self._connected or self.worker is not None or self._disconnect_handle is not None:
+        if (
+            not self._connected or self.worker is not None
+            or self._disconnect_handle is not None
+            or self._temperature_apply_handle is not None
+        ):
             return
         self.connection_status.setText("Disconnecting…")
         try:
@@ -1379,6 +1911,10 @@ class MCD2100Panel(QWidget):
     @Slot()
     def _on_disconnected(self):
         self._connected = False
+        self._temperature_monitor_timer.stop()
+        self._temperature_monitor_handle = None
+        self.sample_temperature_setpoint_value.setText("N/A")
+        self.temperature_apply_status.setText("Disconnected")
         if self._detached_after_completion:
             self._show_completed_detach()
         else:
@@ -1443,24 +1979,46 @@ class MCD2100Panel(QWidget):
                 f"{float(value):.6g} K"
                 if isinstance(value, (int, float)) and math.isfinite(float(value)) else "N/A"
             )
-        self.sample_temperature_value.setText(
-            display(getattr(snapshot, "sample_temperature_k", None))
-        )
+        sample_temperature = getattr(snapshot, "sample_temperature_k", None)
+        self.sample_temperature_value.setText(display(sample_temperature))
+        if isinstance(sample_temperature, (int, float)) and math.isfinite(float(sample_temperature)):
+            self._last_sample_temperature_k = float(sample_temperature)
+            self._update_condition_preview()
         self.vti_temperature_value.setText(
             display(getattr(snapshot, "vti_temperature_k", None))
         )
+        sample_setpoint = getattr(snapshot, "sample_setpoint_k", None)
+        self.sample_temperature_setpoint_value.setText(display(sample_setpoint))
+        if isinstance(sample_setpoint, (int, float)) and math.isfinite(float(sample_setpoint)):
+            self._last_sample_setpoint_k = float(sample_setpoint)
         active = getattr(snapshot, "sample_control_active", None)
         self.sample_temperature_control_value.setText(
             "Active" if active is True else "Inactive" if active is False else "N/A"
         )
+        if active is not True:
+            self.temperature_apply_status.setText("Control inactive")
+        elif self._temperature_is_stable(snapshot):
+            self.temperature_apply_status.setText(
+                f"Stable at {float(sample_temperature):.6g} K"
+            )
+        elif isinstance(sample_setpoint, (int, float)) and math.isfinite(float(sample_setpoint)):
+            self.temperature_apply_status.setText(f"Ramping to {float(sample_setpoint):.6g} K")
+        else:
+            self.temperature_apply_status.setText("Temperature control active")
 
     @Slot(str)
     def _show_error(self, message):
         self.error_display.setPlainText(str(message))
+        self.error_display.setVisible(True)
+        if hasattr(self, "_log"):
+            self._append_log(f"ERROR: {message}")
 
     @Slot()
     def start(self):
         if self.worker is not None:
+            return
+        if self._temperature_apply_handle is not None:
+            self._show_error("Wait for the temperature target to finish applying")
             return
         if self._externally_busy:
             self._show_error("Another MCD workflow is using the shared instruments")
@@ -1505,6 +2063,7 @@ class MCD2100Panel(QWidget):
                 if readiness:
                     raise ValueError(readiness[0])
             device_id = self._sample_id.text().strip()
+            point = self._point.text().strip()
             if device_id:
                 self._update_derived_output()
             output_text = self.output.text().strip()
@@ -1518,6 +2077,7 @@ class MCD2100Panel(QWidget):
             standalone_injected = self.parent() is None
             if not device_id and not standalone_injected:
                 raise ValueError("Sample ID is required")
+            filename_temperature_k, filename_temperature_source = self._filename_temperature()
             if device_id:
                 cfg.mcd2100.sample_id = device_id
             stem = sanitize_token(stem)
@@ -1538,13 +2098,16 @@ class MCD2100Panel(QWidget):
             if device_id:
                 base_root = Path(cfg.filename.base_out)
                 settings_snapshot = {
-                    "mcd2100_settings_version": 3,
+                    "mcd2100_settings_version": 4,
+                    "point": point,
                     "start_field_t": start_field, "stop_field_t": stop_field,
                     "angles_deg": angles, "rotator": rotator_name,
                     "lf_center_nm": self.lf_center.value(), "lf_exposure_ms": self.lf_exposure.value(),
                     "lf_frames": self.lf_frames.value(), "gate_ratio": self._gate_ratio(),
                     "gate_vtg_factor": self.gate_vtg_factor.value(),
                     "gate_vbg_factor": self.gate_vbg_factor.value(),
+                    "initial_voltage_settle_s": self.initial_voltage_settle.value(),
+                    "voltage_settle_s": self.voltage_settle.value(),
                     "gate_conditions": conditions,
                     "gate_batches": list(self._gate_batch_provenance),
                     "temperature_control_enabled": self.temperature_control_enabled.isChecked(),
@@ -1553,6 +2116,8 @@ class MCD2100Panel(QWidget):
                     "temperature_tolerance_k": self.temperature_tolerance.value(),
                     "temperature_stable_s": self.temperature_stable.value(),
                     "temperature_timeout_s": self.temperature_timeout.value(),
+                    "filename_temperature_k": filename_temperature_k,
+                    "filename_temperature_source": filename_temperature_source,
                 }
                 safety_policy = {
                     "attodry2100": vars(cfg.attodry2100),
@@ -1583,8 +2148,18 @@ class MCD2100Panel(QWidget):
                 temperature_tolerance_k=self.temperature_tolerance.value(),
                 temperature_stable_s=self.temperature_stable.value(),
                 temperature_timeout_s=self.temperature_timeout.value(),
+                initial_voltage_settle_s=self.initial_voltage_settle.value(),
+                voltage_settle_s=self.voltage_settle.value(),
+                filename_temperature_k=filename_temperature_k,
+                filename_temperature_source=filename_temperature_source,
                 **self._continuous_settings(),
-                metadata={"device_id": self._sample_id.text().strip(), "experiment_type": "mcd_attodry2100"},
+                metadata={
+                    "device_id": self._sample_id.text().strip(),
+                    "point": point,
+                    "filename_temperature_k": filename_temperature_k,
+                    "filename_temperature_source": filename_temperature_source,
+                    "experiment_type": "mcd_attodry2100",
+                },
             )
         except Exception as exc:
             run = getattr(self, "_experiment_run", None)
@@ -1596,11 +2171,13 @@ class MCD2100Panel(QWidget):
             self._show_error(str(exc))
             return
         self.error_display.clear()
+        self.error_display.setVisible(False)
         self.worker = worker
         self.runner = _Runner(worker)
         self.runner.progress.connect(self._on_progress)
         self.runner.spectrum_event.connect(self._on_spectrum_event)
         self.runner.log.connect(self._append_log)
+        self.runner.phase.connect(self._on_phase)
         self.thread = QThread(self)
         self.runner.moveToThread(self.thread)
         self.thread.started.connect(self.runner.run)
@@ -1613,6 +2190,12 @@ class MCD2100Panel(QWidget):
         self.thread.finished.connect(self._thread_finished)
         self._terminal_status = "Running"
         self.status.setText("Running")
+        self._active_phase = "Starting"
+        self._phase_started_at = time.monotonic()
+        self._last_spectrum_at = None
+        self._spectrum_count = 0
+        self._plot_overlay.setText("Waiting for first spectrum")
+        self.spectrum_activity.setText("Spectrum 0 · no spectrum yet")
         self.progress_bar.setValue(0)
         self.run_state_changed.emit(True)
         self._refresh_controls()
@@ -1623,7 +2206,7 @@ class MCD2100Panel(QWidget):
         if self.worker is None:
             return
         self.worker.request_cancel()
-        self.status.setText("Cancellation requested — waiting for safe cleanup")
+        self._on_phase("Cancellation requested — waiting for safe cleanup")
 
     @Slot(float, float, int, int)
     def _on_progress(self, field_t: float, percent: float, condition_index: int, condition_count: int) -> None:
@@ -1651,10 +2234,89 @@ class MCD2100Panel(QWidget):
         self.polarization_value.setText(
             f"{label} at {float(event.get('B1_T', 0.0)):+.6g} T"
         )
+        self.direction_value.setText(str(event.get("direction", "N/A")).title())
+        self._last_spectrum_at = time.monotonic()
+        self._spectrum_count = int(event.get("total_spectra", self._spectrum_count + 1))
+        gate_index = int(event.get("gate_index", 1))
+        gate_count = int(event.get("gate_count", 1))
+        field_t = float(event.get("B1_T", 0.0))
+        self._plot_overlay.setText(
+            f"Spectrum {self._spectrum_count} · Gate {gate_index}/{gate_count}\n"
+            f"{label} · {field_t:+.6g} T"
+        )
+        if wavelengths and counts:
+            self._plot_overlay.setPos(float(min(wavelengths)), float(max(counts)))
+        self._refresh_activity()
+
+    @Slot(str)
+    def _on_phase(self, message: str) -> None:
+        self._active_phase = str(message)
+        self._phase_started_at = time.monotonic()
+        self._settle_deadline = None
+        if self._active_phase.startswith("Gate settling") and self._active_phase.endswith(" s"):
+            try:
+                settle_s = float(self._active_phase.rsplit(":", 1)[1][:-2].strip())
+                self._settle_deadline = self._phase_started_at + max(0.0, settle_s)
+            except (IndexError, ValueError):
+                pass
+        self.status.setText(self._active_phase)
+        self._append_log(self._active_phase)
+        self._refresh_activity()
+
+    @Slot()
+    def _refresh_activity(self) -> None:
+        now = time.monotonic()
+        running = self.worker is not None
+        since_spectrum = (
+            None if self._last_spectrum_at is None
+            else max(0.0, now - self._last_spectrum_at)
+        )
+        phase_lower = self._active_phase.lower()
+        waiting = any(token in phase_lower for token in (
+            "settling", "ramping gate", "positioning", "configuring", "starting"
+        ))
+        if running and since_spectrum is not None and since_spectrum < 1.5:
+            self.run_activity.setText("● New spectrum")
+            self.run_activity.setStyleSheet("color: #15803d; font-weight: 700;")
+        elif running and self._settle_deadline is not None:
+            remaining = max(0, int(math.ceil(self._settle_deadline - now)))
+            self.run_activity.setText(f"● Settling · {remaining} s remaining")
+            self.run_activity.setStyleSheet("color: #b45309; font-weight: 700;")
+        elif running and waiting:
+            self.run_activity.setText("● Setup / waiting")
+            self.run_activity.setStyleSheet("color: #b45309; font-weight: 700;")
+        elif running:
+            self.run_activity.setText("● Running")
+            self.run_activity.setStyleSheet("color: #2563eb; font-weight: 700;")
+        else:
+            self.run_activity.setText(f"● {self._terminal_status}")
+            self.run_activity.setStyleSheet("color: #6b7280;")
+
+        if since_spectrum is None and not running:
+            text = "Spectrum 0 · no spectrum yet"
+        elif since_spectrum is None:
+            elapsed = max(0.0, now - self._phase_started_at)
+            text = f"Spectrum 0 · waiting {elapsed:.0f} s"
+        else:
+            text = f"Spectrum {self._spectrum_count} · updated {since_spectrum:.1f} s ago"
+        expected_interval = max(
+            15.0,
+            3.0 * self.lf_exposure.value() * self.lf_frames.value() / 1000.0 + 5.0,
+        )
+        expecting = running and phase_lower.startswith("acquiring spectra")
+        phase_age = max(0.0, now - self._phase_started_at)
+        reference_age = phase_age if since_spectrum is None else min(since_spectrum, phase_age)
+        if expecting and reference_age > expected_interval:
+            text += " · no recent spectrum"
+            self.spectrum_activity.setStyleSheet("color: #b91c1c; font-weight: 700;")
+        else:
+            self.spectrum_activity.setStyleSheet("color: #4b5563;")
+        self.spectrum_activity.setText(text)
 
     @Slot(str)
     def _append_log(self, message: str) -> None:
-        self._log.appendPlainText(str(message))
+        timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
+        self._log.appendPlainText(f"[{timestamp}] {message}")
 
     @Slot(object)
     def _on_terminal(self, result):
@@ -1671,6 +2333,10 @@ class MCD2100Panel(QWidget):
         spectra = int(result.get("spectra_written", 0))
         self.progress.setText(f"{spectra} spectra")
         self.progress_bar.setValue(100 if terminal == "COMPLETED" else 0)
+        self._active_phase = self._terminal_status
+        self._phase_started_at = time.monotonic()
+        self._append_log(f"Run finished: {terminal}; {spectra} spectra written")
+        self._refresh_activity()
         error = result.get("error") or result.get("cleanup_error")
         if error:
             self._show_error(str(error))
@@ -1712,15 +2378,24 @@ class MCD2100Panel(QWidget):
 
     def _refresh_controls(self):
         running = self.worker is not None
-        self.start_btn.setEnabled(self._connected and not running and not self._externally_busy)
+        applying_temperature = self._temperature_apply_handle is not None
+        self.start_btn.setEnabled(
+            self._connected and not running and not self._externally_busy and not applying_temperature
+        )
         self.stop_btn.setEnabled(running)
         self.connect_btn.setEnabled(not self._connected and not running and self._connect_handle is None)
-        self.disconnect_btn.setEnabled(self._connected and not running and self._disconnect_handle is None)
-        self.refresh_btn.setEnabled(self._connected and not running)
+        self.disconnect_btn.setEnabled(
+            self._connected and not running and self._disconnect_handle is None
+            and not applying_temperature
+        )
+        self.refresh_btn.setEnabled(self._connected and not running and not applying_temperature)
         self.temperature_control_enabled.setEnabled(not running)
+        self.initial_voltage_settle.setEnabled(not running)
+        self.voltage_settle.setEnabled(not running)
         self._update_temperature_controls()
 
     def shutdown(self, timeout_ms=30_000):
+        self._temperature_monitor_timer.stop()
         if self.worker is not None:
             self.worker.request_cancel()
         thread = self.thread

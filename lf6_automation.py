@@ -37,6 +37,7 @@ from PrincetonInstruments.LightField.AddIns import CameraSettings
 
 LIGHTFIELD_SETTING_TIMEOUT_S = 15.0
 LIGHTFIELD_POLL_INTERVAL_S = 0.05
+LIGHTFIELD_ACQUISITION_ABORT_TIMEOUT_S = 5.0
 
 
 class LightFieldSettingTimeoutError(TimeoutError):
@@ -72,6 +73,25 @@ class LF6Setup:
         image_frame = dataset.GetFrame(0, frames - 1)
         array = self.convert_buffer(image_data, image_frame.Format)
         return array
+
+    def abort_acquisition(self) -> bool:
+        """Request cancellation of an active LightField acquisition.
+
+        LightField versions expose this operation on different automation
+        objects. Try the supported-looking surfaces without assuming one
+        particular SDK version; the caller still enforces its own timeout.
+        """
+        for owner in (self.experiment, self.application):
+            for name in ("Stop", "Abort", "Cancel"):
+                method = getattr(owner, name, None)
+                if not callable(method):
+                    continue
+                try:
+                    method()
+                    return True
+                except Exception:
+                    continue
+        return False
 
     def _frame_dims(self, frame):
         """Try common LightField frame width/height attributes (property or method)."""

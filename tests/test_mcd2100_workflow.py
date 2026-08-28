@@ -200,8 +200,11 @@ class ContinuousContractTests(unittest.TestCase):
         ])
         result, controller, _, tempdir = self._run_scripted(fields)
         self.assertEqual(result["status"], "COMPLETED", result)
-        self.assertEqual(controller.detach_verified_snapshot.field_t, .01)
-        self.assertEqual(controller.fields[0].field_t, .012)
+        # The cycle-boundary field-only read is followed by the authoritative
+        # full snapshot when the endpoint is reached.  The latter is the
+        # snapshot reused for detach validation.
+        self.assertEqual(controller.detach_verified_snapshot.field_t, .012)
+        self.assertEqual(controller.fields, [])
         self.assertEqual(controller.detach_calls, 1)
         self.assertNotIn("stop", controller.events)
         tempdir.cleanup()
@@ -241,6 +244,8 @@ class ContinuousContractTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows[0]["sample_Tmid_K"]), 20.0)
         self.assertEqual(metadata["temperature_stabilization"]["status"], "stable")
         self.assertEqual(metadata["temperature_requested"]["vti_coordination"], "cryostat automatic")
+        self.assertIsNone(metadata["temperature_requested"]["ramp_rate_k_per_min"])
+        self.assertEqual(metadata["temperature_requested"]["ramp_control"], "unchanged")
 
     def test_temperature_timeout_is_bounded_and_prevents_field_and_optical_start(self):
         controller = _ContinuousFakeController([_safe_snapshot(0.0)] * 20)

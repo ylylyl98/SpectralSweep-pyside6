@@ -59,6 +59,11 @@ class SpectrometerLF6:
         y = y.ravel()
         return align_wavelengths_to_intensities(wl, y)
 
+    def abort_acquisition(self) -> bool:
+        """Forward a best-effort cancellation request to LightField."""
+        method = getattr(self.setup, "abort_acquisition", None)
+        return bool(method()) if callable(method) else False
+
     def acquire_2d(self):
         """
         Capture one frame and return a 2D array if the frame reports Width/Height.

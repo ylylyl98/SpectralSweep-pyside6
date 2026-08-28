@@ -244,16 +244,24 @@ def smu_readiness_issues(smu_ctrl: Any, required_roles: Iterable[str]) -> list[s
 def build_mcd2100_filename(device_id: str, gate_index: int, start_t: float,
                            stop_t: float, direction: str, *, doping_v=None,
                            efield_v=None, vtg_v=None, vbg_v=None, vbias_v=None,
-                           ratio=None) -> str:
+                           ratio=None, point: str = "",
+                           temperature_k=None) -> str:
     """Build the MCD extension around the application's canonical filename base."""
     context = FilenameContext(
         device_id=sanitize_token(device_id) or "device", tag="MCD", temperature="",
         mode="MCD", laser_nm="", nominal_power_uw=None, center_nm=None,
         exposure_ms=None, accumulations=None,
+        point=point,
     )
-    parts = [build_base_filename(context, []) or "device", "MCD", f"G{int(gate_index):02d}",
+    parts = [build_base_filename(context, []) or "device", "MCD"]
+    if temperature_k is not None:
+        temperature = format_compact_number(temperature_k)
+        if not temperature:
+            raise ValueError("filename temperature must be finite")
+        parts.append(f"{temperature}K")
+    parts.extend([f"G{int(gate_index):02d}",
              f"B{format_compact_number(start_t, keep_sign=True)}to"
-             f"{format_compact_number(stop_t, keep_sign=True)}T"]
+             f"{format_compact_number(stop_t, keep_sign=True)}T"])
     for prefix, value, signed in (("D", doping_v, False), ("F", efield_v, False),
                                   ("Vtg", vtg_v, True), ("Vbg", vbg_v, True),
                                   ("Vb", vbias_v, True), ("r", ratio, False)):
