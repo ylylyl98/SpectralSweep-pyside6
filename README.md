@@ -2,17 +2,17 @@
 
 SpectralSweep is a PySide6 desktop application for spectra acquisition and sweep-driven optical measurement workflows. The repository is organized around the current desktop UI and its instrument-control runtime.
 
-The application is intended for lab setups that combine Princeton Instruments LightField spectroscopy with voltage control, motion control, and optional optical power measurements. The desktop UI keeps instrument connections, sweep setup, live preview, and data capture in one operator-facing workflow.
+The application is intended for lab setups that combine either Princeton Instruments LightField or an Andor SDK2 camera with a Shamrock spectrograph, voltage control, motion control, and optional optical power measurements. The desktop UI keeps instrument connections, sweep setup, live preview, and data capture in one operator-facing workflow.
 
 ## Main Features
 
 - PySide6 desktop interface with a docked instrument-control panel and dedicated workflow tabs
-- Live spectrum viewing for the LF6 / LightField spectrometer path
+- Live spectrum viewing with selectable LightField, Andor Si CCD, or Andor InGaAs CCD backends
 - Presets-based spectra sweep planning with loop tables, batch conditions, and CSV export
 - MegaSweep voltage-mapping workflow for Vtg/Vbg and D/Vbias acquisition patterns
 - BFP viewing and export tools
-- Hardware-controller wrappers for LF6, Keithley SMU workflows, rotation stages, linear stage, and Thorlabs PM100D
-- Mock LF6 mode for UI development without live spectrometer hardware
+- Hardware-controller wrappers for LightField/Andor, Keithley SMU workflows, rotation stages, linear stage, and Thorlabs PM100D
+- Mock spectrum mode for UI development without live spectrometer hardware
 
 ## Supported Launch Path
 
@@ -44,7 +44,49 @@ pip install -r requirements.txt
 ```
 
 3. Ensure vendor hardware software is installed as needed for your lab setup:
-   Princeton Instruments LightField for LF6 automation, VISA support for Keithley / Newport communication, and Thorlabs PM100D driver files where applicable.
+   Princeton Instruments LightField for LF6 automation; or Andor SDK2 and Shamrock DLLs for the Andor backend; plus VISA support for Keithley / Newport communication and Thorlabs PM100D driver files where applicable.
+
+## Andor Si / InGaAs Setup
+
+1. The repository-bundled `andor dll` and `andor dll/shamrock dll`
+   directories are selected automatically. Override them on the Settings tab
+   only when using another installed Andor runtime.
+2. Set the Si and InGaAs camera indices. A camera serial number is strongly
+   recommended; when provided, it takes precedence over the index and prevents
+   the wrong detector from being selected if Windows changes enumeration order.
+3. Configure the Shamrock index and shared optical defaults. Si and InGaAs
+   cooling targets, cooler-on-connect choices, and fan modes are stored as
+   separate detector profiles.
+4. In the instrument sidebar under Spectrum Detector, choose **Andor Shamrock
+   + Si CCD** or **Andor Shamrock + InGaAs CCD** and connect. Both choices use
+   the Shamrock spectrometer; the choice determines which attached detector is
+   opened. The selected pair is shared by Spectrum, Dual Gate, 2D Sweep,
+   Motion Sweep, MCD, MCD 2100, and BFP acquisitions.
+
+After a real Andor pair connects, expand **Andor controls** below the plot in the
+Spectrum tab. The drawer shows grating groove/blaze information, center
+wavelength, input slit, shutter, Shamrock output port, cooling, and the active
+stored wavelength calibration. For the Si CCD it also exposes 2D ROI and
+horizontal/vertical binning. **Apply + verify** writes the displayed operating
+controls and reads them back before reporting success. The Instruments sidebar
+remains focused on connection, detector temperature, and safe warm disconnect.
+
+The Spectrum tab supports one-shot **Acquire 1D/2D** and continuous **Run 1D/2D**.
+Continuous capture is sequential: the next request starts only after the prior
+frame arrives. The one-dimensional InGaAs array exposes only the 1D actions;
+the Si CCD supports both 1D spectra and 2D detector frames.
+
+Wavelength arrays come exclusively from calibration coefficients already stored
+in the Shamrock controller. SpectralSweep supplies the selected detector's pixel
+geometry and reads `get_calibration()`; it never fits, resets, or overwrites
+calibration coefficients. Results are cached until detector geometry, read mode,
+grating, or center wavelength changes.
+
+The cooler is disabled on connection by default. Use **Warm up + disconnect**
+for a cold detector; it turns cooling off and waits for the configured safe
+temperature before closing the SDK connection. Before production data, verify
+the optional wavelength-axis reversal against a known spectral line without
+changing the stored calibration.
 
 ## Project Structure
 
@@ -87,7 +129,8 @@ SpectralSweep-pyside6/
 - `ui/megasweep_panel.py`
   Voltage sweep planning, live path preview, and measurement export.
 - `controllers/lf6_controller.py`
-  LF6 / LightField connection and acquisition control.
+  Shared LightField / Andor connection and acquisition control (legacy module
+  name retained for compatibility).
 - `controllers/smu_controller.py`
   Keithley / IV workflow integration used by sweep panels.
 
@@ -96,6 +139,9 @@ SpectralSweep-pyside6/
 Some modules depend on lab-specific hardware and vendor runtimes:
 
 - `lf6_automation.py` integrates with Princeton Instruments LightField through `pythonnet`.
+- `app/devices/andor_adapter.py` integrates Andor SDK2 cameras and Shamrock
+  spectrographs through `pylablib`, with all SDK operations serialized on one
+  owner thread.
 - `iv_automation.py` uses VISA and NI-DAQ related interfaces for supported measurement workflows.
 - `TLPMX.py` and its bundled DLL support Thorlabs PM100D discovery and readout.
 - Motion-stage adapters under `app/devices/` rely on the corresponding device libraries and connection paths available on the host machine.

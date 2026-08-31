@@ -115,6 +115,35 @@ class ConfigPersistenceTests(unittest.TestCase):
                 [],
             )
 
+    def test_legacy_andor_cooling_defaults_migrate_to_both_camera_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "lf6": {
+                            "andor_temperature_c": -61.0,
+                            "andor_cooler_on_connect": True,
+                            "andor_fan_mode": "low",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            restored = AppConfig()
+            restored.load(path)
+
+            for role in ("si", "ingaas"):
+                self.assertEqual(
+                    getattr(restored.lf6, f"andor_{role}_temperature_c"), -61.0
+                )
+                self.assertTrue(
+                    getattr(restored.lf6, f"andor_{role}_cooler_on_connect")
+                )
+                self.assertEqual(
+                    getattr(restored.lf6, f"andor_{role}_fan_mode"), "low"
+                )
+
     def test_corrupt_or_wrong_shaped_sections_keep_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"

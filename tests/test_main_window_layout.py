@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QAction, QKeyEvent
 from PySide6.QtWidgets import QApplication, QMainWindow, QPushButton, QSplitter, QWidget
 
-from ui.main_window import MainWindow
+from ui.main_window import MainWindow, _SessionChangeWatcher
 
 
 class MainWindowLayoutTests(unittest.TestCase):
@@ -32,6 +32,26 @@ class MainWindowLayoutTests(unittest.TestCase):
         window._sidebar_toggle_action = QAction(window)
         self.addCleanup(window.deleteLater)
         return window
+
+    def test_session_change_watcher_only_tracks_input_inside_its_window(self):
+        owner = QMainWindow()
+        child = QWidget(owner)
+        outsider = QWidget()
+        changes = []
+        watcher = _SessionChangeWatcher(owner, lambda: changes.append(True), owner)
+        event = QKeyEvent(
+            QEvent.Type.KeyRelease,
+            Qt.Key.Key_A,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+        watcher.eventFilter(outsider, event)
+        self.assertEqual(changes, [])
+        watcher.eventFilter(child, event)
+        self.assertEqual(changes, [True])
+
+        outsider.deleteLater()
+        owner.deleteLater()
 
     def test_sidebar_collapses_and_restores_prior_width(self):
         window = self._layout_stub()

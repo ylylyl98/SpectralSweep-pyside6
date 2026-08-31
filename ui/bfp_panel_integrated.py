@@ -6,11 +6,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
-from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QRectF
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -32,6 +31,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -199,6 +201,8 @@ def _save_figure_atomic(path: Path, fig: Figure, dpi: int = 300) -> None:
 
 
 def _save_png(path: Path, data: np.ndarray, wls: np.ndarray, y_axis: Optional[np.ndarray] = None, scale: str = "Linear", cmap: str = "gray") -> None:
+    from matplotlib.figure import Figure
+
     arr = np.asarray(data, dtype=float)
     fig = Figure(figsize=(7.5, 4.2), dpi=140)
     ax = fig.add_subplot(111)
@@ -768,6 +772,8 @@ class _BRCWidget(QWidget):
         if self._wl is None or self._result is None or self._sample is None or self._bg_scaled is None:
             return
         try:
+            from matplotlib.figure import Figure
+
             sample_path = Path(self._sample_edit.text().strip())
             suffix = rc_suffix_brc(self._mode_combo.currentText(), int(self._order_combo.currentText()))
             out = sample_path.with_name(f"{sample_path.stem}_{suffix}_c-{self._scale_spin.value():.2f}.png")

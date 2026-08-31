@@ -3,13 +3,15 @@ from __future__ import annotations
 import os
 import unittest
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QWheelEvent
 from PySide6.QtWidgets import QApplication, QAbstractSpinBox
 
-from ui.megasweep_panel import MegaSweepPanel
+from ui.megasweep_panel import CoordSystem, MegaSweepPanel, _PreviewPlot
 
 
 class MegaSweepLayoutTests(unittest.TestCase):
@@ -26,6 +28,31 @@ class MegaSweepLayoutTests(unittest.TestCase):
         self.app.processEvents()
         self.addCleanup(panel.close)
         return panel
+
+    def test_progress_geometry_is_cached_and_sliced_without_rescanning_points(self):
+        preview = _PreviewPlot()
+        self.addCleanup(preview.close)
+        preview._coord = CoordSystem.PHYSICAL
+        preview._ratio = 1.0
+        preview._axis_a_vals = np.asarray([0.0, 1.0])
+        preview._valid_points = [
+            {"axis_a": outer, "axis_b": inner, "raw": (outer + 10, inner + 20, 0)}
+            for outer in (0.0, 1.0)
+            for inner in (0.0, 1.0, 2.0)
+        ]
+        preview._cache_progress_geometry()
+
+        preview.update_progress(4, 3)
+
+        completed_x, completed_y = preview._completed_axis_pts.getData()
+        self.assertEqual(completed_x.tolist(), [0.0, 0.0, 0.0, 1.0])
+        self.assertEqual(completed_y.tolist(), [0.0, 1.0, 2.0, 0.0])
+        done_x, _ = preview._done_axis.getData()
+        np.testing.assert_allclose(done_x[:2], [0.0, 0.0])
+        self.assertTrue(np.isnan(done_x[2]))
+        current_x, current_y = preview._current_axis_stripe.getData()
+        self.assertEqual(current_x.tolist(), [1.0, 1.0])
+        self.assertEqual(current_y.tolist(), [0.0, 2.0])
 
     @staticmethod
     def _wheel_event(

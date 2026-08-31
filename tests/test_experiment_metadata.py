@@ -3,7 +3,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+import app.experiment_metadata as experiment_metadata
 from app.experiment_metadata import (
     CANCELLED,
     COMPLETED,
@@ -47,6 +49,45 @@ class ExperimentMetadataContractTests(unittest.TestCase):
         self.assertEqual(metadata["settings"]["requested"]["maximum_field_t"], 9)
         self.assertEqual(metadata["settings"]["requested"]["output_dir"], ".")
         self.assertNotIn("maximum_field_t", metadata["settings"]["loadable"])
+
+    def test_begin_persists_initial_metadata_once_with_sidecar_registered(self):
+        with patch(
+            "app.experiment_metadata._atomic_json",
+            wraps=experiment_metadata._atomic_json,
+        ) as atomic_json:
+            run = self.service.begin("motion_sweep", "D-once")
+
+        self.assertEqual(atomic_json.call_count, 1)
+        metadata = json.loads(run.path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            metadata["files"],
+            [{
+                "path": run.path.relative_to(self.root).as_posix(),
+                "role": "metadata",
+                "kind": "experiment_metadata",
+            }],
+        )
+
+    def test_history_connection_closes_if_schema_setup_fails(self):
+        connection = MagicMock()
+        connection.execute.side_effect = sqlite3.OperationalError("schema failure")
+        with patch("app.experiment_metadata.sqlite3.connect", return_value=connection):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.service.history._connect()
+        connection.close.assert_called_once_with()
+
+    def test_history_schema_setup_is_reused_after_first_connection(self):
+        first = MagicMock()
+        second = MagicMock()
+        with patch(
+            "app.experiment_metadata.sqlite3.connect",
+            side_effect=[first, second],
+        ):
+            self.service.history._connect()
+            self.service.history._connect()
+
+        self.assertEqual(first.execute.call_count, 3)
+        second.execute.assert_not_called()
 
     def test_cancelled_and_failed_records_are_retained(self):
         cancelled = self.service.begin("x", "D1")

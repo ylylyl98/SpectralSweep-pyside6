@@ -60,7 +60,7 @@ class _LightFieldRotationService:
         if spectrometer is None:
             raise RuntimeError("LightField spectrometer is unavailable")
         self.wavelengths = np.asarray(
-            spectrometer.calibration_wavelengths(force=True), dtype=float
+            spectrometer.calibration_wavelengths(force=False), dtype=float
         ).ravel().tolist()
         return self.wavelengths
 

@@ -37,6 +37,9 @@ from typing import Any, Dict, List, Optional
 
 # ── Location of the persisted config file ─────────────────────────────────────
 _PROJECT_CONFIG_FILE = Path(__file__).resolve().parents[1] / "config.json"
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_BUNDLED_ANDOR_DLL_DIR = _PROJECT_ROOT / "andor dll"
+_BUNDLED_SHAMROCK_DLL_DIR = _BUNDLED_ANDOR_DLL_DIR / "shamrock dll"
 
 
 def _default_config_file() -> Path:
@@ -58,11 +61,46 @@ _CONFIG_FILE = _default_config_file()
 
 @dataclass
 class LF6Config:
-    """LightField spectrometer defaults."""
+    """Shared spectrometer defaults (legacy name retained for compatibility)."""
+    backend: str = "lightfield"         # lightfield | andor_si | andor_ingaas
     exposure_ms: float = 2000.0       # ms  — matches main_ui.py sidebar default
     center_nm: float = 860.0          # nm  — matches main_ui.py sidebar default
     accumulations: int = 1            # frames to combine (EPF)
     auto_load_on_connect: bool = True # load saved experiment automatically
+    andor_sdk2_dll_dir: str = str(_BUNDLED_ANDOR_DLL_DIR)
+    andor_shamrock_dll_dir: str = str(_BUNDLED_SHAMROCK_DLL_DIR)
+    andor_si_camera_index: int = 1
+    andor_ingaas_camera_index: int = 0
+    andor_si_serial: str = ""
+    andor_ingaas_serial: str = ""
+    andor_spectrograph_index: int = 0
+    andor_temperature_c: float = -75.0
+    andor_cooler_on_connect: bool = False
+    andor_fan_mode: str = "full"
+    # Detector-specific operating profiles.  The legacy fields above remain as
+    # migration fallbacks for existing config files.
+    andor_si_temperature_c: float = -75.0
+    andor_si_cooler_on_connect: bool = False
+    andor_si_fan_mode: str = "full"
+    andor_si_horizontal_binning: int = 1
+    andor_si_vertical_binning: int = 1
+    andor_si_roi_hstart: int = 0
+    andor_si_roi_hend: int = 0       # 0 means full detector width
+    andor_si_roi_vstart: int = 0
+    andor_si_roi_vend: int = 0       # 0 means full detector height
+    andor_si_output_port: str = "unchanged"
+    andor_ingaas_temperature_c: float = -75.0
+    andor_ingaas_cooler_on_connect: bool = False
+    andor_ingaas_fan_mode: str = "full"
+    andor_ingaas_output_port: str = "unchanged"
+    andor_safe_disconnect_temperature_c: float = 5.0
+    andor_shutter_mode: str = "auto"
+    andor_shamrock_shutter_mode: str = "unchanged"
+    andor_grating: int = 1
+    andor_slit_width_um: float = 1000.0
+    andor_invert_wavelength_axis: bool = True
+    andor_discard_first: bool = False
+    andor_timeout_margin_s: float = 2.0
 
 
 @dataclass
@@ -380,7 +418,21 @@ class AppConfig:
         if not isinstance(data, dict):
             return
 
-        _update_dataclass(self.lf6,      data.get("lf6", {}))
+        lf6_data = data.get("lf6", {})
+        _update_dataclass(self.lf6, lf6_data)
+        if isinstance(lf6_data, dict):
+            # Older files had one shared cooling profile.  Preserve those
+            # values for both detectors unless role-specific values exist.
+            for role in ("si", "ingaas"):
+                mappings = (
+                    ("temperature_c", "andor_temperature_c"),
+                    ("cooler_on_connect", "andor_cooler_on_connect"),
+                    ("fan_mode", "andor_fan_mode"),
+                )
+                for suffix, legacy_key in mappings:
+                    role_key = f"andor_{role}_{suffix}"
+                    if role_key not in lf6_data and legacy_key in lf6_data:
+                        setattr(self.lf6, role_key, lf6_data[legacy_key])
         _update_dataclass(self.smu,      data.get("smu", {}))
         _update_dataclass(self.ramp,     data.get("ramp", {}))
         _update_dataclass(self.filename, data.get("filename", {}))
@@ -448,3 +500,18 @@ def _update_dataclass(obj, mapping: dict) -> None:
 
 cfg = AppConfig()
 cfg.load()
+
+# The reference notebook originally pointed one directory above this project.
+# Prefer the repository-bundled runtime when that legacy value is still saved,
+# or when the saved folder no longer exists. Explicit valid custom paths remain
+# untouched.
+if _BUNDLED_ANDOR_DLL_DIR.is_dir():
+    legacy_sdk = Path(r"D:\Insturment control v3\andor dll")
+    configured_sdk = Path(str(cfg.lf6.andor_sdk2_dll_dir or ""))
+    if configured_sdk == legacy_sdk or not configured_sdk.is_dir():
+        cfg.lf6.andor_sdk2_dll_dir = str(_BUNDLED_ANDOR_DLL_DIR)
+if _BUNDLED_SHAMROCK_DLL_DIR.is_dir():
+    legacy_shamrock = Path(r"D:\Insturment control v3\andor dll\shamrock dll")
+    configured_shamrock = Path(str(cfg.lf6.andor_shamrock_dll_dir or ""))
+    if configured_shamrock == legacy_shamrock or not configured_shamrock.is_dir():
+        cfg.lf6.andor_shamrock_dll_dir = str(_BUNDLED_SHAMROCK_DLL_DIR)

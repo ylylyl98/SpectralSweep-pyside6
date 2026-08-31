@@ -1,6 +1,6 @@
 # controllers/lf6_controller.py
 # ──────────────────────────────────────────────────────────────────────────────
-# Qt controller for the LightField 6 spectrometer.
+# Qt controller for the shared spectrum backend.
 #
 # Design rules:
 #   - All LF6 state lives HERE.  UI panels never hold a reference to LF6Setup
@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QMetaObject, QThread, Qt, Signal, Slot
 
 # ── project root on sys.path so app/ and utils/ are importable ────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -75,12 +75,18 @@ class _LF6Worker(QObject):
     settings_applied   = Signal()
     wavelengths_updated = Signal(object)      # wl ndarray
     state_changed      = Signal(object)
+    temperature_ready  = Signal(object)
+    cooler_changed     = Signal(bool)
+    andor_status_ready = Signal(object)
+    andor_controls_applied = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
         self._setup  = None   # lf6_automation.LF6Setup or MockLF6Setup
         self._adapter = None  # app.devices.lf6_adapter.SpectrometerLF6
         self._state = LightFieldLifecycleState.DISCONNECTED
+        self._backend = "lightfield"
+        self._identity = {}
 
     def _transition(self, state: LightFieldLifecycleState) -> None:
         self._state = state
@@ -89,8 +95,16 @@ class _LF6Worker(QObject):
 
     # ── connect / disconnect ──────────────────────────────────────────────────
 
-    @Slot(bool)
-    def connect_instrument(self, use_mock: bool) -> None:
+    @Slot(bool, str)
+    def connect_instrument(self, use_mock: bool, backend: str = "lightfield") -> None:
+        if self._setup is not None:
+            self.disconnect_instrument()
+        backend = str(backend or "lightfield").strip().lower()
+        if backend not in {"lightfield", "andor_si", "andor_ingaas"}:
+            self.error.emit(f"Unknown spectrum backend: {backend}")
+            return
+        self._backend = backend
+        self._identity = {}
         self._transition(LightFieldLifecycleState.STARTING)
         try:
             if use_mock:
@@ -102,12 +116,74 @@ class _LF6Worker(QObject):
                     simulate_delay=False,
                 )
                 self._adapter = MockAdapter(self._setup)
-            else:
+                self._identity = {
+                    "backend": f"mock_{backend}",
+                    "camera_role": backend.removeprefix("andor_"),
+                }
+            elif backend == "lightfield":
                 # Real path: lazy-import so clr is only touched on real hardware
                 import lf6_automation
                 self._setup = lf6_automation.LF6Setup()
                 from app.devices.lf6_adapter import SpectrometerLF6
                 self._adapter = SpectrometerLF6(self._setup)
+                self._identity = {"backend": "lightfield"}
+            else:
+                from app.devices.andor_adapter import (
+                    AndorConnectionOptions,
+                    AndorSDK2Setup,
+                    SpectrometerAndor,
+                )
+
+                role = backend.removeprefix("andor_")
+                index = (
+                    cfg.lf6.andor_si_camera_index
+                    if role == "si" else cfg.lf6.andor_ingaas_camera_index
+                )
+                serial = (
+                    cfg.lf6.andor_si_serial
+                    if role == "si" else cfg.lf6.andor_ingaas_serial
+                )
+                temperature_c = getattr(
+                    cfg.lf6,
+                    f"andor_{role}_temperature_c",
+                    cfg.lf6.andor_temperature_c,
+                )
+                cooler_on_connect = getattr(
+                    cfg.lf6,
+                    f"andor_{role}_cooler_on_connect",
+                    cfg.lf6.andor_cooler_on_connect,
+                )
+                fan_mode = getattr(
+                    cfg.lf6,
+                    f"andor_{role}_fan_mode",
+                    cfg.lf6.andor_fan_mode,
+                )
+                output_port = getattr(
+                    cfg.lf6,
+                    f"andor_{role}_output_port",
+                    "unchanged",
+                )
+                options = AndorConnectionOptions(
+                    camera_role=role,
+                    camera_index=int(index),
+                    camera_serial=str(serial),
+                    spectrograph_index=int(cfg.lf6.andor_spectrograph_index),
+                    sdk2_dll_dir=str(cfg.lf6.andor_sdk2_dll_dir),
+                    shamrock_dll_dir=str(cfg.lf6.andor_shamrock_dll_dir),
+                    temperature_c=float(temperature_c),
+                    cooler_on_connect=bool(cooler_on_connect),
+                    fan_mode=str(fan_mode),
+                    output_port=str(output_port),
+                    shutter_mode=str(cfg.lf6.andor_shutter_mode),
+                    grating=int(cfg.lf6.andor_grating),
+                    slit_width_um=float(cfg.lf6.andor_slit_width_um),
+                    invert_wavelength_axis=bool(cfg.lf6.andor_invert_wavelength_axis),
+                    discard_first=bool(cfg.lf6.andor_discard_first),
+                    timeout_margin_s=float(cfg.lf6.andor_timeout_margin_s),
+                )
+                self._setup = AndorSDK2Setup(options)
+                self._adapter = SpectrometerAndor(self._setup)
+                self._identity = self._setup.identity
 
             self._transition(LightFieldLifecycleState.INITIALIZING)
             # Startup is connection-only. Mutable experiment settings are deferred
@@ -124,15 +200,33 @@ class _LF6Worker(QObject):
             self.connected.emit(experiments)
 
         except Exception as exc:
+            failed_setup = self._setup
             self._setup  = None
             self._adapter = None
+            close = getattr(failed_setup, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    _LOG.exception("Failed to close spectrum backend after connect error")
             self._transition(LightFieldLifecycleState.DISCONNECTED)
-            self.error.emit(f"LF6 connect failed: {exc}\n{traceback.format_exc()}")
+            self.error.emit(
+                f"{backend.replace('_', ' ').title()} connect failed: {exc}\n"
+                f"{traceback.format_exc()}"
+            )
 
     @Slot()
     def disconnect_instrument(self) -> None:
-        self._setup   = None
+        setup = self._setup
+        self._setup = None
         self._adapter = None
+        self._identity = {}
+        close = getattr(setup, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:
+                self.error.emit(f"Spectrometer disconnect warning: {exc}")
         self._transition(LightFieldLifecycleState.DISCONNECTED)
         self.disconnected.emit()
 
@@ -141,7 +235,7 @@ class _LF6Worker(QObject):
     @Slot(float, float, int)
     def apply_settings(self, exposure_ms: float, center_nm: float, accumulations: int) -> None:
         if self._setup is None:
-            self.error.emit("LF6 not connected.")
+            self.error.emit("Spectrometer not connected.")
             return
         try:
             self.configure_for_acquisition(
@@ -152,7 +246,7 @@ class _LF6Worker(QObject):
             self.wavelengths_updated.emit(wl)
             self.settings_applied.emit()
         except Exception as exc:
-            self.error.emit(f"LF6 apply_settings failed: {exc}")
+            self.error.emit(f"Spectrometer apply_settings failed: {exc}")
 
     def set_center_wavelength_when_ready(self, center_nm: float, **kwargs) -> None:
         """Use LF6's bounded readiness/writeability wait for center changes."""
@@ -244,6 +338,14 @@ class _LF6Worker(QObject):
         return self._state
 
     @property
+    def backend(self) -> str:
+        return self._backend
+
+    @property
+    def identity(self) -> dict:
+        return dict(self._identity)
+
+    @property
     def is_ready(self) -> bool:
         if self._setup is None:
             return False
@@ -275,30 +377,100 @@ class _LF6Worker(QObject):
     @Slot()
     def acquire_single(self) -> None:
         if self._adapter is None:
-            self.error.emit("LF6 not connected.")
+            self.error.emit("Spectrometer not connected.")
             return
         try:
             wl, cts = self._adapter.acquire()
             self.spectrum_ready.emit(wl, cts)
         except Exception as exc:
-            self.error.emit(f"LF6 acquire failed: {exc}")
+            self.error.emit(f"Spectrometer acquire failed: {exc}")
 
     @Slot()
     def acquire_2d(self) -> None:
         if self._setup is None:
-            self.error.emit("LF6 not connected.")
+            self.error.emit("Spectrometer not connected.")
             return
         try:
+            if self._backend == "andor_ingaas":
+                raise RuntimeError(
+                    "The connected InGaAs detector is a one-dimensional array; "
+                    "use Acquire 1D"
+                )
+            if self._backend == "andor_si":
+                change_mode = getattr(self._setup, "change_roi_FullSensor", None)
+                if callable(change_mode):
+                    change_mode()
             img = self._setup.acquire_2d()
             self.frame_ready.emit(img)
         except Exception as exc:
-            self.error.emit(f"LF6 acquire_2d failed: {exc}")
+            self.error.emit(f"Spectrometer acquire_2d failed: {exc}")
+
+    @Slot()
+    def read_temperature(self) -> None:
+        method = getattr(self._setup, "get_temperature", None)
+        if not callable(method):
+            self.error.emit(
+                "The connected spectrum backend has no detector temperature readback"
+            )
+            return
+        try:
+            self.temperature_ready.emit(method())
+        except Exception as exc:
+            self.error.emit(f"Detector temperature read failed: {exc}")
+
+    @Slot(bool)
+    def set_cooler(self, on: bool) -> None:
+        method = getattr(self._setup, "set_cooler", None)
+        if not callable(method):
+            self.error.emit("The connected spectrum backend has no cooler control")
+            return
+        try:
+            method(bool(on))
+            self.cooler_changed.emit(bool(on))
+        except Exception as exc:
+            self.error.emit(f"Detector cooler update failed: {exc}")
+
+    @Slot()
+    def refresh_andor_status(self) -> None:
+        method = getattr(self._setup, "get_control_snapshot", None)
+        if not callable(method):
+            self.error.emit("Andor controls are unavailable for this spectrum backend")
+            return
+        try:
+            self.andor_status_ready.emit(method(include_calibration=True))
+        except Exception as exc:
+            self.error.emit(f"Andor status refresh failed: {exc}")
+
+    @Slot(object)
+    def apply_andor_controls(self, settings: object) -> None:
+        method = getattr(self._setup, "apply_controls", None)
+        if not callable(method):
+            self.error.emit("Andor controls are unavailable for this spectrum backend")
+            return
+        try:
+            snapshot = method(dict(settings or {}))
+            invalidate = getattr(self._adapter, "invalidate_wavelengths", None)
+            if callable(invalidate):
+                invalidate()
+            self._identity.update(
+                {
+                    "spectrograph_serial": snapshot.get("spectrograph_serial", ""),
+                    "output_port": snapshot.get("output_port"),
+                    "grating": snapshot.get("grating"),
+                    "wavelength_nm": snapshot.get("wavelength_nm"),
+                    "connection_warnings": self._identity.get("connection_warnings", []),
+                }
+            )
+            self.andor_controls_applied.emit(snapshot)
+            self.andor_status_ready.emit(snapshot)
+        except Exception as exc:
+            self.error.emit(f"Andor apply-and-verify failed: {exc}")
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _get_wavelengths(self) -> np.ndarray:
         if self._adapter is not None:
-            return self._adapter.calibration_wavelengths(force=True)
+            return self._adapter.calibration_wavelengths(force=False)
         if self._setup is not None:
             return np.asarray(self._setup.get_wavelength_calibration(), dtype=float)
         return np.array([], dtype=float)
@@ -337,6 +509,20 @@ class LF6Controller(QObject):
     settings_applied    = Signal()
     wavelengths_updated = Signal(object)
     state_changed       = Signal(object)
+    temperature_ready   = Signal(object)
+    cooler_changed      = Signal(bool)
+    andor_status_ready  = Signal(object)
+    andor_controls_applied = Signal(object)
+
+    _connect_requested = Signal(bool, str)
+    _disconnect_requested = Signal()
+    _apply_requested = Signal(float, float, int)
+    _acquire_requested = Signal()
+    _acquire_2d_requested = Signal()
+    _temperature_requested = Signal()
+    _cooler_requested = Signal(bool)
+    _andor_status_requested = Signal()
+    _andor_controls_requested = Signal(object)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -354,17 +540,35 @@ class LF6Controller(QObject):
         self._worker.settings_applied.connect(self.settings_applied)
         self._worker.wavelengths_updated.connect(self.wavelengths_updated)
         self._worker.state_changed.connect(self.state_changed)
+        self._worker.temperature_ready.connect(self.temperature_ready)
+        self._worker.cooler_changed.connect(self.cooler_changed)
+        self._worker.andor_status_ready.connect(self.andor_status_ready)
+        self._worker.andor_controls_applied.connect(self.andor_controls_applied)
+
+        self._connect_requested.connect(self._worker.connect_instrument)
+        self._disconnect_requested.connect(self._worker.disconnect_instrument)
+        self._apply_requested.connect(self._worker.apply_settings)
+        self._acquire_requested.connect(self._worker.acquire_single)
+        self._acquire_2d_requested.connect(self._worker.acquire_2d)
+        self._temperature_requested.connect(self._worker.read_temperature)
+        self._cooler_requested.connect(self._worker.set_cooler)
+        self._andor_status_requested.connect(self._worker.refresh_andor_status)
+        self._andor_controls_requested.connect(self._worker.apply_andor_controls)
 
         self._thread.start()
 
     # ── public API (called from main thread) ──────────────────────────────────
 
-    def connect_instrument(self, use_mock: bool = False) -> None:
-        """Start LF6 connection in background thread."""
-        self._worker.connect_instrument.__func__(self._worker, use_mock)
+    def connect_instrument(
+        self, use_mock: bool = False, backend: Optional[str] = None
+    ) -> None:
+        """Connect the selected LightField or Andor spectrum backend."""
+        selected = str(backend or cfg.lf6.backend or "lightfield")
+        cfg.lf6.backend = selected
+        self._connect_requested.emit(bool(use_mock), selected)
 
     def disconnect_instrument(self) -> None:
-        self._worker.disconnect_instrument.__func__(self._worker)
+        self._disconnect_requested.emit()
 
     def apply_settings(
         self,
@@ -372,8 +576,8 @@ class LF6Controller(QObject):
         center_nm: float,
         accumulations: int,
     ) -> None:
-        self._worker.apply_settings.__func__(
-            self._worker, exposure_ms, center_nm, accumulations
+        self._apply_requested.emit(
+            float(exposure_ms), float(center_nm), int(accumulations)
         )
 
     def set_center_wavelength_when_ready(self, center_nm: float, **kwargs) -> None:
@@ -403,10 +607,34 @@ class LF6Controller(QObject):
     prepare_acquisition = configure_for_acquisition
 
     def acquire_single(self) -> None:
-        self._worker.acquire_single.__func__(self._worker)
+        self._acquire_requested.emit()
 
     def acquire_2d(self) -> None:
-        self._worker.acquire_2d.__func__(self._worker)
+        self._acquire_2d_requested.emit()
+
+    def read_temperature(self) -> None:
+        self._temperature_requested.emit()
+
+    def set_cooler(self, on: bool) -> None:
+        self._cooler_requested.emit(bool(on))
+
+    def refresh_andor_status(self) -> None:
+        self._andor_status_requested.emit()
+
+    def apply_andor_controls(self, settings: dict) -> None:
+        self._andor_controls_requested.emit(dict(settings or {}))
+
+    def abort_acquisition(self) -> bool:
+        adapter = self._worker.adapter
+        method = getattr(adapter, "abort_acquisition", None)
+        return bool(method()) if callable(method) else False
+
+    def andor_disconnect_safety_snapshot(self) -> Optional[dict]:
+        if self.backend not in {"andor_si", "andor_ingaas"} or not self.is_connected:
+            return None
+        setup = self._worker.setup
+        method = getattr(setup, "get_disconnect_safety_snapshot", None)
+        return dict(method()) if callable(method) else None
 
     # ── state accessors (read from main thread — be aware of races) ───────────
 
@@ -417,6 +645,14 @@ class LF6Controller(QObject):
     @property
     def state(self):
         return self._worker.state
+
+    @property
+    def backend(self) -> str:
+        return self._worker.backend
+
+    @property
+    def identity(self) -> dict:
+        return self._worker.identity
 
     @property
     def is_ready(self) -> bool:
@@ -451,6 +687,11 @@ class LF6Controller(QObject):
 
     def shutdown(self) -> None:
         """Call from main.py on application exit."""
-        self._worker.disconnect_instrument.__func__(self._worker)
+        if self._thread.isRunning():
+            QMetaObject.invokeMethod(
+                self._worker,
+                "disconnect_instrument",
+                Qt.ConnectionType.BlockingQueuedConnection,
+            )
         self._thread.quit()
         self._thread.wait(3000)

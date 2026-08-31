@@ -37,7 +37,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
-from app.devices.stage_adapter import get_linear_stage_profile
+from app.devices.stage_profiles import get_linear_stage_profile
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -215,11 +215,34 @@ class _LF6Section(QWidget):
     def __init__(self, lf6_ctrl, parent=None):
         super().__init__(parent)
         self._ctrl = lf6_ctrl
+        self._real_andor = False
+        self._last_temperature_c: Optional[float] = None
+        self._warming_disconnect = False
+        self._last_andor_snapshot: dict = {}
+        self._warmup_timer = QTimer(self)
+        self._warmup_timer.setInterval(5000)
+        self._warmup_timer.timeout.connect(self._poll_warmup_temperature)
         self._build()
         self._wire()
 
     def _build(self):
         lay = QVBoxLayout(self)
+
+        backend_row = QHBoxLayout()
+        backend_row.addWidget(QLabel("Backend:"))
+        self._backend = QComboBox()
+        self._backend.addItem("LightField", "lightfield")
+        self._backend.addItem("Andor Shamrock + Si CCD", "andor_si")
+        self._backend.addItem("Andor Shamrock + InGaAs CCD", "andor_ingaas")
+        selected = self._backend.findData(getattr(cfg.lf6, "backend", "lightfield"))
+        self._backend.setCurrentIndex(max(0, selected))
+        self._backend.setToolTip(
+            "Select the complete spectrum backend shared by every acquisition "
+            "tab. Each Andor option opens the Shamrock spectrometer together "
+            "with the selected Si or InGaAs detector."
+        )
+        backend_row.addWidget(self._backend, stretch=1)
+        lay.addLayout(backend_row)
 
         row = QHBoxLayout()
         self._mock_chk = QCheckBox("Use mock (no hardware)")
@@ -242,43 +265,530 @@ class _LF6Section(QWidget):
         self._status = _status_label("Disconnected", "gray")
         lay.addWidget(self._status)
 
+        detector_row = QHBoxLayout()
+        self._temperature = QLabel("Detector: N/A")
+        self._temperature_refresh = QPushButton("Read temperature")
+        self._temperature_refresh.setEnabled(False)
+        self._cooler = QCheckBox("Cooler")
+        self._cooler.setChecked(bool(cfg.lf6.andor_cooler_on_connect))
+        self._cooler.setEnabled(False)
+        detector_row.addWidget(self._temperature)
+        detector_row.addWidget(self._temperature_refresh)
+        detector_row.addWidget(self._cooler)
+        lay.addLayout(detector_row)
+
+        self._andor_group = self._build_andor_controls()
+        self._andor_group.setVisible(False)
+        # Detailed spectrograph and detector controls live beside the plots in
+        # the Spectrum tab.  Keep this section focused on connection and safe
+        # shutdown; the hidden group remains as a compatibility bridge for its
+        # existing status slots while the controls are migrated.
+        self._warm_disconnect_btn.setVisible(False)
+        lay.addWidget(self._warm_disconnect_btn)
+
         self._exp_combo = QComboBox()
         self._exp_combo.setPlaceholderText("Saved experiments")
         self._exp_combo.setToolTip("LightField experiments available on the connected spectrometer.")
         self._exp_combo.setEnabled(False)
         lay.addWidget(self._exp_combo)
 
+    def _build_andor_controls(self) -> QGroupBox:
+        group = QGroupBox("Andor controls")
+        form = QFormLayout(group)
+        form.setContentsMargins(6, 8, 6, 6)
+        form.setSpacing(4)
+
+        self._andor_identity = QLabel("Camera: —\nShamrock: —")
+        self._andor_identity.setWordWrap(True)
+        form.addRow("Hardware:", self._andor_identity)
+
+        self._andor_wavelength = QDoubleSpinBox()
+        self._andor_wavelength.setRange(0.0, 5000.0)
+        self._andor_wavelength.setDecimals(2)
+        self._andor_wavelength.setSuffix(" nm")
+        form.addRow("Center wavelength:", self._andor_wavelength)
+
+        self._andor_grating = QSpinBox()
+        self._andor_grating.setRange(1, 32)
+        form.addRow("Grating:", self._andor_grating)
+
+        self._andor_slit = QDoubleSpinBox()
+        self._andor_slit.setRange(1.0, 5000.0)
+        self._andor_slit.setDecimals(1)
+        self._andor_slit.setSuffix(" µm")
+        form.addRow("Input slit:", self._andor_slit)
+
+        self._andor_spec_shutter = QComboBox()
+        self._andor_spec_shutter.addItems(
+            ["unchanged", "closed", "opened", "bnc"]
+        )
+        self._andor_spec_shutter.setCurrentText(
+            str(getattr(cfg.lf6, "andor_shamrock_shutter_mode", "unchanged"))
+        )
+        form.addRow("Shamrock shutter:", self._andor_spec_shutter)
+
+        self._andor_target_temperature = QDoubleSpinBox()
+        self._andor_target_temperature.setRange(-120.0, 30.0)
+        self._andor_target_temperature.setDecimals(1)
+        self._andor_target_temperature.setSuffix(" °C")
+        form.addRow("Temperature target:", self._andor_target_temperature)
+
+        self._andor_fan = QComboBox()
+        self._andor_fan.addItems(["full", "low", "off"])
+        form.addRow("Fan:", self._andor_fan)
+
+        self._andor_read_mode = QComboBox()
+        self._andor_read_mode.addItem("1D spectrum (FVB)", "fvb")
+        self._andor_read_mode.addItem("2D full sensor", "image")
+        form.addRow("Sensor mode:", self._andor_read_mode)
+
+        binning_row = QHBoxLayout()
+        self._andor_hbin = QSpinBox()
+        self._andor_hbin.setRange(1, 32)
+        self._andor_vbin = QSpinBox()
+        self._andor_vbin.setRange(1, 32)
+        binning_row.addWidget(QLabel("H"))
+        binning_row.addWidget(self._andor_hbin)
+        binning_row.addWidget(QLabel("V"))
+        binning_row.addWidget(self._andor_vbin)
+        form.addRow("Full-sensor binning:", binning_row)
+
+        self._andor_temperature_status = QLabel("Cooling status: —")
+        self._andor_temperature_status.setWordWrap(True)
+        form.addRow("", self._andor_temperature_status)
+
+        self._andor_calibration = QLabel("Stored calibration: not read")
+        self._andor_calibration.setWordWrap(True)
+        self._andor_calibration.setToolTip(
+            "Reads the wavelength mapping derived from coefficients already stored "
+            "in the Shamrock. The app never fits or overwrites them."
+        )
+        form.addRow("", self._andor_calibration)
+
+        action_row = QHBoxLayout()
+        self._andor_refresh = QPushButton("Refresh all")
+        self._andor_apply = QPushButton("Apply + verify")
+        action_row.addWidget(self._andor_refresh)
+        action_row.addWidget(self._andor_apply)
+        form.addRow("", action_row)
+
+        self._andor_diagnostics = QPushButton("View diagnostics")
+        form.addRow("", self._andor_diagnostics)
+
+        self._warm_disconnect_btn = QPushButton("Warm up + disconnect")
+        self._warm_disconnect_btn.setToolTip(
+            "Turn the cooler off, monitor detector temperature, and disconnect "
+            "only after the configured safe temperature is reached."
+        )
+        form.addRow("", self._warm_disconnect_btn)
+        return group
+
     def _wire(self):
         self._connect_btn.clicked.connect(self._on_connect)
-        self._disconnect_btn.clicked.connect(self._ctrl.disconnect_instrument)
+        self._disconnect_btn.clicked.connect(self._on_disconnect_requested)
         self._ctrl.connected.connect(self._on_connected)
         self._ctrl.disconnected.connect(self._on_disconnected)
-        self._ctrl.error.connect(lambda msg: self._status.setText(f"Error: {msg[:60]}"))
+        self._ctrl.error.connect(self._on_error)
+        read_temperature = getattr(self._ctrl, "read_temperature", None)
+        if callable(read_temperature):
+            self._temperature_refresh.clicked.connect(read_temperature)
+        self._cooler.toggled.connect(self._on_cooler_toggled)
+        temperature_ready = getattr(self._ctrl, "temperature_ready", None)
+        if temperature_ready is not None:
+            temperature_ready.connect(self._on_temperature_ready)
+        cooler_changed = getattr(self._ctrl, "cooler_changed", None)
+        if cooler_changed is not None:
+            cooler_changed.connect(self._on_cooler_changed)
+        andor_status = getattr(self._ctrl, "andor_status_ready", None)
+        if andor_status is not None:
+            andor_status.connect(self._on_andor_status)
+        andor_applied = getattr(self._ctrl, "andor_controls_applied", None)
+        if andor_applied is not None:
+            andor_applied.connect(self._on_andor_controls_applied)
+        self._andor_refresh.clicked.connect(self._refresh_andor_status)
+        self._andor_apply.clicked.connect(self._apply_andor_controls)
+        self._andor_diagnostics.clicked.connect(self._show_andor_diagnostics)
+        self._warm_disconnect_btn.clicked.connect(self._start_warmup_disconnect)
+        self._backend.currentIndexChanged.connect(
+            lambda _index: setattr(cfg.lf6, "backend", self._backend.currentData())
+        )
 
     @Slot()
     def _on_connect(self):
         self._status.setText("Connecting…")
         self._status.setStyleSheet("color: orange; font-weight: bold;")
-        self._ctrl.connect_instrument(use_mock=self._mock_chk.isChecked())
+        self._connect_btn.setEnabled(False)
+        self._backend.setEnabled(False)
+        self._mock_chk.setEnabled(False)
+        self._ctrl.connect_instrument(
+            use_mock=self._mock_chk.isChecked(),
+            backend=self._backend.currentData(),
+        )
 
     @Slot(list)
     def _on_connected(self, experiments: list):
-        self._status.setText("Connected")
+        identity = getattr(self._ctrl, "identity", {}) or {}
+        serial = str(identity.get("camera_serial", "")).strip()
+        role = str(identity.get("camera_role", "")).strip()
+        detail = ""
+        if role:
+            detail = f" · Shamrock + {role.upper()} CCD"
+        if serial:
+            detail += f" · S/N {serial}"
+        self._status.setText(f"Connected{detail}")
+        warnings = identity.get("connection_warnings", [])
+        if isinstance(warnings, list) and warnings:
+            self._status.setToolTip("\n".join(str(item) for item in warnings))
+        else:
+            self._status.setToolTip("")
         self._status.setStyleSheet("color: green; font-weight: bold;")
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
-        self._exp_combo.setEnabled(True)
+        self._backend.setEnabled(False)
+        self._mock_chk.setEnabled(False)
+        self._exp_combo.setEnabled(bool(experiments))
         self._exp_combo.clear()
         self._exp_combo.addItems(experiments)
+        real_andor = str(identity.get("backend", "")) == "andor_sdk2"
+        self._real_andor = real_andor
+        self._andor_group.setVisible(False)
+        self._warm_disconnect_btn.setVisible(real_andor)
+        self._temperature_refresh.setEnabled(real_andor)
+        self._cooler.setEnabled(real_andor)
+        role_key = role.lower() if role.lower() in {"si", "ingaas"} else "ingaas"
+        self._andor_target_temperature.setValue(
+            float(
+                getattr(
+                    cfg.lf6,
+                    f"andor_{role_key}_temperature_c",
+                    cfg.lf6.andor_temperature_c,
+                )
+            )
+        )
+        self._andor_fan.setCurrentText(
+            str(
+                getattr(
+                    cfg.lf6,
+                    f"andor_{role_key}_fan_mode",
+                    cfg.lf6.andor_fan_mode,
+                )
+            )
+        )
+        read_temperature = getattr(self._ctrl, "read_temperature", None)
+        if real_andor and callable(read_temperature):
+            read_temperature()
+        if real_andor:
+            QTimer.singleShot(0, self._refresh_andor_status)
 
     @Slot()
     def _on_disconnected(self):
         self._status.setText("Disconnected")
         self._status.setStyleSheet("color: gray; font-weight: bold;")
+        self._status.setToolTip("")
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
+        self._backend.setEnabled(True)
+        self._mock_chk.setEnabled(True)
         self._exp_combo.setEnabled(False)
         self._exp_combo.clear()
+        self._temperature.setText("Detector: N/A")
+        self._last_temperature_c = None
+        self._last_andor_snapshot = {}
+        self._real_andor = False
+        self._warming_disconnect = False
+        self._warmup_timer.stop()
+        self._andor_group.setVisible(False)
+        self._warm_disconnect_btn.setVisible(False)
+        self._temperature_refresh.setEnabled(False)
+        self._cooler.setEnabled(False)
+
+    @Slot(str)
+    def _on_error(self, message: str):
+        first_line = str(message).splitlines()[0]
+        self._status.setText(f"Error: {first_line[:80]}")
+        self._status.setStyleSheet("color: #b91c1c; font-weight: bold;")
+        self._status.setToolTip(str(message))
+        connected = bool(getattr(self._ctrl, "is_connected", False))
+        self._connect_btn.setEnabled(not connected)
+        self._disconnect_btn.setEnabled(connected)
+        self._backend.setEnabled(not connected)
+        self._mock_chk.setEnabled(not connected)
+        self._andor_refresh.setEnabled(connected and self._real_andor)
+        self._andor_apply.setEnabled(connected and self._real_andor)
+
+    @Slot(bool)
+    def _on_cooler_toggled(self, _on: bool):
+        set_cooler = getattr(self._ctrl, "set_cooler", None)
+        if self._cooler.isEnabled() and callable(set_cooler):
+            set_cooler(self._cooler.isChecked())
+
+    @Slot(object)
+    def _on_temperature_ready(self, value):
+        try:
+            temperature = float(value)
+            self._last_temperature_c = temperature
+            self._temperature.setText(f"Detector: {temperature:.1f} °C")
+            if self._warming_disconnect:
+                threshold = float(cfg.lf6.andor_safe_disconnect_temperature_c)
+                self._andor_temperature_status.setText(
+                    f"Warming: {temperature:.1f} °C / safe at {threshold:.1f} °C"
+                )
+                if temperature >= threshold:
+                    self._warming_disconnect = False
+                    self._warmup_timer.stop()
+                    self._ctrl.disconnect_instrument()
+        except (TypeError, ValueError):
+            self._temperature.setText(f"Detector: {value}")
+
+    @Slot(bool)
+    def _on_cooler_changed(self, on: bool):
+        self._cooler.blockSignals(True)
+        self._cooler.setChecked(bool(on))
+        self._cooler.blockSignals(False)
+
+    @Slot()
+    def _refresh_andor_status(self) -> None:
+        method = getattr(self._ctrl, "refresh_andor_status", None)
+        if self._real_andor and callable(method):
+            self._status.setText("Reading Andor status…")
+            self._andor_refresh.setEnabled(False)
+            method()
+
+    @Slot()
+    def _apply_andor_controls(self) -> None:
+        method = getattr(self._ctrl, "apply_andor_controls", None)
+        if not self._real_andor or not callable(method):
+            return
+        role = str((getattr(self._ctrl, "identity", {}) or {}).get("camera_role", "ingaas"))
+        role = role if role in {"si", "ingaas"} else "ingaas"
+        cfg.lf6.center_nm = float(self._andor_wavelength.value())
+        cfg.lf6.andor_grating = int(self._andor_grating.value())
+        cfg.lf6.andor_slit_width_um = float(self._andor_slit.value())
+        setattr(
+            cfg.lf6,
+            f"andor_{role}_temperature_c",
+            float(self._andor_target_temperature.value()),
+        )
+        setattr(cfg.lf6, f"andor_{role}_fan_mode", self._andor_fan.currentText())
+        if role == "si":
+            cfg.lf6.andor_si_horizontal_binning = int(self._andor_hbin.value())
+            cfg.lf6.andor_si_vertical_binning = int(self._andor_vbin.value())
+        cfg.lf6.andor_shamrock_shutter_mode = self._andor_spec_shutter.currentText()
+        self._andor_apply.setEnabled(False)
+        self._status.setText("Applying and verifying Andor controls…")
+        settings = {
+                "wavelength_nm": float(self._andor_wavelength.value()),
+                "grating": int(self._andor_grating.value()),
+                "input_slit_width_um": float(self._andor_slit.value()),
+                "shutter_mode": self._andor_spec_shutter.currentText(),
+                "temperature_setpoint_c": float(
+                    self._andor_target_temperature.value()
+                ),
+                "cooler_on": bool(self._cooler.isChecked()),
+                "fan_mode": self._andor_fan.currentText(),
+            }
+        if role == "si":
+            settings.update(
+                {
+                    "read_mode": self._andor_read_mode.currentData(),
+                    "horizontal_binning": int(self._andor_hbin.value()),
+                    "vertical_binning": int(self._andor_vbin.value()),
+                }
+            )
+        method(settings)
+
+    @Slot(object)
+    def _on_andor_status(self, snapshot: object) -> None:
+        data = dict(snapshot or {})
+        self._last_andor_snapshot = data
+        self._andor_refresh.setEnabled(self._real_andor)
+        self._andor_apply.setEnabled(self._real_andor)
+        camera_serial = data.get("camera_serial", "?")
+        spec_serial = data.get("spectrograph_serial", "?")
+        detector = data.get("detector_size", "?")
+        camera_role = str(data.get("camera_role", ""))
+        self._andor_identity.setText(
+            f"Camera {camera_role.upper()} S/N {camera_serial}, "
+            f"detector {detector}\nShamrock S/N {spec_serial}"
+        )
+
+        def set_value(widget, key):
+            if key in data and data[key] is not None:
+                widget.blockSignals(True)
+                widget.setValue(data[key])
+                widget.blockSignals(False)
+
+        wavelength_limits = data.get("wavelength_limits_nm")
+        if (
+            isinstance(wavelength_limits, (tuple, list))
+            and len(wavelength_limits) == 2
+            and float(wavelength_limits[1]) > float(wavelength_limits[0])
+        ):
+            self._andor_wavelength.setRange(
+                float(wavelength_limits[0]), float(wavelength_limits[1])
+            )
+        if data.get("gratings_number"):
+            self._andor_grating.setRange(1, int(data["gratings_number"]))
+        grating_infos = data.get("grating_infos", [])
+        if isinstance(grating_infos, list):
+            grating_lines = []
+            for item in grating_infos:
+                if not isinstance(item, dict):
+                    continue
+                info = item.get("info", {})
+                if isinstance(info, dict):
+                    description = ", ".join(
+                        f"{key}={value}" for key, value in info.items()
+                    )
+                else:
+                    description = str(info)
+                grating_lines.append(f"Grating {item.get('index')}: {description}")
+            self._andor_grating.setToolTip("\n".join(grating_lines))
+        temperature_range = data.get("temperature_range_c")
+        if (
+            isinstance(temperature_range, (tuple, list))
+            and len(temperature_range) == 2
+            and float(temperature_range[1]) > float(temperature_range[0])
+        ):
+            self._andor_target_temperature.setRange(
+                float(temperature_range[0]), float(temperature_range[1])
+            )
+        set_value(self._andor_wavelength, "wavelength_nm")
+        set_value(self._andor_grating, "grating")
+        set_value(self._andor_slit, "input_slit_width_um")
+        set_value(self._andor_target_temperature, "temperature_setpoint_c")
+        if "fan_mode" in data and data["fan_mode"] in {"full", "low", "off"}:
+            self._andor_fan.setCurrentText(str(data["fan_mode"]))
+        if "shutter_mode" in data:
+            self._andor_spec_shutter.setCurrentText(str(data["shutter_mode"]))
+        self._andor_slit.setEnabled(bool(data.get("input_slit_present", False)))
+        self._andor_spec_shutter.setEnabled(bool(data.get("shutter_present", False)))
+        si_camera = camera_role == "si"
+        self._andor_read_mode.setEnabled(si_camera)
+        self._andor_hbin.setEnabled(si_camera)
+        self._andor_vbin.setEnabled(si_camera)
+        if not si_camera:
+            self._andor_read_mode.setCurrentIndex(
+                self._andor_read_mode.findData("fvb")
+            )
+        elif data.get("read_mode") in {"fvb", "image"}:
+            self._andor_read_mode.setCurrentIndex(
+                self._andor_read_mode.findData(data["read_mode"])
+            )
+        roi = data.get("roi")
+        if isinstance(roi, (tuple, list)) and len(roi) >= 6:
+            self._andor_hbin.setValue(int(roi[4]))
+            self._andor_vbin.setValue(int(roi[5]))
+        if "temperature_c" in data:
+            self._on_temperature_ready(data["temperature_c"])
+        if "cooler_on" in data:
+            self._on_cooler_changed(bool(data["cooler_on"]))
+        temperature_status = str(data.get("temperature_status", "unknown"))
+        status_labels = {
+            "off": "Cooler off",
+            "not_reached": "Cooling",
+            "not_stabilized": "Cooling; not stabilized",
+            "stabilized": "Temperature stable",
+            "drifted": "Temperature drifted",
+        }
+        self._andor_temperature_status.setText(
+            f"Cooling status: {status_labels.get(temperature_status, temperature_status)}"
+        )
+        pixel_count = data.get("calibration_pixel_count")
+        cal_range = data.get("calibration_range_nm")
+        if pixel_count and cal_range:
+            self._andor_calibration.setText(
+                "Stored calibration: "
+                f"{pixel_count} pixels, {float(cal_range[0]):.2f} to "
+                f"{float(cal_range[1]):.2f} nm"
+            )
+        errors = data.get("readback_errors", {})
+        if isinstance(errors, dict) and errors:
+            details = "\n".join(f"{key}: {value}" for key, value in errors.items())
+            self._status.setText("Connected · Andor status has readback warnings")
+            self._status.setToolTip(details)
+            self._status.setStyleSheet("color: #92400e; font-weight: bold;")
+        else:
+            self._status.setText("Connected · Andor controls verified")
+            self._status.setToolTip("")
+            self._status.setStyleSheet("color: green; font-weight: bold;")
+
+    @Slot(object)
+    def _on_andor_controls_applied(self, snapshot: object) -> None:
+        self._on_andor_status(snapshot)
+        self._status.setText("Connected · Andor controls applied and verified")
+
+    @Slot()
+    def _start_warmup_disconnect(self) -> None:
+        if not self._real_andor:
+            self._ctrl.disconnect_instrument()
+            return
+        self._warming_disconnect = True
+        self._cooler.setChecked(False)
+        self._andor_temperature_status.setText("Warming detector before disconnect…")
+        self._warmup_timer.start()
+        self._poll_warmup_temperature()
+
+    @Slot()
+    def _poll_warmup_temperature(self) -> None:
+        read_temperature = getattr(self._ctrl, "read_temperature", None)
+        if self._warming_disconnect and callable(read_temperature):
+            read_temperature()
+
+    @Slot()
+    def _on_disconnect_requested(self) -> None:
+        threshold = float(cfg.lf6.andor_safe_disconnect_temperature_c)
+        cold = (
+            self._real_andor
+            and (
+                self._cooler.isChecked()
+                or self._last_temperature_c is None
+                or self._last_temperature_c < threshold
+            )
+        )
+        if cold:
+            QMessageBox.warning(
+                self,
+                "Detector is cold",
+                "The Andor detector is cold or its temperature has not been verified. "
+                "Use 'Warm up + disconnect' and wait for the safe temperature.",
+            )
+            return
+        self._ctrl.disconnect_instrument()
+
+    @Slot()
+    def _show_andor_diagnostics(self) -> None:
+        data = self._last_andor_snapshot
+        if not data:
+            QMessageBox.information(
+                self, "Andor diagnostics", "No Andor status has been read yet."
+            )
+            return
+        lines = [
+            f"Camera role: {data.get('camera_role', '—')}",
+            f"Camera serial: {data.get('camera_serial', '—')}",
+            f"Detector size: {data.get('detector_size', '—')}",
+            f"Shamrock serial: {data.get('spectrograph_serial', '—')}",
+            f"Center wavelength: {data.get('wavelength_nm', '—')} nm",
+            f"Grating: {data.get('grating', '—')}",
+            f"Input slit: {data.get('input_slit_width_um', '—')} µm",
+            f"Shutter: {data.get('shutter_mode', '—')}",
+            f"Temperature: {data.get('temperature_c', '—')} °C",
+            f"Temperature status: {data.get('temperature_status', '—')}",
+            f"Cooler: {data.get('cooler_on', '—')}",
+            f"Fan: {data.get('fan_mode', '—')}",
+            f"Read mode: {data.get('read_mode', '—')}",
+            f"ROI/binning: {data.get('roi', '—')}",
+            f"Calibration source: {data.get('calibration_source', '—')}",
+            f"Calibration pixels: {data.get('calibration_pixel_count', '—')}",
+            f"Calibration range: {data.get('calibration_range_nm', '—')} nm",
+        ]
+        errors = data.get("readback_errors", {})
+        if isinstance(errors, dict) and errors:
+            lines.append("")
+            lines.append("Readback errors:")
+            lines.extend(f"• {key}: {value}" for key, value in errors.items())
+        QMessageBox.information(self, "Andor diagnostics", "\n".join(lines))
 
 
 # ── SMU Section ───────────────────────────────────────────────────────────────
@@ -2782,7 +3292,7 @@ class InstrumentPanel(QScrollArea):
 
         if lf6_ctrl is not None:
             section = _LF6Section(lf6_ctrl)
-            expander = _Expander("LF6 Spectrometer", section)
+            expander = _Expander("Spectrum Detector", section)
             self._sections["lf6"] = section
             self._expanders["lf6"] = expander
             lay.addWidget(expander)
@@ -2858,7 +3368,10 @@ class InstrumentPanel(QScrollArea):
         }
         lf6 = self._sections.get("lf6")
         if isinstance(lf6, _LF6Section):
-            state["lf6"] = {"use_mock": bool(lf6._mock_chk.isChecked())}
+            state["lf6"] = {
+                "use_mock": bool(lf6._mock_chk.isChecked()),
+                "backend": str(lf6._backend.currentData()),
+            }
         smu = self._sections.get("smu")
         if isinstance(smu, _SMUSection):
             state["smu"] = {
@@ -2920,6 +3433,11 @@ class InstrumentPanel(QScrollArea):
         if isinstance(lf6_state, dict) and isinstance(lf6, _LF6Section):
             if "use_mock" in lf6_state:
                 lf6._mock_chk.setChecked(bool(lf6_state["use_mock"]))
+            backend = lf6_state.get("backend")
+            if isinstance(backend, str):
+                index = lf6._backend.findData(backend)
+                if index >= 0:
+                    lf6._backend.setCurrentIndex(index)
 
         smu_state = state.get("smu")
         smu = self._sections.get("smu")

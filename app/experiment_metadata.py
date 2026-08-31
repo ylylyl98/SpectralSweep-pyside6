@@ -137,30 +137,39 @@ class ExperimentHistory:
 
     def __init__(self, path: Optional[str | Path] = None):
         self.path = Path(path) if path is not None else _default_history_path()
+        self._schema_ready = False
+        self._schema_lock = threading.Lock()
 
     def _connect(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(str(self.path), timeout=2)
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute(
-            """CREATE TABLE IF NOT EXISTS experiments (
-                experiment_id TEXT PRIMARY KEY,
-                device_id TEXT NOT NULL,
-                experiment_type TEXT NOT NULL,
-                started_utc TEXT NOT NULL,
-                completed_utc TEXT,
-                status TEXT NOT NULL,
-                metadata_path TEXT NOT NULL,
-                settings_json TEXT NOT NULL,
-                summary_json TEXT NOT NULL
-            )"""
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_experiments_device_type "
-            "ON experiments(device_id, experiment_type, started_utc DESC)"
-        )
-        connection.commit()
-        return connection
+        try:
+            with self._schema_lock:
+                if not self._schema_ready:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    connection.execute(
+                        """CREATE TABLE IF NOT EXISTS experiments (
+                            experiment_id TEXT PRIMARY KEY,
+                            device_id TEXT NOT NULL,
+                            experiment_type TEXT NOT NULL,
+                            started_utc TEXT NOT NULL,
+                            completed_utc TEXT,
+                            status TEXT NOT NULL,
+                            metadata_path TEXT NOT NULL,
+                            settings_json TEXT NOT NULL,
+                            summary_json TEXT NOT NULL
+                        )"""
+                    )
+                    connection.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_experiments_device_type "
+                        "ON experiments(device_id, experiment_type, started_utc DESC)"
+                    )
+                    connection.commit()
+                    self._schema_ready = True
+            return connection
+        except BaseException:
+            connection.close()
+            raise
 
     def upsert(self, metadata: Mapping[str, Any], *, local_metadata_path: Optional[str | Path] = None) -> None:
         db = None
@@ -385,10 +394,20 @@ class ExperimentMetadataService:
         if sample_id:
             metadata["device"]["sample_id"] = str(sample_id)
         metadata["metadata_path"] = _portable_path(path, self.output_root)
-        run = ExperimentRun(self, metadata, path, allow_post_completion=allow_post_completion)
-        # Registering the sidecar makes the complete file association explicit.
-        run.register_file(path, role="metadata", kind="experiment_metadata")
-        return run
+        # Include the sidecar association in the initial durable write.  Calling
+        # register_file() after construction used to rewrite the same JSON and
+        # SQLite row immediately, doubling run-start filesystem work.
+        metadata["files"].append({
+            "path": _portable_path(path, self.output_root),
+            "role": "metadata",
+            "kind": "experiment_metadata",
+        })
+        return ExperimentRun(
+            self,
+            metadata,
+            path,
+            allow_post_completion=allow_post_completion,
+        )
 
     @staticmethod
     def loadable_settings(settings: Mapping[str, Any]) -> dict[str, Any]:

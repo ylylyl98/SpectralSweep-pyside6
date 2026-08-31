@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRect, QSettings, QTimer, QObject, Slot
+from PySide6.QtCore import Qt, QRect, QSettings, QTimer, QObject, QEvent, Slot
 from PySide6.QtGui  import QCloseEvent, QFont, QAction
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QStatusBar, QApplication,
@@ -391,6 +391,32 @@ class _SharedSampleIdBinder(QObject):
         self.set_value(value)
 
 
+class _SessionChangeWatcher(QObject):
+    """Debounce user input into a single session-state observation."""
+
+    _CHANGE_EVENTS = {
+        QEvent.Type.KeyRelease,
+        QEvent.Type.MouseButtonRelease,
+        QEvent.Type.Wheel,
+        QEvent.Type.Drop,
+        QEvent.Type.InputMethod,
+        QEvent.Type.FocusOut,
+    }
+
+    def __init__(self, owner: QWidget, changed, parent=None):
+        super().__init__(parent)
+        self._owner = owner
+        self._changed = changed
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() in self._CHANGE_EVENTS and (
+            watched is self._owner
+            or (isinstance(watched, QWidget) and self._owner.isAncestorOf(watched))
+        ):
+            self._changed()
+        return False
+
+
 class MainWindow(QMainWindow):
     """
     Application shell.
@@ -436,11 +462,19 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self._status)
         self._status.showMessage("Ready")
 
-        self._lf6.connected.connect(lambda _: self._status.showMessage("LF6 connected"))
-        self._lf6.disconnected.connect(lambda: self._status.showMessage("LF6 disconnected"))
-        self._lf6.error.connect(lambda m: self._status.showMessage(f"LF6 error: {m[:80]}"))
+        self._lf6.connected.connect(
+            lambda _: self._status.showMessage("Spectrometer connected")
+        )
+        self._lf6.disconnected.connect(
+            lambda: self._status.showMessage("Spectrometer disconnected")
+        )
+        self._lf6.error.connect(
+            lambda m: self._status.showMessage(f"Spectrometer error: {m[:80]}")
+        )
         self._lf6.state_changed.connect(
-            lambda state: self._status.showMessage(f"LF6 {getattr(state, 'value', state).lower()}")
+            lambda state: self._status.showMessage(
+                f"Spectrometer {getattr(state, 'value', state).lower()}"
+            )
         )
         self._smu.connected.connect(lambda *_: self._status.showMessage("SMU connected"))
         self._smu.disconnected.connect(lambda: self._status.showMessage("SMU disconnected"))
@@ -562,15 +596,27 @@ class MainWindow(QMainWindow):
         self._restore_geometry()
         self._restore_session()
 
-        # A short polling debounce also catches dynamic table-cell widgets.
+        # User input schedules a debounced observation.  A slow fallback poll
+        # catches programmatic/dynamic-widget changes without walking every
+        # panel four times per second while the application is idle.
         self._last_observed_session = self._capture_session()
+        self._session_observe_timer = QTimer(self)
+        self._session_observe_timer.setSingleShot(True)
+        self._session_observe_timer.setInterval(150)
+        self._session_observe_timer.timeout.connect(self._poll_session_changes)
         self._session_poll_timer = QTimer(self)
-        self._session_poll_timer.setInterval(250)
+        self._session_poll_timer.setInterval(5000)
         self._session_poll_timer.timeout.connect(self._poll_session_changes)
         self._session_save_timer = QTimer(self)
         self._session_save_timer.setSingleShot(True)
         self._session_save_timer.setInterval(500)
         self._session_save_timer.timeout.connect(self._persist_session)
+        self._session_change_watcher = _SessionChangeWatcher(
+            self, self._schedule_session_observation, self
+        )
+        if app is not None:
+            app.installEventFilter(self._session_change_watcher)
+        self._tabs.currentChanged.connect(self._schedule_session_observation)
         self._session_poll_timer.start()
 
     # ── geometry persistence ──────────────────────────────────────────────────
@@ -932,6 +978,9 @@ class MainWindow(QMainWindow):
             self._last_observed_session = current
             self._session_save_timer.start()
 
+    def _schedule_session_observation(self, *_args) -> None:
+        self._session_observe_timer.start()
+
     def _persist_session(self) -> None:
         session = self._capture_session()
         cfg.session.schema_version = int(session["schema_version"])
@@ -1046,6 +1095,43 @@ class MainWindow(QMainWindow):
             )
             event.ignore()
             return
+        try:
+            cooling = self._lf6.andor_disconnect_safety_snapshot()
+        except Exception as exc:
+            answer = QMessageBox.question(
+                self,
+                "Andor detector temperature is unknown",
+                "The Andor detector temperature could not be verified before exit:\n\n"
+                f"{exc}\n\nExit and close the camera connection anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        else:
+            if cooling:
+                temperature = float(cooling.get("temperature_c", -273.15))
+                threshold = float(cfg.lf6.andor_safe_disconnect_temperature_c)
+                cooler_on = bool(cooling.get("cooler_on", False))
+                if cooler_on or temperature < threshold:
+                    answer = QMessageBox.question(
+                        self,
+                        "Andor detector is cold",
+                        f"The detector is {temperature:.1f} °C and the safe disconnect "
+                        f"temperature is {threshold:.1f} °C.\n\n"
+                        "Cancel exit and use 'Warm up + disconnect' in the "
+                        "Instruments tab. Exit anyway only for an emergency.",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if answer != QMessageBox.StandardButton.Yes:
+                        event.ignore()
+                        return
+        app = QApplication.instance()
+        if app is not None and hasattr(self, "_session_change_watcher"):
+            app.removeEventFilter(self._session_change_watcher)
+        self._session_observe_timer.stop()
         self._session_poll_timer.stop()
         self._session_save_timer.stop()
         self._persist_session()

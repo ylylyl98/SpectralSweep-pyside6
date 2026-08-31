@@ -332,7 +332,7 @@ class _PowerSweepWorker(QObject):
         wls = np.array([])
         if spec is not None:
             try:
-                wls = spec.calibration_wavelengths(force=True)
+                wls = spec.calibration_wavelengths(force=False)
             except Exception:
                 pass
         if wls.size <= 2 and setup is not None:

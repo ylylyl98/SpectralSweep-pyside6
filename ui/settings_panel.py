@@ -25,7 +25,7 @@ from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
     QDoubleSpinBox, QSpinBox, QLineEdit, QFileDialog, QFormLayout, QComboBox,
-    QSizePolicy,
+    QSizePolicy, QCheckBox, QScrollArea,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -54,7 +54,13 @@ class SettingsPanel(QWidget):
     # ── build ─────────────────────────────────────────────────────────────────
 
     def _build(self):
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; }")
+        body = QWidget()
+        root = QVBoxLayout(body)
         root.setAlignment(Qt.AlignmentFlag.AlignTop)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(10)
@@ -80,9 +86,11 @@ class SettingsPanel(QWidget):
         root.addWidget(self._status_lbl)
 
         root.addStretch()
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
 
     def _build_lf6_group(self) -> QGroupBox:
-        grp = QGroupBox("LF6 Spectrometer Settings")
+        grp = QGroupBox("Shared Spectrometer Settings")
         form = QFormLayout(grp)
         form.setContentsMargins(8, 10, 8, 8)
         form.setSpacing(6)
@@ -110,7 +118,7 @@ class SettingsPanel(QWidget):
         self._accum.setFixedWidth(130)
         form.addRow("Accumulations:", self._accum)
 
-        self._apply_btn = QPushButton("Apply to LF6")
+        self._apply_btn = QPushButton("Apply to spectrometer")
         self._apply_btn.setEnabled(False)
         self._apply_btn.setMaximumWidth(130)
         form.addRow("", self._apply_btn)
@@ -118,6 +126,118 @@ class SettingsPanel(QWidget):
         self._lf6_status = QLabel("")
         self._lf6_status.setStyleSheet("font-size: 11px;")
         form.addRow("", self._lf6_status)
+
+        self._andor_sdk_dir = QLineEdit()
+        self._andor_sdk_dir.setMinimumWidth(320)
+        form.addRow("Andor SDK2 DLL folder:", self._andor_sdk_dir)
+
+        self._andor_shamrock_dir = QLineEdit()
+        self._andor_shamrock_dir.setMinimumWidth(320)
+        form.addRow("Shamrock DLL folder:", self._andor_shamrock_dir)
+
+        self._andor_si_index = QSpinBox()
+        self._andor_si_index.setRange(0, 31)
+        self._andor_si_serial = QLineEdit()
+        self._andor_si_serial.setPlaceholderText("optional serial override")
+        si_row = QHBoxLayout()
+        si_row.addWidget(QLabel("index"))
+        si_row.addWidget(self._andor_si_index)
+        si_row.addWidget(QLabel("serial"))
+        si_row.addWidget(self._andor_si_serial)
+        form.addRow("Andor Si camera:", si_row)
+
+        self._andor_ingaas_index = QSpinBox()
+        self._andor_ingaas_index.setRange(0, 31)
+        self._andor_ingaas_serial = QLineEdit()
+        self._andor_ingaas_serial.setPlaceholderText("optional serial override")
+        ingaas_row = QHBoxLayout()
+        ingaas_row.addWidget(QLabel("index"))
+        ingaas_row.addWidget(self._andor_ingaas_index)
+        ingaas_row.addWidget(QLabel("serial"))
+        ingaas_row.addWidget(self._andor_ingaas_serial)
+        form.addRow("Andor InGaAs camera:", ingaas_row)
+
+        self._andor_spec_index = QSpinBox()
+        self._andor_spec_index.setRange(0, 31)
+        form.addRow("Shamrock index:", self._andor_spec_index)
+
+        self._andor_si_temperature = QDoubleSpinBox()
+        self._andor_si_temperature.setRange(-120.0, 30.0)
+        self._andor_si_temperature.setDecimals(1)
+        self._andor_si_temperature.setSuffix(" °C")
+        self._andor_si_cooler = QCheckBox("cool on connect")
+        self._andor_si_fan = QComboBox()
+        self._andor_si_fan.addItems(["full", "low", "off"])
+        self._andor_si_output_port = QComboBox()
+        self._andor_si_output_port.addItems(["unchanged", "direct", "side"])
+        si_operating = QHBoxLayout()
+        si_operating.addWidget(self._andor_si_temperature)
+        si_operating.addWidget(self._andor_si_cooler)
+        si_operating.addWidget(QLabel("fan"))
+        si_operating.addWidget(self._andor_si_fan)
+        si_operating.addWidget(QLabel("output"))
+        si_operating.addWidget(self._andor_si_output_port)
+        form.addRow("Si operating profile:", si_operating)
+
+        self._andor_ingaas_temperature = QDoubleSpinBox()
+        self._andor_ingaas_temperature.setRange(-120.0, 30.0)
+        self._andor_ingaas_temperature.setDecimals(1)
+        self._andor_ingaas_temperature.setSuffix(" °C")
+        self._andor_ingaas_cooler = QCheckBox("cool on connect")
+        self._andor_ingaas_fan = QComboBox()
+        self._andor_ingaas_fan.addItems(["full", "low", "off"])
+        self._andor_ingaas_output_port = QComboBox()
+        self._andor_ingaas_output_port.addItems(["unchanged", "direct", "side"])
+        ingaas_operating = QHBoxLayout()
+        ingaas_operating.addWidget(self._andor_ingaas_temperature)
+        ingaas_operating.addWidget(self._andor_ingaas_cooler)
+        ingaas_operating.addWidget(QLabel("fan"))
+        ingaas_operating.addWidget(self._andor_ingaas_fan)
+        ingaas_operating.addWidget(QLabel("output"))
+        ingaas_operating.addWidget(self._andor_ingaas_output_port)
+        form.addRow("InGaAs operating profile:", ingaas_operating)
+
+        self._andor_safe_disconnect_temperature = QDoubleSpinBox()
+        self._andor_safe_disconnect_temperature.setRange(-20.0, 30.0)
+        self._andor_safe_disconnect_temperature.setDecimals(1)
+        self._andor_safe_disconnect_temperature.setSuffix(" °C")
+        self._andor_safe_disconnect_temperature.setToolTip(
+            "Warm-up disconnect waits until the detector reaches at least this temperature."
+        )
+        form.addRow(
+            "Safe disconnect temperature:",
+            self._andor_safe_disconnect_temperature,
+        )
+
+        self._andor_shutter = QComboBox()
+        self._andor_shutter.addItems(["auto", "open", "closed"])
+        form.addRow("Camera shutter mode:", self._andor_shutter)
+
+        self._andor_shamrock_shutter = QComboBox()
+        self._andor_shamrock_shutter.addItems(
+            ["unchanged", "closed", "opened", "bnc"]
+        )
+        form.addRow("Shamrock shutter default:", self._andor_shamrock_shutter)
+
+        self._andor_grating = QSpinBox()
+        self._andor_grating.setRange(1, 32)
+        form.addRow("Shamrock grating:", self._andor_grating)
+
+        self._andor_slit = QDoubleSpinBox()
+        self._andor_slit.setRange(1.0, 5000.0)
+        self._andor_slit.setDecimals(1)
+        self._andor_slit.setSuffix(" µm")
+        form.addRow("Input slit width:", self._andor_slit)
+
+        self._andor_invert_wl = QCheckBox("Reverse calibration axis only")
+        self._andor_invert_wl.setToolTip(
+            "Matches the detector orientation used in the uploaded notebook. "
+            "Verify with a known spectral line before production measurements."
+        )
+        form.addRow("Wavelength orientation:", self._andor_invert_wl)
+
+        self._andor_discard_first = QCheckBox("Discard first frame")
+        form.addRow("Acquisition:", self._andor_discard_first)
 
         return grp
 
@@ -211,6 +331,75 @@ class SettingsPanel(QWidget):
         self._accum.valueChanged.connect(
             lambda v: setattr(cfg.lf6, "accumulations", v)
         )
+        self._andor_sdk_dir.textChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_sdk2_dll_dir", value.strip())
+        )
+        self._andor_shamrock_dir.textChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_shamrock_dll_dir", value.strip())
+        )
+        self._andor_si_index.valueChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_si_camera_index", int(value))
+        )
+        self._andor_ingaas_index.valueChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_ingaas_camera_index", int(value))
+        )
+        self._andor_si_serial.textChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_si_serial", value.strip())
+        )
+        self._andor_ingaas_serial.textChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_ingaas_serial", value.strip())
+        )
+        self._andor_spec_index.valueChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_spectrograph_index", int(value))
+        )
+        for role in ("si", "ingaas"):
+            temperature = getattr(self, f"_andor_{role}_temperature")
+            cooler = getattr(self, f"_andor_{role}_cooler")
+            fan = getattr(self, f"_andor_{role}_fan")
+            output_port = getattr(self, f"_andor_{role}_output_port")
+            temperature.valueChanged.connect(
+                lambda value, role=role: setattr(
+                    cfg.lf6, f"andor_{role}_temperature_c", float(value)
+                )
+            )
+            cooler.toggled.connect(
+                lambda value, role=role: setattr(
+                    cfg.lf6, f"andor_{role}_cooler_on_connect", bool(value)
+                )
+            )
+            fan.currentTextChanged.connect(
+                lambda value, role=role: setattr(
+                    cfg.lf6, f"andor_{role}_fan_mode", value
+                )
+            )
+            output_port.currentTextChanged.connect(
+                lambda value, role=role: setattr(
+                    cfg.lf6, f"andor_{role}_output_port", value
+                )
+            )
+        self._andor_safe_disconnect_temperature.valueChanged.connect(
+            lambda value: setattr(
+                cfg.lf6, "andor_safe_disconnect_temperature_c", float(value)
+            )
+        )
+        self._andor_shutter.currentTextChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_shutter_mode", value)
+        )
+        self._andor_shamrock_shutter.currentTextChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_shamrock_shutter_mode", value)
+        )
+        self._andor_grating.valueChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_grating", int(value))
+        )
+        self._andor_slit.valueChanged.connect(
+            lambda value: setattr(cfg.lf6, "andor_slit_width_um", float(value))
+        )
+        self._andor_invert_wl.toggled.connect(
+            lambda value: setattr(cfg.lf6, "andor_invert_wavelength_axis", bool(value))
+        )
+        self._andor_discard_first.toggled.connect(
+            lambda value: setattr(cfg.lf6, "andor_discard_first", bool(value))
+        )
         self._base_out_edit.textChanged.connect(
             lambda t: setattr(cfg.filename, "base_out", t)
         )
@@ -231,6 +420,37 @@ class SettingsPanel(QWidget):
         self._exposure.setValue(cfg.lf6.exposure_ms)
         self._center.setValue(cfg.lf6.center_nm)
         self._accum.setValue(cfg.lf6.accumulations)
+        self._andor_sdk_dir.setText(cfg.lf6.andor_sdk2_dll_dir)
+        self._andor_shamrock_dir.setText(cfg.lf6.andor_shamrock_dll_dir)
+        self._andor_si_index.setValue(int(cfg.lf6.andor_si_camera_index))
+        self._andor_ingaas_index.setValue(int(cfg.lf6.andor_ingaas_camera_index))
+        self._andor_si_serial.setText(cfg.lf6.andor_si_serial)
+        self._andor_ingaas_serial.setText(cfg.lf6.andor_ingaas_serial)
+        self._andor_spec_index.setValue(int(cfg.lf6.andor_spectrograph_index))
+        for role in ("si", "ingaas"):
+            getattr(self, f"_andor_{role}_temperature").setValue(
+                float(getattr(cfg.lf6, f"andor_{role}_temperature_c"))
+            )
+            getattr(self, f"_andor_{role}_cooler").setChecked(
+                bool(getattr(cfg.lf6, f"andor_{role}_cooler_on_connect"))
+            )
+            getattr(self, f"_andor_{role}_fan").setCurrentText(
+                str(getattr(cfg.lf6, f"andor_{role}_fan_mode"))
+            )
+            getattr(self, f"_andor_{role}_output_port").setCurrentText(
+                str(getattr(cfg.lf6, f"andor_{role}_output_port"))
+            )
+        self._andor_safe_disconnect_temperature.setValue(
+            float(cfg.lf6.andor_safe_disconnect_temperature_c)
+        )
+        self._andor_shutter.setCurrentText(str(cfg.lf6.andor_shutter_mode))
+        self._andor_shamrock_shutter.setCurrentText(
+            str(cfg.lf6.andor_shamrock_shutter_mode)
+        )
+        self._andor_grating.setValue(int(cfg.lf6.andor_grating))
+        self._andor_slit.setValue(float(cfg.lf6.andor_slit_width_um))
+        self._andor_invert_wl.setChecked(bool(cfg.lf6.andor_invert_wavelength_axis))
+        self._andor_discard_first.setChecked(bool(cfg.lf6.andor_discard_first))
         self._base_out_edit.setText(cfg.filename.base_out)
         self._temp_edit.setText(cfg.filename.temperature)
         self._measurement_mode.setCurrentText(cfg.filename.measurement_mode)

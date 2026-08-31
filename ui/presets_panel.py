@@ -65,7 +65,7 @@ from utils.when_condition import (
     evaluate_when_expression,
     validate_when_expression,
 )
-from app.devices.stage_adapter import get_linear_stage_profile
+from app.devices.stage_profiles import get_linear_stage_profile
 from app.devices.spectrum_alignment import align_wavelengths_to_image, align_wavelengths_to_intensities
 from utils.filename_builder import (
     FilenameContext,
@@ -2114,8 +2114,19 @@ class _RunWorker(QObject):
 
                 if previous_ctx != ctx:
                     if self._lf6 and self._lf6.is_connected:
-                        self._lf6.apply_settings(exp_ms, center, accum)
-                        time.sleep(0.15)
+                        prepare = getattr(
+                            self._lf6, "configure_for_acquisition", None
+                        )
+                        if not callable(prepare):
+                            raise _RunFlowError(
+                                "acquisition",
+                                "Spectrometer acquisition preparation is unavailable.",
+                            )
+                        prepare(
+                            center_nm=center,
+                            exposure_ms=exp_ms,
+                            frames=accum,
+                        )
 
                     if val_rot1 is not None and self._rot and self._rot.is_connected("rot1"):
                         self._rot.move_to("rot1", float(val_rot1))

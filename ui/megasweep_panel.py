@@ -1442,6 +1442,19 @@ class _PreviewPlot(QWidget):
         self._voltage_stripes: dict[int, object] = {}
         self._ratio: float = 1.0
         self._coord: CoordSystem = CoordSystem.PHYSICAL
+        self._progress_axis_x = np.array([], dtype=float)
+        self._progress_axis_y = np.array([], dtype=float)
+        self._progress_v_x = np.array([], dtype=float)
+        self._progress_v_y = np.array([], dtype=float)
+        self._completed_axis_x = np.array([], dtype=float)
+        self._completed_axis_y = np.array([], dtype=float)
+        self._completed_v_x = np.array([], dtype=float)
+        self._completed_v_y = np.array([], dtype=float)
+        self._completed_segment_offsets: list[int] = [0]
+        self._progress_stripe_indices = np.array([], dtype=int)
+        self._stripe_endpoints: list[
+            tuple[float, float, float, float, float, float, float, float] | None
+        ] = []
 
         self._planned_axis = pg.ScatterPlotItem(size=5, pen=pg.mkPen(None), brush=pg.mkBrush(90, 110, 130, 85))
         self._planned_v = pg.ScatterPlotItem(size=5, pen=pg.mkPen(None), brush=pg.mkBrush(90, 110, 130, 85))
@@ -1524,6 +1537,88 @@ class _PreviewPlot(QWidget):
     def _raw_to_df(self, vtg: float, vbg: float) -> tuple[float, float]:
         r = self._ratio
         return (vtg + r * vbg, vtg - r * vbg)
+
+    def _cache_progress_geometry(self) -> None:
+        """Precompute immutable point and stripe geometry for cheap updates."""
+        points = self._valid_points
+        self._progress_axis_x = np.asarray(
+            [point["axis_a"] for point in points], dtype=float
+        )
+        self._progress_axis_y = np.asarray(
+            [point["axis_b"] for point in points], dtype=float
+        )
+        if self._coord == CoordSystem.RAW:
+            voltage_points = [
+                self._raw_to_df(point["raw"][0], point["raw"][1])
+                for point in points
+            ]
+        else:
+            voltage_points = [
+                (float(point["raw"][0]), float(point["raw"][1]))
+                for point in points
+            ]
+        self._progress_v_x = np.asarray(
+            [point[0] for point in voltage_points], dtype=float
+        )
+        self._progress_v_y = np.asarray(
+            [point[1] for point in voltage_points], dtype=float
+        )
+
+        axis_values = np.asarray(self._axis_a_vals, dtype=float)
+        grouped: list[list[int]] = [[] for _ in axis_values]
+        stripe_indices = np.full(len(points), -1, dtype=int)
+        if axis_values.size:
+            sorted_indices = np.argsort(axis_values)
+            sorted_values = axis_values[sorted_indices]
+            for point_index, point_axis in enumerate(self._progress_axis_x):
+                insertion = int(np.searchsorted(sorted_values, point_axis))
+                candidates = [
+                    candidate
+                    for candidate in (insertion - 1, insertion)
+                    if 0 <= candidate < sorted_values.size
+                ]
+                if not candidates:
+                    continue
+                sorted_index = min(
+                    candidates,
+                    key=lambda candidate: abs(sorted_values[candidate] - point_axis),
+                )
+                if abs(sorted_values[sorted_index] - point_axis) < EPS:
+                    stripe_index = int(sorted_indices[sorted_index])
+                    grouped[stripe_index].append(point_index)
+                    stripe_indices[point_index] = stripe_index
+
+        axis_x: list[float] = []
+        axis_y: list[float] = []
+        voltage_x: list[float] = []
+        voltage_y: list[float] = []
+        offsets = [0]
+        endpoints = []
+        for indices in grouped:
+            if indices:
+                first, last = indices[0], indices[-1]
+                endpoint = (
+                    self._progress_axis_x[first], self._progress_axis_x[last],
+                    self._progress_axis_y[first], self._progress_axis_y[last],
+                    self._progress_v_x[first], self._progress_v_x[last],
+                    self._progress_v_y[first], self._progress_v_y[last],
+                )
+                endpoints.append(endpoint)
+                axis_x.extend((endpoint[0], endpoint[1], np.nan))
+                axis_y.extend((endpoint[2], endpoint[3], np.nan))
+                voltage_x.extend((endpoint[4], endpoint[5], np.nan))
+                voltage_y.extend((endpoint[6], endpoint[7], np.nan))
+            else:
+                endpoints.append(None)
+            offsets.append(len(axis_x))
+
+        self._completed_axis_x = np.asarray(axis_x, dtype=float)
+        self._completed_axis_y = np.asarray(axis_y, dtype=float)
+        self._completed_v_x = np.asarray(voltage_x, dtype=float)
+        self._completed_v_y = np.asarray(voltage_y, dtype=float)
+        self._completed_segment_offsets = offsets
+        self._progress_stripe_indices = stripe_indices
+        self._stripe_endpoints = endpoints
 
     def _set_point_layers(self, all_points: list[dict], valid_points: list[dict]):
         self._all_points = list(all_points)
@@ -1751,6 +1846,7 @@ class _PreviewPlot(QWidget):
         self._axis_a_vals = np.asarray(axis_a_vals, dtype=float)
         self._axis_b_vals = np.asarray(axis_b_vals, dtype=float)
         self._snake = bool(snake)
+        self._cache_progress_geometry()
         self.set_axis_labels(axis_a_name, axis_b_name)
 
         if coord == CoordSystem.RAW:
@@ -1779,50 +1875,50 @@ class _PreviewPlot(QWidget):
             self.clear_progress()
             return
         upto = min(done, len(self._valid_points))
-        pts = self._valid_points[:upto]
-        cur = pts[-1]
-        def _v_coords(p: dict) -> tuple[float, float]:
-            vtg, vbg = p["raw"][0], p["raw"][1]
-            if self._coord == CoordSystem.RAW:
-                return self._raw_to_df(vtg, vbg)
-            return vtg, vbg
-
-        self._completed_axis_pts.setData(x=[p["axis_a"] for p in pts], y=[p["axis_b"] for p in pts])
-        self._completed_v_pts.setData(x=[_v_coords(p)[0] for p in pts], y=[_v_coords(p)[1] for p in pts])
+        cur = self._valid_points[upto - 1]
+        self._completed_axis_pts.setData(
+            x=self._progress_axis_x[:upto], y=self._progress_axis_y[:upto]
+        )
+        self._completed_v_pts.setData(
+            x=self._progress_v_x[:upto], y=self._progress_v_y[:upto]
+        )
         inner_count = max(1, inner_count)
         current_stripe = min(len(self._axis_a_vals) - 1, max(0, (done - 1) // inner_count)) if len(self._axis_a_vals) else 0
-        completed = [float(self._axis_a_vals[i]) for i in range(current_stripe) if i < len(self._axis_a_vals)]
-        if completed:
-            axis_x, axis_y = [], []
-            v_x, v_y = [], []
-            for idx in range(current_stripe):
-                a_val = float(self._axis_a_vals[idx])
-                stripe_pts = [p for p in self._valid_points if abs(p["axis_a"] - a_val) < EPS]
-                if not stripe_pts:
-                    continue
-                axis_x.extend([stripe_pts[0]["axis_a"], stripe_pts[-1]["axis_a"], np.nan])
-                axis_y.extend([stripe_pts[0]["axis_b"], stripe_pts[-1]["axis_b"], np.nan])
-                v0 = _v_coords(stripe_pts[0])
-                v1 = _v_coords(stripe_pts[-1])
-                v_x.extend([v0[0], v1[0], np.nan])
-                v_y.extend([v0[1], v1[1], np.nan])
-            self._done_axis.setData(x=axis_x, y=axis_y)
-            self._done_v.setData(x=v_x, y=v_y)
+        segment_end = self._completed_segment_offsets[
+            min(current_stripe, len(self._completed_segment_offsets) - 1)
+        ]
+        if segment_end:
+            self._done_axis.setData(
+                x=self._completed_axis_x[:segment_end],
+                y=self._completed_axis_y[:segment_end],
+            )
+            self._done_v.setData(
+                x=self._completed_v_x[:segment_end],
+                y=self._completed_v_y[:segment_end],
+            )
         else:
             self._done_axis.setData([], [])
             self._done_v.setData([], [])
-        current_pts = [p for p in self._valid_points if abs(p["axis_a"] - cur["axis_a"]) < EPS]
-        if current_pts:
-            self._current_axis_stripe.setData(x=[current_pts[0]["axis_a"], current_pts[-1]["axis_a"]], y=[current_pts[0]["axis_b"], current_pts[-1]["axis_b"]])
-            cv0 = _v_coords(current_pts[0])
-            cv1 = _v_coords(current_pts[-1])
-            self._current_v_stripe.setData(x=[cv0[0], cv1[0]], y=[cv0[1], cv1[1]])
+        stripe_index = int(self._progress_stripe_indices[upto - 1])
+        endpoint = (
+            self._stripe_endpoints[stripe_index]
+            if 0 <= stripe_index < len(self._stripe_endpoints)
+            else None
+        )
+        if endpoint is not None:
+            self._current_axis_stripe.setData(
+                x=[endpoint[0], endpoint[1]], y=[endpoint[2], endpoint[3]]
+            )
+            self._current_v_stripe.setData(
+                x=[endpoint[4], endpoint[5]], y=[endpoint[6], endpoint[7]]
+            )
         else:
             self._current_axis_stripe.setData([], [])
             self._current_v_stripe.setData([], [])
-        cv_cur = _v_coords(cur)
         self._cur_axis.setData(x=[cur["axis_a"]], y=[cur["axis_b"]])
-        self._cur_v.setData(x=[cv_cur[0]], y=[cv_cur[1]])
+        self._cur_v.setData(
+            x=[self._progress_v_x[upto - 1]], y=[self._progress_v_y[upto - 1]]
+        )
 
     def clear_progress(self):
         self._completed_axis_pts.setData([], [])
