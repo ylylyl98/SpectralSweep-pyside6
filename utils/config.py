@@ -235,10 +235,14 @@ class MagnetConfig:
     maximum_current_a: float = 44.27
     maximum_rate_a_per_s: float = 0.0343
     mcd_max_field_t: float = 8.0
+    safe_control_max_field_t: float = 8.0
     heater_warm_s: float = 60.0
     heater_cool_s: float = 120.0
     current_match_tolerance_a: float = 0.01
     field_tolerance_t: float = 0.002
+    # Magnet specification: maximum documented charging voltage is 2 V
+    # (0-40 A at 0.0343 A/s). This is intentionally below APS100 VLIM=3 V.
+    persistent_zero_max_magnet_voltage_v: Optional[float] = 2.0
     poll_interval_s: float = 0.5
     allow_remote_heater_control: bool = True
 
@@ -302,7 +306,7 @@ class MCDConfig:
     sample_id: str = ""
     point: str = ""
     condition_label: str = ""
-    subfolder: str = "MCD Data"
+    subfolder: str = "mcd"
     temperature: str = "1.8"
     measurement_mode: str = "Ref"
     laser_nm: str = ""

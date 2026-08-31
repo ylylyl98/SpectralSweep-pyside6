@@ -1066,7 +1066,7 @@ class _ContinuousMCDWorker(QObject):
 
     def _create_output_paths(self, p: dict) -> tuple[Path, Path, Path]:
         sample = _safe_name(p["sample_id"])
-        subfolder = _safe_name(p.get("subfolder", "MCD Data"))
+        subfolder = _safe_name(p.get("subfolder", "mcd"))
         out_dir = Path(p["base_output_dir"]) / sample / subfolder
         base_stem = build_mcd_filename_base(p)
         stem = make_unique_stem(out_dir, base_stem)
@@ -1126,6 +1126,7 @@ class MCDPanel(QWidget):
         self._thread: Optional[QThread] = None
         self._worker: Optional[_ContinuousMCDWorker] = None
         self._externally_busy = False
+        self._safe_magnet_operation_active = False
         self._last_snapshot = None
         self._updating_table = False
         self._syncing_gate_ratio = False
@@ -1208,7 +1209,11 @@ class MCDPanel(QWidget):
         self._identity = QLabel("Disconnected")
         self._identity.setToolTip("Device name reported by the APS100 (*IDN?).")
         self._field = QLabel("—")
-        self._field.setToolTip("Field measured in the magnet coil (persistent side).")
+        self._field.setToolTip(
+            "APS100 IMAG value. With the heater ON it tracks output current; with "
+            "the heater OFF it is the APS100 stored persistent field, not an "
+            "independent magnet-current measurement."
+        )
         self._output = QLabel("—")
         self._output.setToolTip(
             "Field from the power-supply leads, with the drive current in amperes."
@@ -1245,7 +1250,12 @@ class MCDPanel(QWidget):
         status_grid.setVerticalSpacing(2)
         status_grid.addWidget(caption("Identity"), 0, 0)
         status_grid.addWidget(self._identity, 0, 1)
-        status_grid.addWidget(caption("Magnet field"), 0, 2)
+        self._field_caption = caption("Magnet field")
+        self._field_caption.setToolTip(
+            "Driven: IMAG follows the energized magnet. Persistent: IMAG is the "
+            "stored field from when the heater was switched off."
+        )
+        status_grid.addWidget(self._field_caption, 0, 2)
         status_grid.addWidget(self._field, 0, 3)
         status_grid.addWidget(caption("Lead/output"), 1, 0)
         status_grid.addWidget(self._output, 1, 1)
@@ -1299,6 +1309,87 @@ class MCDPanel(QWidget):
         transition_form.addRow(self._driven_btn, self._persistent_btn)
         transition_form.addRow(self._zero_leads)
         transition_form.addRow("Transition", self._transition_status)
+
+        safe_group = QGroupBox("Safe Magnet Control")
+        safe_group.setToolTip(
+            "Atomically match persistent current when needed, enter Driven mode, "
+            "move to the requested field, and finish in the selected safe mode."
+        )
+        safe_form = QFormLayout(safe_group)
+        safe_form.setContentsMargins(8, 6, 8, 6)
+        safe_form.setVerticalSpacing(4)
+        self._safe_target = self._double_spin(
+            -cfg.magnet.safe_control_max_field_t,
+            cfg.magnet.safe_control_max_field_t,
+            0.0,
+            4,
+            " T",
+        )
+        self._safe_target.setToolTip(
+            "Requested final magnet field. The normal 1000 MCD operating guard "
+            f"limits this control to ±{cfg.magnet.safe_control_max_field_t:g} T."
+        )
+        self._safe_rate = QLabel("Stored APS100 RATE 0–4 profile — connect to read")
+        self._safe_rate.setWordWrap(True)
+        self._safe_rate.setToolTip(
+            "Read-only policy: lead matching and magnet motion use the range-dependent "
+            "RATE 0–4 values already stored in the APS100. This application never "
+            "changes them, and FAST/RATE 5 is never used."
+        )
+        self._safe_rates_refresh_btn = QPushButton("Refresh stored rates")
+        self._safe_rates_refresh_btn.setToolTip(
+            "Read RANGE 0–4, RATE 0–4, and VLIM from the APS100 without changing them."
+        )
+        vmag_limit = cfg.magnet.persistent_zero_max_magnet_voltage_v
+        self._safe_vmag_limit = QLabel(
+            f"±{float(vmag_limit):g} V"
+            if vmag_limit is not None
+            else "NOT COMMISSIONED — persistent lead zeroing is blocked"
+        )
+        self._safe_vmag_limit.setWordWrap(True)
+        self._safe_vmag_limit.setToolTip(
+            "Fail-closed VMAG limit used while SWEEP ZERO removes lead current "
+            "after the persistent switch has cooled. Configure it from the magnet SOP."
+        )
+        self._safe_final_mode = QComboBox()
+        self._safe_final_mode.addItem("Persistent — heater OFF", "persistent")
+        self._safe_final_mode.addItem("Driven — heater ON", "driven")
+        self._safe_final_mode.setToolTip(
+            "Persistent traps the target field and can zero the leads. Driven "
+            "keeps the heater ON and is required for field-sweep MCD."
+        )
+        self._safe_settle = self._double_spin(0.0, 300.0, 2.0, 1, " s")
+        self._safe_settle.setToolTip(
+            "Time the magnet field must remain within tolerance after the ramp "
+            "before a persistent-mode transition may begin."
+        )
+        self._safe_move_btn = QPushButton("Execute Safe Move")
+        self._safe_move_btn.setToolTip(
+            "Run the complete guarded sequence from the current state to the "
+            "target field and selected final mode."
+        )
+        self._safe_zero_btn = QPushButton("Safely Return to 0 T")
+        self._safe_zero_btn.setToolTip(
+            "From Persistent mode, first match the leads and warm the heater; "
+            "then ramp the driven magnet to zero and finish Persistent at 0 T."
+        )
+        self._safe_state = QLabel("Idle — no safe move running")
+        self._safe_state.setWordWrap(True)
+        self._safe_state.setToolTip(
+            "Current step or verified result of the high-level safe magnet operation."
+        )
+        safe_actions = QHBoxLayout()
+        safe_actions.addWidget(self._safe_move_btn)
+        safe_actions.addWidget(self._safe_zero_btn)
+        safe_form.addRow("Target", self._safe_target)
+        safe_form.addRow("Ramp rate", self._safe_rate)
+        safe_form.addRow("", self._safe_rates_refresh_btn)
+        safe_form.addRow("Lead-zero VMAG limit", self._safe_vmag_limit)
+        safe_form.addRow("Final mode", self._safe_final_mode)
+        safe_form.addRow("Field stability", self._safe_settle)
+        safe_form.addRow(safe_actions)
+        safe_form.addRow("Safe operation", self._safe_state)
+        transition_form.addRow(safe_group)
         self._transition_widget.setVisible(False)
         conn_form.addRow(self._advanced_toggle)
         conn_form.addRow(self._transition_widget)
@@ -1922,6 +2013,9 @@ class MCDPanel(QWidget):
         self._pause_btn.clicked.connect(self._pause_magnet)
         self._driven_btn.clicked.connect(self._enter_driven)
         self._persistent_btn.clicked.connect(self._enter_persistent)
+        self._safe_move_btn.clicked.connect(self._start_safe_magnet_move)
+        self._safe_zero_btn.clicked.connect(self._safe_return_to_zero)
+        self._safe_rates_refresh_btn.clicked.connect(self._magnet.refresh_rates)
         self._run_btn.clicked.connect(self._start_run)
         self._stop_btn.clicked.connect(self._stop_run)
         self._show_spectrum_chk.toggled.connect(self._set_spectrum_visible)
@@ -1946,6 +2040,12 @@ class MCDPanel(QWidget):
         self._magnet.connected.connect(self._on_magnet_connected)
         self._magnet.disconnected.connect(self._on_magnet_disconnected)
         self._magnet.snapshot_updated.connect(self._on_snapshot)
+        rates_signal = getattr(self._magnet, "rates_updated", None)
+        if rates_signal is not None:
+            rates_signal.connect(self._on_rates_updated)
+        audit_signal = getattr(self._magnet, "safe_move_audit", None)
+        if audit_signal is not None:
+            audit_signal.connect(self._on_safe_move_audit)
         self._magnet.transition_progress.connect(self._on_transition)
         self._magnet.operation_finished.connect(self._on_magnet_operation)
         self._magnet.error.connect(self._on_magnet_error)
@@ -1997,6 +2097,7 @@ class MCDPanel(QWidget):
     def _on_magnet_disconnected(self) -> None:
         self._identity.setText("Disconnected")
         self._field.setText("—")
+        self._field_caption.setText("Magnet field")
         self._current_field.setText("N/A")
         self._output.setText("—")
         self._heater.setText("—")
@@ -2011,6 +2112,9 @@ class MCDPanel(QWidget):
     def _on_snapshot(self, snapshot) -> None:
         self._last_snapshot = snapshot
         self._field.setText(f"{snapshot.field_t:+.6f} T")
+        self._field_caption.setText(
+            "Magnet field (live)" if snapshot.heater_on else "Magnet field (stored)"
+        )
         self._current_field.setText(f"{snapshot.field_t:+.6f} T")
         self._output.setText(
             f"{snapshot.output_field_t:+.6f} T ({snapshot.output_current_a:+.5f} A)"
@@ -2040,14 +2144,117 @@ class MCDPanel(QWidget):
         if snapshot.status.menu_locked:
             faults.append("MENU LOCK")
         self._fault.setText(", ".join(faults) if faults else "None")
+        if not self._safe_magnet_operation_active and not faults:
+            mode_name = "Driven" if snapshot.heater_on else "Persistent"
+            lead_note = (
+                " · leads zeroed"
+                if not snapshot.heater_on and abs(snapshot.output_current_a) <= 0.01
+                else ""
+            )
+            self._safe_state.setText(
+                f"READY — {mode_name} {snapshot.field_t:+.6f} T{lead_note}"
+            )
+            self._safe_state.setStyleSheet("color:#1d7a3e; font-weight:600;")
+
+    @Slot(object)
+    def _on_rates_updated(self, payload) -> None:
+        rates = dict((payload or {}).get("rates") or {})
+        lines = []
+        lower = 0.0
+        for index in range(5):
+            if index not in rates:
+                continue
+            upper, rate = rates[index]
+            lines.append(
+                f"R{index}: {lower:g}–{float(upper):g} A @ {float(rate):g} T/min"
+            )
+            lower = float(upper)
+        voltage = (payload or {}).get("voltage_limit_v")
+        if voltage is not None:
+            lines.append(f"VLIM: {float(voltage):g} V")
+        self._safe_rate.setText("\n".join(lines) or "Stored APS100 rates unavailable")
+
+    @Slot(object)
+    def _on_safe_move_audit(self, payload) -> None:
+        """Persist the exact guarded request, snapshots, rates, and APS commands."""
+        audit = dict(payload or {})
+        try:
+            audit_dir = Path(cfg.base_out) / "magnet_audit"
+            audit_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            outcome = re.sub(r"[^a-z0-9_-]+", "_", str(audit.get("outcome", "unknown")).lower())
+            path = audit_dir / f"aps100_safe_move_{stamp}_{outcome}.json"
+            path.write_text(
+                json.dumps(audit, indent=2, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
+            self._append_log(f"APS100 safe-move audit saved: {path}")
+        except Exception as exc:
+            self._append_log(f"APS100 AUDIT SAVE ERROR: {exc}")
 
     @Slot(str, float)
     def _on_transition(self, label: str, remaining: float) -> None:
-        self._transition_status.setText(f"{label}: {remaining:.1f} s remaining")
+        field_steps = {
+            "matching leads",
+            "zeroing leads",
+            "ramping field",
+            "entering driven mode",
+        }
+        if label in field_steps and not math.isfinite(float(remaining)):
+            text = f"{label}: telemetry unavailable"
+        elif label in field_steps:
+            text = f"{label}: {remaining:+.6f} T"
+        else:
+            text = f"{label}: {remaining:.1f} s remaining"
+
+        # These are values already read and verified by the guarded adapter
+        # operation. Updating the display here avoids concurrent APS100 queries
+        # while normal polling is suspended by exclusive ownership.
+        if label in field_steps and math.isfinite(float(remaining)):
+            field_t = float(remaining)
+            output_text = (
+                f"{field_t:+.6f} T "
+                f"({field_t / cfg.magnet.coil_constant_t_per_a:+.5f} A)"
+            )
+            if label == "ramping field":
+                self._field.setText(f"{field_t:+.6f} T")
+                self._field_caption.setText("Magnet field (live)")
+                self._current_field.setText(f"{field_t:+.6f} T")
+                self._output.setText(output_text)
+                self._sweep.setText("ramping")
+            elif label in {"matching leads", "zeroing leads"}:
+                self._field_caption.setText("Magnet field (stored)")
+                self._output.setText(output_text)
+                self._sweep.setText(label)
+        elif label == "heater warming":
+            self._heater.setText("ON — driven · warming")
+            self._field_caption.setText("Magnet field (live)")
+            self._sweep.setText("heater warming")
+        elif label == "heater cooling":
+            self._heater.setText("OFF — persistent · cooling")
+            self._field_caption.setText("Magnet field (stored)")
+            self._sweep.setText("heater cooling")
+        elif label == "field settling":
+            self._sweep.setText("paused · settling")
+        self._transition_status.setText(text)
+        if self._safe_magnet_operation_active:
+            self._safe_state.setText(text)
+            self._safe_state.setStyleSheet("color:#9a6200; font-weight:600;")
 
     @Slot(str)
     def _on_magnet_operation(self, operation: str) -> None:
         self._append_log(f"APS100 operation completed: {operation}")
+        if operation.startswith("safe_move:"):
+            parts = operation.split(":", 2)
+            mode = parts[1].capitalize() if len(parts) > 1 else "Verified"
+            target = parts[2] if len(parts) > 2 else "target"
+            self._safe_state.setText(
+                f"READY — {mode} {target} T · final state verified"
+            )
+            self._safe_state.setStyleSheet("color:#1d7a3e; font-weight:600;")
+            self._transition_status.setText("Safe magnet move completed")
+            self._release_safe_magnet_operation()
+            return
         if operation == "enter_driven_mode":
             self._transition_status.setText(
                 "Driven mode active — persistent heater ON"
@@ -2073,6 +2280,10 @@ class MCDPanel(QWidget):
     def _on_magnet_error(self, message: str) -> None:
         self._append_log(f"ERROR: {message}")
         self._run_status.setText("Magnet error")
+        if self._safe_magnet_operation_active:
+            self._safe_state.setText(f"STOPPED — {message}")
+            self._safe_state.setStyleSheet("color:#a82020; font-weight:600;")
+            self._release_safe_magnet_operation()
 
     @Slot(bool)
     def _set_spectrum_visible(self, visible: bool) -> None:
@@ -2402,33 +2613,137 @@ class MCDPanel(QWidget):
         if self._worker is not None:
             self._worker.request_stop()
         self._magnet.pause()
+        if self._safe_magnet_operation_active:
+            self._safe_state.setText(
+                "Stop requested — completing the current safe heater checkpoint…"
+            )
         self._append_log("Pause requested.")
 
     @Slot()
     def _enter_driven(self) -> None:
-        answer = QMessageBox.question(
-            self,
-            "Enter driven mode",
-            "The APS100 will match the lead current, turn the persistent heater ON, "
-            "and hold the matched current for the configured warm-up time. Continue?",
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._magnet.take_remote()
-            self._magnet.enter_driven_mode()
+        if self._last_snapshot is None:
+            QMessageBox.warning(self, "APS100", "Refresh APS100 status first.")
+            return
+        self._begin_safe_magnet_move(self._last_snapshot.field_t, "driven")
 
     @Slot()
     def _enter_persistent(self) -> None:
+        if self._last_snapshot is None:
+            QMessageBox.warning(self, "APS100", "Refresh APS100 status first.")
+            return
+        self._begin_safe_magnet_move(self._last_snapshot.field_t, "persistent")
+
+    @Slot()
+    def _start_safe_magnet_move(self) -> None:
+        self._begin_safe_magnet_move(
+            self._safe_target.value(),
+            str(self._safe_final_mode.currentData() or "persistent"),
+        )
+
+    @Slot()
+    def _safe_return_to_zero(self) -> None:
+        self._safe_target.setValue(0.0)
+        self._safe_final_mode.setCurrentIndex(
+            self._safe_final_mode.findData("persistent")
+        )
+        self._begin_safe_magnet_move(0.0, "persistent")
+
+    def _begin_safe_magnet_move(self, target_t: float, final_mode: str) -> None:
+        if self._safe_magnet_operation_active or self._worker is not None:
+            return
+        if not self._magnet.is_connected:
+            QMessageBox.warning(self, "APS100", "Connect the APS100 first.")
+            return
+        snapshot = self._last_snapshot
+        if snapshot is None:
+            QMessageBox.warning(self, "APS100", "Refresh APS100 status first.")
+            return
+        needs_lead_zero = (
+            final_mode == "persistent"
+            and self._zero_leads.isChecked()
+            and (
+                bool(snapshot.heater_on)
+                or abs(snapshot.output_field_t) > cfg.magnet.field_tolerance_t
+                or abs(float(target_t) - snapshot.field_t) > cfg.magnet.field_tolerance_t
+            )
+        )
+        if (
+            needs_lead_zero
+            and cfg.magnet.persistent_zero_max_magnet_voltage_v is None
+        ):
+            QMessageBox.critical(
+                self,
+                "Persistent lead-zero safety not commissioned",
+                "Configure magnet.persistent_zero_max_magnet_voltage_v from the "
+                "approved magnet SOP before automatic persistent lead zeroing.",
+            )
+            return
+        mode_text = (
+            "Persistent (heater OFF)"
+            if final_mode == "persistent"
+            else "Driven (heater ON)"
+        )
+        zero_line = (
+            "The leads will be ramped to zero after cooling."
+            if final_mode == "persistent" and self._zero_leads.isChecked()
+            else "The leads will remain matched to the magnet."
+        )
+        stored_confirmation = ""
+        if not snapshot.heater_on:
+            stored_confirmation = (
+                f"\n\nIMPORTANT: IMAG is the APS100 STORED persistent field "
+                f"({snapshot.field_t:+.6f} T), not an independent measurement. "
+                "Confirm that this value and polarity match the actual trapped field."
+            )
         answer = QMessageBox.question(
             self,
-            "Enter persistent mode",
-            "The APS100 will pause, turn the heater OFF, hold current for the "
-            "configured cooling time, then optionally zero the leads. Continue?",
+            "Execute safe magnet move",
+            f"Move the magnet to {target_t:+.4f} T and finish in {mode_text}?\n\n"
+            "If currently Persistent, the APS100 will first match the lead current "
+            "before turning the heater ON.\n"
+            f"{zero_line}{stored_confirmation}",
         )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._magnet.take_remote()
-            self._magnet.enter_persistent_mode(
-                zero_leads=self._zero_leads.isChecked()
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        acquire = getattr(self._magnet, "acquire_exclusive", None)
+        if callable(acquire) and not acquire("safe_magnet_control"):
+            QMessageBox.warning(
+                self,
+                "APS100 busy",
+                "The magnet is already owned by "
+                f"{self._magnet.exclusive_owner or 'another operation'}.",
             )
+            return
+        self._safe_magnet_operation_active = True
+        self._safe_move_btn.setEnabled(False)
+        self._safe_zero_btn.setEnabled(False)
+        self._run_btn.setEnabled(False)
+        self._safe_state.setText("Starting guarded magnet sequence…")
+        self._safe_state.setStyleSheet("color:#9a6200; font-weight:600;")
+        self._append_log(
+            f"Safe magnet move requested: target={target_t:+.6f} T, final={final_mode}, "
+            f"rate=stored APS100 RATE 0–4, zero_leads={self._zero_leads.isChecked()}"
+        )
+        self._magnet.safe_move_to_field(
+            target_t,
+            final_mode=final_mode,
+            zero_leads=self._zero_leads.isChecked(),
+            persistent_field_confirmed=not snapshot.heater_on,
+            settle_s=self._safe_settle.value(),
+            timeout_s=7200.0,
+        )
+
+    def _release_safe_magnet_operation(self) -> None:
+        if not self._safe_magnet_operation_active:
+            return
+        self._safe_magnet_operation_active = False
+        release = getattr(self._magnet, "release_exclusive", None)
+        if callable(release):
+            release("safe_magnet_control")
+        idle = self._worker is None
+        self._safe_move_btn.setEnabled(idle)
+        self._safe_zero_btn.setEnabled(idle)
+        self._run_btn.setEnabled(idle and not self._externally_busy)
 
     @Slot()
     def _update_coordinates_and_filename(self, *_args) -> None:
@@ -2468,7 +2783,7 @@ class MCDPanel(QWidget):
         if require_sample and not sample_id:
             raise ValueError("Sample ID is required")
         base_output = str(cfg.base_out)
-        subfolder = cfg.mcd.subfolder or "MCD Data"
+        subfolder = "mcd"
         conditions = self._condition_rows()
         enabled = [c for c in conditions if c["enabled"]]
         if not enabled:
@@ -2623,7 +2938,7 @@ class MCDPanel(QWidget):
         self._save_config_from_ui()
         self._last_run_params = dict(params)
         try:
-            run_root = self._current_output_dir(params) if hasattr(self, "_current_output_dir") else Path(params["base_output_dir"]) / _safe_name(params["sample_id"]) / _safe_name(params.get("subfolder", "MCD Data"))
+            run_root = self._current_output_dir(params) if hasattr(self, "_current_output_dir") else Path(params["base_output_dir"]) / _safe_name(params["sample_id"]) / _safe_name(params.get("subfolder", "mcd"))
             self._experiment_run = ExperimentMetadataService(run_root).begin(
                 "mcd_aps100", params["sample_id"], output_dir=run_root, settings=params
             )
@@ -2731,6 +3046,9 @@ class MCDPanel(QWidget):
         self._disconnect_btn.setEnabled(not running)
         self._driven_btn.setEnabled(not running)
         self._persistent_btn.setEnabled(not running)
+        safe_enabled = not running and not self._safe_magnet_operation_active
+        self._safe_move_btn.setEnabled(safe_enabled)
+        self._safe_zero_btn.setEnabled(safe_enabled)
         self.run_state_changed.emit(bool(running))
 
     def set_externally_busy(self, busy: bool) -> None:
@@ -2792,6 +3110,10 @@ class MCDPanel(QWidget):
             "plot_log_sizes": [int(v) for v in self._plot_log_splitter.sizes()],
             "spectrum_visible": bool(self._show_spectrum_chk.isChecked()),
             "conditions": self._condition_rows(),
+            "safe_target_t": self._safe_target.value(),
+            "safe_final_mode": self._safe_final_mode.currentData(),
+            "safe_settle_s": self._safe_settle.value(),
+            "safe_zero_leads": self._zero_leads.isChecked(),
         }
 
     def apply_saved_experiment_settings(self, settings: dict) -> dict:
@@ -2832,6 +3154,20 @@ class MCDPanel(QWidget):
             self._start_settle.setValue(float(state.get("start_settle_s", self._start_settle.value())))
         except (TypeError, ValueError):
             pass
+        try:
+            self._safe_target.setValue(
+                float(state.get("safe_target_t", self._safe_target.value()))
+            )
+            self._safe_settle.setValue(
+                float(state.get("safe_settle_s", self._safe_settle.value()))
+            )
+        except (TypeError, ValueError):
+            pass
+        mode_index = self._safe_final_mode.findData(state.get("safe_final_mode"))
+        if mode_index >= 0:
+            self._safe_final_mode.setCurrentIndex(mode_index)
+        if isinstance(state.get("safe_zero_leads"), bool):
+            self._zero_leads.setChecked(state["safe_zero_leads"])
         sizes = state.get("splitter_sizes")
         if isinstance(sizes, (list, tuple)) and len(sizes) == 2:
             try:

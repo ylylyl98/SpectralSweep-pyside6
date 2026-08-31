@@ -8,6 +8,7 @@ from app.devices.aps100_attodry1000_adapter import (
     APS100CommandBlockedError,
     APS100IdentityError,
     APS100SafetyError,
+    MockAPS100Adapter,
     decode_status_byte,
     field_response_to_tesla,
 )
@@ -31,6 +32,8 @@ class _FakeAPS100Resource:
         self.sweep = "pause"
         self.pause_response = "pause"
         self.status = 0
+        self.event_status = 0
+        self.magnet_voltage_v = 0.0
         self.mode = "Manual"
         self.units = "kG"
         self.block_commands: set[str] = set()
@@ -49,7 +52,8 @@ class _FakeAPS100Resource:
         if upper == "*IDN?":
             response = self.idn
         elif upper == "*ESR?":
-            response = "0"
+            response = str(self.event_status)
+            self.event_status = 0
         elif upper == "*STB?":
             response = str(self.status)
         elif upper == "MODE?":
@@ -74,7 +78,7 @@ class _FakeAPS100Resource:
         elif upper == "VLIM?":
             response = "3.0V"
         elif upper == "VMAG?":
-            response = "0.0V"
+            response = f"{self.magnet_voltage_v}V"
         elif upper == "VOUT?":
             response = "0.0V"
         elif upper.startswith("RANGE?"):
@@ -111,6 +115,32 @@ class _FakeAPS100Resource:
 
     def close(self):
         self.closed = True
+
+
+class _InstantSweepAPS100Resource(_FakeAPS100Resource):
+    """Fake firmware that completes each commanded SLOW sweep immediately."""
+
+    def write(self, command):
+        super().write(command)
+        upper = str(command).strip().upper()
+        if upper.startswith("SWEEP UP"):
+            self.output_kg = self.high_kg
+            if self.heater:
+                self.field_kg = self.output_kg
+            self.sweep = "pause"
+            self.status &= ~1
+        elif upper.startswith("SWEEP DOWN"):
+            self.output_kg = self.low_kg
+            if self.heater:
+                self.field_kg = self.output_kg
+            self.sweep = "pause"
+            self.status &= ~1
+        elif upper == "SWEEP ZERO":
+            self.output_kg = 0.0
+            if self.heater:
+                self.field_kg = 0.0
+            self.sweep = "standby"
+            self.status = (self.status & ~1) | 2
 
 
 class APS100AdapterTests(unittest.TestCase):
@@ -194,6 +224,18 @@ class APS100AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(APS100CommandBlockedError, "front-panel menu"):
             adapter.take_remote()
 
+    def test_stale_esr_is_cleared_before_remote_and_not_misattributed(self):
+        adapter, fake = self.make_adapter()
+        adapter.connect()
+        fake.event_status = 97
+
+        adapter.take_remote()
+
+        self.assertTrue(adapter._remote)
+        remote_index = fake.commands.index("REMOTE")
+        self.assertEqual(fake.commands[remote_index - 1], "*ESR?")
+        self.assertEqual(fake.commands[remote_index + 1], "*ESR?")
+
     def test_limits_are_written_in_kg_and_verified(self):
         adapter, fake = self.make_adapter()
         adapter.connect()
@@ -275,6 +317,149 @@ class APS100AdapterTests(unittest.TestCase):
         with self.assertRaises(APS100SafetyError):
             adapter.enter_persistent_mode(zero_leads=False)
         self.assertNotIn("PSHTR OFF", fake.commands)
+
+    def test_safe_move_from_persistent_field_to_persistent_zero(self):
+        adapter = MockAPS100Adapter(time_scale=6000.0)
+        adapter.connect()
+        adapter._field_t = 8.0
+        adapter._output_t = 0.0
+        adapter._heater = False
+
+        result = adapter.safe_move_to_field(
+            0.0,
+            final_mode="persistent",
+            zero_leads=True,
+            persistent_field_confirmed=True,
+            max_magnet_voltage_v=0.1,
+            settle_s=0.0,
+            timeout_s=10.0,
+        )
+
+        self.assertFalse(result.heater_on)
+        self.assertAlmostEqual(result.field_t, 0.0, places=3)
+        self.assertAlmostEqual(result.output_current_a, 0.0, places=3)
+
+    def test_safe_move_can_finish_driven_without_zeroing_leads(self):
+        adapter = MockAPS100Adapter(time_scale=6000.0)
+        adapter.connect()
+        adapter._field_t = 0.02
+        adapter._output_t = 0.0
+        adapter._heater = False
+
+        result = adapter.safe_move_to_field(
+            0.01,
+            final_mode="driven",
+            persistent_field_confirmed=True,
+            settle_s=0.0,
+            timeout_s=5.0,
+        )
+
+        self.assertTrue(result.heater_on)
+        self.assertAlmostEqual(result.field_t, 0.01, places=3)
+        self.assertAlmostEqual(result.output_field_t, 0.01, places=3)
+
+    def test_real_adapter_matches_persistent_leads_before_heating_and_zeroing(self):
+        fake = _InstantSweepAPS100Resource()
+        adapter, fake = self.make_adapter(
+            fake,
+            heater_warm_s=0.0,
+            heater_cool_s=0.0,
+        )
+        adapter.connect()
+        fake.field_kg = 80.0
+        fake.output_kg = 0.0
+        fake.heater = 0
+
+        result = adapter.safe_move_to_field(
+            0.0,
+            final_mode="persistent",
+            zero_leads=True,
+            persistent_field_confirmed=True,
+            max_magnet_voltage_v=0.1,
+            settle_s=0.0,
+            timeout_s=2.0,
+        )
+
+        match_index = fake.commands.index("SWEEP UP SLOW")
+        heater_on_index = fake.commands.index("PSHTR ON")
+        zero_index = fake.commands.index("SWEEP ZERO")
+        heater_off_index = fake.commands.index("PSHTR OFF")
+        self.assertLess(match_index, heater_on_index)
+        self.assertLess(heater_on_index, zero_index)
+        self.assertLess(zero_index, heater_off_index)
+        self.assertFalse(any(command.startswith("RATE ") for command in fake.commands))
+        self.assertTrue(result.status.standby)
+        self.assertFalse(result.heater_on)
+        self.assertAlmostEqual(result.field_t, 0.0)
+        self.assertAlmostEqual(result.output_current_a, 0.0)
+
+    def test_persistent_matching_requires_explicit_stored_field_confirmation(self):
+        adapter = MockAPS100Adapter()
+        adapter.connect()
+        adapter._field_t = 8.0
+        adapter._output_t = 0.0
+        adapter._heater = False
+        with self.assertRaisesRegex(APS100SafetyError, "Confirm.*stored persistent"):
+            adapter.safe_move_to_field(0.0, final_mode="driven", settle_s=0.0)
+
+    def test_persistent_lead_zero_requires_commissioned_vmag_limit(self):
+        adapter = MockAPS100Adapter()
+        adapter.connect()
+        adapter._field_t = adapter._output_t = 1.0
+        adapter._heater = False
+        with self.assertRaisesRegex(APS100SafetyError, "VMAG safety limit"):
+            adapter.safe_move_to_field(
+                1.0,
+                final_mode="persistent",
+                zero_leads=True,
+                settle_s=0.0,
+            )
+
+    def test_persistent_noop_does_not_cycle_heater(self):
+        adapter = MockAPS100Adapter()
+        adapter.connect()
+        adapter._field_t = 1.0
+        adapter._output_t = 0.0
+        adapter._heater = False
+        result = adapter.safe_move_to_field(
+            1.0,
+            final_mode="persistent",
+            zero_leads=True,
+            settle_s=0.0,
+        )
+        self.assertFalse(result.heater_on)
+        self.assertEqual(adapter._zero_commands, 0)
+
+    def test_persistent_lead_zero_stops_on_excess_magnet_voltage(self):
+        adapter = MockAPS100Adapter()
+        adapter.connect()
+        adapter._field_t = adapter._output_t = 1.0
+        adapter._heater = False
+        adapter._magnet_voltage_v = 0.2
+        with self.assertRaisesRegex(APS100SafetyError, "VMAG exceeded"):
+            adapter.safe_move_to_field(
+                1.0,
+                final_mode="persistent",
+                zero_leads=True,
+                max_magnet_voltage_v=0.1,
+                settle_s=0.0,
+            )
+        self.assertAlmostEqual(adapter._output_t, 1.0)
+
+    def test_safe_move_pauses_an_active_sweep_before_new_target(self):
+        adapter = MockAPS100Adapter(time_scale=6000.0)
+        adapter.connect()
+        adapter._heater = True
+        adapter._target_t = 2.0
+        result = adapter.safe_move_to_field(
+            0.5,
+            final_mode="driven",
+            settle_s=0.0,
+            timeout_s=5.0,
+        )
+        self.assertTrue(result.heater_on)
+        self.assertFalse(result.status.sweep_active)
+        self.assertAlmostEqual(result.field_t, 0.5, delta=0.002)
 
 
 if __name__ == "__main__":

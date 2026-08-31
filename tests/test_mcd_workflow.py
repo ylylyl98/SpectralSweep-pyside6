@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication, QGroupBox
+from PySide6.QtWidgets import QApplication, QGroupBox, QMessageBox
 
 from app.devices.aps100_attodry1000_adapter import MockAPS100Adapter, decode_status_byte
 from ui.mcd_panel import (
@@ -24,7 +24,7 @@ from ui.mcd_panel import (
     _vtg_vbg_from_doping_efield,
     build_mcd_filename_base,
 )
-from utils.config import MCDConfig
+from utils.config import MCDConfig, cfg
 
 
 class _Spectrum:
@@ -93,6 +93,8 @@ class _PanelMagnetController(QObject):
     connected = Signal(object)
     disconnected = Signal()
     snapshot_updated = Signal(object)
+    rates_updated = Signal(object)
+    safe_move_audit = Signal(object)
     transition_progress = Signal(str, float)
     operation_finished = Signal(str)
     error = Signal(str)
@@ -113,6 +115,9 @@ class _PanelMagnetController(QObject):
     def refresh_snapshot(self):
         pass
 
+    def refresh_rates(self):
+        pass
+
     def pause(self):
         pass
 
@@ -121,6 +126,17 @@ class _PanelMagnetController(QObject):
 
     def enter_persistent_mode(self, **_kwargs):
         pass
+
+    def safe_move_to_field(self, target_t, **kwargs):
+        self.safe_move_call = (float(target_t), dict(kwargs))
+
+    def acquire_exclusive(self, owner):
+        self.exclusive_owner = str(owner)
+        return True
+
+    def release_exclusive(self, owner):
+        if self.exclusive_owner == str(owner):
+            self.exclusive_owner = ""
 
 
 class _EmptyController:
@@ -195,7 +211,7 @@ def _workflow_params(base_output_dir: str) -> dict:
         "decimal_style": "dot",
         "filename_parts": ["temp_mode", "laser_power", "center", "exposure"],
         "base_output_dir": base_output_dir,
-        "subfolder": "MCD Data",
+        "subfolder": "mcd",
     }
 
 
@@ -218,7 +234,7 @@ class MCDWorkflowTests(unittest.TestCase):
 
         self.assertEqual(panel._mode.currentText(), "Ref")
         self.assertIn("Device01", panel._filename_preview.text())
-        self.assertIn("MCD Data", panel._path_preview.text())
+        self.assertIn("mcd", panel._path_preview.text())
 
     def test_panel_controls_have_explanatory_tooltips(self):
         panel = MCDPanel(
@@ -233,6 +249,9 @@ class MCDWorkflowTests(unittest.TestCase):
             "_remote_btn", "_refresh_btn", "_identity", "_field",
             "_output", "_heater", "_sweep", "_fault", "_pause_btn",
             "_driven_btn", "_persistent_btn", "_zero_leads", "_transition_status",
+            "_safe_target", "_safe_rate", "_safe_final_mode", "_safe_settle",
+            "_safe_rates_refresh_btn", "_safe_vmag_limit", "_safe_move_btn",
+            "_safe_zero_btn", "_safe_state",
             "_advanced_toggle", "_metadata_toggle",
             "_start_t", "_stop_t", "_start_settle", "_sweep_rate_label",
             "_rotator", "_angle_a", "_angle_b", "_rotation_settle",
@@ -278,6 +297,7 @@ class MCDWorkflowTests(unittest.TestCase):
             "Sample / Device", "Field Sweep", "Rotation",
             "LightField", "Gate / SMU", "Filename",
             "Run control", "Status / Progress / Log", "Continuous APS100 MCD",
+            "Safe Magnet Control",
         }.issubset(titles))
 
     def test_advanced_transition_toggle_hides_and_shows(self):
@@ -325,9 +345,48 @@ class MCDWorkflowTests(unittest.TestCase):
         magnet._heater = False
         panel._on_snapshot(magnet.read_snapshot())
         self.assertIn("requires driven mode", panel._mode_notice.text())
+        self.assertIn("stored", panel._field_caption.text().lower())
         magnet._heater = True
         panel._on_snapshot(magnet.read_snapshot())
         self.assertIn("MCD ready", panel._mode_notice.text())
+        self.assertIn("live", panel._field_caption.text().lower())
+
+    def test_safe_transition_progress_updates_existing_telemetry_without_polling(self):
+        panel = MCDPanel(
+            _PanelMagnetController(),
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        magnet = MockAPS100Adapter()
+        magnet.connect()
+        magnet._heater = False
+        magnet._field_t = 0.2
+        panel._on_snapshot(magnet.read_snapshot())
+
+        stored_field_text = panel._field.text()
+        panel._safe_magnet_operation_active = True
+        panel._on_transition("matching leads", 0.1)
+        self.assertEqual(panel._field.text(), stored_field_text)
+        self.assertIn("+0.100000 T", panel._output.text())
+        self.assertIn("stored", panel._field_caption.text().lower())
+
+        panel._on_transition("ramping field", 0.15)
+        self.assertIn("+0.150000 T", panel._field.text())
+        self.assertIn("+0.150000 T", panel._output.text())
+        self.assertIn("live", panel._field_caption.text().lower())
+        self.assertEqual(panel._sweep.text(), "ramping")
+
+        panel._on_transition("ramping field", float("nan"))
+        self.assertIn("telemetry unavailable", panel._transition_status.text())
+        self.assertIn("+0.150000 T", panel._field.text())
+
+        magnet._heater = True
+        magnet._field_t = magnet._output_t = 0.2
+        panel._on_snapshot(magnet.read_snapshot())
+        self.assertIn("+0.200000 T", panel._field.text())
+        self.assertIn("+0.200000 T", panel._output.text())
 
     def test_driven_mode_completion_shows_explicit_heater_notice(self):
         panel = MCDPanel(
@@ -345,6 +404,97 @@ class MCDWorkflowTests(unittest.TestCase):
         self.assertIn("heater is ON", panel._mode_notice.text())
         information.assert_called_once()
         self.assertIn("ready for an MCD field sweep", information.call_args.args[2])
+
+    def test_safe_move_dispatches_atomic_persistent_request_and_locks_ui(self):
+        magnet = _PanelMagnetController()
+        magnet.is_connected = True
+        panel = MCDPanel(
+            magnet,
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        adapter = MockAPS100Adapter()
+        adapter.connect()
+        panel._on_snapshot(adapter.read_snapshot())
+        panel._safe_target.setValue(8.0)
+        panel._safe_final_mode.setCurrentIndex(
+            panel._safe_final_mode.findData("persistent")
+        )
+
+        with patch.object(
+            cfg.magnet, "persistent_zero_max_magnet_voltage_v", 0.1
+        ), patch(
+            "ui.mcd_panel.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            panel._start_safe_magnet_move()
+
+        target, kwargs = magnet.safe_move_call
+        self.assertEqual(target, 8.0)
+        self.assertEqual(kwargs["final_mode"], "persistent")
+        self.assertNotIn("rate_t_per_min", kwargs)
+        self.assertIn("stored aps100", panel._safe_rate.text().lower())
+        self.assertTrue(kwargs["zero_leads"])
+        self.assertFalse(kwargs["persistent_field_confirmed"])
+        self.assertEqual(magnet.exclusive_owner, "safe_magnet_control")
+        self.assertFalse(panel._safe_move_btn.isEnabled())
+
+        panel._on_magnet_operation("safe_move:persistent:+8.000000")
+        self.assertEqual(magnet.exclusive_owner, "")
+        self.assertIn("Persistent", panel._safe_state.text())
+
+    def test_safe_return_to_zero_finishes_persistent(self):
+        magnet = _PanelMagnetController()
+        magnet.is_connected = True
+        panel = MCDPanel(
+            magnet,
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        adapter = MockAPS100Adapter()
+        adapter.connect()
+        panel._on_snapshot(adapter.read_snapshot())
+        panel._safe_target.setValue(8.0)
+        panel._safe_final_mode.setCurrentIndex(
+            panel._safe_final_mode.findData("driven")
+        )
+        with patch.object(
+            cfg.magnet, "persistent_zero_max_magnet_voltage_v", 0.1
+        ), patch(
+            "ui.mcd_panel.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ):
+            panel._safe_return_to_zero()
+        target, kwargs = magnet.safe_move_call
+        self.assertEqual(target, 0.0)
+        self.assertEqual(kwargs["final_mode"], "persistent")
+
+    def test_safe_move_audit_is_persisted(self):
+        panel = MCDPanel(
+            _PanelMagnetController(),
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        payload = {
+            "schema": "aps100_safe_move_audit_v1",
+            "outcome": "completed",
+            "request": {"target_t": 8.0, "final_mode": "persistent"},
+            "commands": [{"kind": "write", "command": "SWEEP ZERO"}],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            cfg.filename, "base_out", temp_dir
+        ):
+            panel._on_safe_move_audit(payload)
+            audits = list((Path(temp_dir) / "magnet_audit").glob("*.json"))
+            self.assertEqual(len(audits), 1)
+            saved = json.loads(audits[0].read_text(encoding="utf-8"))
+        self.assertEqual(saved, payload)
 
     def test_layout_state_round_trips(self):
         panel = MCDPanel(
@@ -399,7 +549,10 @@ class MCDWorkflowTests(unittest.TestCase):
         self.assertEqual(panel._sweep_mode.currentData(), "one_way")
         params = panel._collect_params(require_sample=False)
         self.assertEqual(params["sweep_mode"], "one_way")
-        self.assertEqual(len(params["conditions"]), 1)
+        self.assertEqual(
+            sum(bool(row["enabled"]) for row in params["conditions"]),
+            1,
+        )
 
         panel._sweep_mode.setCurrentIndex(1)
         self.assertEqual(panel._sweep_mode.currentData(), "round_trip")
@@ -463,7 +616,7 @@ class MCDWorkflowTests(unittest.TestCase):
             )
             result = worker._run()
             csv_path = Path(result["csv_path"])
-            self.assertEqual(csv_path.parent, Path(temp_dir) / "Device01" / "MCD Data")
+            self.assertEqual(csv_path.parent, Path(temp_dir) / "Device01" / "mcd")
             self.assertIn("1.8KREF", csv_path.name)
             self.assertNotIn("532nm", csv_path.name)
             self.assertIn("D0.5V_E1.5V", csv_path.name)
@@ -518,7 +671,7 @@ class MCDWorkflowTests(unittest.TestCase):
             worker.run()
 
             self.assertTrue(results[0]["stopped"])
-            output_dir = Path(temp_dir) / "Device01" / "MCD Data"
+            output_dir = Path(temp_dir) / "Device01" / "mcd"
             csv_path = next(output_dir.glob("*.csv"))
             with csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
@@ -590,7 +743,7 @@ class MCDWorkflowTests(unittest.TestCase):
             worker.run()
 
             self.assertTrue(results[0]["stopped"])
-            output_dir = Path(temp_dir) / "Device01" / "MCD Data"
+            output_dir = Path(temp_dir) / "Device01" / "mcd"
             csv_path = next(output_dir.glob("*.csv"))
             metadata = json.loads(
                 csv_path.with_suffix(".meta.json").read_text(encoding="utf-8")
@@ -855,7 +1008,7 @@ class MCDWorkflowTests(unittest.TestCase):
             worker.run()
 
             self.assertTrue(results[0]["stopped"])
-            output_dir = Path(temp_dir) / "Device01" / "MCD Data"
+            output_dir = Path(temp_dir) / "Device01" / "mcd"
             csvs = sorted(output_dir.glob("*.csv"))
             self.assertEqual(len(csvs), 2)
             first_meta = json.loads(
@@ -989,7 +1142,7 @@ class MCDWorkflowTests(unittest.TestCase):
             worker.finished.connect(results.append)
             worker.run()
             self.assertIn("quench", results[0]["error"])
-            output_dir = Path(temp_dir) / "Device01" / "MCD Data"
+            output_dir = Path(temp_dir) / "Device01" / "mcd"
             self.assertTrue(any(output_dir.glob("*.csv")))
             self.assertEqual(magnet.get_sweep_state(), "pause")
 

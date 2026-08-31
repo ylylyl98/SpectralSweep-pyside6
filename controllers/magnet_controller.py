@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import threading
 import traceback
+from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Optional
 
 from PySide6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, Signal, Slot
@@ -20,6 +22,8 @@ class _MagnetWorker(QObject):
     connected = Signal(object)
     disconnected = Signal()
     snapshot_updated = Signal(object)
+    rates_updated = Signal(object)
+    safe_move_audit = Signal(object)
     transition_progress = Signal(str, float)
     operation_finished = Signal(str)
     error = Signal(str)
@@ -56,6 +60,7 @@ class _MagnetWorker(QObject):
             identity = self.adapter.connect()
             self.connected.emit(identity)
             self.refresh_snapshot()
+            self.refresh_rates()
             self._timer.start()
         except Exception as exc:
             self.adapter = None
@@ -98,6 +103,20 @@ class _MagnetWorker(QObject):
             self.error.emit(f"APS100 status read failed: {exc}")
 
     @Slot()
+    def refresh_rates(self) -> None:
+        if self.adapter is None:
+            return
+        try:
+            self.rates_updated.emit(
+                {
+                    "rates": self.adapter.get_rates(),
+                    "voltage_limit_v": self.adapter.get_voltage_limit_v(),
+                }
+            )
+        except Exception as exc:
+            self.error.emit(f"APS100 stored-rate read failed: {exc}")
+
+    @Slot()
     def take_remote(self) -> None:
         self._run_simple("remote", lambda: self.adapter.take_remote())
 
@@ -132,6 +151,7 @@ class _MagnetWorker(QObject):
         try:
             self.adapter.enter_persistent_mode(
                 zero_leads=bool(zero_leads),
+                max_magnet_voltage_v=cfg.magnet.persistent_zero_max_magnet_voltage_v,
                 progress=lambda label, remaining: self.transition_progress.emit(
                     label, remaining
                 ),
@@ -140,6 +160,91 @@ class _MagnetWorker(QObject):
             self.operation_finished.emit("enter_persistent_mode")
         except Exception as exc:
             self.error.emit(f"Enter persistent mode failed: {exc}")
+
+    @Slot(float, str, bool, bool, float, float)
+    def safe_move_to_field(
+        self,
+        target_t: float,
+        final_mode: str,
+        zero_leads: bool,
+        persistent_field_confirmed: bool,
+        settle_s: float,
+        timeout_s: float,
+    ) -> None:
+        if self.adapter is None:
+            self.error.emit("APS100 is not connected")
+            return
+        self._stop_event.clear()
+        adapter = self.adapter
+        commands = []
+        previous_observer = getattr(adapter, "command_observer", None)
+        started_utc = datetime.now(timezone.utc).isoformat()
+        starting_snapshot = None
+        stored_rates = None
+        voltage_limit_v = None
+        outcome = "failed"
+        failure = ""
+        try:
+            starting_snapshot = adapter.read_snapshot()
+            stored_rates = adapter.get_rates()
+            voltage_limit_v = adapter.get_voltage_limit_v()
+            adapter.command_observer = commands.append
+            snapshot = adapter.safe_move_to_field(
+                float(target_t),
+                final_mode=str(final_mode),
+                zero_leads=bool(zero_leads),
+                tolerance_t=cfg.magnet.field_tolerance_t,
+                settle_s=float(settle_s),
+                timeout_s=float(timeout_s),
+                persistent_field_confirmed=bool(persistent_field_confirmed),
+                max_magnet_voltage_v=cfg.magnet.persistent_zero_max_magnet_voltage_v,
+                stop_event=self._stop_event,
+                progress=lambda label, value: self.transition_progress.emit(
+                    label, value
+                ),
+            )
+            self.snapshot_updated.emit(snapshot)
+            outcome = "completed"
+            self.operation_finished.emit(
+                f"safe_move:{str(final_mode).lower()}:{float(target_t):+.6f}"
+            )
+        except Exception as exc:
+            failure = str(exc)
+            self.error.emit(f"Safe magnet move failed: {exc}")
+            snapshot = None
+            try:
+                snapshot = adapter.read_snapshot()
+            except Exception:
+                pass
+        finally:
+            adapter.command_observer = previous_observer
+            self.safe_move_audit.emit(
+                {
+                    "schema": "aps100_safe_move_audit_v1",
+                    "started_utc": started_utc,
+                    "finished_utc": datetime.now(timezone.utc).isoformat(),
+                    "outcome": outcome,
+                    "error": failure,
+                    "request": {
+                        "target_t": float(target_t),
+                        "final_mode": str(final_mode),
+                        "zero_leads": bool(zero_leads),
+                        "persistent_field_confirmed": bool(
+                            persistent_field_confirmed
+                        ),
+                        "settle_s": float(settle_s),
+                        "timeout_s": float(timeout_s),
+                        "vmag_limit_v": cfg.magnet.persistent_zero_max_magnet_voltage_v,
+                    },
+                    "stored_rates": stored_rates,
+                    "aps_voltage_limit_v": voltage_limit_v,
+                    "starting_snapshot": (
+                        asdict(starting_snapshot) if starting_snapshot is not None else None
+                    ),
+                    "final_snapshot": asdict(snapshot) if snapshot is not None else None,
+                    "commands": commands,
+                }
+            )
 
     def _run_simple(self, name: str, callback) -> None:
         if self.adapter is None:
@@ -164,6 +269,8 @@ class MagnetController(QObject):
     connected = Signal(object)
     disconnected = Signal()
     snapshot_updated = Signal(object)
+    rates_updated = Signal(object)
+    safe_move_audit = Signal(object)
     transition_progress = Signal(str, float)
     operation_finished = Signal(str)
     error = Signal(str)
@@ -173,10 +280,12 @@ class MagnetController(QObject):
     _connect_requested = Signal(str, bool)
     _disconnect_requested = Signal()
     _refresh_requested = Signal()
+    _rates_requested = Signal()
     _remote_requested = Signal()
     _pause_requested = Signal()
     _driven_requested = Signal()
     _persistent_requested = Signal(bool)
+    _safe_move_requested = Signal(float, str, bool, bool, float, float)
     _polling_requested = Signal(bool)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
@@ -194,6 +303,9 @@ class MagnetController(QObject):
         self._refresh_requested.connect(
             self._worker.refresh_snapshot, Qt.ConnectionType.QueuedConnection
         )
+        self._rates_requested.connect(
+            self._worker.refresh_rates, Qt.ConnectionType.QueuedConnection
+        )
         self._remote_requested.connect(
             self._worker.take_remote, Qt.ConnectionType.QueuedConnection
         )
@@ -206,6 +318,9 @@ class MagnetController(QObject):
         self._persistent_requested.connect(
             self._worker.enter_persistent_mode, Qt.ConnectionType.QueuedConnection
         )
+        self._safe_move_requested.connect(
+            self._worker.safe_move_to_field, Qt.ConnectionType.QueuedConnection
+        )
         self._polling_requested.connect(
             self._worker.set_polling_enabled, Qt.ConnectionType.QueuedConnection
         )
@@ -213,6 +328,8 @@ class MagnetController(QObject):
         self._worker.connected.connect(self.connected)
         self._worker.disconnected.connect(self.disconnected)
         self._worker.snapshot_updated.connect(self.snapshot_updated)
+        self._worker.rates_updated.connect(self.rates_updated)
+        self._worker.safe_move_audit.connect(self.safe_move_audit)
         self._worker.transition_progress.connect(self.transition_progress)
         self._worker.operation_finished.connect(self.operation_finished)
         self._worker.error.connect(self.error)
@@ -248,6 +365,9 @@ class MagnetController(QObject):
     def refresh_snapshot(self) -> None:
         self._refresh_requested.emit()
 
+    def refresh_rates(self) -> None:
+        self._rates_requested.emit()
+
     def take_remote(self) -> None:
         self._remote_requested.emit()
 
@@ -266,6 +386,34 @@ class MagnetController(QObject):
             self.error.emit("Remote heater control is disabled in configuration")
             return
         self._persistent_requested.emit(bool(zero_leads))
+
+    def safe_move_to_field(
+        self,
+        target_t: float,
+        *,
+        final_mode: str,
+        zero_leads: bool = True,
+        persistent_field_confirmed: bool = False,
+        settle_s: float = 2.0,
+        timeout_s: float = 3600.0,
+    ) -> None:
+        if not cfg.magnet.allow_remote_heater_control:
+            self.error.emit("Remote heater control is disabled in configuration")
+            return
+        if abs(float(target_t)) > cfg.magnet.safe_control_max_field_t:
+            self.error.emit(
+                "Safe magnet target exceeds the configured "
+                f"±{cfg.magnet.safe_control_max_field_t:g} T control limit"
+            )
+            return
+        self._safe_move_requested.emit(
+            float(target_t),
+            str(final_mode),
+            bool(zero_leads),
+            bool(persistent_field_confirmed),
+            float(settle_s),
+            float(timeout_s),
+        )
 
     def acquire_exclusive(self, owner: str) -> bool:
         if not self._exclusive_lock.acquire(blocking=False):
