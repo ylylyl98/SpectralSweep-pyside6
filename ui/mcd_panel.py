@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 import math
+import os
 from pathlib import Path
 import re
 import threading
@@ -54,7 +55,14 @@ from utils.filename_builder import (
     sanitize_token,
 )
 from utils.mcd_common import (
-    mcd_coordinates, vtg_vbg_from_doping_efield,
+    MODE_DIRECT,
+    MODE_DOPING_EFIELD,
+    build_condition_batch,
+    gate_ratio_from_factors,
+    mcd_coordinates,
+    parse_numeric_spec,
+    validate_gate_conditions,
+    vtg_vbg_from_doping_efield,
     resolve_condition_line as _resolve_mcd_condition_line,
 )
 
@@ -90,14 +98,65 @@ def _spectrum_1d(wavelengths, counts) -> tuple[np.ndarray, np.ndarray]:
     return wl[:n], data[:n]
 
 
+class _ElidedLabel(QLabel):
+    """QLabel that truncates long text with an ellipsis to fit its fixed width.
+
+    Used for the run-status line above the plot so long filenames never force
+    the layout (and therefore the plot) wider.  The full text is shown as a
+    tooltip whenever truncation is active.
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(str(text), parent)
+        self._full_text = str(text)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.setMinimumWidth(0)
+        self.setWordWrap(False)
+
+    def setText(self, text: str) -> None:
+        self._full_text = str(text)
+        self._apply_elision()
+
+    def text(self) -> str:
+        return self._full_text
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_elision()
+
+    def _apply_elision(self) -> None:
+        width = self.width()
+        if width <= 0:
+            return
+        metrics = self.fontMetrics()
+        elided = metrics.elidedText(
+            self._full_text, Qt.TextElideMode.ElideMiddle, max(1, width - 4)
+        )
+        if elided != self.text():
+            super().setText(elided)
+        if elided != self._full_text:
+            self.setToolTip(self._full_text)
+
+
 MCD_SCALAR_FIELDS = [
-    "Bfield_T",
+    "timestamp_start_utc",
+    "timestamp_end_utc",
+    "leg",
+    "direction",
     "rotation_angle_deg",
+    "B0_T",
+    "B1_T",
+    "Bmid_T",
     "Vtg_V",
     "Vbg_V",
     "Vbias_V",
     "Doping_V",
     "Efield_V",
+    "sample_T0_K",
+    "sample_T1_K",
+    "sample_Tmid_K",
 ]
 
 
@@ -189,23 +248,184 @@ class _ContinuousMCDWorker(QObject):
         self._stop = threading.Event()
         self._csv_path: Optional[Path] = None
         self._metadata_path: Optional[Path] = None
-        self._event_path: Optional[Path] = None
         self._metadata: dict = {}
         self._spectra_written = 0
         self._total_legs = 1
         self._leg_index = 0
         self._leg_start_t = 0.0
         self._leg_target_t = 0.0
+        self._legs_completed = 0
+        self._leg_active = False
         self._condition_index = 1
         self._condition_count = 1
         self._total_spectra = 0
 
     def request_stop(self) -> None:
         self._stop.set()
+        abort = getattr(self._lf6_ctrl, "abort_acquisition", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                pass
 
     def _check_stop(self) -> None:
         if self._stop.is_set():
             raise _MCDStopRequested("MCD stop requested")
+
+    def _ensure_lightfield_ready(self) -> None:
+        if not getattr(self._lf6_ctrl, "is_connected", False):
+            raise RuntimeError("LightField is not connected")
+        ensure_ready = getattr(self._lf6_ctrl, "ensure_ready", None)
+        if callable(ensure_ready):
+            ensure_ready(
+                timeout_s=float(self._p.get("lightfield_ready_timeout_s", 15.0)),
+                poll_interval_s=0.05,
+            )
+        ready = getattr(self._lf6_ctrl, "is_ready", None)
+        if ready is not None and not bool(ready):
+            raise RuntimeError("LightField is not ready")
+        if bool(getattr(self._lf6_ctrl, "is_busy", False)):
+            raise RuntimeError("LightField is busy")
+        if getattr(self._lf6_ctrl, "adapter", None) is None:
+            raise RuntimeError("LightField acquisition adapter is unavailable")
+
+    def _validate_magnet_snapshot(
+        self,
+        snapshot,
+        *,
+        expected_direction: Optional[str] = None,
+        target_t: Optional[float] = None,
+    ) -> float:
+        mode = str(getattr(snapshot, "operating_mode", "Manual")).strip()
+        if mode.lower() != "manual":
+            raise RuntimeError(
+                f"APS100 operating mode changed to {mode!r}; the Z magnet requires Manual mode"
+            )
+        units = str(getattr(snapshot, "units", "G")).strip()
+        if units.lower() not in {"g", "kg", "t"}:
+            raise RuntimeError(f"APS100 field units changed unexpectedly: {units!r}")
+        status = getattr(snapshot, "status", None)
+        if status is None:
+            raise RuntimeError("APS100 status telemetry is unavailable")
+        if bool(getattr(status, "quench", False)):
+            raise RuntimeError("APS100 reports a quench condition")
+        if bool(getattr(status, "power_module_failure", False)):
+            raise RuntimeError("APS100 reports a power-module failure")
+        if bool(getattr(status, "menu_locked", False)):
+            raise RuntimeError("APS100 front-panel menu is blocking remote commands")
+        if not bool(getattr(snapshot, "heater_on", False)):
+            raise RuntimeError("APS100 left driven mode (persistent heater is OFF)")
+
+        numeric = (
+            "field_t", "output_field_t", "output_current_a", "lower_limit_t",
+            "upper_limit_t", "voltage_limit_v", "magnet_voltage_v",
+            "output_voltage_v",
+        )
+        for name in numeric:
+            value = getattr(snapshot, name, None)
+            if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+                raise RuntimeError(f"APS100 returned non-finite {name} telemetry")
+        field_t = float(snapshot.field_t)
+        maximum = float(getattr(self._magnet_ctrl.adapter, "maximum_field_t", 9.0))
+        if abs(field_t) > maximum + 1e-9:
+            raise RuntimeError(
+                f"APS100 field telemetry {field_t:g} T exceeds configured ±{maximum:g} T"
+            )
+
+        if expected_direction is not None and target_t is not None:
+            tolerance = abs(float(self._p["field_tolerance_t"]))
+            sign = 1.0 if expected_direction == "up" else -1.0
+            at_target = sign * (field_t - float(target_t)) >= -tolerance
+            state = str(getattr(snapshot, "sweep_state", "")).lower()
+            active = bool(getattr(status, "sweep_active", False))
+            if not at_target:
+                if "pause" in state or not active:
+                    raise RuntimeError(
+                        f"APS100 paused at {field_t:.6g} T before reaching {float(target_t):.6g} T"
+                    )
+                if expected_direction not in state:
+                    raise RuntimeError(
+                        f"APS100 reported {state!r} during an expected {expected_direction} sweep"
+                    )
+                if bool(getattr(status, "standby", False)):
+                    raise RuntimeError("APS100 entered standby during an active sweep")
+        return field_t
+
+    def _check_field_faults(self, field_t, status, *, heater_on=None) -> float:
+        field_t = float(field_t)
+        if not math.isfinite(field_t):
+            raise RuntimeError("APS100 returned non-finite field telemetry")
+        maximum = float(getattr(self._magnet_ctrl.adapter, "maximum_field_t", 9.0))
+        if abs(field_t) > maximum + 1e-9:
+            raise RuntimeError(
+                f"APS100 field telemetry {field_t:g} T exceeds configured ±{maximum:g} T"
+            )
+        if status is None:
+            raise RuntimeError("APS100 status telemetry is unavailable")
+        if bool(getattr(status, "quench", False)):
+            raise RuntimeError("APS100 reports a quench condition")
+        if bool(getattr(status, "power_module_failure", False)):
+            raise RuntimeError("APS100 reports a power-module failure")
+        if bool(getattr(status, "menu_locked", False)):
+            raise RuntimeError("APS100 front-panel menu is blocking remote commands")
+        if heater_on is not None and not bool(heater_on):
+            raise RuntimeError("APS100 left driven mode (persistent heater is OFF)")
+        return field_t
+
+    def _read_light_progress(self):
+        """Cheap mid-leg telemetry: field, sweep text, status, heater (4 queries)."""
+        magnet = self._magnet_ctrl.adapter
+        return (
+            float(magnet.get_field_t()),
+            str(magnet.get_sweep_state()).lower(),
+            magnet.get_status(),
+            bool(magnet.get_heater_status()),
+        )
+
+    def _read_field_status(self):
+        """Cheap before/after-acquisition telemetry: field + status (2 queries)."""
+        magnet = self._magnet_ctrl.adapter
+        return float(magnet.get_field_t()), magnet.get_status()
+
+    def _validate_progress(
+        self, field_t, state, status, heater_on, *, expected_direction, target_t
+    ) -> float:
+        """Fast mid-leg safety check using field, sweep text, and status bits."""
+        field_t = self._check_field_faults(field_t, status, heater_on=heater_on)
+        state = str(state).lower()
+        tolerance = abs(float(self._p["field_tolerance_t"]))
+        sign = 1.0 if expected_direction == "up" else -1.0
+        target_t = float(target_t)
+        at_target = sign * (field_t - target_t) >= -tolerance
+        if not at_target:
+            active = bool(getattr(status, "sweep_active", False))
+            if "pause" in state or not active:
+                raise RuntimeError(
+                    f"APS100 paused at {field_t:.6g} T before reaching {target_t:.6g} T"
+                )
+            if expected_direction not in state:
+                raise RuntimeError(
+                    f"APS100 reported {state!r} during an expected {expected_direction} sweep"
+                )
+            if bool(getattr(status, "standby", False)):
+                raise RuntimeError("APS100 entered standby during an active sweep")
+        return field_t
+
+    def _validate_endpoint_field(
+        self, field_t, status, *, expected_direction, target_t
+    ) -> float:
+        """Fast before/after-acquisition check: faults plus early-pause bit."""
+        field_t = self._check_field_faults(field_t, status)
+        tolerance = abs(float(self._p["field_tolerance_t"]))
+        sign = 1.0 if expected_direction == "up" else -1.0
+        target_t = float(target_t)
+        at_target = sign * (field_t - target_t) >= -tolerance
+        if not at_target and not bool(getattr(status, "sweep_active", False)):
+            raise RuntimeError(
+                f"APS100 paused at {field_t:.6g} T before reaching {target_t:.6g} T"
+            )
+        return field_t
 
     def _emit_log(self, text: str) -> None:
         self.log.emit(f"[{datetime.now().strftime('%H:%M:%S')}] {text}")
@@ -245,25 +465,35 @@ class _ContinuousMCDWorker(QObject):
             legs = [p["stop_t"]]
         if magnet is None or not getattr(magnet, "connected", False):
             raise RuntimeError("APS100 is not connected")
-        if not self._lf6_ctrl.is_connected or self._lf6_ctrl.adapter is None:
-            raise RuntimeError("LightField is not connected")
+        self._ensure_lightfield_ready()
         rotator = self._rotation_ctrl.adapter(p["rotator"])
         if rotator is None:
             raise RuntimeError(f"{p['rotator'].upper()} is not connected")
 
+        magnet.take_remote()
+        require_manual = getattr(magnet, "require_manual_mode", None)
+        if callable(require_manual):
+            require_manual()
+        select_units = getattr(magnet, "select_field_units", None)
+        if callable(select_units):
+            select_units()
         initial = magnet.read_snapshot()
+        self._validate_magnet_snapshot(initial)
         if initial.status.faulted:
             raise RuntimeError("APS100 reports a quench or power-module failure")
         if not initial.heater_on:
             raise RuntimeError("APS100 is not in driven mode (persistent heater is OFF)")
-        if "paused" not in initial.sweep_state:
+        sweep_state = str(initial.sweep_state).lower()
+        paused = (
+            "pause" in sweep_state or "standby" in sweep_state
+        ) and not initial.status.sweep_active
+        if not paused:
             raise RuntimeError("APS100 must be paused before starting MCD")
 
         conditions = self._resolve_conditions(p)
         total = len(conditions)
         self._condition_count = total
         self._total_legs = len(legs) * total
-        magnet.take_remote()
         summary: list = []
         result: dict = {"csv_paths": [], "conditions": []}
         pending_error: Optional[BaseException] = None
@@ -303,7 +533,6 @@ class _ContinuousMCDWorker(QObject):
         for index in range(len(summary) + 1, total + 1):
             summary.append({"condition": index, "status": "not_started"})
         result["conditions"] = list(summary)
-        self._finalize_run_summary(result, summary, total, sweep_mode)
         result["cycles"] = total_cycles
         result["spectra_written"] = self._total_spectra
         if result["csv_paths"]:
@@ -329,25 +558,6 @@ class _ContinuousMCDWorker(QObject):
             ]
         return conditions
 
-    def _finalize_run_summary(
-        self, result: dict, summary: list, total: int, sweep_mode: str
-    ) -> None:
-        paths = result.get("csv_paths") or []
-        payload = {
-            "created_utc": _utc_now(),
-            "sweep_mode": sweep_mode,
-            "condition_count": total,
-            "conditions": summary,
-            "csv_paths": paths,
-        }
-        result["summary_path"] = None
-        if not paths:
-            return
-        first = Path(paths[0])
-        summary_path = first.with_name(f"{first.stem}_summary.json")
-        summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        result["summary_path"] = str(summary_path)
-
     def _run_condition(
         self, condition: dict, index: int, total: int, legs: list
     ) -> dict:
@@ -365,13 +575,7 @@ class _ContinuousMCDWorker(QObject):
         rotator = self._rotation_ctrl.adapter(p["rotator"])
         if rotator is None:
             raise RuntimeError(f"{p['rotator'].upper()} is not connected")
-        self._csv_path, self._metadata_path, self._event_path = self._create_output_paths(p)
-        self._event_path.write_text("", encoding="utf-8")
-        self._event(
-            "preflight",
-            f"condition={index}/{total} field={magnet.get_field_t():.9g} T",
-        )
-        self._event("remote", "REMOTE")
+        self._csv_path, self._metadata_path = self._create_output_paths(p)
 
         identity = getattr(magnet, "identity", None)
         doping, efield = _mcd_coordinates(
@@ -381,6 +585,8 @@ class _ContinuousMCDWorker(QObject):
             "created_utc": _utc_now(),
             "status": "running",
             "mode": "continuous_two_angle_mcd",
+            "measurement_mode": "continuous",
+            "magnet_backend": "aps100_attodry1000",
             "parameters": p,
             "condition_index": index,
             "condition_count": total,
@@ -393,6 +599,7 @@ class _ContinuousMCDWorker(QObject):
             },
             "data_file": self._csv_path.name,
             "csv_scalar_columns": MCD_SCALAR_FIELDS,
+            "csv_schema_compatible_with": "mcd2100_continuous_v1",
             "sweep_mode": str(p.get("sweep_mode", "one_way")).strip().lower(),
             "legs": [],
             "field_definition": "mean of APS100 field readings before and after acquisition",
@@ -408,6 +615,10 @@ class _ContinuousMCDWorker(QObject):
         self._metadata["applied_bias"] = bias_info["applied_bias"]
         self._metadata["bias_skipped_reason"] = bias_info["bias_skipped_reason"]
         self._metadata["post_ramp_readback"] = bias_info.get("readback", {})
+        self._metadata["gate_settle_s"] = bias_info.get("gate_settle_s", 0.0)
+        self._metadata["gate_settle_phase"] = bias_info.get(
+            "gate_settle_phase", "none"
+        )
         self._write_metadata()
         self._check_stop()
 
@@ -422,13 +633,16 @@ class _ContinuousMCDWorker(QObject):
             for rate_index, (upper_range_a, rate_t_per_min) in magnet.get_rates().items()
         ]
         self._metadata["aps100_slow_rate_profile"] = rate_profile
+        self._metadata["aps100_fast_rate_t_per_min"] = float(
+            magnet.get_rate_t_per_min(5)
+        )
         self._write_metadata()
-        self._event("aps100_slow_rate_profile", json.dumps(rate_profile))
 
         self._emit_log(
             f"Moving to start field {p['start_t']:.4f} T using the APS100 "
-            "stored SLOW rate profile."
+            "normal range-dependent rate profile (RATE 0–4)."
         )
+        self._leg_active = False
         magnet.move_to_field(
             p["start_t"],
             tolerance_t=p["field_tolerance_t"],
@@ -437,10 +651,6 @@ class _ContinuousMCDWorker(QObject):
             progress=lambda field: self._emit_progress(field),
         )
         actual_limits = magnet.set_limits_t(low_t, high_t)
-        self._event(
-            "limits",
-            f"LLIM={actual_limits[0]:.9g} T ULIM={actual_limits[1]:.9g} T",
-        )
         if p["start_settle_s"] > 0:
             self._sleep_stop_aware(p["start_settle_s"])
 
@@ -454,6 +664,7 @@ class _ContinuousMCDWorker(QObject):
         wl_headers = [f"{value:.6f}" for value in wavelengths]
         cycle = 0
         self._spectra_written = 0
+        timing = {"acquire_s": 0.0, "read_s": 0.0, "acquisitions": 0, "reads": 0}
         assert self._csv_path is not None
         with self._csv_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
@@ -473,24 +684,72 @@ class _ContinuousMCDWorker(QObject):
                         }
                     )
                     self._metadata["legs"] = list(leg_log)
-                    self._event(
-                        "leg_start",
-                        f"leg={leg_index}/{len(legs)} target={target:.9g} T "
-                        f"direction={leg_dir}",
-                    )
                     self._emit_log(
                         f"Sweep leg {leg_index}/{len(legs)}: {leg_dir} "
                         f"toward {target:.4f} T."
                     )
                     self._leg_index = (index - 1) * len(legs) + (leg_index - 1)
-                    self._leg_start_t = magnet.get_field_t()
+                    leg_snapshot = magnet.read_snapshot()
+                    self._leg_start_t = self._validate_magnet_snapshot(
+                        leg_snapshot,
+                        expected_direction=leg_dir,
+                        target_t=target,
+                    )
+                    leg_label = "forward" if leg_index == 1 else "backward"
                     self._leg_target_t = float(target)
+                    self._leg_active = True
+                    previous_field = self._leg_start_t
+                    leg_started = time.monotonic()
+                    last_progress = leg_started
+                    stable_reads = 0
+                    required_stable_reads = max(
+                        1, int(p.get("endpoint_stable_reads", 3))
+                    )
+                    progress_epsilon = max(
+                        0.0, float(p.get("sweep_progress_epsilon_t", 0.0001))
+                    )
                     while True:
                         self._check_stop()
-                        current = magnet.get_field_t()
+                        now = time.monotonic()
+                        if now - leg_started > float(p.get("sweep_leg_timeout_s", 3600.0)):
+                            raise RuntimeError(
+                                f"APS100 sweep leg timed out before reaching {target:g} T"
+                            )
+                        read_started = time.monotonic()
+                        field_t, state, status, heater_on = self._read_light_progress()
+                        current = self._validate_progress(
+                            field_t, state, status, heater_on,
+                            expected_direction=leg_dir, target_t=target,
+                        )
+                        timing["read_s"] += time.monotonic() - read_started
+                        timing["reads"] += 1
                         self._emit_progress(current)
-                        if leg_direction * (current - target) >= 0:
-                            break
+                        at_target = leg_direction * (current - target) >= -abs(
+                            float(p["field_tolerance_t"])
+                        )
+                        if at_target:
+                            stable_reads += 1
+                            if stable_reads >= required_stable_reads:
+                                break
+                            self._sleep_stop_aware(float(p.get("field_poll_s", 0.2)))
+                            continue
+                        stable_reads = 0
+                        signed_progress = leg_direction * (current - previous_field)
+                        if signed_progress < -progress_epsilon:
+                            raise RuntimeError(
+                                f"APS100 field moved the wrong way: {previous_field:.6g} T "
+                                f"to {current:.6g} T during a {leg_dir} sweep"
+                            )
+                        if signed_progress >= progress_epsilon:
+                            last_progress = now
+                        if now - last_progress > float(
+                            p.get("sweep_progress_timeout_s", 120.0)
+                        ):
+                            raise RuntimeError(
+                                f"APS100 sweep made no measurable progress for "
+                                f"{float(p.get('sweep_progress_timeout_s', 120.0)):g} s"
+                            )
+                        previous_field = current
                         order = ("A", "B") if cycle % 2 == 0 else ("B", "A")
                         for label in order:
                             self._check_stop()
@@ -498,9 +757,34 @@ class _ContinuousMCDWorker(QObject):
                             rotator.move_to(angle)
                             self._sleep_stop_aware(p["rotation_settle_s"])
                             measured_angle = float(rotator.get_position())
-                            field_before = magnet.get_field_t()
-                            wl, counts = _spectrum_1d(*spec.acquire())
-                            field_after = magnet.get_field_t()
+                            angle_error = abs((measured_angle - angle + 180.0) % 360.0 - 180.0)
+                            if angle_error > float(p.get("rotation_tolerance_deg", 0.25)):
+                                raise RuntimeError(
+                                    f"Rotation readback {measured_angle:.6g}° is not within "
+                                    f"tolerance of {angle:.6g}°"
+                                )
+                            read_started = time.monotonic()
+                            before_field, before_status = self._read_field_status()
+                            field_before = self._validate_endpoint_field(
+                                before_field, before_status,
+                                expected_direction=leg_dir, target_t=target,
+                            )
+                            timing["read_s"] += time.monotonic() - read_started
+                            timing["reads"] += 1
+                            timestamp_start = _utc_now()
+                            acquire_started = time.monotonic()
+                            wl, counts = _spectrum_1d(*self._acquire_spectrum(spec))
+                            timing["acquire_s"] += time.monotonic() - acquire_started
+                            timing["acquisitions"] += 1
+                            timestamp_end = _utc_now()
+                            read_started = time.monotonic()
+                            after_field, after_status = self._read_field_status()
+                            field_after = self._validate_endpoint_field(
+                                after_field, after_status,
+                                expected_direction=leg_dir, target_t=target,
+                            )
+                            timing["read_s"] += time.monotonic() - read_started
+                            timing["reads"] += 1
                             if wl.size != wavelengths.size or not np.allclose(
                                 wl, wavelengths, rtol=0.0, atol=1e-6
                             ):
@@ -509,24 +793,46 @@ class _ContinuousMCDWorker(QObject):
                             field_mean = (field_before + field_after) / 2.0
                             writer.writerow(
                                 [
-                                    field_mean,
+                                    timestamp_start,
+                                    timestamp_end,
+                                    leg_label,
+                                    leg_dir,
                                     measured_angle,
+                                    field_before,
+                                    field_after,
+                                    field_mean,
                                     p["vtg_v"],
                                     p["vbg_v"],
                                     p["vbias_v"],
                                     doping,
                                     efield,
+                                    None,
+                                    None,
+                                    None,
                                 ]
                                 + counts.tolist()
                             )
                             handle.flush()
+                            os.fsync(handle.fileno())
                             self._spectra_written += 1
                             self.spectrum.emit(wl, counts, label, field_mean)
                             self._emit_progress(field_after)
                         cycle += 1
+                    self._legs_completed += 1
+                if timing["acquisitions"]:
+                    self._emit_log(
+                        "Per-spectrum timing: "
+                        f"{timing['acquire_s'] / timing['acquisitions']:.2f} s acquisition, "
+                        f"{timing['read_s'] / max(1, timing['reads']):.2f} s per telemetry read"
+                    )
+                    self._metadata["timing"] = {
+                        "acquisition_s": round(timing["acquire_s"], 4),
+                        "telemetry_s": round(timing["read_s"], 4),
+                        "spectra": timing["acquisitions"],
+                        "telemetry_reads": timing["reads"],
+                    }
             finally:
                 magnet.pause()
-                self._event("sweep_pause", f"field={magnet.get_field_t():.9g} T")
 
         final_snapshot = magnet.read_snapshot()
         self._metadata.update(
@@ -599,11 +905,6 @@ class _ContinuousMCDWorker(QObject):
                 else ", Vbias=skipped"
             )
         )
-        self._event(
-            "voltage_pre_ramp",
-            f"Vbg={_fmt(pre_vbg)} V Vtg={_fmt(pre_vtg)} V "
-            f"Vbias={_fmt(pre_vbias)} V",
-        )
 
         # 2) Stop-aware stepped ramp to the set voltages.
         device.set_gates(
@@ -640,9 +941,24 @@ class _ContinuousMCDWorker(QObject):
             info["bias_skipped_reason"] = bias_reason
             self._emit_log(f"Vbias skipped: {bias_reason}.")
 
-        # 3) Settle, then read the resulting currents once (not during the
-        #    magnetic sweep / spectrum acquisition, which stays fast).
-        self._sleep_stop_aware(p["voltage_settle_s"])
+        # 3) Settle before the field sweep, like the 2100 tab: the first
+        #    condition waits the initial settle, later conditions the shorter
+        #    settle. Both are stop-aware, then the resulting currents are
+        #    read once (not during the sweep / acquisition).
+        condition_index = int(p.get("condition_index", 1))
+        first_ramp = condition_index <= 1
+        settle_s = float(
+            p.get("initial_voltage_settle_s", p.get("voltage_settle_s", 0.0))
+            if first_ramp
+            else p.get("voltage_settle_s", 0.0)
+        )
+        self._emit_log(
+            "Gate settling after "
+            f"{'first' if first_ramp else 'later'} gate ramp: {settle_s:g} s"
+        )
+        self._sleep_stop_aware(settle_s)
+        info["gate_settle_s"] = settle_s
+        info["gate_settle_phase"] = "first" if first_ramp else "later"
         readback: dict = {}
         if hasattr(device, "read_currents"):
             try:
@@ -658,12 +974,6 @@ class _ContinuousMCDWorker(QObject):
                 "Post-ramp current: "
                 f"Ibg={_fmt(ibg)} A, Itg={_fmt(itg)} A, Ibias={_fmt(ib)} A"
             )
-            self._event(
-                "voltage_settled",
-                f"Vbg={_fmt(p['vbg_v'])} V Vtg={_fmt(p['vtg_v'])} V "
-                f"Vbias={_fmt(p['vbias_v'])} V "
-                f"Ibg={_fmt(ibg)} A Itg={_fmt(itg)} A Ibias={_fmt(ib)} A",
-            )
         info["readback"] = readback
         self._emit_log("Sample voltages applied.")
         return info
@@ -674,8 +984,67 @@ class _ContinuousMCDWorker(QObject):
             self._check_stop()
             time.sleep(min(0.05, deadline - time.monotonic()))
 
+    def _acquire_spectrum(self, spec):
+        """Acquire one spectrum while publishing live APS100 field reads.
+
+        LightField acquisitions can take tens of seconds.  The worker runs the
+        acquisition on a helper thread and periodically emits the current field
+        so the 1000 tab's live readout keeps moving, mirroring the 2100 tab.
+        """
+        result = {}
+        completed = threading.Event()
+
+        def capture() -> None:
+            try:
+                result["value"] = spec.acquire()
+            except BaseException as exc:
+                result["error"] = exc
+            finally:
+                completed.set()
+
+        threading.Thread(
+            target=capture, name="MCDLightFieldCapture", daemon=True
+        ).start()
+        telemetry_s = max(0.0, float(self._p.get("field_telemetry_s", 2.0)))
+        last_emit = float("-inf")
+        while not completed.wait(0.5):
+            if self._stop.is_set():
+                abort = getattr(spec, "abort_acquisition", None)
+                if callable(abort):
+                    try:
+                        abort()
+                    except Exception:
+                        pass
+                if not completed.wait(5.0):
+                    raise _MCDStopRequested(
+                        "MCD stop requested during LightField acquisition"
+                    )
+                raise _MCDStopRequested(
+                    "MCD stop requested during LightField acquisition"
+                )
+            now = time.monotonic()
+            if now - last_emit >= telemetry_s:
+                last_emit = now
+                try:
+                    field = float(self._magnet_ctrl.adapter.get_field_t())
+                except Exception:
+                    continue
+                if math.isfinite(field):
+                    self._emit_progress(field)
+        if "error" in result:
+            raise result["error"]
+        value = result.get("value")
+        if value is None:
+            raise RuntimeError("LightField acquisition returned no spectrum")
+        return value
+
     def _emit_progress(self, field_t: float) -> None:
-        if self._total_legs <= 1:
+        if not self._leg_active:
+            # Repositioning to the start field is not a measurement leg;
+            # hold progress at the number of completed legs instead of
+            # letting the field change drive the bar backwards.
+            fraction = self._legs_completed / self._total_legs
+        elif self._total_legs <= 1:
             start = self._p["start_t"]
             stop = self._p["stop_t"]
             fraction = (field_t - start) / (stop - start)
@@ -686,7 +1055,8 @@ class _ContinuousMCDWorker(QObject):
                 if abs(span) > 1e-12
                 else 0.0
             )
-            fraction = (self._leg_index + within) / self._total_legs
+            within = min(1.0, max(0.0, within))
+            fraction = (self._legs_completed + within) / self._total_legs
         self.progress.emit(
             field_t,
             min(100.0, max(0.0, fraction * 100.0)),
@@ -703,27 +1073,25 @@ class _ContinuousMCDWorker(QObject):
         suffix = 1
         while any(
             (out_dir / f"{stem}{extension}").exists()
-            for extension in (".csv", ".meta.json", ".log")
+            for extension in (".csv", ".meta.json")
         ):
             stem = f"{base_stem}_{suffix:03d}"
             suffix += 1
         return (
             out_dir / f"{stem}.csv",
             out_dir / f"{stem}.meta.json",
-            out_dir / f"{stem}.log",
         )
-
-    def _event(self, event: str, detail: str) -> None:
-        if self._event_path is None:
-            return
-        with self._event_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"{_utc_now()}\t{event}\t{detail}\n")
 
     def _write_metadata(self) -> None:
         if self._metadata_path is not None:
-            self._metadata_path.write_text(
-                json.dumps(self._metadata, indent=2), encoding="utf-8"
+            temporary = self._metadata_path.with_name(
+                self._metadata_path.name + ".tmp"
             )
+            with temporary.open("w", encoding="utf-8") as stream:
+                json.dump(self._metadata, stream, indent=2, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self._metadata_path)
 
     def _set_metadata_status(self, status: str, *, error: Optional[str] = None) -> None:
         if not self._metadata:
@@ -760,6 +1128,7 @@ class MCDPanel(QWidget):
         self._externally_busy = False
         self._last_snapshot = None
         self._updating_table = False
+        self._syncing_gate_ratio = False
         self._voltage_limit = abs(float(cfg.smu.volt_compliance_V))
         self._build_ui()
         self._wire_signals()
@@ -935,7 +1304,16 @@ class MCDPanel(QWidget):
         conn_form.addRow(self._transition_widget)
         controls_layout.addWidget(connection)
 
-        magnet_group = QGroupBox("Continuous Field Sweep")
+        workflow = QGroupBox("Continuous APS100 MCD")
+        workflow.setToolTip(
+            "Continuous two-angle MCD 1000 workflow using the APS100 Z magnet."
+        )
+        workflow_layout = QVBoxLayout(workflow)
+        workflow_layout.setContentsMargins(8, 8, 8, 8)
+        workflow_layout.setSpacing(6)
+        controls_layout.addWidget(workflow)
+
+        magnet_group = QGroupBox("Field Sweep")
         magnet_group.setToolTip(
             "Field range for the continuous two-angle MCD measurement. The "
             "APS100 sweeps between these fields while spectra are acquired."
@@ -954,15 +1332,22 @@ class MCDPanel(QWidget):
         self._start_settle.setToolTip(
             "Extra wait after reaching the start field before the first spectrum."
         )
-        magnet_form.addRow("Start field", self._start_t)
-        magnet_form.addRow("Stop field", self._stop_t)
-        sweep_rate_label = QLabel("APS100 stored SLOW rate profile")
-        sweep_rate_label.setWordWrap(True)
-        sweep_rate_label.setToolTip(
-            "The sweep rate is fixed to the SLOW rate profile stored in the "
-            "APS100 and is not settable here."
+        start_stop_row = QHBoxLayout()
+        start_stop_row.setSpacing(6)
+        start_stop_row.addWidget(QLabel("Start"))
+        start_stop_row.addWidget(self._start_t, 1)
+        start_stop_row.addWidget(QLabel("Stop"))
+        start_stop_row.addWidget(self._stop_t, 1)
+        magnet_form.addRow(start_stop_row)
+        self._sweep_rate_label = QLabel(
+            "Normal range-dependent rates (RATE 0–4)"
         )
-        magnet_form.addRow("Sweep rate", sweep_rate_label)
+        self._sweep_rate_label.setWordWrap(True)
+        self._sweep_rate_label.setToolTip(
+            "The APS100 automatically selects the stored RATE 0–4 value for "
+            "the present output-current range. RATE 5 FAST mode is not used."
+        )
+        magnet_form.addRow("Sweep rate", self._sweep_rate_label)
         magnet_form.addRow("Start settle", self._start_settle)
         self._sweep_mode = QComboBox()
         self._sweep_mode.addItem("One-way", "one_way")
@@ -976,15 +1361,14 @@ class MCDPanel(QWidget):
         )
         magnet_form.addRow("Sweep mode", self._sweep_mode)
 
-        optics = QGroupBox("Rotation and LightField")
-        optics.setToolTip(
-            "Sample rotation and spectrometer settings used at every "
-            "measurement point."
+        rotation_group = QGroupBox("Rotation")
+        rotation_group.setToolTip(
+            "Sample rotation settings used at every measurement point."
         )
-        optics_form = QFormLayout(optics)
-        optics_form.setContentsMargins(8, 6, 8, 6)
-        optics_form.setVerticalSpacing(3)
-        optics_form.setHorizontalSpacing(8)
+        rotation_form = QFormLayout(rotation_group)
+        rotation_form.setContentsMargins(8, 6, 8, 6)
+        rotation_form.setVerticalSpacing(3)
+        rotation_form.setHorizontalSpacing(8)
         self._rotator = QComboBox()
         self._rotator.setToolTip(
             "Which rotation motor (rot1/rot2) rotates the sample."
@@ -1003,6 +1387,19 @@ class MCDPanel(QWidget):
         self._rotation_settle.setToolTip(
             "Wait after the rotator reaches an angle before acquiring."
         )
+        rotation_form.addRow("Rotator", self._rotator)
+        rotation_form.addRow("Angle A", self._angle_a)
+        rotation_form.addRow("Angle B", self._angle_b)
+        rotation_form.addRow("Rotation settle", self._rotation_settle)
+
+        lightfield_group = QGroupBox("LightField")
+        lightfield_group.setToolTip(
+            "Spectrometer settings used for every A/B spectrum pair."
+        )
+        lightfield_form = QFormLayout(lightfield_group)
+        lightfield_form.setContentsMargins(8, 6, 8, 6)
+        lightfield_form.setVerticalSpacing(3)
+        lightfield_form.setHorizontalSpacing(8)
         self._exposure = self._double_spin(1.0, 600_000.0, cfg.lf6.exposure_ms, 1, " ms")
         self._exposure.setToolTip(
             "Spectrometer exposure time in ms per spectrum."
@@ -1015,31 +1412,48 @@ class MCDPanel(QWidget):
         )
         self._frames.setRange(1, 1000)
         self._frames.setValue(cfg.lf6.accumulations)
-        optics_form.addRow("Rotator", self._rotator)
-        optics_form.addRow("Angle A", self._angle_a)
-        optics_form.addRow("Angle B", self._angle_b)
-        optics_form.addRow("Rotation settle", self._rotation_settle)
-        optics_form.addRow("Exposure", self._exposure)
-        optics_form.addRow("Center", self._center)
-        optics_form.addRow("Frames/accums", self._frames)
+        self._compact(self._center, 100, 140)
+        self._compact(self._exposure, 100, 140)
+        self._compact(self._frames, 80, 100)
+        lightfield_form.addRow("Center", self._center)
+        lightfield_form.addRow("Exposure", self._exposure)
+        lightfield_form.addRow("Frames/accums", self._frames)
 
-        voltages = QGroupBox("Sample Voltages")
+        voltages = QGroupBox("Gate / SMU")
         voltages.setToolTip(
-            "Gate and bias voltages applied through the SMUs before the MCD "
-            "measurement starts. Ramping follows the Dual Gate tab settings "
+            "Gate and bias voltages are always ramped through the SMUs before "
+            "each condition sweep. Ramping follows the Dual Gate tab settings "
             "(step, delay, settle)."
         )
         voltage_form = QFormLayout(voltages)
         voltage_form.setContentsMargins(8, 6, 8, 6)
         voltage_form.setVerticalSpacing(3)
         voltage_form.setHorizontalSpacing(8)
-        self._apply_voltages = QCheckBox("Ramp voltages before MCD")
-        self._apply_voltages.setToolTip(
-            "Apply Vtg/Vbg/Vbias through the SMUs before each condition sweep. "
-            "Ramping follows the Dual Gate tab settings (step/delay/settle). "
-            "Requires connected SMUs."
+        self.gate_vtg_factor = self._double_spin(
+            -100.0, 100.0, cfg.mcd.gate_vtg_factor, 6, ""
         )
-        self._apply_voltages.setChecked(cfg.mcd.apply_sample_voltages)
+        self.gate_vtg_factor.setToolTip(
+            "Factor a in the relation a×Vtg = b×Vbg."
+        )
+        self.gate_vbg_factor = self._double_spin(
+            -100.0, 100.0, cfg.mcd.gate_vbg_factor, 6, ""
+        )
+        self.gate_vbg_factor.setToolTip(
+            "Factor b in the relation a×Vtg = b×Vbg. The canonical ratio "
+            "r = b/a is used to derive Doping and E-field."
+        )
+        self._compact(self.gate_vtg_factor, 80, 110)
+        self._compact(self.gate_vbg_factor, 80, 110)
+        if (
+            abs(float(cfg.mcd.gate_vtg_factor) - 1.0) <= 1e-12
+            and abs(float(cfg.mcd.gate_vbg_factor) - 1.0) <= 1e-12
+            and abs(float(cfg.mcd.gate_ratio) - 1.0) > 1e-12
+        ):
+            self.gate_vbg_factor.setValue(float(cfg.mcd.gate_ratio))
+        self.gate_ratio_value = QLabel()
+        self.gate_ratio_value.setToolTip(
+            "Canonical gate ratio r = b/a used for Doping/E-field derivation."
+        )
         self._gate_ratio = self._double_spin(
             -1000.0, 1000.0, cfg.mcd.gate_ratio, 4, ""
         )
@@ -1048,6 +1462,105 @@ class MCDPanel(QWidget):
             "Doping = Vtg + r*Vbg and E-field = Vtg - r*Vbg. "
             "Must be non-zero to enter Doping/E-field directly; "
             "otherwise they are computed from Vtg/Vbg."
+        )
+        try:
+            ratio = gate_ratio_from_factors(
+                self.gate_vtg_factor.value(), self.gate_vbg_factor.value()
+            )
+        except ValueError:
+            ratio = float(cfg.mcd.gate_ratio)
+        self.gate_ratio_value.setText(f"r = {ratio:.6g}")
+        self._gate_ratio.setValue(ratio)
+        ratio_row = QHBoxLayout()
+        ratio_row.setSpacing(6)
+        ratio_row.addWidget(QLabel("Weighting"))
+        ratio_row.addWidget(QLabel("TG"))
+        ratio_row.addWidget(self.gate_vtg_factor)
+        ratio_row.addWidget(QLabel("BG"))
+        ratio_row.addWidget(self.gate_vbg_factor)
+        ratio_row.addWidget(self.gate_ratio_value)
+        ratio_row.addStretch(1)
+        self._initial_voltage_settle = self._double_spin(
+            0.0, 3600.0, cfg.mcd.initial_voltage_settle_s, 3, " s"
+        )
+        self._voltage_settle = self._double_spin(
+            0.0, 3600.0, cfg.mcd.voltage_settle_s, 3, " s"
+        )
+        self._initial_voltage_settle.setSingleStep(0.5)
+        self._voltage_settle.setSingleStep(0.1)
+        self._compact(self._initial_voltage_settle, 88, 110)
+        self._compact(self._voltage_settle, 88, 110)
+        self._initial_voltage_settle.setToolTip(
+            "Cancelable wait after ramping to the first gate condition, "
+            "before the field sweep."
+        )
+        self._voltage_settle.setToolTip(
+            "Cancelable wait after ramping to each later gate condition, "
+            "before its field sweep."
+        )
+        settle_row = QHBoxLayout()
+        settle_row.setSpacing(6)
+        settle_row.addWidget(QLabel("Settle"))
+        settle_row.addWidget(QLabel("First"))
+        settle_row.addWidget(self._initial_voltage_settle)
+        settle_row.addWidget(QLabel("Later"))
+        settle_row.addWidget(self._voltage_settle)
+        settle_row.addStretch(1)
+        entry_group = QGroupBox("New gate rows")
+        entry_layout = QGridLayout(entry_group)
+        entry_layout.setContentsMargins(8, 4, 8, 4)
+        entry_layout.setHorizontalSpacing(5)
+        entry_layout.setVerticalSpacing(3)
+        self._gate_entry_mode = QComboBox()
+        self._gate_entry_mode.addItem("Direct Vtg / Vbg", MODE_DIRECT)
+        self._gate_entry_mode.addItem("Doping / E-field", MODE_DOPING_EFIELD)
+        self._gate_entry_mode.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self._gate_entry_mode.setMaximumWidth(150)
+        self._gate_entry_a_label = QLabel()
+        self._gate_entry_b_label = QLabel()
+        self._gate_entry_a = QLineEdit("0")
+        self._gate_entry_b = QLineEdit("0")
+        for editor in (self._gate_entry_a, self._gate_entry_b):
+            editor.setToolTip("Enter one value, comma-separated values, or start:step:stop")
+            editor.setMaximumWidth(130)
+            editor.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
+        self._gate_entry_vbias = self._double_spin(-1000, 1000, 0.0, 4, " V")
+        self._gate_entry_vbias.setMaximumWidth(110)
+        self._gate_entry_expansion_label = QLabel("Combine")
+        self._gate_entry_expansion = QComboBox()
+        self._gate_entry_expansion.addItem("Match by position", "paired")
+        self._gate_entry_expansion.addItem("Every combination", "grid")
+        self._gate_entry_expansion.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
+        self._gate_entry_expansion.setMaximumWidth(120)
+        self._gate_entry_add = QPushButton("Add 1 row")
+        self._gate_entry_add.setStyleSheet("font-weight: 700;")
+        self._gate_entry_add.setMaximumWidth(130)
+        self._gate_entry_status = QLabel()
+        self._gate_entry_status.setWordWrap(True)
+        self._gate_entry_status.setMaximumWidth(420)
+        self._gate_entry_rows: list = []
+        entry_layout.addWidget(QLabel("Input type"), 0, 0)
+        entry_layout.addWidget(self._gate_entry_a_label, 0, 1)
+        entry_layout.addWidget(self._gate_entry_b_label, 0, 2)
+        entry_layout.addWidget(self._gate_entry_mode, 1, 0)
+        entry_layout.addWidget(self._gate_entry_a, 1, 1)
+        entry_layout.addWidget(self._gate_entry_b, 1, 2)
+        entry_layout.addWidget(QLabel("Vbias"), 2, 0)
+        entry_layout.addWidget(self._gate_entry_expansion_label, 2, 1)
+        entry_layout.addWidget(self._gate_entry_vbias, 3, 0)
+        entry_layout.addWidget(self._gate_entry_expansion, 3, 1)
+        entry_layout.addWidget(self._gate_entry_add, 3, 2)
+        entry_layout.addWidget(self._gate_entry_status, 4, 0, 1, 3)
+        self._gate_entry_add.setToolTip(
+            "Append the entered rows to the condition table. "
+            "Direct mode uses Vtg/Vbg; Doping/E-field mode back-computes "
+            "Vtg/Vbg from the gate ratio."
         )
         self._condition_table = QTableWidget(1, 6)
         self._condition_table.setHorizontalHeaderLabels(
@@ -1064,7 +1577,6 @@ class MCDPanel(QWidget):
         self._condition_table.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
         )
-        self._condition_table.setFixedHeight(150)
         self._condition_table.setToolTip(
             "One row per voltage condition; the MCD sweep runs once per enabled row. "
             "Edit Vtg/Vbg to update Doping/E-field, or edit Doping/E-field to "
@@ -1083,8 +1595,12 @@ class MCDPanel(QWidget):
         condition_buttons.setSpacing(6)
         condition_buttons.addWidget(self._add_condition_btn)
         condition_buttons.addWidget(self._remove_condition_btn)
-        voltage_form.addRow(self._apply_voltages)
-        voltage_form.addRow("Gate ratio r", self._gate_ratio)
+        voltage_form.addRow(ratio_row)
+        voltage_form.addRow(settle_row)
+        entry_row = QHBoxLayout()
+        entry_row.addWidget(entry_group)
+        entry_row.addStretch(1)
+        voltage_form.addRow(entry_row)
         voltage_form.addRow(self._condition_table)
         voltage_form.addRow(condition_buttons)
         self._seed_condition_table(cfg.mcd.conditions or [])
@@ -1094,22 +1610,21 @@ class MCDPanel(QWidget):
         self._row_a.setContentsMargins(0, 0, 0, 0)
         self._row_a.setSpacing(6)
         self._row_a.addWidget(magnet_group, 1)
-        self._row_a.addWidget(optics, 1)
+        self._row_a.addWidget(rotation_group, 1)
         row_a_widget = QWidget()
         row_a_widget.setLayout(self._row_a)
-        controls_layout.addWidget(row_a_widget)
+        workflow_layout.addWidget(row_a_widget)
 
-        controls_layout.addWidget(voltages)
+        workflow_layout.addWidget(voltages)
 
-        output = QGroupBox("File Naming and Run")
-        output.setToolTip(
-            "Filenames, output folder, and the controls that arm and start "
-            "the continuous MCD measurement."
+        sample_group = QGroupBox("Sample / Device")
+        sample_group.setToolTip(
+            "Sample identity and point/location for the MCD 1000 run."
         )
-        output_form = QFormLayout(output)
-        output_form.setContentsMargins(8, 6, 8, 6)
-        output_form.setVerticalSpacing(3)
-        output_form.setHorizontalSpacing(8)
+        sample_form = QFormLayout(sample_group)
+        sample_form.setContentsMargins(8, 6, 8, 6)
+        sample_form.setVerticalSpacing(3)
+        sample_form.setHorizontalSpacing(8)
         self._sample_id = QLineEdit(cfg.mcd.sample_id)
         self._sample_id.setToolTip(
             "Sample ID (required) - embedded in every filename and folder path."
@@ -1120,6 +1635,8 @@ class MCDPanel(QWidget):
             "Measurement location (e.g. p1, center, edge) - embedded in filenames."
         )
         self._point.setPlaceholderText("p1, center, edge")
+        self._compact(self._sample_id, 150, 300)
+        self._compact(self._point, 80, 160)
         self._condition = QLineEdit(cfg.mcd.condition_label)
         self._condition.setToolTip(
             "Optional experiment condition label included in filenames."
@@ -1127,8 +1644,10 @@ class MCDPanel(QWidget):
         self._condition.setPlaceholderText("Optional condition")
         self._temperature = QLineEdit(cfg.mcd.temperature)
         self._temperature.setToolTip(
-            "Temperature token used in filenames, e.g. 6 or 1.8."
+            "Temperature token used in filenames, e.g. 6 or 1.8. "
+            "Metadata only — the APS100 does not control sample temperature."
         )
+        self._compact(self._temperature, 80, 160)
         self._mode = QComboBox()
         self._mode.setToolTip(
             "Measurement mode token (Ref or PL) used in filenames."
@@ -1154,22 +1673,52 @@ class MCDPanel(QWidget):
         )
         sample_row = QHBoxLayout()
         sample_row.setSpacing(6)
+        sample_row.addWidget(QLabel("Sample ID"))
         sample_row.addWidget(self._sample_id, 1)
-        sample_row.addWidget(self._point, 1)
-        sample_row.addWidget(self._condition, 1)
-        output_form.addRow("Sample/point/cond", sample_row)
+        sample_row.addWidget(QLabel("Point / Location"))
+        sample_row.addWidget(self._point)
+        sample_row.addStretch(1)
+        sample_form.addRow(sample_row)
+        sample_form.addRow("Temperature", self._temperature)
 
-        naming_row = QHBoxLayout()
-        naming_row.setSpacing(6)
-        for widget in (
-            self._temperature,
-            self._mode,
-            self._laser,
-            self._power,
-            self._power_coefficient,
-        ):
-            naming_row.addWidget(widget, 1)
-        output_form.addRow("Run tokens", naming_row)
+        self._metadata_toggle = QToolButton()
+        self._metadata_toggle.setCheckable(True)
+        self._metadata_toggle.setText("Optional filename metadata (advanced)")
+        self._metadata_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self._metadata_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self._metadata_toggle.setToolTip(
+            "Show optional condition, Ref/PL, laser, power, and filename-token settings. "
+            "All values are saved in the per-run JSON metadata."
+        )
+        self._metadata_widget = QWidget()
+        metadata_form = QFormLayout(self._metadata_widget)
+        metadata_form.setContentsMargins(8, 2, 0, 2)
+        metadata_form.setVerticalSpacing(3)
+        metadata_form.addRow("Condition", self._condition)
+        optical_tokens = QHBoxLayout()
+        optical_tokens.setSpacing(6)
+        optical_tokens.addWidget(self._mode)
+        optical_tokens.addWidget(self._laser, 1)
+        optical_tokens.addWidget(self._power, 1)
+        optical_tokens.addWidget(self._power_coefficient, 1)
+        metadata_form.addRow("Mode / laser / power / coefficient", optical_tokens)
+        self._metadata_widget.setVisible(False)
+        sample_form.addRow(self._metadata_toggle)
+        sample_form.addRow(self._metadata_widget)
+
+        workflow_layout.insertWidget(0, sample_group)
+        workflow_layout.insertWidget(2, lightfield_group)
+
+        filename_group = QGroupBox("Filename")
+        filename_group.setToolTip(
+            "Filename fields and live output-path preview for MCD 1000 data."
+        )
+        filename_form = QFormLayout(filename_group)
+        filename_form.setContentsMargins(8, 6, 8, 6)
+        filename_form.setVerticalSpacing(3)
+        filename_form.setHorizontalSpacing(8)
 
         filename_part_tips = {
             "temp_mode": "Include temperature and mode (Ref/PL) tokens in filenames.",
@@ -1201,7 +1750,7 @@ class MCDPanel(QWidget):
             row, column = divmod(index, 2)
             parts_grid.addWidget(checkbox, row, column)
             parts_grid.setColumnStretch(column, 1)
-        output_form.addRow(parts_widget)
+        metadata_form.addRow("Filename tokens", parts_widget)
 
         self._filename_preview = QLabel()
         self._filename_preview.setToolTip(
@@ -1219,12 +1768,12 @@ class MCDPanel(QWidget):
         self._path_preview.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
-        self._run_btn = QPushButton("Start Continuous MCD")
+        self._run_btn = QPushButton("Start MCD 1000")
         self._run_btn.setToolTip(
             "Run preflight checks, then start the continuous two-angle sweep "
             "with the settings above."
         )
-        self._stop_btn = QPushButton("Stop MCD")
+        self._stop_btn = QPushButton("Stop / Cancel")
         self._stop_btn.setToolTip(
             "Request a clean stop and pause the APS100."
         )
@@ -1234,7 +1783,7 @@ class MCDPanel(QWidget):
             "Sweep progress from start field to stop field."
         )
         self._progress.setRange(0, 1000)
-        self._run_status = QLabel("Ready")
+        self._run_status = _ElidedLabel("Ready")
         self._run_status.setToolTip(
             "Current run status: moves, spectra acquired, or errors."
         )
@@ -1245,20 +1794,46 @@ class MCDPanel(QWidget):
             "MCD sweep requires driven mode (persistent heater ON). "
             "Use the advanced transition controls if the heater is OFF."
         )
-        output_form.addRow(self._mode_notice)
-        output_form.addRow(self._filename_preview)
-        output_form.addRow(self._path_preview)
-        output_form.addRow(self._run_btn)
-        output_form.addRow(self._stop_btn)
-        output_form.addRow(self._progress)
-        output_form.addRow("Status", self._run_status)
-        controls_layout.addWidget(output)
+        filename_form.addRow("Filename preview", self._filename_preview)
+        filename_form.addRow("Output folder", self._path_preview)
+
+        run_group = QGroupBox("Run control")
+        run_group.setToolTip(
+            "Start or stop the continuous MCD 1000 measurement."
+        )
+        run_layout = QVBoxLayout(run_group)
+        run_layout.setContentsMargins(8, 6, 8, 6)
+        run_layout.setSpacing(6)
+        run_layout.addWidget(self._mode_notice)
+        run_buttons = QHBoxLayout()
+        run_buttons.setSpacing(8)
+        for button in (self._run_btn, self._stop_btn):
+            button.setMinimumHeight(36)
+            run_buttons.addWidget(button)
+        run_layout.addLayout(run_buttons)
+
+        workflow_layout.addWidget(filename_group)
+        controls_layout.addWidget(run_group)
         controls_layout.addStretch()
 
-        display = QWidget()
+        display = QGroupBox("Status / Progress / Log")
         display_layout = QVBoxLayout(display)
         display_layout.setContentsMargins(8, 6, 8, 6)
         display_layout.setSpacing(6)
+        display_layout.addWidget(self._progress)
+        self._current_field = QLabel("N/A")
+        self._current_field.setToolTip(
+            "Live APS100 field readout. Updates from controller telemetry "
+            "when idle and from the run worker during a measurement."
+        )
+        field_row = QHBoxLayout()
+        field_row.addWidget(QLabel("Current field"))
+        field_row.addWidget(self._current_field, 1)
+        display_layout.addLayout(field_row)
+        status_row = QHBoxLayout()
+        status_row.addWidget(QLabel("Status"))
+        status_row.addWidget(self._run_status, 1)
+        display_layout.addLayout(status_row)
         header = QHBoxLayout()
         title = QLabel("Live spectrum")
         title.setStyleSheet("font-weight:700;")
@@ -1305,6 +1880,7 @@ class MCDPanel(QWidget):
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setSizes([760, 440])
+        self._update_gate_entry()
         self._update_coordinates_and_filename()
         self._apply_responsive_layout()
 
@@ -1321,6 +1897,12 @@ class MCDPanel(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._apply_responsive_layout()
+
+    @staticmethod
+    def _compact(widget, minimum: int, maximum: int) -> None:
+        """Cap a widget's width so it never stretches across the whole form."""
+        widget.setMinimumWidth(int(minimum))
+        widget.setMaximumWidth(int(maximum))
 
     @staticmethod
     def _double_spin(low, high, value, decimals, suffix):
@@ -1351,7 +1933,16 @@ class MCDPanel(QWidget):
         self._add_condition_btn.clicked.connect(self._add_condition_row)
         self._remove_condition_btn.clicked.connect(self._remove_condition_row)
         self._gate_ratio.valueChanged.connect(self._on_gate_ratio_changed)
+        self.gate_vtg_factor.valueChanged.connect(self._on_gate_factors_changed)
+        self.gate_vbg_factor.valueChanged.connect(self._on_gate_factors_changed)
+        self._gate_entry_mode.currentIndexChanged.connect(self._update_gate_entry)
+        self._gate_entry_a.textChanged.connect(self._update_gate_entry)
+        self._gate_entry_b.textChanged.connect(self._update_gate_entry)
+        self._gate_entry_vbias.valueChanged.connect(self._update_gate_entry)
+        self._gate_entry_expansion.currentIndexChanged.connect(self._update_gate_entry)
+        self._gate_entry_add.clicked.connect(self._commit_gate_entry)
         self._advanced_toggle.toggled.connect(self._on_advanced_toggled)
+        self._metadata_toggle.toggled.connect(self._on_metadata_toggled)
         self._magnet.connected.connect(self._on_magnet_connected)
         self._magnet.disconnected.connect(self._on_magnet_disconnected)
         self._magnet.snapshot_updated.connect(self._on_snapshot)
@@ -1406,6 +1997,7 @@ class MCDPanel(QWidget):
     def _on_magnet_disconnected(self) -> None:
         self._identity.setText("Disconnected")
         self._field.setText("—")
+        self._current_field.setText("N/A")
         self._output.setText("—")
         self._heater.setText("—")
         self._sweep.setText("—")
@@ -1419,10 +2011,13 @@ class MCDPanel(QWidget):
     def _on_snapshot(self, snapshot) -> None:
         self._last_snapshot = snapshot
         self._field.setText(f"{snapshot.field_t:+.6f} T")
+        self._current_field.setText(f"{snapshot.field_t:+.6f} T")
         self._output.setText(
             f"{snapshot.output_field_t:+.6f} T ({snapshot.output_current_a:+.5f} A)"
         )
-        self._heater.setText("ON — driven" if snapshot.heater_on else "OFF — persistent")
+        operating_mode = str(getattr(snapshot, "operating_mode", "Manual"))
+        heater_text = "ON — driven" if snapshot.heater_on else "OFF — persistent"
+        self._heater.setText(f"{heater_text} · {operating_mode}")
         self._sweep.setText(snapshot.sweep_state)
         if snapshot.heater_on:
             self._mode_notice.setText(
@@ -1436,6 +2031,8 @@ class MCDPanel(QWidget):
             )
             self._mode_notice.setStyleSheet("color:#a82020; font-weight:600;")
         faults = []
+        if operating_mode.lower() != "manual":
+            faults.append(f"unexpected {operating_mode} mode")
         if snapshot.status.quench:
             faults.append("QUENCH")
         if snapshot.status.power_module_failure:
@@ -1450,8 +2047,27 @@ class MCDPanel(QWidget):
 
     @Slot(str)
     def _on_magnet_operation(self, operation: str) -> None:
-        self._transition_status.setText(f"Completed: {operation}")
         self._append_log(f"APS100 operation completed: {operation}")
+        if operation == "enter_driven_mode":
+            self._transition_status.setText(
+                "Driven mode active — persistent heater ON"
+            )
+            self._mode_notice.setText(
+                "MCD ready — driven mode confirmed, persistent heater is ON."
+            )
+            self._mode_notice.setStyleSheet("color:#1d7a3e; font-weight:600;")
+            self._append_log(
+                "DRIVEN MODE ACTIVE: persistent heater is ON; field sweeping is enabled."
+            )
+            QMessageBox.information(
+                self,
+                "APS100 driven mode active",
+                "The APS100 confirmed Driven Mode.\n\n"
+                "The persistent heater is ON and the configured warm-up wait "
+                "has completed. The magnet is ready for an MCD field sweep.",
+            )
+            return
+        self._transition_status.setText(f"Completed: {operation}")
 
     @Slot(str)
     def _on_magnet_error(self, message: str) -> None:
@@ -1463,14 +2079,56 @@ class MCDPanel(QWidget):
         self._plot.setVisible(bool(visible))
 
     @Slot(float)
-    def _on_gate_ratio_changed(self, _value: float) -> None:
+    def _on_gate_ratio_changed(self, value: float) -> None:
+        if not self._syncing_gate_ratio:
+            self._syncing_gate_ratio = True
+            try:
+                self.gate_vtg_factor.setValue(1.0)
+                self.gate_vbg_factor.setValue(float(value))
+            finally:
+                self._syncing_gate_ratio = False
+        self.gate_ratio_value.setText(f"r = {value:.6g}")
+        self.gate_ratio_value.setStyleSheet("")
         self._update_condition_editable()
         self._update_coordinates_and_filename()
+        if hasattr(self, "_gate_entry_mode"):
+            self._update_gate_entry()
+
+    @Slot()
+    def _on_gate_factors_changed(self, *_args) -> None:
+        if self._syncing_gate_ratio:
+            return
+        try:
+            ratio = gate_ratio_from_factors(
+                self.gate_vtg_factor.value(), self.gate_vbg_factor.value()
+            )
+        except ValueError as exc:
+            self.gate_ratio_value.setText(str(exc))
+            self.gate_ratio_value.setStyleSheet("color: #a40000;")
+            return
+        self._syncing_gate_ratio = True
+        try:
+            self._gate_ratio.setValue(ratio)
+        finally:
+            self._syncing_gate_ratio = False
+        self.gate_ratio_value.setText(f"r = {ratio:.6g}")
+        self.gate_ratio_value.setStyleSheet("")
+        self._update_condition_editable()
+        self._update_coordinates_and_filename()
+        if hasattr(self, "_gate_entry_mode"):
+            self._update_gate_entry()
 
     @Slot(bool)
     def _on_advanced_toggled(self, checked: bool) -> None:
         self._transition_widget.setVisible(checked)
         self._advanced_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+        )
+
+    @Slot(bool)
+    def _on_metadata_toggled(self, checked: bool) -> None:
+        self._metadata_widget.setVisible(checked)
+        self._metadata_toggle.setArrowType(
             Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
         )
 
@@ -1493,6 +2151,87 @@ class MCDPanel(QWidget):
                 }
             )
         return rows
+
+    def _update_gate_entry(self, *_args) -> None:
+        """Rebuild the pending gate batch from the entry fields (like the 2100 tab)."""
+        direct = self._gate_entry_mode.currentData() == MODE_DIRECT
+        self._gate_entry_a_label.setText("Vtg values" if direct else "Doping values")
+        self._gate_entry_b_label.setText("Vbg values" if direct else "E-field values")
+        try:
+            label_a = "Vtg" if direct else "Doping"
+            label_b = "Vbg" if direct else "E-field"
+            values_a = parse_numeric_spec(self._gate_entry_a.text(), label_a)
+            values_b = parse_numeric_spec(self._gate_entry_b.text(), label_b)
+            multiple_both = len(values_a) > 1 and len(values_b) > 1
+            self._gate_entry_expansion_label.setVisible(multiple_both)
+            self._gate_entry_expansion.setVisible(multiple_both)
+            expansion = (
+                self._gate_entry_expansion.currentData()
+                if multiple_both else "paired"
+            )
+            rows = build_condition_batch(
+                self._gate_entry_mode.currentData(),
+                self._gate_entry_a.text(),
+                self._gate_entry_b.text(),
+                expansion,
+                self._gate_ratio.value(),
+                vbias_v=self._gate_entry_vbias.value(),
+                voltage_limit=self._voltage_limit,
+            )
+        except ValueError as exc:
+            self._gate_entry_rows = []
+            self._gate_entry_status.setText(str(exc))
+            self._gate_entry_status.setStyleSheet("color: #a40000;")
+            self._gate_entry_add.setEnabled(False)
+            self._gate_entry_add.setText("Add rows")
+            return
+        self._gate_entry_rows = rows
+        count = len(rows)
+        self._gate_entry_add.setText(f"Add {count} row{'s' if count != 1 else ''}")
+        self._gate_entry_add.setEnabled(True)
+        self._gate_entry_status.setStyleSheet("")
+        self._gate_entry_status.setText(
+            f"{count} row{'s' if count != 1 else ''} ready. "
+            "Use commas or start:step:stop for multiple values."
+        )
+
+    def _commit_gate_entry(self) -> None:
+        self._update_gate_entry()
+        rows = list(getattr(self, "_gate_entry_rows", []))
+        if not rows:
+            return
+        self._append_gate_rows(rows)
+
+    def _append_gate_rows(self, rows: list) -> None:
+        """Append resolved gate rows to the condition table."""
+        if not rows:
+            raise ValueError("No gate rows were provided")
+        table_rows = [
+            {
+                "enabled": bool(item.get("enabled", True)),
+                "vtg_v": float(item["vtg_v"]),
+                "vbg_v": float(item["vbg_v"]),
+                "vbias_v": float(item["vbias_v"]),
+                "doping_v": float(item["doping_v"]),
+                "efield_v": float(item["efield_v"]),
+            }
+            for item in rows
+        ]
+        existing = self._condition_rows()
+        if (
+            len(existing) == 1
+            and existing[0].get("enabled", True)
+            and abs(float(existing[0].get("vtg_v", 0.0))) <= 1e-12
+            and abs(float(existing[0].get("vbg_v", 0.0))) <= 1e-12
+            and abs(float(existing[0].get("vbias_v", 0.0))) <= 1e-12
+        ):
+            existing = []
+        combined = existing + table_rows
+        validate_gate_conditions(combined, self._voltage_limit)
+        self._seed_condition_table(combined)
+        self._condition_table.selectRow(len(combined) - 1)
+        self._update_condition_editable()
+        self._update_coordinates_and_filename()
 
     def _row_value(self, row: int, column: int) -> float:
         item = self._condition_table.item(row, column)
@@ -1548,6 +2287,18 @@ class MCDPanel(QWidget):
                         self._set_row_value(row, column, 0.0)
         finally:
             self._updating_table = False
+        self._update_condition_table_height()
+
+    def _update_condition_table_height(self) -> None:
+        """Size the condition table to its rows so it never leaves blank space."""
+        rows = max(1, self._condition_table.rowCount())
+        visible_rows = min(8, max(4, rows))
+        height = (
+            self._condition_table.horizontalHeader().height()
+            + visible_rows * self._condition_table.verticalHeader().defaultSectionSize()
+            + 4
+        )
+        self._condition_table.setFixedHeight(height)
 
     def _update_condition_editable(self) -> None:
         editable = abs(self._gate_ratio.value()) > 1e-9
@@ -1633,6 +2384,7 @@ class MCDPanel(QWidget):
             self._condition_table.selectRow(row)
         finally:
             self._updating_table = False
+        self._update_condition_table_height()
         self._update_coordinates_and_filename()
 
     def _remove_condition_row(self) -> None:
@@ -1642,6 +2394,7 @@ class MCDPanel(QWidget):
         if row < 0:
             row = self._condition_table.rowCount() - 1
         self._condition_table.removeRow(row)
+        self._update_condition_table_height()
         self._update_coordinates_and_filename()
 
     @Slot()
@@ -1733,6 +2486,13 @@ class MCDPanel(QWidget):
             "stop_t": stop,
             "field_tolerance_t": cfg.magnet.field_tolerance_t,
             "move_timeout_s": 1800.0,
+            "field_poll_s": cfg.mcd.field_poll_s,
+            "sweep_leg_timeout_s": cfg.mcd.sweep_leg_timeout_s,
+            "sweep_progress_timeout_s": cfg.mcd.sweep_progress_timeout_s,
+            "sweep_progress_epsilon_t": cfg.mcd.sweep_progress_epsilon_t,
+            "endpoint_stable_reads": cfg.mcd.endpoint_stable_reads,
+            "rotation_tolerance_deg": cfg.mcd.rotation_tolerance_deg,
+            "lightfield_ready_timeout_s": cfg.mcd.lightfield_ready_timeout_s,
             "start_settle_s": self._start_settle.value(),
             "rotator": self._rotator.currentText(),
             "angle_a_deg": self._angle_a.value(),
@@ -1742,7 +2502,7 @@ class MCDPanel(QWidget):
             "center_nm": self._center.value(),
             "frames": self._frames.value(),
             "sweep_mode": self._sweep_mode.currentData() or "one_way",
-            "apply_voltages": self._apply_voltages.isChecked(),
+            "apply_voltages": True,
             "conditions": conditions,
             "vbg_v": first["vbg_v"],
             "vtg_v": first["vtg_v"],
@@ -1751,7 +2511,8 @@ class MCDPanel(QWidget):
             "voltage_ramp_step_v": cfg.ramp.step_V,
             "voltage_vbias_step_v": cfg.ramp.vbias_step_V,
             "voltage_step_delay_s": cfg.ramp.delay_s,
-            "voltage_settle_s": cfg.ramp.settle_s,
+            "initial_voltage_settle_s": self._initial_voltage_settle.value(),
+            "voltage_settle_s": self._voltage_settle.value(),
             "sample_id": sample_id,
             "point": self._point.text().strip(),
             "condition_label": self._condition.text().strip(),
@@ -1790,6 +2551,17 @@ class MCDPanel(QWidget):
             return
         if not self._magnet.is_connected:
             QMessageBox.warning(self, "APS100", "Connect the APS100 first.")
+            return
+        lf_ready = getattr(self._lf6, "is_ready", None)
+        if not getattr(self._lf6, "is_connected", False) or (
+            lf_ready is not None and not bool(lf_ready)
+        ):
+            QMessageBox.warning(
+                self, "LightField", "LightField must be connected and ready before MCD."
+            )
+            return
+        if bool(getattr(self._lf6, "is_busy", False)):
+            QMessageBox.warning(self, "LightField", "LightField is currently busy.")
             return
         if self._last_snapshot is None or not self._last_snapshot.heater_on:
             QMessageBox.warning(self, "APS100", "The magnet must be in driven mode.")
@@ -1831,7 +2603,7 @@ class MCDPanel(QWidget):
             sweep_line
             + cond_line
             + mode_line
-            + "Rate: APS100 stored SLOW rate profile\n"
+            + "Rate: Normal range-dependent APS100 rates (RATE 0–4)\n"
             f"{params['rotator'].upper()}: {params['angle_a_deg']:.3f}° / "
             f"{params['angle_b_deg']:.3f}°\n"
             f"Output: {build_mcd_filename_base(params)}.csv\n"
@@ -1894,6 +2666,7 @@ class MCDPanel(QWidget):
         condition_count: int,
     ) -> None:
         self._progress.setValue(round(percent * 10.0))
+        self._current_field.setText(f"{field_t:+.6f} T")
         if condition_count > 1:
             self._run_status.setText(
                 f"Cond {condition_index}/{condition_count} — "
@@ -1906,6 +2679,7 @@ class MCDPanel(QWidget):
     def _on_spectrum(self, wl, counts, label: str, field_t: float) -> None:
         curve = self._curve_a if label == "A" else self._curve_b
         curve.setData(np.asarray(wl), np.asarray(counts))
+        self._current_field.setText(f"{field_t:+.6f} T")
         self._run_status.setText(f"Angle {label} acquired at {field_t:+.6f} T")
 
     @Slot(str)
@@ -1932,7 +2706,7 @@ class MCDPanel(QWidget):
                     path = Path(csv_name)
                     if path.exists():
                         run.register_file(path, "raw")
-                        for sibling in (path.with_suffix(".log"), path.with_name(f"{path.stem}_summary.json"), path.with_suffix(".meta.json")):
+                        for sibling in (path.with_suffix(".meta.json"),):
                             if sibling.exists():
                                 run.register_file(sibling, "intermediate")
                 if result.get("error"):
@@ -1989,7 +2763,6 @@ class MCDPanel(QWidget):
         cfg.mcd.angle_b_deg = self._angle_b.value()
         cfg.mcd.rotation_settle_s = self._rotation_settle.value()
         cfg.mcd.sweep_mode = self._sweep_mode.currentData() or "one_way"
-        cfg.mcd.apply_sample_voltages = self._apply_voltages.isChecked()
         conditions = self._condition_rows()
         cfg.mcd.conditions = conditions
         first = next(
@@ -2000,6 +2773,10 @@ class MCDPanel(QWidget):
         cfg.mcd.vtg_v = float(first.get("vtg_v", 0.0))
         cfg.mcd.vbias_v = float(first.get("vbias_v", 0.0))
         cfg.mcd.gate_ratio = self._gate_ratio.value()
+        cfg.mcd.gate_vtg_factor = self.gate_vtg_factor.value()
+        cfg.mcd.gate_vbg_factor = self.gate_vbg_factor.value()
+        cfg.mcd.initial_voltage_settle_s = self._initial_voltage_settle.value()
+        cfg.mcd.voltage_settle_s = self._voltage_settle.value()
         cfg.lf6.exposure_ms = self._exposure.value()
         cfg.lf6.center_nm = self._center.value()
         cfg.lf6.accumulations = self._frames.value()
@@ -2025,6 +2802,10 @@ class MCDPanel(QWidget):
             "exposure_ms": lambda v: self._exposure.setValue(float(v)),
             "frames": lambda v: self._frames.setValue(int(v)),
             "gate_ratio": lambda v: self._gate_ratio.setValue(float(v)),
+            "gate_vtg_factor": lambda v: self.gate_vtg_factor.setValue(float(v)),
+            "gate_vbg_factor": lambda v: self.gate_vbg_factor.setValue(float(v)),
+            "initial_voltage_settle_s": lambda v: self._initial_voltage_settle.setValue(float(v)),
+            "voltage_settle_s": lambda v: self._voltage_settle.setValue(float(v)),
         }
         skipped = []
         for key, value in dict(settings or {}).items():

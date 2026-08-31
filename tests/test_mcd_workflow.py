@@ -7,15 +7,17 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGroupBox
 
-from app.devices.aps100_attodry1000_adapter import MockAPS100Adapter
+from app.devices.aps100_attodry1000_adapter import MockAPS100Adapter, decode_status_byte
 from ui.mcd_panel import (
+    MCD_SCALAR_FIELDS,
     MCDPanel,
     _ContinuousMCDWorker,
     _mcd_coordinates,
@@ -67,8 +69,19 @@ class _RotationController:
 class _LF6Controller:
     def __init__(self, spectrum):
         self.is_connected = True
+        self.is_ready = True
+        self.is_busy = False
         self.adapter = spectrum
         self.setup = None
+        self.ensure_calls = 0
+        self.abort_calls = 0
+
+    def ensure_ready(self, **_kwargs):
+        self.ensure_calls += 1
+
+    def abort_acquisition(self):
+        self.abort_calls += 1
+        return True
 
 
 class _MagnetController:
@@ -220,12 +233,12 @@ class MCDWorkflowTests(unittest.TestCase):
             "_remote_btn", "_refresh_btn", "_identity", "_field",
             "_output", "_heater", "_sweep", "_fault", "_pause_btn",
             "_driven_btn", "_persistent_btn", "_zero_leads", "_transition_status",
-            "_advanced_toggle",
-            "_start_t", "_stop_t", "_start_settle",
+            "_advanced_toggle", "_metadata_toggle",
+            "_start_t", "_stop_t", "_start_settle", "_sweep_rate_label",
             "_rotator", "_angle_a", "_angle_b", "_rotation_settle",
             "_exposure", "_center", "_frames",
             "_sweep_mode",
-            "_apply_voltages", "_gate_ratio",
+            "_gate_ratio", "_initial_voltage_settle", "_voltage_settle",
             "_condition_table", "_add_condition_btn", "_remove_condition_btn",
             "_sample_id", "_point", "_condition", "_temperature", "_mode",
             "_laser", "_power", "_power_coefficient",
@@ -240,6 +253,11 @@ class MCDWorkflowTests(unittest.TestCase):
         self.assertEqual(missing, [])
         for checkbox in panel._filename_part_checks.values():
             self.assertTrue(checkbox.toolTip().strip())
+        self.assertEqual(
+            panel._sweep_rate_label.text(),
+            "Normal range-dependent rates (RATE 0–4)",
+        )
+        self.assertIn("RATE 5 FAST mode is not used", panel._sweep_rate_label.toolTip())
 
     def test_layout_defaults_and_spectrum_toggle(self):
         panel = MCDPanel(
@@ -255,6 +273,12 @@ class MCDWorkflowTests(unittest.TestCase):
         self.assertTrue(panel._plot.isHidden())
         panel._show_spectrum_chk.setChecked(True)
         self.assertFalse(panel._plot.isHidden())
+        titles = {box.title() for box in panel.findChildren(QGroupBox)}
+        self.assertTrue({
+            "Sample / Device", "Field Sweep", "Rotation",
+            "LightField", "Gate / SMU", "Filename",
+            "Run control", "Status / Progress / Log", "Continuous APS100 MCD",
+        }.issubset(titles))
 
     def test_advanced_transition_toggle_hides_and_shows(self):
         panel = MCDPanel(
@@ -272,6 +296,22 @@ class MCDWorkflowTests(unittest.TestCase):
         panel._advanced_toggle.setChecked(False)
         self.assertFalse(panel._transition_widget.isVisible())
 
+    def test_optional_filename_metadata_is_collapsed_and_expandable(self):
+        panel = MCDPanel(
+            _PanelMagnetController(),
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        panel.show()
+        self.app.processEvents()
+        self.assertFalse(panel._metadata_widget.isVisible())
+        panel._metadata_toggle.setChecked(True)
+        self.assertTrue(panel._metadata_widget.isVisible())
+        panel._metadata_toggle.setChecked(False)
+        self.assertFalse(panel._metadata_widget.isVisible())
+
     def test_mode_notice_reflects_magnet_mode(self):
         panel = MCDPanel(
             _PanelMagnetController(),
@@ -288,6 +328,23 @@ class MCDWorkflowTests(unittest.TestCase):
         magnet._heater = True
         panel._on_snapshot(magnet.read_snapshot())
         self.assertIn("MCD ready", panel._mode_notice.text())
+
+    def test_driven_mode_completion_shows_explicit_heater_notice(self):
+        panel = MCDPanel(
+            _PanelMagnetController(),
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+
+        with patch("ui.mcd_panel.QMessageBox.information") as information:
+            panel._on_magnet_operation("enter_driven_mode")
+
+        self.assertIn("heater ON", panel._transition_status.text())
+        self.assertIn("heater is ON", panel._mode_notice.text())
+        information.assert_called_once()
+        self.assertIn("ready for an MCD field sweep", information.call_args.args[2])
 
     def test_layout_state_round_trips(self):
         panel = MCDPanel(
@@ -414,36 +471,27 @@ class MCDWorkflowTests(unittest.TestCase):
 
             with csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
-            self.assertEqual(
-                rows[0][:7],
-                [
-                    "Bfield_T",
-                    "rotation_angle_deg",
-                    "Vtg_V",
-                    "Vbg_V",
-                    "Vbias_V",
-                    "Doping_V",
-                    "Efield_V",
-                ],
-            )
-            self.assertEqual(rows[0][7:], ["700.000000", "701.000000", "702.000000"])
+            self.assertEqual(rows[0][:16], MCD_SCALAR_FIELDS)
+            self.assertEqual(rows[0][16:], ["700.000000", "701.000000", "702.000000"])
             self.assertGreaterEqual(len(rows), 5)
-            angles = [float(row[1]) for row in rows[1:5]]
+            angles = [float(row[4]) for row in rows[1:5]]
             self.assertEqual(angles, [45.0, 135.0, 135.0, 45.0])
             for row in rows[1:]:
-                self.assertAlmostEqual(float(row[2]), 1.0)
-                self.assertAlmostEqual(float(row[3]), -0.25)
-                self.assertAlmostEqual(float(row[5]), 0.5)
-                self.assertAlmostEqual(float(row[6]), 1.5)
+                self.assertEqual(row[2], "forward")
+                self.assertEqual(row[3], "up")
+                self.assertAlmostEqual(float(row[7]), (float(row[5]) + float(row[6])) / 2.0)
+                self.assertAlmostEqual(float(row[8]), 1.0)
+                self.assertAlmostEqual(float(row[9]), -0.25)
+                self.assertAlmostEqual(float(row[11]), 0.5)
+                self.assertAlmostEqual(float(row[12]), 1.5)
+                self.assertEqual(row[13:16], ["", "", ""])
 
             metadata_path = csv_path.with_suffix(".meta.json")
-            event_path = csv_path.with_suffix(".log")
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(metadata["status"], "completed")
             self.assertIn("aps100_slow_rate_profile", metadata)
-            self.assertTrue(event_path.exists())
             self.assertFalse(any(csv_path.parent.glob("mcd_*.csv")))
-            self.assertEqual(magnet.get_sweep_state(), "sweep paused")
+            self.assertEqual(magnet.get_sweep_state(), "pause")
 
     def test_stop_preserves_partial_csv_and_marks_metadata_stopped(self):
         magnet = MockAPS100Adapter(time_scale=60.0)
@@ -480,7 +528,7 @@ class MCDWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(metadata["status"], "stopped")
             self.assertEqual(metadata["spectra_written"], 2)
-            self.assertEqual(magnet.get_sweep_state(), "sweep paused")
+            self.assertEqual(magnet.get_sweep_state(), "pause")
 
     def test_round_trip_writes_both_directions_and_metadata(self):
         magnet = MockAPS100Adapter(time_scale=60.0)
@@ -500,7 +548,7 @@ class MCDWorkflowTests(unittest.TestCase):
             csv_path = Path(result["csv_path"])
             with csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
-            fields = [float(row[0]) for row in rows[1:]]
+            fields = [float(row[7]) for row in rows[1:]]
             self.assertGreaterEqual(len(fields), 4)
             self.assertGreater(max(fields), 0.005)
             self.assertLess(min(fields), -0.005)
@@ -514,10 +562,6 @@ class MCDWorkflowTests(unittest.TestCase):
                 [leg["direction"] for leg in metadata["legs"]],
                 ["up", "down"],
             )
-            event_log = csv_path.with_suffix(".log").read_text(encoding="utf-8")
-            self.assertIn("leg=1/2", event_log)
-            self.assertIn("direction=up", event_log)
-            self.assertIn("direction=down", event_log)
 
     def test_stop_during_round_trip_marks_stopped_and_pauses(self):
         magnet = MockAPS100Adapter(time_scale=60.0)
@@ -554,7 +598,7 @@ class MCDWorkflowTests(unittest.TestCase):
             self.assertEqual(metadata["status"], "stopped")
             self.assertEqual(metadata["sweep_mode"], "round_trip")
             self.assertGreaterEqual(len(metadata["legs"]), 1)
-            self.assertEqual(magnet.get_sweep_state(), "sweep paused")
+            self.assertEqual(magnet.get_sweep_state(), "pause")
 
     def test_doping_efield_inverse_transform(self):
         vtg, vbg = _vtg_vbg_from_doping_efield(1.0, -2.0, 2.0)
@@ -599,6 +643,146 @@ class MCDWorkflowTests(unittest.TestCase):
         flags = panel._condition_table.item(0, 4).flags()
         self.assertFalse(bool(flags & Qt.ItemFlag.ItemIsEditable))
 
+    def test_gate_ratio_factors_sync_like_2100(self):
+        panel = MCDPanel(
+            _PanelMagnetController(),
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        panel.gate_vtg_factor.setValue(2.0)
+        panel.gate_vbg_factor.setValue(1.0)
+        self.assertAlmostEqual(panel._gate_ratio.value(), 0.5)
+        self.assertIn("r = 0.5", panel.gate_ratio_value.text())
+
+        # Doping/E-field entry uses the factor-derived ratio.
+        panel._seed_condition_table([])
+        panel._gate_entry_mode.setCurrentIndex(
+            panel._gate_entry_mode.findData("doping_efield")
+        )
+        panel._gate_entry_a.setText("1")
+        panel._gate_entry_b.setText("0")
+        panel._gate_entry_add.click()
+        rows = panel._condition_rows()
+        self.assertAlmostEqual(rows[0]["vtg_v"], 0.5)
+        self.assertAlmostEqual(rows[0]["vbg_v"], 1.0)
+
+        # Direct r edits canonicalize the factors to 1 : r.
+        panel._gate_ratio.setValue(2.0)
+        self.assertAlmostEqual(panel.gate_vtg_factor.value(), 1.0)
+        self.assertAlmostEqual(panel.gate_vbg_factor.value(), 2.0)
+        self.assertAlmostEqual(panel._gate_ratio.value(), 2.0)
+
+    def test_gates_are_always_ramped_before_measurement(self):
+        panel = MCDPanel(
+            _PanelMagnetController(),
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        params = panel._collect_params(require_sample=False)
+        self.assertTrue(params["apply_voltages"])
+        self.assertFalse(hasattr(panel, "_apply_voltages"))
+
+    def test_gate_settle_controls_flow_into_params(self):
+        panel = MCDPanel(
+            _PanelMagnetController(),
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        panel._initial_voltage_settle.setValue(2.5)
+        panel._voltage_settle.setValue(1.5)
+        params = panel._collect_params(require_sample=False)
+        self.assertAlmostEqual(params["initial_voltage_settle_s"], 2.5)
+        self.assertAlmostEqual(params["voltage_settle_s"], 1.5)
+
+    def test_gate_settle_uses_first_and_later_delays(self):
+        magnet = MockAPS100Adapter(time_scale=60.0)
+        magnet.connect()
+        rotation = _Rotation()
+        smu = _RecordingSMU(has_bias=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            params = _workflow_params(temp_dir)
+            params["apply_voltages"] = True
+            params["initial_voltage_settle_s"] = 0.01
+            params["voltage_settle_s"] = 0.0
+            worker = _ContinuousMCDWorker(
+                params,
+                _MagnetController(magnet),
+                _LF6Controller(_Spectrum(rotation)),
+                _RotationController(rotation),
+                smu,
+            )
+            first = worker._apply_voltages({**params, "condition_index": 1})
+            later = worker._apply_voltages({**params, "condition_index": 2})
+            self.assertAlmostEqual(first["gate_settle_s"], 0.01)
+            self.assertAlmostEqual(later["gate_settle_s"], 0.0)
+            self.assertEqual(first["gate_settle_phase"], "first")
+            self.assertEqual(later["gate_settle_phase"], "later")
+
+    def test_gate_entry_adds_direct_and_doping_efield_rows(self):
+        panel = MCDPanel(
+            _PanelMagnetController(),
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        panel._seed_condition_table([])
+        panel._gate_ratio.setValue(2.0)
+
+        # Direct Vtg / Vbg with a comma list plus a single Vbg value.
+        panel._gate_entry_mode.setCurrentIndex(
+            panel._gate_entry_mode.findData("direct")
+        )
+        panel._gate_entry_a.setText("1,2")
+        panel._gate_entry_b.setText("-0.25")
+        panel._gate_entry_add.click()
+        rows = panel._condition_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertAlmostEqual(rows[0]["vtg_v"], 1.0)
+        self.assertAlmostEqual(rows[0]["vbg_v"], -0.25)
+        self.assertAlmostEqual(rows[0]["doping_v"], 0.5)
+        self.assertAlmostEqual(rows[0]["efield_v"], 1.5)
+        self.assertAlmostEqual(rows[1]["vtg_v"], 2.0)
+        self.assertAlmostEqual(rows[1]["vbg_v"], -0.25)
+
+        # Doping / E-field: Vtg/Vbg are back-computed from the gate ratio.
+        panel._gate_entry_mode.setCurrentIndex(
+            panel._gate_entry_mode.findData("doping_efield")
+        )
+        panel._gate_entry_a.setText("1")
+        panel._gate_entry_b.setText("0")
+        panel._gate_entry_add.click()
+        rows = panel._condition_rows()
+        self.assertEqual(len(rows), 3)
+        self.assertAlmostEqual(rows[2]["vtg_v"], 0.5)
+        self.assertAlmostEqual(rows[2]["vbg_v"], 0.25)
+        self.assertAlmostEqual(rows[2]["doping_v"], 1.0)
+        self.assertAlmostEqual(rows[2]["efield_v"], 0.0)
+
+    def test_gate_entry_doping_mode_requires_nonzero_ratio(self):
+        panel = MCDPanel(
+            _PanelMagnetController(),
+            _EmptyController(),
+            _EmptyController(),
+            _EmptyController(),
+        )
+        self.addCleanup(panel.close)
+        panel._gate_ratio.setValue(0.0)
+        panel._gate_entry_mode.setCurrentIndex(
+            panel._gate_entry_mode.findData("doping_efield")
+        )
+        panel._gate_entry_a.setText("1")
+        panel._gate_entry_b.setText("0")
+        panel._update_gate_entry()
+        self.assertFalse(panel._gate_entry_add.isEnabled())
+        self.assertIn("non-zero", panel._gate_entry_status.text())
+
     def test_multiple_conditions_write_one_csv_each(self):
         magnet = MockAPS100Adapter(time_scale=60.0)
         magnet.connect()
@@ -629,11 +813,8 @@ class MCDWorkflowTests(unittest.TestCase):
                 )
                 self.assertEqual(metadata["status"], "completed")
                 self.assertEqual(metadata["condition_count"], 2)
-            summary = json.loads(
-                Path(result["summary_path"]).read_text(encoding="utf-8")
-            )
             self.assertEqual(
-                [c["status"] for c in summary["conditions"]],
+                [c["status"] for c in result["conditions"]],
                 ["completed", "completed"],
             )
 
@@ -685,14 +866,11 @@ class MCDWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(first_meta["status"], "completed")
             self.assertEqual(second_meta["status"], "stopped")
-            summary = json.loads(
-                Path(results[0]["summary_path"]).read_text(encoding="utf-8")
-            )
             self.assertEqual(
-                [c["status"] for c in summary["conditions"]],
+                [c["status"] for c in results[0]["conditions"]],
                 ["completed", "stopped", "not_started"],
             )
-            self.assertEqual(magnet.get_sweep_state(), "sweep paused")
+            self.assertEqual(magnet.get_sweep_state(), "pause")
 
     def test_vbias_skipped_when_no_channel_connected(self):
         magnet = MockAPS100Adapter(time_scale=60.0)
@@ -771,11 +949,171 @@ class MCDWorkflowTests(unittest.TestCase):
             self.assertAlmostEqual(readback["Ibg_A"], 1e-9)
             self.assertAlmostEqual(readback["Itg_A"], 2e-9)
             self.assertAlmostEqual(readback["Ibias_A"], 3e-9)
-            event_log = csv_path.with_suffix(".log").read_text(encoding="utf-8")
-            self.assertIn("voltage_pre_ramp", event_log)
-            self.assertIn("voltage_settled", event_log)
-            self.assertIn("Ibg=1e-09", event_log)
-            self.assertIn("Itg=2e-09", event_log)
+
+    def test_lightfield_not_ready_blocks_before_remote_or_magnet_mutation(self):
+        magnet = MockAPS100Adapter(time_scale=60.0)
+        magnet.connect()
+        rotation = _Rotation()
+        optical = _LF6Controller(_Spectrum(rotation))
+        optical.is_ready = False
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = _ContinuousMCDWorker(
+                _workflow_params(temp_dir),
+                _MagnetController(magnet), optical,
+                _RotationController(rotation), None,
+            )
+            with self.assertRaisesRegex(RuntimeError, "LightField is not ready"):
+                worker._run()
+        self.assertEqual(optical.ensure_calls, 1)
+        self.assertFalse(magnet._remote)
+
+    def test_mid_sweep_fault_fails_closed_and_preserves_partial_artifacts(self):
+        class FaultMagnet(MockAPS100Adapter):
+            faulted = False
+
+            def get_status(self):
+                if self.faulted:
+                    return decode_status_byte(0b00000100)
+                return super().get_status()
+
+        magnet = FaultMagnet(time_scale=60.0)
+        magnet.connect()
+        rotation = _Rotation()
+        spectrum = _Spectrum(rotation, on_acquire=lambda _count: setattr(magnet, "faulted", True))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = _ContinuousMCDWorker(
+                _workflow_params(temp_dir), _MagnetController(magnet),
+                _LF6Controller(spectrum), _RotationController(rotation), None,
+            )
+            results = []
+            worker.finished.connect(results.append)
+            worker.run()
+            self.assertIn("quench", results[0]["error"])
+            output_dir = Path(temp_dir) / "Device01" / "MCD Data"
+            self.assertTrue(any(output_dir.glob("*.csv")))
+            self.assertEqual(magnet.get_sweep_state(), "pause")
+
+    def test_stalled_sweep_hits_progress_watchdog_and_pauses(self):
+        class StalledMagnet(MockAPS100Adapter):
+            def _update(self):
+                self._last_update = time.monotonic()
+
+        magnet = StalledMagnet(time_scale=60.0)
+        magnet.connect()
+        magnet._field_t = magnet._output_t = -0.01
+        rotation = _Rotation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            params = _workflow_params(temp_dir)
+            params["sweep_progress_timeout_s"] = 0.02
+            worker = _ContinuousMCDWorker(
+                params, _MagnetController(magnet),
+                _LF6Controller(_Spectrum(rotation)),
+                _RotationController(rotation), None,
+            )
+            results = []
+            worker.finished.connect(results.append)
+            worker.run()
+            self.assertIn("no measurable progress", results[0]["error"])
+            self.assertEqual(magnet.get_sweep_state(), "pause")
+
+    def test_firmware_167_standby_state_is_accepted_at_start(self):
+        class StandbyAPS100(MockAPS100Adapter):
+            def get_sweep_state(self):
+                self._update()
+                if self._target_t is None:
+                    return "standby"
+                return super().get_sweep_state()
+
+        magnet = StandbyAPS100(time_scale=6.0)
+        magnet.connect()
+        rotation = _Rotation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = _ContinuousMCDWorker(
+                _workflow_params(temp_dir),
+                _MagnetController(magnet),
+                _LF6Controller(_Spectrum(rotation)),
+                _RotationController(rotation),
+                None,
+            )
+            result = worker._run()
+            self.assertIn("csv_path", result)
+            self.assertEqual(magnet.get_sweep_state(), "standby")
+
+    def test_progress_is_monotonic_while_repositioning_to_start_field(self):
+        magnet = MockAPS100Adapter(time_scale=6.0)
+        magnet.connect()
+        # The magnet sits above the requested window, so the workflow must
+        # move down to start_t before the measurement leg begins.
+        magnet._field_t = 0.03
+        magnet._output_t = 0.03
+        rotation = _Rotation()
+        percents = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = _ContinuousMCDWorker(
+                _workflow_params(temp_dir),
+                _MagnetController(magnet),
+                _LF6Controller(_Spectrum(rotation)),
+                _RotationController(rotation),
+                None,
+            )
+            worker.progress.connect(
+                lambda _field, percent, _cond, _count: percents.append(percent)
+            )
+            result = worker._run()
+            self.assertIn("csv_path", result)
+        self.assertEqual(percents, sorted(percents))
+
+    def test_field_telemetry_polls_during_acquisition(self):
+        magnet = MockAPS100Adapter(time_scale=6.0)
+        magnet.connect()
+        state = {"acquiring": False, "polls_during": 0}
+        original_read = magnet.get_field_t
+
+        def counting_read():
+            if state["acquiring"]:
+                state["polls_during"] += 1
+            return original_read()
+
+        magnet.get_field_t = counting_read
+
+        class SlowSpectrum(_Spectrum):
+            def acquire(self):
+                state["acquiring"] = True
+                try:
+                    time.sleep(0.6)
+                    return super().acquire()
+                finally:
+                    state["acquiring"] = False
+
+        rotation = _Rotation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            params = _workflow_params(temp_dir)
+            params["field_telemetry_s"] = 0.0
+            worker = _ContinuousMCDWorker(
+                params,
+                _MagnetController(magnet),
+                _LF6Controller(SlowSpectrum(rotation)),
+                _RotationController(rotation),
+                None,
+            )
+            result = worker._run()
+            self.assertIn("csv_path", result)
+        self.assertGreaterEqual(state["polls_during"], 1)
+
+    def test_unexpected_pause_before_endpoint_fails_closed(self):
+        magnet = MockAPS100Adapter(time_scale=6.0)
+        magnet.connect()
+        rotation = _Rotation()
+        spectrum = _Spectrum(rotation, on_acquire=lambda _count: magnet.pause())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worker = _ContinuousMCDWorker(
+                _workflow_params(temp_dir), _MagnetController(magnet),
+                _LF6Controller(spectrum), _RotationController(rotation), None,
+            )
+            results = []
+            worker.finished.connect(results.append)
+            worker.run()
+            self.assertIn("paused", results[0]["error"])
 
 
 if __name__ == "__main__":

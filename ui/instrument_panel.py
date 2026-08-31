@@ -93,16 +93,6 @@ def _select_or_insert_combo_text(combo: QComboBox, text: str) -> None:
     combo.setCurrentIndex(idx)
 
 
-def _valid_font_size(value: object, default: int = 9) -> int:
-    try:
-        pt = int(value)
-    except (TypeError, ValueError):
-        pt = default
-    if pt <= 0:
-        pt = default
-    return min(max(pt, 7), 18)
-
-
 class _VisaScanWorker(QObject):
     """Runs pyvisa list_resources() in a background thread."""
     finished = Signal(list)   # emits list[str] of found resources
@@ -3265,23 +3255,6 @@ class InstrumentPanel(QScrollArea):
         outer_lay.setContentsMargins(0, 0, 0, 0)
         outer_lay.setSpacing(0)
 
-        # Font-size toolbar
-        font_row = QHBoxLayout()
-        font_row.setContentsMargins(4, 2, 4, 2)
-        _fnt_lbl = QLabel("Font size:")
-        _fnt_lbl.setToolTip("Adjust the font size of all text in this panel.")
-        self._font_spn = QSpinBox()
-        self._font_spn.setRange(7, 18)
-        self._font_spn.setValue(_valid_font_size(cfg.font_size_pt))
-        self._font_spn.setSuffix(" pt")
-        self._font_spn.setFixedWidth(62)
-        self._font_spn.setToolTip("Panel font size in points.")
-        font_row.addWidget(_fnt_lbl)
-        font_row.addWidget(self._font_spn)
-        font_row.addStretch()
-        outer_lay.addLayout(font_row)
-        outer_lay.addWidget(_separator())
-
         container = QWidget()
         lay = QVBoxLayout(container)
         lay.setContentsMargins(4, 4, 4, 6)
@@ -3352,14 +3325,11 @@ class InstrumentPanel(QScrollArea):
 
         self.setWidget(outer)
 
-        # Wire font spinner — updates container font which Qt propagates to children
-        self._font_spn.valueChanged.connect(self._on_font_size_changed)
         self._content = container
 
     def capture_session_state(self) -> dict:
         """Capture connection setup and harmless UI preferences only."""
         state: dict = {
-            "font_size_pt": int(self._font_spn.value()),
             "scroll_y": int(self._scroll_area.verticalScrollBar().value()),
             "expanded": {
                 key: bool(expander._btn.isChecked())
@@ -3417,10 +3387,6 @@ class InstrumentPanel(QScrollArea):
         """Restore controls without connecting, polling, moving, or setting outputs."""
         if not isinstance(state, dict):
             return
-        try:
-            self._font_spn.setValue(_valid_font_size(state["font_size_pt"]))
-        except (KeyError, TypeError, ValueError):
-            pass
         expanded = state.get("expanded")
         if isinstance(expanded, dict):
             for key, value in expanded.items():
@@ -3551,17 +3517,3 @@ class InstrumentPanel(QScrollArea):
             0, lambda: self._scroll_area.verticalScrollBar().setValue(scroll_y)
         )
 
-    @Slot(int)
-    def _on_font_size_changed(self, pt: int):
-        from PySide6.QtGui import QFont
-        pt = _valid_font_size(pt)
-        cfg.font_size_pt = pt
-        f = self._content.font()
-        f.setPointSize(pt)
-        self._content.setFont(f)
-        # Force all child widgets to inherit
-        for w in self._content.findChildren(QWidget):
-            if not w.font().pointSize() == pt:
-                wf = w.font()
-                wf.setPointSize(pt)
-                w.setFont(wf)

@@ -162,7 +162,7 @@ class MCD2100PanelTests(unittest.TestCase):
         tabs = QTabWidget()
         other = QWidget()
         tabs.addTab(other, "Other")
-        tabs.addTab(old, "MCD")
+        tabs.addTab(old, "MCD 1000")
         tabs.addTab(new, "MCD 2100")
         host = SimpleNamespace(
             _active_mcd_panel=None, _mcd=old, _mcd2100=new,
@@ -174,16 +174,16 @@ class MCD2100PanelTests(unittest.TestCase):
         panel, _, _ = self.make_panel()
         self.assertIsInstance(panel, MCD2100Panel)
         source = inspect.getsource(MainWindow.__init__)
-        self.assertIn('addTab(self._mcd, "MCD")', source)
+        self.assertIn('addTab(self._mcd, "MCD 1000")', source)
         self.assertIn('addTab(self._mcd2100, "MCD 2100")', source)
 
     def test_continuous_controls_follow_grouped_layout_without_discrete_selector(self):
         panel, _, _ = self.make_panel()
         titles = {box.title() for box in panel.findChildren(QGroupBox)}
         self.assertTrue({
-            "Sample / Device", "Field Sweep", "Polarization / Rotation",
-            "LightField", "Gate / SMU", "Output", "Run control",
-            "Status / Progress / Log", "Sample Temperature (optional)",
+            "Sample / Device", "Field Sweep", "Rotation", "Temperature",
+            "LightField", "Gate / SMU", "Filename", "Run control",
+            "Status / Progress / Log",
         }.issubset(titles))
         source = inspect.getsource(MCD2100Panel).lower()
         self.assertNotIn("discrete selector", source)

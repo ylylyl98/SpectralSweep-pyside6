@@ -320,8 +320,16 @@ class MCDConfig:
     angle_a_deg: float = 45.0
     angle_b_deg: float = 135.0
     gate_ratio: float = 1.0
+    gate_vtg_factor: float = 1.0
+    gate_vbg_factor: float = 1.0
     rotation_settle_s: float = 0.3
     field_poll_s: float = 0.2
+    sweep_leg_timeout_s: float = 3600.0
+    sweep_progress_timeout_s: float = 120.0
+    sweep_progress_epsilon_t: float = 0.0001
+    endpoint_stable_reads: int = 3
+    rotation_tolerance_deg: float = 0.25
+    lightfield_ready_timeout_s: float = 15.0
     sweep_mode: str = "one_way"
     conditions: List[dict] = field(default_factory=list)
     apply_sample_voltages: bool = False
@@ -329,6 +337,7 @@ class MCDConfig:
     vtg_v: float = 0.0
     vbias_v: float = 0.0
     voltage_ramp_step_v: float = 0.1
+    initial_voltage_settle_s: float = 0.1
     voltage_settle_s: float = 0.1
 
 

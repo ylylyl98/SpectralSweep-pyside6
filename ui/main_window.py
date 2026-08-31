@@ -540,7 +540,7 @@ class MainWindow(QMainWindow):
         self._mcd.run_state_changed.connect(
             lambda running: self._on_mcd_workflow_state_changed(self._mcd, running)
         )
-        self._tabs.addTab(self._mcd, "MCD")
+        self._tabs.addTab(self._mcd, "MCD 1000")
         self._magnet2100 = AttoDRY2100Controller(config=cfg.attodry2100, parent=self)
         self._mcd2100 = MCD2100Panel(
             self._magnet2100,
@@ -1058,7 +1058,7 @@ class MainWindow(QMainWindow):
                 setter(active is not None and panel is not active)
         if active is not None:
             self._tabs.setCurrentWidget(active)
-            label = "MCD 2100" if active is self._mcd2100 else "MCD"
+            label = "MCD 2100" if active is self._mcd2100 else "MCD 1000"
             self._status.showMessage(f"{label} running — other instrument controls locked")
         else:
             self._status.showMessage("MCD finished — instrument controls unlocked")

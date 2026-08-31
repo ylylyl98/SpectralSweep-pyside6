@@ -210,6 +210,9 @@ class _FakeLFController:
         self.is_connected = True
         self.adapter = _FakeLFAdapter()
 
+    def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
+        self.apply_settings(center_nm, exposure_ms, frames)
+
     def apply_settings(self, *_args):
         return None
 

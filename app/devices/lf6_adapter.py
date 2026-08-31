@@ -45,7 +45,9 @@ class SpectrometerLF6:
     def acquire(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Return (wavelengths, intensities).
-        We force λ refresh to reflect any recent center change.
+        Use the cached λ axis: configure_for_acquisition() and
+        change_spectra_center() invalidate the cache whenever the center
+        changes, so a per-spectrum re-read here would be pure overhead.
         """
         # acquire_2d preserves full-sensor geometry while still returning a
         # flat buffer when the LightField frame does not expose dimensions.
@@ -53,7 +55,7 @@ class SpectrometerLF6:
             y = np.asarray(self.setup.acquire_2d(), dtype=float)
         else:
             y = np.asarray(self.setup.acquire(), dtype=float)
-        wl = self.calibration_wavelengths(force=True)
+        wl = self.calibration_wavelengths(force=False)
         if y.ndim == 2 and y.shape[0] > 1 and y.shape[1] > 1:
             return align_wavelengths_to_image(wl, y)
         y = y.ravel()

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app.devices.aps100_attodry1000_adapter import (
     APS100AttoDry1000Adapter,
+    APS100CommandBlockedError,
     APS100IdentityError,
     APS100SafetyError,
     decode_status_byte,
@@ -27,8 +28,12 @@ class _FakeAPS100Resource:
         self.low_kg = 0.0
         self.high_kg = 0.0
         self.heater = 1
-        self.sweep = "sweep paused"
+        self.sweep = "pause"
+        self.pause_response = "pause"
         self.status = 0
+        self.mode = "Manual"
+        self.units = "kG"
+        self.block_commands: set[str] = set()
         self.ranges = [40.0, 44.28, 45.0, 89.0, 100.0]
         self.rates = [0.0343, 0.0171, 0.0100, 0.0002, 0.0002, 5.0]
 
@@ -38,14 +43,22 @@ class _FakeAPS100Resource:
         self._queue.append(command)
         upper = command.upper()
         response = None
+        if upper in self.block_commands:
+            self._queue.append("Command blocked")
+            return
         if upper == "*IDN?":
             response = self.idn
         elif upper == "*ESR?":
             response = "0"
         elif upper == "*STB?":
             response = str(self.status)
+        elif upper == "MODE?":
+            response = self.mode
         elif upper == "UNITS?":
-            response = "kG"
+            response = self.units
+        elif upper == "UNITS G":
+            # Firmware 1.67.323 accepts UNITS G but continues reporting kG.
+            pass
         elif upper == "IMAG?":
             response = f"{self.field_kg:.6f}kG"
         elif upper == "IOUT?":
@@ -80,7 +93,7 @@ class _FakeAPS100Resource:
         elif upper == "PSHTR OFF":
             self.heater = 0
         elif upper == "SWEEP PAUSE":
-            self.sweep = "sweep paused"
+            self.sweep = self.pause_response
             self.status &= ~1
         elif upper.startswith("SWEEP UP"):
             self.sweep = "sweep up"
@@ -147,6 +160,39 @@ class APS100AdapterTests(unittest.TestCase):
         self.assertAlmostEqual(snapshot.lower_limit_t, -2.0)
         self.assertAlmostEqual(snapshot.upper_limit_t, 2.0)
         self.assertTrue(snapshot.heater_on)
+        self.assertEqual(snapshot.operating_mode, "Manual")
+
+    def test_non_manual_mode_is_rejected_before_mutation(self):
+        adapter, fake = self.make_adapter()
+        adapter.connect()
+        adapter.take_remote()
+        fake.mode = "Shim"
+        with self.assertRaises(APS100SafetyError):
+            adapter.start_sweep_to(0.1)
+        self.assertFalse(any(command.startswith("SWEEP UP") for command in fake.commands))
+
+    def test_field_units_kG_is_accepted_like_real_firmware(self):
+        adapter, fake = self.make_adapter()
+        adapter.connect()
+        adapter.take_remote()
+        fake.units = "kG"
+        units = adapter.select_field_units()
+        self.assertEqual(units, "kG")
+
+    def test_ampere_units_are_rejected(self):
+        adapter, fake = self.make_adapter()
+        adapter.connect()
+        adapter.take_remote()
+        fake.units = "A"
+        with self.assertRaises(Exception):
+            adapter.select_field_units()
+
+    def test_command_blocked_has_actionable_error(self):
+        adapter, fake = self.make_adapter()
+        adapter.connect()
+        fake.block_commands.add("REMOTE")
+        with self.assertRaisesRegex(APS100CommandBlockedError, "front-panel menu"):
+            adapter.take_remote()
 
     def test_limits_are_written_in_kg_and_verified(self):
         adapter, fake = self.make_adapter()
@@ -194,6 +240,30 @@ class APS100AdapterTests(unittest.TestCase):
             adapter.enter_persistent_mode(zero_leads=False)
             self.assertAlmostEqual(clock[0], 180.0)
             self.assertLess(fake.commands.index("PSHTR ON"), fake.commands.index("PSHTR OFF"))
+
+    def test_pause_accepts_standby_response_from_firmware_1_67(self):
+        adapter, fake = self.make_adapter()
+        adapter.connect()
+        adapter.take_remote()
+        fake.pause_response = "standby"
+        fake.status = 0b10
+
+        adapter.pause()
+
+        self.assertEqual(fake.sweep, "standby")
+        self.assertFalse(decode_status_byte(fake.status).sweep_active)
+
+    def test_pause_accepts_short_pause_response_from_firmware_1_67(self):
+        adapter, fake = self.make_adapter()
+        adapter.connect()
+        adapter.take_remote()
+        fake.pause_response = "pause"
+        fake.status = 0b10
+
+        adapter.pause()
+
+        self.assertEqual(fake.sweep, "pause")
+        self.assertFalse(decode_status_byte(fake.status).sweep_active)
 
     def test_heater_off_is_blocked_when_lead_current_is_not_matched(self):
         adapter, fake = self.make_adapter()

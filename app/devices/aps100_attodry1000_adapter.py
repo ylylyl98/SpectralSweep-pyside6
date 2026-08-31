@@ -33,6 +33,10 @@ class APS100SafetyError(APS100Error):
     """Raised when a requested operation violates a configured guard."""
 
 
+class APS100CommandBlockedError(APS100Error):
+    """Raised when the front panel or local state blocks a remote command."""
+
+
 class APS100TimeoutError(APS100Error):
     """Raised when a field or state transition does not complete in time."""
 
@@ -85,6 +89,7 @@ class MagnetSnapshot:
     magnet_voltage_v: float
     output_voltage_v: float
     units: str
+    operating_mode: str
 
     @property
     def driven_mode(self) -> bool:
@@ -265,7 +270,10 @@ class APS100AttoDry1000Adapter:
                 if line.lower() == command_norm:
                     continue
                 if "command blocked" in line.lower():
-                    raise APS100Error(f"APS100 rejected {command!r}: {line}")
+                    raise APS100CommandBlockedError(
+                        f"APS100 blocked {command!r}; close the front-panel menu "
+                        "and enable remote operation"
+                    )
                 return line
             raise APS100Error(f"APS100 returned no response to {command!r}; last line={last!r}")
 
@@ -282,7 +290,10 @@ class APS100AttoDry1000Adapter:
                     ) from exc
                 if echoed and echoed.lower() != self._normalized_line(command).lower():
                     if "command blocked" in echoed.lower():
-                        raise APS100Error(f"APS100 rejected {command!r}: {echoed}")
+                        raise APS100CommandBlockedError(
+                            f"APS100 blocked {command!r}; close the front-panel "
+                            "menu and enable remote operation"
+                        )
                     raise APS100Error(
                         f"Unexpected APS100 response while writing {command!r}: {echoed!r}"
                     )
@@ -303,6 +314,18 @@ class APS100AttoDry1000Adapter:
 
     def get_units(self) -> str:
         return self._query("UNITS?").strip()
+
+    def get_operating_mode(self) -> str:
+        """Return the APS100 operating mode (the Z magnet requires Manual)."""
+        return self._query("MODE?").strip()
+
+    def require_manual_mode(self) -> str:
+        mode = self.get_operating_mode()
+        if mode.lower() != "manual":
+            raise APS100SafetyError(
+                f"APS100 operating mode is {mode!r}; the Z magnet requires Manual mode"
+            )
+        return mode
 
     def select_field_units(self) -> str:
         self._write("UNITS G")
@@ -375,6 +398,7 @@ class APS100AttoDry1000Adapter:
         }
 
     def _ensure_no_fault(self) -> APS100Status:
+        self.require_manual_mode()
         status = self.get_status()
         if status.quench:
             raise APS100SafetyError("APS100 reports a quench condition")
@@ -387,6 +411,7 @@ class APS100AttoDry1000Adapter:
     def read_snapshot(self) -> MagnetSnapshot:
         with self._lock:
             units = self.get_units()
+            operating_mode = self.get_operating_mode()
             field_t = self.get_field_t()
             output_field_t = self.get_output_field_t()
             low_t, high_t = self.get_limits_t()
@@ -404,6 +429,7 @@ class APS100AttoDry1000Adapter:
                 magnet_voltage_v=self.get_magnet_voltage_v(),
                 output_voltage_v=self.get_output_voltage_v(),
                 units=units,
+                operating_mode=operating_mode,
             )
 
     def _validate_field(self, field_t: float) -> float:
@@ -530,13 +556,31 @@ class APS100AttoDry1000Adapter:
         if not confirm:
             return
         deadline = time.monotonic() + max(0.1, float(timeout_s))
+        last_state = ""
+        last_status = None
         while time.monotonic() < deadline:
             state = self.get_sweep_state()
             status = self.get_status()
-            if "paused" in state and not status.sweep_active:
+            last_state = state
+            last_status = status
+            # The APS100 manual documents "sweep paused". Firmware 1.67.323
+            # also returns "standby" or the short form "pause" after
+            # SWEEP PAUSE. In any case the sweep-active status bit must be
+            # clear before the pause is safe.
+            paused_state = "pause" in state or "standby" in state
+            if paused_state and not status.sweep_active:
                 return
             self._sleep(0.05)
-        raise APS100TimeoutError("APS100 did not confirm sweep paused")
+        status_text = (
+            f"STB={last_status.raw} (sweep_active={last_status.sweep_active}, "
+            f"standby={last_status.standby})"
+            if last_status is not None
+            else "STB unavailable"
+        )
+        raise APS100TimeoutError(
+            "APS100 did not confirm sweep paused: "
+            f"SWEEP?={last_state!r}, {status_text}"
+        )
 
     def wait_for_field(
         self,
@@ -563,7 +607,9 @@ class APS100AttoDry1000Adapter:
                 self.pause()
                 return value
             state = self.get_sweep_state()
-            if "paused" in state and not self.get_status().sweep_active:
+            if (
+                "pause" in state or "standby" in state
+            ) and not self.get_status().sweep_active:
                 raise APS100SafetyError(
                     f"APS100 paused at {value:.6g} T before reaching {target:.6g} T"
                 )
@@ -792,7 +838,7 @@ class MockAPS100Adapter:
     def get_sweep_state(self):
         self._update()
         if self._target_t is None:
-            return "sweep paused"
+            return "pause"
         return "sweep up" if self._target_t > self._output_t else "sweep down"
 
     def get_heater_status(self):
@@ -820,6 +866,12 @@ class MockAPS100Adapter:
 
     def get_units(self):
         return "kG"
+
+    def get_operating_mode(self):
+        return "Manual"
+
+    def require_manual_mode(self):
+        return self.get_operating_mode()
 
     def get_range_a(self, index):
         return [40.0, 44.28, 45.0, 89.0, 100.0][index]
@@ -849,6 +901,7 @@ class MockAPS100Adapter:
             magnet_voltage_v=0.0,
             output_voltage_v=0.0,
             units="kG",
+            operating_mode=self.get_operating_mode(),
         )
 
     def set_limits_t(self, low_t, high_t):
