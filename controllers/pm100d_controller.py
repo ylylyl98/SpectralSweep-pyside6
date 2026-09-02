@@ -3,7 +3,7 @@
 # Qt controller for the Thorlabs PM100D optical power meter.
 #
 # Wraps app.devices.pm100d_adapter.ThorlabsPM100D_Wrapper.
-# Device enumeration (scan_devices) uses TLPMX directly so it can run before
+# Device enumeration (scan_devices) uses PyVISA directly so it can run before
 # connecting.
 #
 # Signals:
@@ -11,7 +11,7 @@
 #   disconnected()
 #   error(str)
 #   power_ready(float)        measured power in Watts
-#   devices_scanned(list)     list[str] of resource names from TLPMX scan
+#   devices_scanned(list)     list[str] of resource names from VISA scan
 #
 # Public methods:
 #   scan_devices()            → devices_scanned signal
@@ -57,7 +57,7 @@ class _PM100DWorker(QObject):
             found = scan_pm100d_resources()
             self.devices_scanned.emit(found if found else [])
         except ImportError:
-            self.error.emit("TLPMX.py not found in project root.")
+            self.error.emit("PyVISA is required to discover the PM100D.")
             self.devices_scanned.emit([])
         except Exception as exc:
             self.error.emit(f"PM100D scan failed: {exc}")

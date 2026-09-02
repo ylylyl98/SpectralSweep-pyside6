@@ -1,30 +1,31 @@
+"""PyVISA/SCPI adapter for a Thorlabs PM100D power meter."""
+
 from __future__ import annotations
 
-from ctypes import (
-    byref,
-    c_bool,
-    c_double,
-    c_int,
-    c_int16,
-    c_uint32,
-    create_string_buffer,
-)
+import math
 
 try:
-    from TLPMX import TLPMX, TLPM_DEFAULT_CHANNEL
-except ImportError:
-    TLPMX = None
-    TLPM_DEFAULT_CHANNEL = 1
+    import pyvisa
+except ImportError:  # pragma: no cover - exercised only in incomplete installs
+    pyvisa = None
+
+
+PM100D_VENDOR_ID = "0X1313"
+PM100D_PRODUCT_ID = "0X8078"
+PM100D_DEFAULT_WAVELENGTH_NM = 730.0
+PM100D_DEFAULT_AVERAGING_COUNT = 1000
+PM100D_TIMEOUT_MS = 5000
+
+# PyVISA ResourceManager sessions are process-wide and their destructor closes
+# the shared session. Keep one manager alive for the process lifetime rather
+# than allowing repeated discovery calls to create retained wrappers.
+_PM100D_RESOURCE_MANAGER = None
 
 
 def _decode_tlpm_text(value) -> str:
     if isinstance(value, bytes):
         return value.decode("ascii", errors="replace")
     return str(value)
-
-
-def _buffer_to_text(buf) -> str:
-    return _decode_tlpm_text(getattr(buf, "value", b""))
 
 
 def _normalize_resource_name(resource_name) -> str:
@@ -37,20 +38,13 @@ def _normalize_resource_name(resource_name) -> str:
 
 
 def _is_placeholder_serial(serial: str) -> bool:
-    """Return True for non-real serial values that drivers sometimes emit."""
     return serial.lower() in ("n/a", "na", "", "unknown", "none")
 
 
 def _strip_na_serial(resource_name: str) -> str:
-    """
-    If resource_name contains a placeholder serial like 'n/a', replace it with
-    an empty field so the resource manager can still find the device by VID/PID.
-    e.g. USB0::0x1313::0x8078::n/a::INSTR  →  USB0::0x1313::0x8078::::INSTR
-    """
     if not resource_name.upper().startswith("USB"):
         return resource_name
     parts = resource_name.split("::")
-    # USB parts: USB0, VID, PID, SERIAL, INSTR
     if len(parts) == 5 and _is_placeholder_serial(parts[3]):
         parts[3] = ""
         return "::".join(parts)
@@ -58,87 +52,128 @@ def _strip_na_serial(resource_name: str) -> str:
 
 
 def _repair_usb_resource_name(resource_name: str, serial_number: str) -> str:
+    """Normalize a USB VISA name and replace a missing serial when available."""
     text = _normalize_resource_name(resource_name)
     serial = _decode_tlpm_text(serial_number).replace("\x00", "").strip()
     if not text.upper().startswith("USB"):
         return text
-    # Treat placeholder serials the same as empty
     if _is_placeholder_serial(serial):
         serial = ""
-    if "::::INSTR" not in text.upper():
-        # Resource has a non-empty serial slot — check if it's a placeholder
-        return _strip_na_serial(text)
-
-    parts = [part for part in text.split("::") if part]
-    if len(parts) < 3:
+    parts = text.split("::")
+    if len(parts) != 5:
         return text
-    prefix = "::".join(parts[:3])
-    if serial:
-        return f"{prefix}::{serial}::INSTR"
-    return text
+    if _is_placeholder_serial(parts[3]) and serial:
+        parts[3] = serial
+    return "::".join(parts)
+
+
+def _is_pm100d_resource(resource_name: str) -> bool:
+    """Return whether a VISA resource has the PM100D's USB VID/PID."""
+    parts = _normalize_resource_name(resource_name).split("::")
+    return (
+        len(parts) >= 5
+        and parts[0].upper().startswith("USB")
+        and parts[1].upper() == PM100D_VENDOR_ID
+        and parts[2].upper() == PM100D_PRODUCT_ID
+    )
+
+
+def _usb_vid_pid(resource_name: str) -> tuple[str, str] | None:
+    parts = _normalize_resource_name(resource_name).split("::")
+    if len(parts) >= 3 and parts[0].upper().startswith("USB"):
+        return parts[1].upper(), parts[2].upper()
+    return None
+
+
+def _require_pyvisa():
+    if pyvisa is None:
+        raise ImportError("pyvisa is required to connect to the PM100D.")
+    return pyvisa
+
+
+def _get_resource_manager():
+    global _PM100D_RESOURCE_MANAGER
+    _require_pyvisa()
+    manager = _PM100D_RESOURCE_MANAGER
+    if manager is not None:
+        try:
+            session = getattr(manager, "session", True)
+        except Exception:
+            session = None
+        if session is None:
+            manager = None
+    if manager is None:
+        manager = pyvisa.ResourceManager()
+        _PM100D_RESOURCE_MANAGER = manager
+    return manager
+
+
+def _is_invalid_session_error(exc: Exception) -> bool:
+    invalid_session = getattr(getattr(pyvisa, "errors", None), "InvalidSession", None)
+    if isinstance(invalid_session, type) and isinstance(exc, invalid_session):
+        return True
+    text = _decode_tlpm_text(exc).lower()
+    return "invalid session" in text or "vi_error_inv_object" in text
+
+
+def _identity_metadata_from_name(resource_name: str) -> tuple[str, str, str, bool]:
+    parts = resource_name.split("::")
+    serial = parts[3] if len(parts) >= 5 and not _is_placeholder_serial(parts[3]) else ""
+    return "PM100D", serial, "Thorlabs", True
+
+
+def _identity_metadata(instrument, resource_name: str) -> tuple[str, str, str, bool]:
+    model, serial, manufacturer, available = _identity_metadata_from_name(resource_name)
+    try:
+        idn = _decode_tlpm_text(instrument.query("*IDN?")).strip()
+        idn_parts = [part.strip() for part in idn.split(",")]
+        if len(idn_parts) > 0 and idn_parts[0]:
+            manufacturer = idn_parts[0]
+        if len(idn_parts) > 1 and idn_parts[1]:
+            model = idn_parts[1]
+        if len(idn_parts) > 2 and idn_parts[2]:
+            serial = idn_parts[2]
+    except Exception:
+        available = False
+    return model, serial, manufacturer, available
 
 
 def scan_pm100d_resource_entries() -> list[dict[str, object]]:
-    if TLPMX is None:
-        raise ImportError("TLPMX.py is missing! Please put it in the project root.")
-
-    tlpm = TLPMX()
-    count = c_uint32()
+    """Discover PM100D USB resources through VISA, retaining identity metadata."""
+    _require_pyvisa()
+    manager = _get_resource_manager()
     found: list[dict[str, object]] = []
-    try:
-        try:
-            tlpm.setLookForInfoOnSearch(c_int16(1))
-        except Exception:
-            pass
-        tlpm.findRsrc(byref(count))
-        if count.value <= 0:
-            return []
-        name_buf = create_string_buffer(1024)
-        model_buf = create_string_buffer(1024)
-        serial_buf = create_string_buffer(1024)
-        maker_buf = create_string_buffer(1024)
-        for idx in range(count.value):
-            tlpm.getRsrcName(c_int(idx), name_buf)
-            raw_name = _buffer_to_text(name_buf)
-            model_name = ""
-            serial_number = ""
-            manufacturer = ""
-            available = True
-            try:
-                avail_flag = c_int16(0)
-                tlpm.getRsrcInfo(
-                    c_int(idx),
-                    model_buf,
-                    serial_buf,
-                    maker_buf,
-                    byref(avail_flag),
-                )
-                model_name = _buffer_to_text(model_buf)
-                serial_number = _buffer_to_text(serial_buf)
-                manufacturer = _buffer_to_text(maker_buf)
-                available = bool(avail_flag.value)
-            except Exception:
-                pass
+    for raw_resource in manager.list_resources():
+        resource = _normalize_resource_name(raw_resource)
+        if not _is_pm100d_resource(resource):
+            continue
 
-            normalized_raw = _normalize_resource_name(raw_name)
-            repaired_name = _repair_usb_resource_name(normalized_raw, serial_number)
-            if repaired_name:
-                found.append(
-                    {
-                        "resource": repaired_name,
-                        "raw_resource": normalized_raw,
-                        "model": model_name,
-                        "serial": serial_number,
-                        "manufacturer": manufacturer,
-                        "available": available,
-                    }
-                )
-        return found
-    finally:
+        instrument = None
+        model, serial, manufacturer, available = _identity_metadata_from_name(resource)
         try:
-            tlpm.close()
+            instrument = manager.open_resource(resource)
+            model, serial, manufacturer, available = _identity_metadata(instrument, resource)
         except Exception:
-            pass
+            available = False
+        finally:
+            if instrument is not None:
+                try:
+                    instrument.close()
+                except Exception:
+                    pass
+
+        repaired_resource = _repair_usb_resource_name(resource, serial)
+        found.append(
+            {
+                "resource": repaired_resource,
+                "raw_resource": resource,
+                "model": model,
+                "serial": serial,
+                "manufacturer": manufacturer,
+                "available": available,
+            }
+        )
+    return found
 
 
 def scan_pm100d_resources() -> list[str]:
@@ -146,76 +181,38 @@ def scan_pm100d_resources() -> list[str]:
 
 
 class ThorlabsPM100D_Wrapper:
-    def __init__(self, resource_name_str):
-        if TLPMX is None:
-            raise ImportError("TLPMX.py is missing! Please put it in the project root.")
+    """Compatibility wrapper exposing the methods used by the UI/controller."""
 
+    def __init__(self, resource_name_str):
+        _require_pyvisa()
         requested = _normalize_resource_name(resource_name_str)
         if not requested:
             raise ValueError("No PM100D resource name was provided.")
 
         self.inst = None
         self.resource_name = ""
-
+        self._wavelength_nm = PM100D_DEFAULT_WAVELENGTH_NM
         candidates = self._build_resource_candidates(requested)
+        self.rm = _get_resource_manager()
         print(f"DEBUG: PM100D connect requested '{requested}'")
         print(f"DEBUG: PM100D connect candidates: {candidates}")
 
-        # Preferred order: IDQuery=True no-reset first (safe), then no-IDQuery,
-        # reset=True last (it can briefly disconnect the USB device).
-        _OPEN_PARAMS = [(True, False), (False, False), (True, True)]
-
         attempts: list[str] = []
-        connected = False
         for candidate in candidates:
-            for id_query, reset in _OPEN_PARAMS:
-                # Always use a fresh TLPMX instance — a failed open() leaves the
-                # previous instance in an invalid state that rejects all subsequent
-                # open() calls on the same object.
-                inst = TLPMX()
-                try:
-                    inst.open(
-                        create_string_buffer(candidate.encode("ascii")),
-                        c_bool(id_query),
-                        c_bool(reset),
-                    )
-                    self.inst = inst
-                    self.resource_name = candidate
-                    connected = True
-                    print(
-                        "DEBUG: PM100D connected via "
-                        f"'{candidate}' (IDQuery={id_query}, reset={reset})"
-                    )
-                    break
-                except Exception as exc:
-                    attempts.append(
-                        f"{candidate} [IDQuery={id_query}, reset={reset}]: "
-                        f"{self._format_driver_error(exc)}"
-                    )
-                    try:
-                        inst.close()
-                    except Exception:
-                        pass
-            if connected:
+            try:
+                self.inst = self.rm.open_resource(candidate)
+                self.resource_name = candidate
+                print(f"DEBUG: PM100D connected via '{candidate}'")
                 break
+            except Exception as exc:
+                attempts.append(f"{candidate}: {self._format_driver_error(exc)}")
 
-        if not connected:
+        if self.inst is None:
             detail = "; ".join(attempts) if attempts else "no connection attempts were made"
             raise RuntimeError(f"Connection failed: {detail}")
 
         try:
-            # Finite communication timeout so a stalled USB transaction raises
-            # instead of blocking measPower() forever. Without this a single
-            # stuck read leaves the UI's read thread permanently "running",
-            # which freezes all further reads until the whole app is restarted.
-            self.inst.setTimeoutValue(c_uint32(5000))
-            self.inst.setWavelength(c_double(730), TLPM_DEFAULT_CHANNEL)
-            self.inst.setPowerAutoRange(c_int16(1), TLPM_DEFAULT_CHANNEL)
-            self.inst.setPowerUnit(c_int16(0), TLPM_DEFAULT_CHANNEL)
-            # Hardware averaging: ~3000 samples/s → 1000 ≈ 330 ms per reading.
-            # Without this each measPower() is a single sample that swings
-            # negative at low power; the device's own display already averages.
-            self.inst.setAvgCnt(c_int16(1000), TLPM_DEFAULT_CHANNEL)
+            self._configure_instrument()
         except Exception as exc:
             print(
                 "Warning: PM100D config failed "
@@ -233,39 +230,44 @@ class ThorlabsPM100D_Wrapper:
                 seen.add(key)
                 candidates.append(normalized)
 
-        # Strip placeholder serials before the real scan; try the cleaned form first.
-        add(_strip_na_serial(requested))
-        add(requested)  # also keep original in case stripping was wrong
-
+        requested_vid_pid = _usb_vid_pid(requested)
+        requested_parts = requested.split("::")
+        placeholder_serial = (
+            requested_vid_pid == (PM100D_VENDOR_ID, PM100D_PRODUCT_ID)
+            and len(requested_parts) >= 5
+            and _is_placeholder_serial(requested_parts[3])
+        )
         try:
             scanned_entries = scan_pm100d_resource_entries()
         except Exception as exc:
             print(f"DEBUG: PM100D scan fallback unavailable: {self._format_driver_error(exc)}")
             scanned_entries = []
 
-        requested_upper = requested.upper()
+        if not placeholder_serial:
+            # An explicit serial is authoritative; never silently connect to
+            # another PM100D discovered on the same VID/PID.
+            add(requested)
+            return candidates
+
+        scanned_matches: list[str] = []
         for entry in scanned_entries:
             name = str(entry.get("resource") or "")
-            raw_name = str(entry.get("raw_resource") or "")
-            serial = str(entry.get("serial") or "")
-            name_upper = name.upper()
-            raw_upper = raw_name.upper()
-            if (
-                name_upper == requested_upper
-                or requested_upper in name_upper
-                or name_upper in requested_upper
-                or raw_upper == requested_upper
-                or requested_upper in raw_upper
-                or raw_upper in requested_upper
-                or (serial and serial.upper() in requested_upper)
-            ):
-                add(name)
-                add(raw_name)
+            if requested_vid_pid is None or _usb_vid_pid(name) == requested_vid_pid:
+                normalized = _normalize_resource_name(name)
+                if normalized and normalized.lower() not in {item.lower() for item in scanned_matches}:
+                    scanned_matches.append(normalized)
 
-        if len(candidates) == 1 and len(scanned_entries) == 1:
-            add(str(scanned_entries[0].get("resource") or ""))
-            add(str(scanned_entries[0].get("raw_resource") or ""))
+        if len(scanned_matches) > 1:
+            raise RuntimeError(
+                "Ambiguous PM100D resource: multiple devices match the "
+                "requested placeholder serial. Select a device with its serial."
+            )
+        if scanned_matches:
+            add(scanned_matches[0])
+        add(requested)
 
+        if not candidates:
+            add(_strip_na_serial(requested))
         return candidates
 
     def _format_driver_error(self, exc: Exception) -> str:
@@ -274,24 +276,63 @@ class ThorlabsPM100D_Wrapper:
             text = _decode_tlpm_text(arg).strip()
             if text:
                 parts.append(text)
-        if parts:
-            return " | ".join(parts)
-        return _decode_tlpm_text(exc).strip()
+        return " | ".join(parts) if parts else _decode_tlpm_text(exc).strip()
+
+    def _configure_instrument(self):
+        self.inst.timeout = PM100D_TIMEOUT_MS
+        self.inst.write(f"SENS:CORR:WAV {self._wavelength_nm:g}")
+        self.inst.write("SENS:POW:RANG:AUTO ON")
+        self.inst.write("SENS:POW:UNIT W")
+        self.inst.write("SENS:AVER ON")
+        self.inst.write(f"SENS:AVER:COUN {PM100D_DEFAULT_AVERAGING_COUNT}")
+
+    def _recover_connection(self) -> bool:
+        previous_instrument = self.inst
+        instrument = None
+        try:
+            manager = _get_resource_manager()
+            instrument = manager.open_resource(self.resource_name)
+            self.inst = instrument
+            self._configure_instrument()
+            self.rm = manager
+        except Exception:
+            self.inst = None
+            if instrument is not None:
+                try:
+                    instrument.close()
+                except Exception:
+                    pass
+            return False
+
+        if previous_instrument is not instrument:
+            try:
+                previous_instrument.close()
+            except Exception:
+                pass
+        return True
 
     def get_power(self):
         if self.inst is None:
             return float("nan")
-        val = c_double()
         try:
-            self.inst.measPower(byref(val), TLPM_DEFAULT_CHANNEL)
-            return val.value
-        except Exception:
-            return float("nan")
+            return float(self.inst.query("MEAS:POW?").strip())
+        except Exception as exc:
+            if not _is_invalid_session_error(exc) or not self._recover_connection():
+                return float("nan")
+            try:
+                return float(self.inst.query("MEAS:POW?").strip())
+            except Exception:
+                return float("nan")
 
     def configure_wavelength(self, nm):
+        if self.inst is None:
+            raise RuntimeError("PM100D is not connected.")
         try:
-            val = c_double(float(nm))
-            self.inst.setWavelength(val, TLPM_DEFAULT_CHANNEL)
+            value = float(nm)
+            if not math.isfinite(value):
+                raise ValueError("wavelength must be finite")
+            self.inst.write(f"SENS:CORR:WAV {value:g}")
+            self._wavelength_nm = value
             print(f"DEBUG: Wavelength set to {nm} nm")
         except Exception as exc:
             print(f"Error setting wavelength: {self._format_driver_error(exc)}")
@@ -301,9 +342,10 @@ class ThorlabsPM100D_Wrapper:
         self.configure_wavelength(nm)
 
     def close(self):
-        if self.inst is not None:
+        instrument = self.inst
+        self.inst = None
+        if instrument is not None:
             try:
-                self.inst.close()
+                instrument.close()
             except Exception:
                 pass
-            self.inst = None

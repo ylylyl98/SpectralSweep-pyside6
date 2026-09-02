@@ -3118,7 +3118,7 @@ class _PM100DSection(QWidget):
         self._ctrl.devices_scanned.connect(self._on_devices_scanned)
         self._ctrl.connected.connect(self._on_connected)
         self._ctrl.disconnected.connect(self._on_disconnected)
-        self._ctrl.error.connect(lambda msg: self._status.setText(f"Error: {msg[:60]}"))
+        self._ctrl.error.connect(lambda msg: self._status.setText(f"Error: {msg}"))
         self._read_pwr_btn.clicked.connect(self._do_read)
         self._set_wl_btn.clicked.connect(self._on_set_wavelength)
         self._auto_chk.toggled.connect(self._on_auto_toggled)
@@ -3130,7 +3130,7 @@ class _PM100DSection(QWidget):
             self._ctrl.adapter.set_wavelength(self._wl_spn.value())
             self._status.setText(f"Wavelength set to {self._wl_spn.value():.1f} nm")
         except Exception as exc:
-            self._status.setText(f"WL error: {str(exc)[:60]}")
+            self._status.setText(f"WL error: {exc}")
 
     @Slot(bool)
     def _on_auto_toggled(self, checked: bool):
@@ -3151,7 +3151,7 @@ class _PM100DSection(QWidget):
 
     @Slot(str)
     def _on_pm_error(self, msg: str):
-        self._status.setText(f"Error: {msg[:60]}")
+        self._status.setText(f"Error: {msg}")
 
     @Slot()
     def _on_pm_done(self):
