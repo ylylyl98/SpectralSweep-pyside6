@@ -24,6 +24,7 @@ if str(_ROOT) not in sys.path:
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 from PySide6.QtCore    import Qt
+from PySide6.QtCore import QTimer
 
 _APP_NAME = "SpectralSweep"
 _APP_ID = "SpectralSweep.SpectralSweep.Desktop"
@@ -86,6 +87,15 @@ def main():
     if not icon.isNull():
         app.setWindowIcon(icon)
 
+    from app.ntfy_notifications import NTFY_URL
+    from app.process_watchdog import WatchdogSession
+    watchdog = WatchdogSession(NTFY_URL)
+    watchdog.start()
+    watchdog_timer = QTimer(app)
+    watchdog_timer.setInterval(5000)
+    watchdog_timer.timeout.connect(watchdog.beat)
+    watchdog_timer.start()
+
     from ui.input_safety import install_input_wheel_guard
     install_input_wheel_guard(app)
 
@@ -97,8 +107,10 @@ def main():
 
     try:
         exit_code = app.exec()
+        watchdog.close(normal_exit=True)
     finally:
         uninstall_exception_reporting()
+        watchdog.close(normal_exit=False)
     sys.exit(exit_code)
 
 

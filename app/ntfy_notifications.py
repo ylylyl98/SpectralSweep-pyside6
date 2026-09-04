@@ -4,8 +4,10 @@ import threading
 import urllib.request
 from .experiment_lifecycle import subscribe, unsubscribe
 
+NTFY_URL = "https://ntfy.sh/lab-spectra-sweep-9f4c2a7e"
+
 class NtfyNotifier:
-    URL = "https://ntfy.sh/lab-spectra-sweep-9f4c2a7e"
+    URL = NTFY_URL
     TYPES = {"dual_gate_sweep", "gate_map_2d", "motion_sweep", "mcd_aps100", "mcd_attodry2100"}
     def __init__(self):
         self._queue = queue.Queue(maxsize=32)
