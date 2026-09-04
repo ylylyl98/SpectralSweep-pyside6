@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QListWidgetItem, QSplitter, QToolBar,
 )
 from app.experiment_metadata import ExperimentHistory
+from app.ntfy_notifications import NtfyNotifier
 
 # ── Global stylesheet ──────────────────────────────────────────────────────────
 _STYLESHEET = """
@@ -425,8 +426,9 @@ class MainWindow(QMainWindow):
     Geometry and sidebar width persisted via QSettings.
     """
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, notifier=None):
         super().__init__(parent)
+        self._ntfy_notifier = notifier if notifier is not None else NtfyNotifier()
         self.setWindowTitle("SpectralSweep — PySide6")
 
         # Apply global stylesheet once (on the QApplication so all windows share it)
@@ -1066,6 +1068,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         try:
             if not self._mcd2100.shutdown():
+                self._ntfy_notifier.notify_warning(
+                    None,
+                    "MCD 2100 shutdown could not be confirmed; application remains open.",
+                    key="mcd2100-shutdown-unconfirmed",
+                )
                 QMessageBox.critical(
                     self,
                     "MCD 2100 acquisition is still stopping",
@@ -1074,6 +1081,14 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         except Exception as exc:
+            try:
+                self._ntfy_notifier.notify_warning(
+                    None,
+                    "MCD 2100 shutdown failed; application remains open.",
+                    key="mcd2100-shutdown-unconfirmed",
+                )
+            except Exception:
+                pass
             QMessageBox.critical(self, "Unable to stop MCD 2100 safely", str(exc))
             event.ignore()
             return
@@ -1145,6 +1160,10 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         # Shut controllers down gracefully
+        try:
+            self._ntfy_notifier.shutdown()
+        except Exception:
+            pass
         for ctrl in (
             self._magnet,
             self._lf6,

@@ -12,6 +12,7 @@ from app.experiment_metadata import (
     FAILED,
     ExperimentMetadataService,
 )
+from app.experiment_lifecycle import subscribe, unsubscribe
 
 
 class ExperimentMetadataContractTests(unittest.TestCase):
@@ -22,6 +23,19 @@ class ExperimentMetadataContractTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_terminal_event_once_after_durable_write_and_listener_isolation(self):
+        events = []
+        def bad(event): raise RuntimeError("listener")
+        subscribe(bad); subscribe(events.append)
+        try:
+            run = self.service.begin("motion_sweep", "D1", settings={})
+            run.complete()
+            self.assertEqual([(e.experiment_id, e.experiment_type, e.status) for e in events],
+                             [(run.experiment_id, "motion_sweep", COMPLETED)])
+            self.assertEqual(json.loads(run.path.read_text())["status"], COMPLETED)
+        finally:
+            unsubscribe(bad); unsubscribe(events.append)
 
     def test_completed_sidecar_is_portable_and_indexed(self):
         run = self.service.begin(
@@ -62,7 +76,7 @@ class ExperimentMetadataContractTests(unittest.TestCase):
         self.assertEqual(
             metadata["files"],
             [{
-                "path": run.path.relative_to(self.root).as_posix(),
+                "path": run.path.resolve().relative_to(self.root.resolve()).as_posix(),
                 "role": "metadata",
                 "kind": "experiment_metadata",
             }],

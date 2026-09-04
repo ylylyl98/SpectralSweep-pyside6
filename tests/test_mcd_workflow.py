@@ -216,6 +216,33 @@ def _workflow_params(base_output_dir: str) -> dict:
 
 
 class MCDWorkflowTests(unittest.TestCase):
+    def test_stop_between_conditions_retains_first_condition_bookkeeping(self):
+        magnet = MockAPS100Adapter(time_scale=1.0)
+        magnet.connect()
+        rotation = _Rotation()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            params = _workflow_params(temp_dir)
+            params["conditions"] = [
+                {"enabled": True, "vtg_v": 0.0, "vbg_v": 0.0, "vbias_v": 0.0},
+                {"enabled": True, "vtg_v": 1.0, "vbg_v": 0.0, "vbias_v": 0.0},
+            ]
+            worker = _ContinuousMCDWorker(
+                params, _MagnetController(magnet), _LF6Controller(_Spectrum(rotation)),
+                _RotationController(rotation), None,
+            )
+            calls = []
+            def run_condition(condition, index, total, legs):
+                calls.append(index)
+                worker.request_stop()
+                return {"csv_path": "first.csv", "spectra_written": 3, "cycles": 2}
+            with patch.object(worker, "_run_condition", side_effect=run_condition):
+                result = worker._run()
+            self.assertTrue(result["stopped"])
+            self.assertEqual(calls, [1])
+            self.assertEqual(result["csv_paths"], ["first.csv"])
+            self.assertEqual(result["spectra_written"], 3)
+            self.assertEqual(result["cycles"], 2)
+            self.assertEqual(result["conditions"][0]["status"], "completed")
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])

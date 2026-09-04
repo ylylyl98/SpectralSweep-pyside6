@@ -530,6 +530,9 @@ class _ContinuousMCDWorker(QObject):
             result["csv_paths"].append(paths["csv_path"])
             self._total_spectra += paths["spectra_written"]
             total_cycles += paths["cycles"]
+            if self._stop.is_set():
+                result["stopped"] = True
+                break
         for index in range(len(summary) + 1, total + 1):
             summary.append({"condition": index, "status": "not_started"})
         result["conditions"] = list(summary)

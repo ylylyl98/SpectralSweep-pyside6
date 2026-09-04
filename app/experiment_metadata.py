@@ -318,6 +318,11 @@ class ExperimentRun:
             self.metadata["result"]["error"] = self.metadata.get("error")
             self._write()
             self._terminal = True
+            try:
+                from .experiment_lifecycle import ExperimentTerminalEvent, publish
+                publish(ExperimentTerminalEvent(self.experiment_id, self.metadata.get("experiment_type", ""), status))
+            except Exception:
+                pass
             return dict(self.metadata)
 
     def __enter__(self) -> "ExperimentRun":

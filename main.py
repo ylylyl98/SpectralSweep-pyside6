@@ -61,6 +61,11 @@ def _parse_args() -> argparse.Namespace:
 def main():
     args = _parse_args()
 
+    from app.ntfy_notifications import NtfyNotifier
+    from app.runtime_exception_reporting import install as install_exception_reporting
+    notifier = NtfyNotifier()
+    uninstall_exception_reporting = install_exception_reporting(notifier)
+
     _set_windows_app_user_model_id()
 
     # Propagate --mock flag via environment so LF6Controller picks it up
@@ -85,12 +90,16 @@ def main():
     install_input_wheel_guard(app)
 
     from ui.main_window import MainWindow
-    win = MainWindow()
+    win = MainWindow(notifier=notifier)
     if not icon.isNull():
         win.setWindowIcon(icon)
     win.show()
 
-    sys.exit(app.exec())
+    try:
+        exit_code = app.exec()
+    finally:
+        uninstall_exception_reporting()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
