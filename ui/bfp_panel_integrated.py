@@ -62,6 +62,7 @@ from utils.bfp_io import (
     save_full_image_csv,
 )
 from utils.config import cfg
+from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService
 
 pg.setConfigOption("background", "w")
@@ -329,12 +330,14 @@ class _AcquireWorker(QObject):
             if self._warmup:
                 self.status.emit("Warm-up acquisition...")
                 try:
+                    set_lightfield_context(self._ctrl, purpose="warmup")
                     _do_raw_acquire(setup, self._roi_mode)
                 except Exception:
                     pass
             stack = []
             for idx in range(self._repeat):
                 self.status.emit(f"Acquiring frame {idx + 1}/{self._repeat}...")
+                set_lightfield_context(self._ctrl, purpose="measurement", repeat_index=idx + 1)
                 stack.append(np.asarray(_do_raw_acquire(setup, self._roi_mode), dtype=float))
             raw = np.mean(np.stack(stack, axis=0), axis=0)
             wls = _get_wls(spec)
@@ -1556,6 +1559,7 @@ class BFPPanel(QWidget):
                           "exposure_ms": self._exp_spin.value(), "frames": self._epf_spin.value(),
                           "repeat": self._repeat_spin.value(), "auto_save_csv": self._auto_save_csv_chk.isChecked()},
             )
+            bind_lightfield_metadata(self._ctrl, self._experiment_run)
         except Exception as exc:
             self._status_lbl.setText(f"Metadata error; acquisition blocked: {exc}")
             self._status_lbl.setStyleSheet("color: red;")

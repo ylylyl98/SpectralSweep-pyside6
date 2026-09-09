@@ -14,6 +14,50 @@ The application is intended for lab setups that combine either Princeton Instrum
 - Hardware-controller wrappers for LightField/Andor, Keithley SMU workflows, rotation stages, linear stage, and Thorlabs PM100D
 - Mock spectrum mode for UI development without live spectrometer hardware
 
+## LightField experiment metadata
+
+LightField runs in Presets, Power Sweep, MegaSweep, BFP, and both MCD tabs
+automatically read instrument settings immediately before each capture. The
+experiment's `*.experiment.metadata.json` stores distinct configurations under
+`observed.lightfield.settings_snapshots`, separate from requested UI settings.
+Readbacks include exposure, exposures per frame, combination method, stored
+frames, grating label, center wavelength, ports/slits, readout/gain, detector
+temperature setpoint, ROI/binning, correction flags, device identity, experiment
+name, application assembly version, and detector wavelength calibration.
+Unsupported or failed reads are `null` with a reason in `unavailable`.
+
+The adjacent `*.experiment.lightfield.jsonl` contains capture start/completion
+or failure events, linked by `acquisition_index` and `settings_id`. Start events
+include actual detector temperature, the number of frames requested from Capture,
+and sweep context (output file/point where available; angle for MCD2100).
+BFP warmups are labeled explicitly. Capture indices include failed attempts and
+warmups and are **not CSV row numbers**. A start without a completion can indicate
+interruption; capture completion does not itself mean an output row was saved.
+The journal is registered in the experiment's file list; keep it with the JSON
+and data files when copying a run.
+
+The grating label is preserved exactly as LightField reports it; groove density
+is not inferred from an index. Calibration in the JSON is the SDK's detector
+axis before alignment/binning; the exported spectrum's wavelength column is the
+authoritative saved axis. Optional metadata failures are logged without stopping
+acquisition. This metadata is provenance and is not automatically restored to
+hardware when loading saved settings.
+
+## Power-meter correction
+
+The PM100D Power Meter section has one shared **Power correction factor**:
+corrected sample power = raw meter power × factor. The sidebar readout shows
+corrected power; its tooltip includes the raw reading and applied factor.
+Motion Sweep and Presets meter measurements capture the factor at run start,
+so editing it during a run only affects later runs and standalone readings.
+Their CSV files preserve `Power_raw_uW`, `Power_correction_factor`, and
+`Power_uW` (corrected power); experiment settings also record the run factor.
+
+Manually entered power is sample power in µW and is used directly. Filename
+generation never multiplies power again. The former filename coefficient is
+migrated to the shared meter setting when loading a config without a PM100D
+factor. Legacy per-panel coefficient controls are no longer shown or applied.
+
 ## Supported Launch Path
 
 The only supported application entrypoint is:

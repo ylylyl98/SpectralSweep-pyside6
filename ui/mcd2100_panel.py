@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.engine.mcd2100_worker import MCD2100Worker
+from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService
 from controllers.rotation_controller import RotationController
 from utils.config import cfg
@@ -130,6 +131,7 @@ class _LightFieldRotationService:
 
         def capture() -> None:
             try:
+                set_lightfield_context(self._lf6, angle_deg=float(angle), polarization_label=str(_label))
                 result["value"] = spectrometer.acquire()
             except BaseException as exc:
                 result["error"] = exc
@@ -500,7 +502,9 @@ class MCD2100Panel(QWidget):
         gate_form = QFormLayout(gate_group)
         gate_form.setContentsMargins(8, 6, 8, 6)
         gate_form.setVerticalSpacing(4)
-        self.apply_voltages = QCheckBox("Apply gate voltages")
+        # This hidden compatibility control is not added to a layout, so give
+        # it an explicit owner to keep destruction within the panel's lifetime.
+        self.apply_voltages = QCheckBox("Apply gate voltages", gate_group)
         self._apply_requested = False
         self._syncing_gate_ratio = False
         self._gate_batch_provenance: list[dict[str, Any]] = []
@@ -2129,6 +2133,7 @@ class MCD2100Panel(QWidget):
                     sample_id=device_id, settings=settings_snapshot,
                     safety_policy=safety_policy,
                 )
+                bind_lightfield_metadata(self._lf6, self._experiment_run)
             optical = self._optical_factory() if self._optical_factory else _LightFieldRotationService(
                 self._lf6, self._rotation, rotator_name, self._smu
             )

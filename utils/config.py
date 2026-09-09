@@ -133,6 +133,11 @@ class RampConfig:
 
 
 @dataclass
+class PM100DConfig:
+    correction_factor: float = 1.0
+
+
+@dataclass
 class FilenameConfig:
     """Filename settings and output path."""
     base_out: str = r"D:\instrument_control_v3_1"
@@ -362,6 +367,7 @@ class AppConfig:
     smu: SMUConfig = field(default_factory=SMUConfig)
     ramp: RampConfig = field(default_factory=RampConfig)
     filename: FilenameConfig = field(default_factory=FilenameConfig)
+    pm100d: PM100DConfig = field(default_factory=PM100DConfig)
     bfp_naming: BFPNamingConfig = field(default_factory=BFPNamingConfig)
     bfp_rc: BFPRCConfig = field(default_factory=BFPRCConfig)
     rotation: RotationConfig = field(default_factory=RotationConfig)
@@ -449,6 +455,17 @@ class AppConfig:
         _update_dataclass(self.smu,      data.get("smu", {}))
         _update_dataclass(self.ramp,     data.get("ramp", {}))
         _update_dataclass(self.filename, data.get("filename", {}))
+        # Migrate the previous shared filename coefficient once. Manual sample
+        # power no longer uses this factor; only actual meter readings do.
+        meter_data = data.get("pm100d", {})
+        if not isinstance(meter_data, dict):
+            meter_data = {}
+        import math
+        try:
+            factor = float(meter_data.get("correction_factor", self.filename.power_coefficient))
+            self.pm100d.correction_factor = factor if math.isfinite(factor) and factor > 0 else 1.0
+        except (TypeError, ValueError):
+            self.pm100d.correction_factor = 1.0
         _update_dataclass(self.bfp_naming, data.get("bfp_naming", {}))
         _update_dataclass(self.bfp_rc, data.get("bfp_rc", {}))
         rotation_data = data.get("rotation", {})

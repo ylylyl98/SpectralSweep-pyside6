@@ -621,7 +621,7 @@ class MCDWorkflowTests(unittest.TestCase):
         params["measurement_mode"] = "PL"
         params["decimal_style"] = "p"
         legacy = build_mcd_filename_base(params)
-        self.assertIn("1.8KPL_532nm20.000uW", legacy)
+        self.assertIn("1.8KPL_532nm10.000uW", legacy)
         self.assertIn("B-0p25to+0p5T", legacy)
 
     def test_continuous_two_angle_run_writes_one_descriptive_raw_csv(self):

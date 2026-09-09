@@ -42,7 +42,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pyqtgraph as pg
 from utils.config import cfg
+from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService
+from app.power_reading import power_correction_factor, read_power
 from utils.filename_builder import (
     FilenameContext, build_base_filename, sanitize_token, format_compact_number,
 )
@@ -186,7 +188,7 @@ def _scalar_column_names(
 ) -> list[str]:
     cols = []
     if pm_available:
-        cols.append("Power_uW")
+        cols.extend(["Power_uW", "Power_raw_uW", "Power_correction_factor"])
     cols.extend([motion_column, f"{motion_column}_actual"])
     if smu_available:
         cols.extend(_SMU_COLUMNS)
@@ -203,10 +205,12 @@ def _read_scalar_row(
     Vbg_set: float = NAN,
     Vtg_set: float = NAN,
     Vbias_set: float = NAN,
+    raw_power_uw: float = NAN,
+    correction_factor: float = 1.0,
 ) -> list:
     values = []
     if pm_available:
-        values.append(power_uw)
+        values.extend([power_uw, raw_power_uw, correction_factor])
     values.extend([target, actual])
     if smu_available and iv is not None:
         vbg_m, vtg_m = _read_gates(iv)
@@ -266,7 +270,8 @@ class _PowerSweepWorker(QObject):
         smu_ctrl,
     ):
         super().__init__()
-        self._p = params
+        self._p = dict(params)
+        self._p["power_correction_factor"] = power_correction_factor(params.get("power_correction_factor"))
         self._stg = stage_ctrl
         self._rot = rotation_ctrl
         self._pm = pm_ctrl
@@ -454,10 +459,12 @@ class _PowerSweepWorker(QObject):
 
                     # read power
                     power_uw = NAN
+                    raw_power_uw = NAN
                     if move_ok and pm is not None:
                         try:
-                            power_w = float(pm.get_power())
-                            power_uw = power_w * 1e6
+                            reading = read_power(pm, factor=p["power_correction_factor"])
+                            raw_power_uw = reading.raw_w * 1e6
+                            power_uw = reading.corrected_w * 1e6
                             self.log.emit(
                                 f"[{_ts()}]   power: {power_uw:.3f} µW"
                             )
@@ -469,6 +476,7 @@ class _PowerSweepWorker(QObject):
                     # acquire spectrum
                     if move_ok:
                         try:
+                            set_lightfield_context(self._lf6, output_file=fp, point_index=done, position=float(pos))
                             wl, y = spec.acquire()
                             self.spectrum.emit(wl, y)
                         except Exception as exc:
@@ -483,6 +491,8 @@ class _PowerSweepWorker(QObject):
                     scalar_vals = _read_scalar_row(
                         iv, power_uw, pos, arrived, smu_ok,
                         pm_available=pm_ok,
+                        raw_power_uw=raw_power_uw,
+                        correction_factor=p["power_correction_factor"],
                         Vbg_set=p.get("Vbg_target", NAN),
                         Vtg_set=p.get("Vtg_target", NAN),
                         Vbias_set=p.get("Vbias_target", NAN),
@@ -1394,6 +1404,7 @@ class PowerSweepPanel(QWidget):
 
         self._run_btn.setEnabled(False)
         self._run_failed = False
+        params["power_correction_factor"] = power_correction_factor()
         self._run_metadata_params = dict(params)
         self._run_csv_before = set(Path(out_path).glob("*.csv"))
         self._run_files_before = set(Path(out_path).glob("*"))
@@ -1401,6 +1412,7 @@ class PowerSweepPanel(QWidget):
             self._experiment_run = ExperimentMetadataService(out_path).begin(
                 "motion_sweep", devid, output_dir=out_path, settings=params
             )
+            bind_lightfield_metadata(self._lf6, self._experiment_run)
         except Exception as exc:
             self._on_error(f"Metadata error; run blocked: {exc}")
             return

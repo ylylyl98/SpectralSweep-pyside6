@@ -1,6 +1,7 @@
 # Import the .NET class library
 import clr, ctypes
 import time
+from app.lightfield_metadata import LightFieldRecorder, capture_with_metadata, read_snapshot
 
 # Import python sys module
 import sys, os
@@ -45,6 +46,13 @@ class LightFieldSettingTimeoutError(TimeoutError):
 
 
 class LF6Setup:
+    def bind_metadata_run(self, run):
+        self._metadata_recorder = LightFieldRecorder(run)
+
+    def read_metadata_snapshot(self):
+        return read_snapshot(self, camera=CameraSettings,
+                             spectrometer=SpectrometerSettings, experiment=ExperimentSettings)
+
     def __init__(self):
         self.auto = Automation(True, List[String]())
         self.application = self.auto.LightFieldApplication
@@ -66,9 +74,9 @@ class LF6Setup:
         else:
             print('loading experiment failed')
 
-    def acquire(self):
+    def acquire(self, *, purpose="measurement"):
         frames = 1
-        dataset = self.experiment.Capture(frames)
+        dataset = capture_with_metadata(self, frames, purpose=purpose)
         image_data = dataset.GetFrame(0, frames - 1).GetData()
         image_frame = dataset.GetFrame(0, frames - 1)
         array = self.convert_buffer(image_data, image_frame.Format)
@@ -112,13 +120,13 @@ class LF6Setup:
         h = _get(["Height", "GetHeight", "SizeY", "GetSizeY", "YSize", "GetYSize"])
         return w, h
 
-    def acquire_2d(self):
+    def acquire_2d(self, *, purpose="measurement"):
         """
         Capture one frame and return a 2D array (H, W) if frame dimensions are available.
         If dimension detection fails, returns the raw 1D array (same as acquire()).
         """
         frames = 1
-        dataset = self.experiment.Capture(frames)
+        dataset = capture_with_metadata(self, frames, purpose=purpose)
 
         # for frames=1, index is always 0
         frame = dataset.GetFrame(0, 0)
@@ -618,7 +626,7 @@ class LF6Setup:
             print('Frame:', String.Format(str(frames)))
             if image_mode:
                 
-                dataset = self.experiment.Capture(frames)
+                dataset = capture_with_metadata(self, frames)
                 bufferdata = np.zeros((frames,x_pixels_num*y_pixels_num))
                 for i in range(frames):
                     image_data = dataset.GetFrame(0, i).GetData()
@@ -627,7 +635,7 @@ class LF6Setup:
                     bufferdata[i,:] = array
                 return bufferdata
             else:
-                dataset = self.experiment.Capture(frames)
+                dataset = capture_with_metadata(self, frames)
                 bufferdata = np.zeros((frames,x_pixels_num))
                 for i in range(frames):
                     image_data = dataset.GetFrame(0, i).GetData()

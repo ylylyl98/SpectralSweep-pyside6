@@ -469,7 +469,7 @@ class SweepLinePanelTests(unittest.TestCase):
 
         adapter.get_power.assert_not_called()
 
-    def test_filename_preview_applies_coefficient_to_manual_power(self):
+    def test_filename_preview_uses_manual_sample_power_directly(self):
         panel = PresetsPanel()
         panel._sample_edit.setText("Sample1")
         panel._laser_edit.setText("532")
@@ -484,10 +484,10 @@ class SweepLinePanelTests(unittest.TestCase):
 
         panel._refresh_filename_preview()
 
-        self.assertIn("532nm2200.000uW", panel._filename_preview_lbl.text())
+        self.assertIn("532nm1100.000uW", panel._filename_preview_lbl.text())
         self.assertEqual(
             panel._filename_parts_table.item(1, 2).text(),
-            "532nm2200.000uW",
+            "532nm1100.000uW",
         )
 
     def test_successful_finish_fills_progress(self):

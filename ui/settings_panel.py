@@ -275,16 +275,17 @@ class SettingsPanel(QWidget):
         self._measurement_mode.setFixedWidth(130)
         form.addRow("Mode:", self._measurement_mode)
 
-        self._power_coeff = QDoubleSpinBox()
+        self._power_coeff = QDoubleSpinBox(self)  # Legacy session compatibility only
         self._power_coeff.setRange(0.000001, 1_000_000.0)
         self._power_coeff.setDecimals(6)
         self._power_coeff.setSingleStep(0.1)
         self._power_coeff.setFixedWidth(130)
         self._power_coeff.setToolTip(
-            "Multiplier applied to manual or PM100D power in generated filenames. "
-            "Example: 1100 µW × 2 = 2200 µW."
+            "Legacy filename coefficient; no longer applied. "
+            "Use the shared Power Meter correction factor."
         )
-        form.addRow("Power coefficient:", self._power_coeff)
+        self._power_coeff.hide()
+        form.addRow(QLabel("Meter correction is configured in the Power Meter section."))
 
         hint = QLabel(
             "These values are the defaults used by the structured filename builder in the Dual Gate tab."

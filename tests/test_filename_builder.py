@@ -29,17 +29,17 @@ def _context(**overrides) -> FilenameContext:
 
 
 class FilenamePowerTests(unittest.TestCase):
-    def test_manual_power_is_multiplied_by_coefficient(self):
+    def test_manual_sample_power_ignores_legacy_coefficient(self):
         ctx = _context(power_coefficient=2)
 
-        self.assertEqual(resolve_power_uw(ctx), (2200.0, "nominal"))
-        self.assertEqual(format_laser_power_token(ctx), "532nm2200.000uW")
+        self.assertEqual(resolve_power_uw(ctx), (1100.0, "nominal"))
+        self.assertEqual(format_laser_power_token(ctx), "532nm1100.000uW")
         self.assertEqual(
             build_base_filename(ctx, ["laser_power"]),
-            "Sample1_p1_532nm2200.000uW",
+            "Sample1_p1_532nm1100.000uW",
         )
 
-    def test_measured_power_is_corrected_exactly_once(self):
+    def test_already_corrected_meter_power_is_used_directly(self):
         ctx = _context(
             nominal_power_uw="1100",
             measure_power=True,
@@ -47,15 +47,15 @@ class FilenamePowerTests(unittest.TestCase):
             power_coefficient=2,
         )
 
-        self.assertEqual(resolve_power_uw(ctx), (25.0, "measured"))
-        self.assertEqual(format_laser_power_token(ctx), "532nm25.000uW")
+        self.assertEqual(resolve_power_uw(ctx), (12.5, "measured"))
+        self.assertEqual(format_laser_power_token(ctx), "532nm12.500uW")
 
     def test_coefficient_one_preserves_manual_power(self):
         self.assertEqual(resolve_power_uw(_context()), (1100.0, "nominal"))
 
-    def test_decimal_coefficient_is_supported(self):
+    def test_legacy_decimal_coefficient_does_not_change_sample_power(self):
         ctx = _context(nominal_power_uw="10", power_coefficient=0.25)
-        self.assertEqual(resolve_power_uw(ctx), (2.5, "nominal"))
+        self.assertEqual(resolve_power_uw(ctx), (10.0, "nominal"))
 
     def test_invalid_coefficient_falls_back_to_one(self):
         ctx = _context(power_coefficient="invalid")

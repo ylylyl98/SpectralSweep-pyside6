@@ -55,7 +55,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
+from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService
+from app.power_reading import power_correction_factor, read_power
 from utils.hardware_incidents import (
     HardwareIncidentRecorder,
     build_hardware_incident,
@@ -1995,6 +1997,7 @@ class _RunWorker(QObject):
         self._pm       = pm_ctrl
         self._out_dir  = out_dir
         self._meta     = dict(run_meta)
+        self._meta["power_correction_factor"] = power_correction_factor(run_meta.get("power_correction_factor"))
         self._parts    = list(filename_parts)
         self._stop     = stop_event
         self._preview_event = preview_event
@@ -2209,11 +2212,12 @@ class _RunWorker(QObject):
                         )
 
                         measured_power_uw = None
+                        power_reading = None
                         if _to_bool(row.get("MeasurePower", False)):
                             if self._pm and self._pm.is_connected:
                                 try:
-                                    p_w = self._pm.adapter.get_power()
-                                    measured_power_uw = float(p_w) * 1e6
+                                    power_reading = read_power(self._pm.adapter, factor=self._meta["power_correction_factor"])
+                                    measured_power_uw = power_reading.corrected_w * 1e6
                                     corrected, _source = resolve_power_uw(
                                         _filename_context_from_row(
                                             self._meta,
@@ -2254,6 +2258,7 @@ class _RunWorker(QObject):
                                     "Vtg_set", "Vtg_meas",
                                     "Vbias_set", "Vbias_meas",
                                     "Ibg", "Itg", "Ibias",
+                                    *(["Power_uW", "Power_raw_uW", "Power_correction_factor"] if power_reading is not None else []),
                                 ],
                             )
                             for frame_i, (vbg_set, vtg_set) in enumerate(zip(vbg_points, vtg_points), start=1):
@@ -2365,6 +2370,7 @@ class _RunWorker(QObject):
                                 wl = np.array([]); cts = np.array([])
                                 if self._lf6 and self._lf6.is_connected:
                                     try:
+                                        set_lightfield_context(self._lf6, output_file=csv_path, point_index=frame_i, Vbg_set=float(vbg_set), Vtg_set=float(vtg_set))
                                         wl, cts = self._lf6.adapter.acquire()
                                     except Exception as e:
                                         raise _RunFlowError("acquisition", f"Acquire error: {e}") from e
@@ -2427,6 +2433,8 @@ class _RunWorker(QObject):
                                     "Vtg_set": float(vtg_set), "Vtg_meas": Vtg_meas,
                                     "Ibg": Ibg, "Itg": Itg, "Ibias": Ib,
                                 }
+                                if power_reading is not None:
+                                    row_data.update(power_reading.csv_values())
                                 if vbias_set is not None:
                                     row_data["Vbias_set"] = float(vbias_set)
                                     row_data["Vbias_meas"] = Vbias_meas
@@ -2799,10 +2807,10 @@ class PresetsPanel(QWidget):
         self._laser_edit     = QLineEdit(); self._laser_edit.setPlaceholderText("Laser nm")
         self._laser_edit.setFixedWidth(76)
         self._laser_edit.setToolTip("Excitation laser wavelength in nm — recorded in filename.")
-        self._power_edit     = QLineEdit(); self._power_edit.setPlaceholderText("Power µW")
+        self._power_edit     = QLineEdit(); self._power_edit.setPlaceholderText("Sample µW")
         self._power_edit.setFixedWidth(80)
         self._power_edit.setToolTip(
-            "Laser power in µW — multiplied by Coeff for the filename.\n"
+            "Sample power in µW — used directly in the filename.\n"
             "Overwritten by a live PM100D reading when MeasurePower is enabled."
         )
         self._subfolder_edit = QLineEdit(); self._subfolder_edit.setPlaceholderText("Initial Data")
@@ -2812,7 +2820,7 @@ class PresetsPanel(QWidget):
         meta.addWidget(QLabel("Point:"));     meta.addWidget(self._point_edit)
         meta.addWidget(self._tag_label);      meta.addWidget(self._tag_edit)
         meta.addWidget(QLabel("Laser:"));  meta.addWidget(self._laser_edit)
-        meta.addWidget(QLabel("Power:"));  meta.addWidget(self._power_edit)
+        meta.addWidget(QLabel("Sample power (µW):"));  meta.addWidget(self._power_edit)
         meta.addWidget(QLabel("Subfolder:")); meta.addWidget(self._subfolder_edit)
         self._temp_edit = QLineEdit()
         self._temp_edit.setPlaceholderText("Temp (K)")
@@ -2824,12 +2832,12 @@ class PresetsPanel(QWidget):
         self._mode_combo_name.setCurrentText(str(cfg.filename.measurement_mode or "PL"))
         self._mode_combo_name.setFixedWidth(60)
         self._mode_combo_name.setToolTip("Measurement mode token used in filenames.")
-        self._power_coeff_edit = QLineEdit()
+        self._power_coeff_edit = QLineEdit(self)  # Legacy session compatibility only
         self._power_coeff_edit.setFixedWidth(66)
         self._power_coeff_edit.setText(f"{float(cfg.filename.power_coefficient):g}")
         self._power_coeff_edit.setToolTip(
-            "Multiplier applied to manual or measured power before it is written "
-            "into filenames. Example: Power 1100 × Coeff 2 = 2200 µW."
+            "Legacy coefficient; ignored. Meter correction is configured "
+            "in the Power Meter section."
         )
         self._tag_edit.hide()
         self._tag_label.hide()
@@ -2838,8 +2846,7 @@ class PresetsPanel(QWidget):
         meta.insertWidget(5, self._temp_edit)
         meta.insertWidget(6, QLabel("Mode:"))
         meta.insertWidget(7, self._mode_combo_name)
-        meta.insertWidget(meta.count() - 2, QLabel("Coeff:"))
-        meta.insertWidget(meta.count() - 2, self._power_coeff_edit)
+        self._power_coeff_edit.hide()
 
         # Wrap meta row in a styled frame
         meta_frame = QFrame()
@@ -4355,7 +4362,6 @@ class PresetsPanel(QWidget):
         return loop_df, batch_df, seq, batch
 
     def _current_run_meta(self) -> Dict[str, Any]:
-        coeff = _safe_float(self._power_coeff_edit.text())
         return {
             "device_id": self._sample_edit.text().strip(),
             "point": self._point_edit.text().strip(),
@@ -4364,7 +4370,8 @@ class PresetsPanel(QWidget):
             "measurement_mode": self._mode_combo_name.currentText(),
             "laser_nm": self._laser_edit.text().strip(),
             "power_uw": self._power_edit.text().strip(),
-            "power_coefficient": coeff if coeff is not None else 1.0,
+            "power_coefficient": 1.0,
+            "power_correction_factor": power_correction_factor(),
             "subfolder": self._subfolder_edit.text().strip() or "Initial Data",
             "initial_voltage_settle_s": float(
                 self._initial_voltage_settle_spin.value()
@@ -5266,6 +5273,7 @@ class PresetsPanel(QWidget):
             self._experiment_run = ExperimentMetadataService(out_dir).begin(
                 "dual_gate_sweep", run_meta["device_id"], output_dir=out_dir, settings=run_meta
             )
+            bind_lightfield_metadata(self._lf6, self._experiment_run)
         except Exception as exc:
             QMessageBox.critical(self, "Metadata error", f"Experiment metadata could not be created; run blocked.\n\n{exc}")
             self._log(f"Metadata error: {exc}")

@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 )
 
 from utils.config import cfg
+from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService
 from utils.filename_builder import (
     FilenameContext,
@@ -999,6 +1000,7 @@ class _ContinuousMCDWorker(QObject):
 
         def capture() -> None:
             try:
+                set_lightfield_context(self._lf6_ctrl, output_file=self._csv_path, spectrum_index=self._spectra_written + 1)
                 result["value"] = spec.acquire()
             except BaseException as exc:
                 result["error"] = exc
@@ -1755,15 +1757,15 @@ class MCDPanel(QWidget):
         self._laser.setPlaceholderText("Laser nm")
         self._power = QLineEdit(cfg.mcd.power_uw)
         self._power.setToolTip(
-            "Nominal excitation power in uW - recorded in filenames."
+            "Sample power in µW, used directly in filenames."
         )
-        self._power.setPlaceholderText("Power uW")
+        self._power.setPlaceholderText("Sample power µW")
         self._power_coefficient = self._double_spin(
             -1_000_000.0, 1_000_000.0, cfg.mcd.power_coefficient, 6, ""
         )
         self._power_coefficient.setMinimumWidth(140)
         self._power_coefficient.setToolTip(
-            "Multiplier applied to the nominal power token in filenames."
+            "Legacy filename coefficient; no longer applied."
         )
         sample_row = QHBoxLayout()
         sample_row.setSpacing(6)
@@ -1796,8 +1798,9 @@ class MCDPanel(QWidget):
         optical_tokens.addWidget(self._mode)
         optical_tokens.addWidget(self._laser, 1)
         optical_tokens.addWidget(self._power, 1)
-        optical_tokens.addWidget(self._power_coefficient, 1)
-        metadata_form.addRow("Mode / laser / power / coefficient", optical_tokens)
+        self._power_coefficient.setParent(self)
+        self._power_coefficient.hide()
+        metadata_form.addRow("Mode / laser / sample power", optical_tokens)
         self._metadata_widget.setVisible(False)
         sample_form.addRow(self._metadata_toggle)
         sample_form.addRow(self._metadata_widget)
@@ -2945,6 +2948,7 @@ class MCDPanel(QWidget):
             self._experiment_run = ExperimentMetadataService(run_root).begin(
                 "mcd_aps100", params["sample_id"], output_dir=run_root, settings=params
             )
+            bind_lightfield_metadata(self._lf6, self._experiment_run)
         except Exception as exc:
             QMessageBox.critical(self, "Metadata error", f"Experiment metadata could not be created; run blocked.\n\n{exc}")
             self._magnet.release_exclusive("mcd")

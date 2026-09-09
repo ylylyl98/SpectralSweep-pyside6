@@ -181,18 +181,16 @@ def format_stage_position_token(position: Any, *, decimal_style: str = "p") -> s
 
 
 def resolve_power_uw(ctx: FilenameContext) -> Tuple[Optional[float], str]:
-    coefficient = _coerce_float(ctx.power_coefficient)
-    if coefficient is None:
-        coefficient = 1.0
-
+    # Meter readings arrive corrected; nominal power is already sample power.
+    # Retain the legacy context field for loading old sessions, but ignore it.
     measured = _coerce_float(ctx.measured_power_uw)
     if ctx.measure_power and measured is not None:
-        return measured * coefficient, "measured"
+        return measured, "measured"
 
     manual = _coerce_float(ctx.nominal_power_uw)
     if manual is None:
         return None, "missing"
-    return manual * coefficient, "nominal"
+    return manual, "nominal"
 
 
 def format_power_uw_decimal(value: float) -> str:

@@ -34,6 +34,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from app.power_reading import read_power
+
 
 class _PM100DWorker(QObject):
 
@@ -100,7 +102,7 @@ class _PM100DWorker(QObject):
             self.error.emit("PM100D not connected.")
             return
         try:
-            pwr = float(self._adapter.get_power())
+            pwr = read_power(self._adapter).corrected_w
             self.power_ready.emit(pwr)
         except Exception as exc:
             self.error.emit(f"PM100D read_power failed: {exc}")

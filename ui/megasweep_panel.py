@@ -55,6 +55,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pyqtgraph as pg
 from utils.config import cfg
+from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService
 from utils.filename_builder import format_compact_number, format_decimal_token, format_power_uw_decimal, sanitize_token
 from utils.mcd_common import (
@@ -2172,6 +2173,7 @@ class _MegaSweepWorker(QObject):
                     vbg_m, vtg_m = _read_gates(iv)
                     vbias_m = _read_bias(iv)
                     Ibg, Itg, Ib = _read_currents(iv)
+                    set_lightfield_context(self._lf6, output_file=fp, point_index=done, Vtg_set=float(vtg), Vbg_set=float(vbg), Vbias_set=float(vbias))
                     y = _read_intensity(spec, int(wls.size)) if spec is not None else np.full(wls.size, NAN, dtype=float)
                     axis_vals = point["axis_values"]
                     prefix = np.array([
@@ -3447,6 +3449,7 @@ class MegaSweepPanel(QWidget):
                 "gate_map_2d", str(params.get("sample", "")).strip(),
                 output_dir=params["out_path"], settings=params,
             )
+            bind_lightfield_metadata(self._lf6, self._experiment_run)
         except Exception as exc:
             self._on_error(f"Metadata error; run blocked: {exc}")
             return

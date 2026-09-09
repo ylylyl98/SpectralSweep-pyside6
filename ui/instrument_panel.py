@@ -2117,6 +2117,7 @@ class _StageWorker(QObject):
 class _PMReadWorker(QObject):
     """Single power reading from PM100D."""
     reading  = Signal(float)   # power in Watts
+    details = Signal(object)
     finished = Signal()
     error    = Signal(str)
 
@@ -2127,8 +2128,10 @@ class _PMReadWorker(QObject):
     @Slot()
     def run(self):
         try:
-            p = float(self._ctrl.adapter.get_power())
-            self.reading.emit(p)
+            from app.power_reading import read_power
+            reading = read_power(self._ctrl.adapter)
+            self.reading.emit(reading.corrected_w)
+            self.details.emit(reading)
         except Exception as exc:
             self.error.emit(str(exc))
         finally:
@@ -3055,10 +3058,25 @@ class _PM100DSection(QWidget):
         lay.addLayout(wl_row)
 
         # ── power readout ─────────────────────────────────────────────────
+        factor_row = QHBoxLayout()
+        factor_row.addWidget(QLabel("Power correction factor:"))
+        self._factor_spn = QDoubleSpinBox(self)
+        self._factor_spn.setRange(0.000001, 1_000_000.0)
+        self._factor_spn.setDecimals(6)
+        self._factor_spn.setValue(float(cfg.pm100d.correction_factor))
+        self._factor_spn.setToolTip(
+            "Corrected sample power = raw meter power × factor. Applies to all "
+            "meter readings; sweeps keep the factor captured at run start. "
+            "Manual sample power is used directly."
+        )
+        self._factor_spn.valueChanged.connect(self._on_factor_changed)
+        factor_row.addWidget(self._factor_spn)
+        lay.addLayout(factor_row)
+
         pwr_row = QHBoxLayout()
         self._pwr_lbl = QLabel("— W")
         self._pwr_lbl.setStyleSheet("color: gray; font-weight: bold; font-size: 13px;")
-        self._pwr_lbl.setToolTip("Last measured optical power.")
+        self._pwr_lbl.setToolTip("Corrected sample power from the last meter reading.")
         self._pwr_lbl.setMinimumWidth(110)
         pwr_row.addWidget(self._pwr_lbl)
         self._read_pwr_btn = QPushButton("Read")
@@ -3104,12 +3122,28 @@ class _PM100DSection(QWidget):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.reading.connect(self._on_reading)
+        worker.details.connect(self._on_reading_details)
         worker.error.connect(self._on_pm_error)
         worker.finished.connect(thread.quit)
         thread.finished.connect(self._on_pm_done)
         self._pm_worker = worker   # prevent Python GC from destroying the worker
         self._pm_thread = thread
         thread.start()
+
+    @Slot(float)
+    def _on_factor_changed(self, value):
+        from app.power_reading import power_correction_factor
+        cfg.pm100d.correction_factor = power_correction_factor(value)
+        self._pwr_lbl.setText("— W")
+        self._pwr_lbl.setToolTip("Factor changed; take a new reading. Active sweeps retain their starting factor.")
+
+    @Slot(object)
+    def _on_reading_details(self, reading):
+        self._pwr_lbl.setToolTip(
+            f"Raw: {reading.raw_w * 1e6:g} µW\n"
+            f"Correction factor: {reading.correction_factor:g}\n"
+            f"Corrected sample power: {reading.corrected_w * 1e6:g} µW"
+        )
 
     def _wire(self):
         self._scan_btn.clicked.connect(self._ctrl.scan_devices)
