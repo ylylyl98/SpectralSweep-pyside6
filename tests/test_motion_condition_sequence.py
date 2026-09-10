@@ -81,11 +81,11 @@ class MotionConditionSequenceTests(unittest.TestCase):
 
     def test_rotation_retries_read_exception(self):
         rot = _FakeRotationController()
-        rot.adapter("rot2").get_position = Mock(side_effect=[20.0, OSError("temporary read failure"), 23.9992])
+        rot.adapter("rot2").get_position = Mock(side_effect=[20.0, 20.0, OSError("temporary read failure"), 23.9992, 23.9992])
         worker = _PowerSweepWorker({}, None, rot, None, None, None)
         last = worker._sequence_apply_rotations({"rotation_settle_s": 0}, {"rot2": 24.0}, {})
         self.assertEqual(last["rot2_actual"], 23.9992)
-        self.assertEqual(rot.adapter("rot2").moves, [24.0, 24.0])
+        self.assertEqual(rot.adapter("rot2").moves, [24.0])
 
     def test_gate_readback_recovers_without_reramping(self):
         for bad in (float("nan"), float("inf"), 2.63):
@@ -144,40 +144,46 @@ class MotionConditionSequenceTests(unittest.TestCase):
                 rot.adapter("rot2").get_position = lambda: observed
                 worker = _PowerSweepWorker({}, None, rot, None, None, None)
                 last = {}
-                with self.assertRaisesRegex(RuntimeError, "tolerance 0.01 deg"):
+                with self.assertRaisesRegex(RuntimeError, "tolerance 0.01|no genuine readback"):
                     worker._sequence_apply_rotations(
                         {"rotation_settle_s": 0}, {"rot2": 24.0}, last
                     )
-                self.assertEqual(rot.adapter("rot2").moves, [24.0] * 6)
+                self.assertEqual(rot.adapter("rot2").moves, [24.0])
                 self.assertEqual(last, {})
 
-    def test_rotation_recovers_on_first_or_last_retry(self):
-        for retry in (1, 5):
-            with self.subTest(retry=retry):
-                rot = _FakeRotationController()
-                # Initial position, failed checks, then a successful check.
-                readings = iter([20.0] + [23.98] * retry + [23.9992])
-                rot.adapter("rot2").get_position = lambda: next(readings)
-                worker = _PowerSweepWorker({}, None, rot, None, None, None)
-                logs = []
-                worker.log.connect(logs.append)
-                last = worker._sequence_apply_rotations(
-                    {"rotation_settle_s": 0}, {"rot2": 24.0}, {}
-                )
-                self.assertEqual(rot.adapter("rot2").moves, [24.0] * (retry + 1))
-                self.assertEqual(last, {"rot2": 24.0, "rot2_actual": 23.9992})
-                self.assertIn(f"on retry {retry}/5", logs[-1])
-
-    def test_stop_during_retry_prevents_further_moves(self):
+    def test_rotation_read_glitch_recovers_without_reissuing_move(self):
         rot = _FakeRotationController()
-        rot.adapter("rot2").get_position = lambda: 23.98
+        readings = iter([20.0, 20.0, OSError("read glitch"), 23.9992, 23.9992])
+        def read():
+            value = next(readings)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        rot.adapter("rot2").get_position = read
         worker = _PowerSweepWorker({}, None, rot, None, None, None)
-        worker.log.connect(lambda message: worker._stop.set())
+        last = worker._sequence_apply_rotations(
+            {"rotation_settle_s": 0}, {"rot2": 24.0}, {}
+        )
+        self.assertEqual(rot.adapter("rot2").moves, [24.0])
+        self.assertEqual(last, {"rot2": 24.0, "rot2_actual": 23.9992})
+
+    def test_stop_during_readback_prevents_further_moves_and_restore(self):
+        rot = _FakeRotationController()
+        adapter = rot.adapter("rot2")
+        worker = _PowerSweepWorker({}, None, rot, None, None, None)
+        def read():
+            if adapter.moves:
+                worker._stop.set()
+            return 23.98
+        adapter.get_position = read
         with self.assertRaises(_StopRequested):
             worker._sequence_apply_rotations(
                 {"rotation_settle_s": 0}, {"rot2": 24.0}, {}
             )
-        self.assertEqual(rot.adapter("rot2").moves, [24.0])
+        worker._sequence_cleanup_errors = []
+        worker._restore_motion_positions({"rot2": 12.0})
+        self.assertEqual(adapter.moves, [24.0])
+        self.assertIn("previous motion is unconfirmed", worker._sequence_cleanup_errors[-1])
 
     def _params(self, tmp, **overrides):
         params = {

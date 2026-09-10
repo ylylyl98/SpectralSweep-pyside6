@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.devices.motion_verification import move_and_verify
+
 from app.devices.esp300_shared import acquire_shared_esp300, release_shared_esp300
 
 
@@ -21,6 +23,7 @@ class SharedESP300Rotation:
         self._resource = resource
         self._axis = int(axis)
         self._role = role
+        self.motion_tolerance = 0.25
         self._controller = acquire_shared_esp300(resource)
         try:
             self.motion_profile = self._controller.apply_fast_safe_motion_profile(
@@ -42,15 +45,32 @@ class SharedESP300Rotation:
     def axis(self) -> int:
         return self._axis
 
-    def move_to(self, angle_deg: float) -> None:
+    def move_to(self, angle_deg: float, *, stop_event=None, timeout_s=None) -> bool:
+        move_and_verify(self, angle_deg, stop_event=stop_event, timeout_s=timeout_s)
+        return True
+
+    def _move_to_unverified(self, angle_deg: float, *, stop_event=None, timeout_s: float = 60.0) -> bool:
         target = float(angle_deg)
         print(f"[ESP300] {self._role} axis {self._axis} move_to {target:g} deg")
-        self._controller.move_to(target, axis=self._axis)
+        return bool(
+            self._controller.move_to(
+                target,
+                axis=self._axis,
+                stop_event=stop_event,
+                timeout_s=float(timeout_s),
+            )
+        )
 
     def get_position(self) -> float:
         pos = float(self._controller.get_position(axis=self._axis))
         print(f"[ESP300] {self._role} axis {self._axis} readback -> {pos:g} deg")
         return pos
+
+    def motion_status(self):
+        return self._controller.motion_status(axis=self._axis)
+
+    def stop_motion(self) -> None:
+        self._controller.stop_motion(axis=self._axis)
 
     def refresh_motion_profile(self):
         self.motion_profile = self._controller.get_motion_profile(axis=self._axis)

@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
+from app.devices.motion_verification import move_and_verify
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -118,8 +119,7 @@ class _StageWorker(QObject):
                 f"({self._adapter.minimum_position:g} to {self._adapter.maximum_position:g} "
                 f"{self._adapter.position_unit})"
             )
-            self._adapter.move_to(target)
-            pos = float(self._adapter.get_position())
+            pos = move_and_verify(self._adapter, target)
             self.move_done.emit(pos)
         except Exception as exc:
             self.error.emit(f"Stage move_to failed: {exc}")

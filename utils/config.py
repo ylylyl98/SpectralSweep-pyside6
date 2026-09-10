@@ -219,6 +219,28 @@ class StageConfig:
 
 
 @dataclass
+class ImagingStageConfig:
+    """USB ESP32 sample-imaging stage preferences.
+
+    Position/reference state is deliberately never persisted.  The remaining
+    fields are UI defaults and the last firmware readback; the device remains
+    authoritative for scale, direction, and maximum travel.
+    """
+    com_port: str = ""
+    jog_mm: float = 0.1
+    frequency_hz: int = 100
+    pulses_per_rev: int = 200
+    direction_away_level: bool = True
+    maximum_mm: float = 0.0
+    protocol: str = "stage-v2"
+    fine_mm: float = 0.01
+    medium_mm: float = 0.1
+    coarse_mm: float = 1.0
+    slow_hz: int = 100
+    normal_hz: int = 500
+
+
+@dataclass
 class RotationSlotConfig:
     """Per-rotation-stage defaults and persisted selection."""
 
@@ -385,6 +407,7 @@ class AppConfig:
     bfp_rc: BFPRCConfig = field(default_factory=BFPRCConfig)
     rotation: RotationConfig = field(default_factory=RotationConfig)
     stage: StageConfig = field(default_factory=StageConfig)
+    imaging_stage: ImagingStageConfig = field(default_factory=ImagingStageConfig)
     magnet: MagnetConfig = field(default_factory=MagnetConfig)
     attodry2100: AttoDRY2100Config = field(default_factory=AttoDRY2100Config)
     mcd: MCDConfig = field(default_factory=MCDConfig)
@@ -490,6 +513,7 @@ class AppConfig:
         if isinstance(rotation_data.get("rot2"), dict):
             _update_dataclass(self.rotation.rot2, rotation_data["rot2"])
         _update_dataclass(self.stage,    data.get("stage", {}))
+        _update_dataclass(self.imaging_stage, data.get("imaging_stage", {}))
         _update_dataclass(self.magnet,   data.get("magnet", {}))
         # Accept the names used by early 2100 prototypes as well as the
         # canonical names written by current versions.

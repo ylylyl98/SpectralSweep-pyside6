@@ -1,0 +1,71 @@
+{
+  "verified_at_utc": "2026-09-10T22:50:38.080631+00:00",
+  "port": "COM4",
+  "build_success": true,
+  "upload_success": true,
+  "flash_hash_verified_by_esptool": true,
+  "platformio_version": "6.2.0",
+  "platform": "espressif32@7.1.2",
+  "source_sha256": "8c765c000f4c8e3ec50e3b2b0ac7b44514830cdef3a5ca2e1fa52fd363123aa2",
+  "binary_sha256": "eadad90c5f4d666c70d6df6375ba3e1462b65309105743b6d57e9a010e279532",
+  "post_upload_status": [
+    {
+      "protocol": "stage-v2",
+      "capabilities": [
+        "scale",
+        "direction",
+        "maximum"
+      ],
+      "homed": false,
+      "moving": false,
+      "steps": 0,
+      "limit": 0,
+      "stepsPerMm": 200,
+      "pulsesPerRev": 200,
+      "directionAwayLevel": true,
+      "frequencyHz": 100,
+      "message": "OK",
+      "legacy": false
+    },
+    {
+      "protocol": "stage-v2",
+      "capabilities": [
+        "scale",
+        "direction",
+        "maximum"
+      ],
+      "homed": false,
+      "moving": false,
+      "steps": 0,
+      "limit": 0,
+      "stepsPerMm": 200,
+      "pulsesPerRev": 200,
+      "directionAwayLevel": true,
+      "frequencyHz": 100,
+      "message": "OK",
+      "legacy": false
+    },
+    {
+      "protocol": "stage-v2",
+      "capabilities": [
+        "scale",
+        "direction",
+        "maximum"
+      ],
+      "homed": false,
+      "moving": false,
+      "steps": 0,
+      "limit": 0,
+      "stepsPerMm": 200,
+      "pulsesPerRev": 200,
+      "directionAwayLevel": true,
+      "frequencyHz": 100,
+      "message": "OK",
+      "legacy": false
+    }
+  ],
+  "verification_commands": [
+    "status"
+  ],
+  "movement_commands_sent": false
+}

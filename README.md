@@ -323,3 +323,79 @@ complete, stopped, failed, and not-started entries. Numeric inputs accept
 scalars, comma lists, `(start, stop, step)`, and the legacy `start:step:stop`
 syntax. Keep-current rotation plans preserve the live angle without requiring a
 rotation connection.
+
+## Dual Gate execution order
+
+The loop table defines values. In **Customized** mode, enabled rows with the
+same Group number step together (Zip); their value counts must match. Different
+groups are nested. **Synchronize** keeps each enabled row separate, and **Zip**
+steps all enabled rows together.
+
+The **Execution order** table places these groups around **Gate conditions**
+(the enabled batch rows) and **Gate points** (the voltages within a row). Use the
+Up/Down buttons to arrange levels from outermost to innermost. Gate points stay
+inside their gate condition, and spectrum acquisition is always last. For
+example, place a stage/exposure group first, then Gate conditions, Gate points,
+and a paired RotIn/RotOut group. This measures every angle pair at a voltage
+point before advancing the gate sweep. Move the angle group above Gate points
+to measure a complete sweep at each angle pair instead.
+
+RotIn means the excitation rotator; RotOut means the detection rotator. They are
+ordinary optional loop parameters, not a mandatory polarization recipe. Disabled
+axes are not moved or required. Enter your own calibrated numeric angles; the
+app does not infer KK or KK-prime labels from an angle alone. Internal rotation
+identifiers remain compatible with older saved configurations, while new
+filename tokens use `RotIn` and `RotOut`.
+
+Review the resulting sequence and counts, then use the single **Apply plan**
+button in the fixed footer above Run. It applies the loop table, gate conditions,
+and execution order together; **Discard** restores the last applied plan. The
+footer identifies which parts have pending changes and keeps Run disabled until
+they are applied or discarded. Invalid edits are highlighted with a reason.
+The compact and full previews identify draft versus applied sequences. An
+invalid draft cannot replace the applied plan with a runnable sequence.
+For drafts above 20,000 potential spectra, live expansion is deferred until
+Apply; both preview views explicitly identify the displayed applied sequence.
+Drag the divider between execution order and preview to adjust their space;
+the Apply/Discard and Run controls remain outside the scrolling content.
+
+If changing group membership invalidates an existing order, use **Reset order**,
+review the new nesting, and Apply it; the app does not silently reuse a different
+parameter under an old group label.
+Existing saved plans retain their original loop/batch ordering. Interleaved
+points remain grouped by their logical sweep and repetition in the output CSVs;
+changing acquisition order does not require a separate CSV for every spectrum.
+
+A batch row's **MeasurePower** selection requests a fresh corrected meter reading
+for its output sweep and includes measured power in its filename in either
+**PL** or **Ref** mode. A failed requested reading is reported as an error instead
+of substituting a nominal or stale value. PL/Ref still identifies the measurement
+mode, so select the appropriate mode for the experiment.
+
+## Stage and rotation move verification
+
+Stage and rotation adapters verify moves by default, including moves requested
+from the instrument controls and measurement sweeps. Completion requires fresh,
+consecutive position readings within tolerance. Readback retries do not issue
+another move; a corrective move is permitted only after a fresh confirmation
+that the device has stopped, with one correction allowed by default.
+
+For ESP300 axes, the move allowance uses the current position, operating speed,
+acceleration and deceleration, with a margin for settling and communication.
+Slow moves can therefore exceed the former fixed 60-second wait. Unknown speed
+uses a finite fallback allowance. Elliptec uses its synchronous library reply
+with an explicit timeout, followed by genuine readback checks; the app does not
+infer physical speed from its percentage-speed setting. No installed library
+files are modified.
+
+An unresolved move blocks acquisition and prevents an automatic follow-up move
+while the device's stopped state is unconfirmed. This also applies to restore
+moves during cleanup. A failed Elliptec move may require operator recovery and
+reconnection because that adapter cannot independently confirm motion stopped.
+Cancellation of an Elliptec library call is checked after the call returns;
+it is not an immediate hardware stop.
+
+Defaults are defined in `app/devices/motion_verification.py`, with tolerances
+declared by each adapter (0.25 degrees for rotations, 0.01 mm for the Newport
+linear stage, and 0.01 native stage units for the Elliptec linear stage).
+These tolerances are not automatically relaxed after failures.

@@ -48,6 +48,7 @@ from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_con
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.power_reading import power_correction_factor, power_reading_lock, read_power
 from app.nd_calibration import make_power_points, positions_for_power, predict_power
+from app.devices.motion_verification import MotionCancelledError, MotionVerificationConfig, move_and_verify
 from utils.motion_conditions import (MODE_DOPING_EFIELD, build_conditions,
     expand_sequence, resolve_rotation_plan, sequence_preview, build_motion_plan,
     normalize_motion_axis, parse_motion_values, MOTION_NOT_USED, MOTION_HOLD, MOTION_FIXED, MOTION_SWEEP,
@@ -89,7 +90,6 @@ _ROTATION_MIN_DEG = -3600.0
 _ROTATION_MAX_DEG = 3600.0
 # Allow small hardware readback errors after a completed rotation move.
 _ROTATION_POSITION_TOLERANCE_DEG = 0.01
-_ROTATION_POSITION_RETRIES = 5
 _GATE_READBACK_RETRIES = 5
 _GATE_READBACK_INTERVAL_S = 0.1
 
@@ -547,9 +547,14 @@ class _PowerSweepWorker(QObject):
                             verified = self._sequence_apply_rotations(p, {motion_key: float(pos)}, {})
                             arrived = verified[f"{motion_key}_actual"]
                         else:
-                            motion.move_to(pos)
-                            _cancelable_sleep(p.get("motion_settle_s", 0.3), self._stop)
-                            arrived = float(motion.get_position())
+                            arrived = move_and_verify(
+                                motion,
+                                float(pos),
+                                stop_event=self._stop,
+                                config=MotionVerificationConfig(
+                                    settling_s=max(0.0, float(p.get("motion_settle_s", 0.3))),
+                                ),
+                            )
                         self.log.emit(
                             f"[{_ts()}]   arrived at {arrived:.3f} "
                             f"{motion_unit}"
@@ -698,7 +703,11 @@ class _PowerSweepWorker(QObject):
             # restore the selected actuator to its pre-sweep position
             if p.get("return_motion_to_start", True):
                 try:
-                    motion.move_to(start_position)
+                    move_and_verify(
+                        motion,
+                        float(start_position),
+                        config=MotionVerificationConfig(settling_s=0.0),
+                    )
                     self.log.emit(
                         f"[{_ts()}] {motion_label} returned to its starting "
                         f"position ({start_position:.3f} {motion_unit})."
@@ -902,9 +911,8 @@ class _PowerSweepWorker(QObject):
                         if target is None: continue
                         adapter = adapters[axis]
                         if axis in ("rot1", "rot2"):
-                            # Reuse the established 0.01° absolute tolerance
-                            # and five readback retries; move_to errors remain
-                            # immediate and are never silently retried.
+                            # Shared verification owns read retries and the single
+                            # correction permitted after confirmed stopped status.
                             if axis not in last_rotation or not math.isclose(last_rotation[axis], float(target), rel_tol=0.0, abs_tol=_ROTATION_POSITION_TOLERANCE_DEG):
                                 moved_axes.add(axis)
                             last_rotation = self._sequence_apply_rotations(
@@ -917,8 +925,10 @@ class _PowerSweepWorker(QObject):
                             should_move = axis not in commanded_targets or not math.isclose(commanded_targets[axis], target, rel_tol=0.0, abs_tol=1e-9)
                             if should_move:
                                 moved_axes.add(axis)
-                                adapter.move_to(target)
-                                _cancelable_sleep(p.get("motion_settle_s", 0.0), self._stop)
+                                move_and_verify(
+                                    adapter, target, stop_event=self._stop,
+                                    config=MotionVerificationConfig(settling_s=float(p.get("motion_settle_s", 0.0))),
+                                )
                             try: observed = float(adapter.get_position())
                             except Exception as exc: raise RuntimeError(f"{axis} readback failed: {exc}") from exc
                             if not math.isfinite(observed): raise RuntimeError(f"{axis} readback is nonfinite")
@@ -983,7 +993,7 @@ class _PowerSweepWorker(QObject):
                 for axis, value in restore.items():
                     if axis not in moved_axes:
                         continue
-                    try: adapters[axis].move_to(value)
+                    try: move_and_verify(adapters[axis], value)
                     except Exception as exc: cleanup_errors.append(f"{axis} restore failed: {exc}")
             manifest["cleanup_errors"] = cleanup_errors; manifest["cleanup_status"] = "failed" if cleanup_errors else "complete"
             self._atomic_manifest_write(manifest_path, manifest)
@@ -1292,7 +1302,7 @@ class _PowerSweepWorker(QObject):
         for axis, value in restore.items():
             try:
                 adapter = self._stg.adapter if axis == "stage" else self._rot.adapter(axis)
-                adapter.move_to(value)
+                move_and_verify(adapter, value)
             except Exception as exc:
                 self.log.emit(f"[{_ts()}] {axis} restore to {value:.12g} failed: {exc}")
                 self._sequence_cleanup_errors.append(f"{axis} restore to {value:.12g} failed: {exc}")
@@ -1309,43 +1319,18 @@ class _PowerSweepWorker(QObject):
                 except Exception:
                     current = NAN
             needs_move = not math.isfinite(current) or not math.isclose(float(current), target, abs_tol=1e-9)
-            for attempt in range(_ROTATION_POSITION_RETRIES + 1):
-                if self._stop.is_set():
-                    raise _StopRequested()
-                if needs_move or attempt > 0:
-                    adapter.move_to(target)
-                    _cancelable_sleep(p.get("rotation_settle_s", p.get("motion_settle_s", 0.3)), self._stop)
-                read_error = ""
-                try:
-                    observed = float(adapter.get_position())
-                except _StopRequested:
-                    raise
-                except Exception as exc:
-                    observed = NAN
-                    read_error = f"; readback failed: {exc}"
-                if self._stop.is_set():
-                    raise _StopRequested()
-                if math.isfinite(observed) and math.isclose(
-                    observed, target, rel_tol=0.0, abs_tol=_ROTATION_POSITION_TOLERANCE_DEG
-                ):
-                    if attempt:
-                        self.log.emit(
-                            f"[{_ts()}] {axis} reached {target:g} deg on retry "
-                            f"{attempt}/{_ROTATION_POSITION_RETRIES} (observed {observed:g} deg)."
-                        )
-                    break
-                if attempt < _ROTATION_POSITION_RETRIES:
-                    self.log.emit(
-                        f"[{_ts()}] {axis} angle readback {observed:g} deg, target {target:g} deg; "
-                        f"retry {attempt + 1}/{_ROTATION_POSITION_RETRIES}{read_error}."
-                    )
-            else:
-                raise RuntimeError(
-                    f"{axis} did not reach requested angle {target:g} deg "
-                    f"(observed {observed:g} deg, error {abs(observed - target):g} deg, "
-                    f"tolerance {_ROTATION_POSITION_TOLERANCE_DEG:g} deg; "
-                    f"failed after {_ROTATION_POSITION_RETRIES} retries{read_error})"
+            if self._stop.is_set():
+                raise _StopRequested()
+            try:
+                observed = move_and_verify(
+                    adapter, target, stop_event=self._stop, issue_move=needs_move,
+                    tolerance=_ROTATION_POSITION_TOLERANCE_DEG,
+                    config=MotionVerificationConfig(
+                        settling_s=float(p.get("rotation_settle_s", p.get("motion_settle_s", 0.3))),
+                    ),
                 )
+            except MotionCancelledError as exc:
+                raise _StopRequested() from exc
             last[axis] = target
             last[f"{axis}_actual"] = observed
         return last

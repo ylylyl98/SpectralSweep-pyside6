@@ -238,7 +238,11 @@ class SweepLinePanelTests(unittest.TestCase):
         panel = PresetsPanel()
         self.assertEqual(panel._safety_bar.maximumHeight(), 36)
         self.assertEqual(panel._safe_jump_spin.width(), 96)
-        self.assertEqual(panel._voltage_timing_bar.maximumHeight(), 36)
+        # Settling controls occupy separate rows so scaled text fits the pane.
+        timing_layout = panel._voltage_timing_bar.layout()
+        initial_row = timing_layout.getItemPosition(timing_layout.indexOf(panel._initial_voltage_settle_spin))[0]
+        later_row = timing_layout.getItemPosition(timing_layout.indexOf(panel._voltage_settle_spin))[0]
+        self.assertLess(initial_row, later_row)
         self.assertEqual(panel._initial_voltage_settle_spin.maximum(), 3600.0)
         self.assertEqual(panel._voltage_settle_spin.maximum(), 3600.0)
         self.assertEqual(panel._initial_voltage_settle_spin.width(), 88)
@@ -250,7 +254,7 @@ class SweepLinePanelTests(unittest.TestCase):
             panel._voltage_settle_spin.value(), cfg.ramp.settle_s
         )
         self.assertLessEqual(panel._safety_bar.sizeHint().height(), 36)
-        self.assertEqual(panel._tree.minimumHeight(), 220)
+        self.assertEqual(panel._tree.minimumHeight(), 140)
 
     def test_dual_gate_long_settle_metadata_and_duration_format(self):
         panel = PresetsPanel()
@@ -464,8 +468,13 @@ class SweepLinePanelTests(unittest.TestCase):
         measure_item.setCheckState(Qt.CheckState.Checked)
         adapter = Mock()
         panel._pm = types.SimpleNamespace(is_connected=True, adapter=adapter)
-
-        panel._refresh_filename_preview()
+        panel._last_power_uw = 9876.543  # Reading from an earlier optical setup.
+        for mode in ("PL", "Ref"):
+            panel._mode_combo_name.setCurrentText(mode)
+            panel._refresh_filename_preview()
+            self.assertIn("PowerPending", panel._filename_preview_lbl.text())
+            self.assertNotIn("9876.543", panel._filename_preview_lbl.text())
+            self.assertIn("PowerPending", panel._upcoming_preview.toPlainText())
 
         adapter.get_power.assert_not_called()
 

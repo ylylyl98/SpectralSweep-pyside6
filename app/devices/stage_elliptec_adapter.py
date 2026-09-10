@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.devices.motion_verification import move_and_verify
+
 import time
 import math
 
@@ -18,6 +20,7 @@ class ElliptecLinearStage:
     def __init__(self, port: str):
         self._port = port
         self.stage = Thorlabs.ElliptecMotor(port)
+        self.motion_tolerance = 0.01
 
     @property
     def address(self) -> str:
@@ -51,18 +54,33 @@ class ElliptecLinearStage:
             return min(max(pos, self.minimum_position), self.maximum_position)
         return self.validate_position(pos)
 
-    def move_to(self, position: float) -> None:
+    def move_to(self, position: float, *, stop_event=None, timeout_s=None) -> bool:
+        move_and_verify(self, position, stop_event=stop_event, timeout_s=timeout_s)
+        return True
+
+    def _move_to_unverified(self, position: float, *, stop_event=None, timeout_s: float = 60.0) -> bool:
         target = self.validate_position(position)
-        self.stage.move_to(target)
-        time.sleep(0.5)
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("motion cancelled")
+        result = self.stage.move_to(target, timeout=float(timeout_s))
+        if result is False:
+            raise RuntimeError(f"Elliptec move to {target:g} failed")
+        return True
 
     def get_position(self) -> float:
         return float(self.stage.get_position())
 
+    def get_position_strict(self) -> float:
+        return float(self.stage.get_position())
+
+    def stop_motion(self) -> None:
+        stop = getattr(self.stage, "stop", None)
+        if callable(stop):
+            stop()
+
     def home(self) -> None:
         if hasattr(self.stage, "home"):
             self.stage.home()
-            time.sleep(0.5)
             return
         self.move_to(self.minimum_position)
 

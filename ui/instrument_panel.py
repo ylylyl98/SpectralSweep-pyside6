@@ -29,7 +29,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
     QComboBox, QCheckBox, QScrollArea, QSizePolicy, QFormLayout,
     QDoubleSpinBox, QSpinBox, QFrame, QToolButton, QTableWidget,
-    QTableWidgetItem, QHeaderView, QApplication, QMessageBox,
+    QTableWidgetItem, QHeaderView, QApplication, QMessageBox, QDialog,
+    QDialogButtonBox,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,232 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from utils.config import cfg
 from app.devices.stage_profiles import get_linear_stage_profile
+from app.devices.motion_verification import move_and_verify
+
+
+class _ESP32ImagingStageSection(QWidget):
+    """Safe daily controls and explicitly applied stage-v2 settings."""
+    def __init__(self, ctrl, parent=None):
+        super().__init__(parent)
+        self._ctrl = ctrl
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.setMaximumWidth(350)
+        self._connected = False
+        self._state = {}
+        self._reference_dialog = None
+        self._scale_dirty = False; self._direction_dirty = False; self._maximum_dirty = False
+        lay = QVBoxLayout(self); lay.setContentsMargins(4, 4, 4, 4); lay.setSpacing(4)
+        port_row = QHBoxLayout(); self._port = QComboBox(); self._port.setEditable(True)
+        for p in _list_com_ports(): self._port.addItem(p)
+        if cfg.imaging_stage.com_port: self._port.setCurrentText(cfg.imaging_stage.com_port)
+        port_row.addWidget(self._port, 1)
+        self._refresh = QPushButton("Refresh"); self._refresh.clicked.connect(self._refresh_ports); port_row.addWidget(self._refresh)
+        self._connect = QPushButton("Connect"); self._connect.clicked.connect(self._toggle); port_row.addWidget(self._connect)
+        lay.addLayout(port_row)
+        self._status = QLabel("○ Disconnected"); self._status.setWordWrap(True); lay.addWidget(self._status)
+        form = QFormLayout(); form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self._preset = QComboBox(); self._preset.addItem(f"Fine ({cfg.imaging_stage.fine_mm:g} mm)", cfg.imaging_stage.fine_mm); self._preset.addItem(f"Medium ({cfg.imaging_stage.medium_mm:g} mm)", cfg.imaging_stage.medium_mm); self._preset.addItem(f"Coarse ({cfg.imaging_stage.coarse_mm:g} mm)", cfg.imaging_stage.coarse_mm); self._preset.setCurrentIndex(min(range(3), key=lambda i: abs(float(self._preset.itemData(i)) - float(cfg.imaging_stage.jog_mm)))); self._jog = QDoubleSpinBox(); self._jog.setRange(.005, 10); self._jog.setDecimals(3); self._jog.setValue(float(self._preset.currentData())); self._jog.setSuffix(" mm"); self._jog.setVisible(False); self._preset.currentIndexChanged.connect(lambda _: self._jog.setValue(float(self._preset.currentData())))
+        form.addRow("Move distance", self._preset)
+        self._speed = QComboBox(); self._speed.addItem(f"Slow ({cfg.imaging_stage.slow_hz} Hz)", cfg.imaging_stage.slow_hz); self._speed.addItem(f"Normal ({cfg.imaging_stage.normal_hz} Hz)", cfg.imaging_stage.normal_hz); self._speed.setCurrentIndex(0 if cfg.imaging_stage.frequency_hz <= cfg.imaging_stage.slow_hz else 1)
+        self._apply_freq = QPushButton("Apply speed"); self._apply_freq.clicked.connect(lambda: self._ctrl.set_frequency(int(self._speed.currentData())))
+        freq_row = QHBoxLayout(); freq_row.addWidget(self._speed); freq_row.addWidget(self._apply_freq); form.addRow("Speed", freq_row); lay.addLayout(form)
+        jogrow = QHBoxLayout(); self._jog_minus = QPushButton("← Away from imaging end"); self._jog_plus = QPushButton("Toward imaging end →")
+        for button in (self._jog_minus, self._jog_plus): button.setMinimumHeight(38); button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._jog_minus.clicked.connect(lambda: self._ctrl.jog(float(self._preset.currentData()))); self._jog_plus.clicked.connect(lambda: self._ctrl.jog(-float(self._preset.currentData())))
+        jogrow.addWidget(self._jog_minus); jogrow.addWidget(self._jog_plus); lay.addLayout(jogrow)
+        # Absolute destinations are deliberately separate from the open-loop
+        # jog controls.  Both destinations are interpreted from the manually
+        # recorded imaging reference and are gated until a saved limit exists.
+        self._goto_zero = QPushButton("Go to imaging reference (0) →")
+        self._goto_maximum = QPushButton("← Go to saved maximum")
+        open_loop_tip = ("Open-loop pulse estimate; motion does not guarantee physical seating at the endpoint. "
+                         "Requires a referenced stage and saved maximum.")
+        self._goto_zero.setToolTip(open_loop_tip)
+        self._goto_maximum.setToolTip(open_loop_tip)
+        for button in (self._goto_zero, self._goto_maximum):
+            button.setMinimumHeight(34)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._goto_zero.clicked.connect(lambda: self._goto_absolute(0.0))
+        self._goto_maximum.clicked.connect(self._goto_saved_maximum)
+        lay.addWidget(self._goto_zero); lay.addWidget(self._goto_maximum)
+        self._stop = QPushButton("STOP — position becomes unknown"); self._stop.setStyleSheet("background:#b3261e;color:white;font-weight:bold;"); self._stop.clicked.connect(self._ctrl.stop); lay.addWidget(self._stop)
+        self._position = QLabel("Estimated distance from imaging end: unknown"); self._position.setToolTip("Open-loop estimate from firmware pulses; manually re-seat and set zero after a stall, power loss, or STOP."); lay.addWidget(self._position)
+        self._reference = QLabel("Reference: unknown"); self._limit = QLabel("Maximum: unknown"); self._frequency_readout = QLabel("Speed: unknown"); lay.addWidget(self._reference); lay.addWidget(self._limit); lay.addWidget(self._frequency_readout)
+        self._advanced_btn = QToolButton(); self._advanced_btn.setText("Advanced setup"); self._advanced_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon); self._advanced_btn.setCheckable(True); self._advanced_btn.setChecked(False); self._advanced_btn.setArrowType(Qt.RightArrow); self._advanced_btn.toggled.connect(self._toggle_advanced); lay.addWidget(self._advanced_btn)
+        self._advanced = QWidget(); adv = QFormLayout(self._advanced); adv.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        self._fine_mm = QDoubleSpinBox(); self._fine_mm.setRange(.005, 10); self._fine_mm.setDecimals(3); self._fine_mm.setValue(float(cfg.imaging_stage.fine_mm))
+        self._medium_mm = QDoubleSpinBox(); self._medium_mm.setRange(.005, 10); self._medium_mm.setDecimals(3); self._medium_mm.setValue(float(cfg.imaging_stage.medium_mm))
+        self._coarse_mm = QDoubleSpinBox(); self._coarse_mm.setRange(.005, 10); self._coarse_mm.setDecimals(3); self._coarse_mm.setValue(float(cfg.imaging_stage.coarse_mm))
+        preset_cfg = QHBoxLayout(); preset_cfg.addWidget(self._fine_mm); preset_cfg.addWidget(self._medium_mm); preset_cfg.addWidget(self._coarse_mm); adv.addRow("Fine / Medium / Coarse mm", preset_cfg)
+        self._slow_hz = QSpinBox(); self._slow_hz.setRange(100, 2000); self._slow_hz.setValue(int(cfg.imaging_stage.slow_hz)); self._normal_hz = QSpinBox(); self._normal_hz.setRange(100, 2000); self._normal_hz.setValue(int(cfg.imaging_stage.normal_hz)); speed_cfg = QHBoxLayout(); speed_cfg.addWidget(self._slow_hz); speed_cfg.addWidget(self._normal_hz); adv.addRow("Slow / Normal Hz", speed_cfg)
+        self._maximum = QDoubleSpinBox(); self._maximum.setRange(.001, 100); self._maximum.setDecimals(3); self._maximum.setSuffix(" mm"); self._maximum.valueChanged.connect(lambda _: setattr(self, "_maximum_dirty", True))
+        self._apply_max = QPushButton("Apply maximum"); self._apply_max.clicked.connect(lambda: self._ctrl.set_maximum(self._maximum.value())); maxrow = QHBoxLayout(); maxrow.addWidget(self._maximum); maxrow.addWidget(self._apply_max); adv.addRow("Maximum left from imaging end", maxrow)
+        self._save_max = QPushButton("Save current as maximum"); self._save_max.clicked.connect(getattr(self._ctrl, "save_current_as_maximum", lambda: None)); adv.addRow(self._save_max)
+        self._direction = QComboBox(); self._direction.addItem("GPIO HIGH moves away (left)", True); self._direction.addItem("GPIO LOW moves away (left)", False); self._direction.activated.connect(lambda _: setattr(self, "_direction_dirty", True)); self._apply_direction = QPushButton("Apply direction"); self._apply_direction.clicked.connect(lambda: self._ctrl.set_direction(self._direction.currentData())); drow = QHBoxLayout(); drow.addWidget(self._direction); drow.addWidget(self._apply_direction); adv.addRow("Electrical direction mapping", drow)
+        self._scale = QComboBox(); [self._scale.addItem(f"{p} pulses/rev ({p} steps/mm)", p) for p in (200, 800, 1600, 3200)]; self._scale.activated.connect(lambda _: setattr(self, "_scale_dirty", True)); self._apply_scale = QPushButton("Apply scale"); self._apply_scale.clicked.connect(lambda: self._ctrl.set_scale(self._scale.currentData())); srow = QHBoxLayout(); srow.addWidget(self._scale); srow.addWidget(self._apply_scale); adv.addRow("Driver pulses/revolution", srow)
+        self._clear_ref = QPushButton("Clear reference (preserve maximum)"); self._clear_ref.clicked.connect(lambda: self._ctrl.send("invalidate")); adv.addRow(self._clear_ref)
+        self._zero = QPushButton("Set imaging reference…"); self._zero.clicked.connect(self._open_reference_dialog); adv.addRow(self._zero)
+        self._target = QDoubleSpinBox(); self._target.setRange(0.0, 100.0); self._target.setDecimals(3); self._target.setSuffix(" mm")
+        self._target.setToolTip("Absolute distance left from the imaging reference. The value must be within the saved maximum.")
+        self._target_range = QLabel("Allowed range: unavailable until a referenced stage has a saved maximum")
+        self._target_range.setWordWrap(True)
+        self._move_target = QPushButton("Move to target")
+        self._move_target.clicked.connect(lambda: self._goto_absolute(self._target.value()))
+        self._target.valueChanged.connect(lambda _value: self._update_gates())
+        target_row = QHBoxLayout(); target_row.addWidget(self._target, 1); target_row.addWidget(self._move_target)
+        adv.addRow("Move to target", target_row); adv.addRow(self._target_range)
+        self._advanced.setVisible(False); lay.addWidget(self._advanced)
+        for spin in (self._fine_mm, self._medium_mm, self._coarse_mm): spin.valueChanged.connect(self._sync_presets)
+        for spin in (self._slow_hz, self._normal_hz): spin.valueChanged.connect(self._sync_speeds)
+        self._rel = self._goto = self._move_minus = self._move_plus = self._goto_btn = self._setmax = self._home = self._calibrate = None
+        ctrl.connected.connect(lambda _: self._on_connected()); ctrl.disconnected.connect(self._on_disconnected); ctrl.state_changed.connect(self._on_state); ctrl.error.connect(self._on_error)
+        self._update_gates()
+    def _refresh_ports(self):
+        current = self._port.currentText(); self._port.clear(); self._port.addItems(_list_com_ports()); self._port.setCurrentText(current)
+    def _sync_presets(self):
+        values = (self._fine_mm.value(), self._medium_mm.value(), self._coarse_mm.value())
+        labels = ("Fine", "Medium", "Coarse")
+        selected = self._preset.currentIndex()
+        self._preset.blockSignals(True)
+        for i, (label, value) in enumerate(zip(labels, values)):
+            self._preset.setItemText(i, f"{label} ({value:g} mm)"); self._preset.setItemData(i, value)
+        self._preset.blockSignals(False)
+        if selected >= 0: self._jog.setValue(values[selected])
+    def _sync_speeds(self):
+        values = (self._slow_hz.value(), self._normal_hz.value()); labels = ("Slow", "Normal"); selected = self._speed.currentIndex()
+        self._speed.blockSignals(True)
+        for i, (label, value) in enumerate(zip(labels, values)):
+            self._speed.setItemText(i, f"{label} ({value} Hz)"); self._speed.setItemData(i, value)
+        self._speed.blockSignals(False)
+        if selected >= 0: self._speed.setCurrentIndex(selected)
+    def _toggle_advanced(self, checked):
+        self._advanced.setVisible(bool(checked)); self._advanced_btn.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+    def _toggle(self):
+        if self._connect.text() == "Connect":
+            port = self._port.currentText().strip(); cfg.imaging_stage.com_port = port; self._ctrl.connect_instrument(port)
+        else: self._ctrl.disconnect_instrument()
+    def _update_gates(self):
+        ready = self._is_ready(); homed = bool(self._state.get("homed")); has_limit = int(self._state.get("limit", 0) or 0) > 0
+        for w in (self._jog, self._preset, self._speed): w.setEnabled(ready)
+        self._apply_freq.setEnabled(ready); self._jog_minus.setEnabled(ready and (not homed or has_limit)); self._jog_plus.setEnabled(ready and (not homed or has_limit)); self._zero.setEnabled(ready)
+        absolute_ready = ready and homed and has_limit
+        self._goto_zero.setEnabled(absolute_ready); self._goto_maximum.setEnabled(absolute_ready)
+        if absolute_ready:
+            scale = int(self._state.get("stepsPerMm", 200) or 200)
+            maximum_mm = int(self._state.get("limit", 0)) / scale
+            target_valid = 0.0 <= self._target.value() <= maximum_mm
+            self._target_range.setText(f"Allowed range: 0–{maximum_mm:g} mm (saved maximum)")
+            self._move_target.setEnabled(target_valid)
+        else:
+            self._target_range.setText("Allowed range: unavailable until a referenced stage has a saved maximum")
+            self._move_target.setEnabled(False)
+        if self._reference_dialog is not None and not ready:
+            self._reference_dialog.reject()
+        self._apply_max.setEnabled(ready and homed); self._save_max.setEnabled(ready and homed and int(self._state.get("steps", 0) or 0) > 0)
+        for w in (self._direction, self._scale, self._apply_direction, self._apply_scale, self._clear_ref): w.setEnabled(ready)
+        self._stop.setEnabled(self._connected); self._port.setEnabled(not self._connected); self._refresh.setEnabled(not self._connected)
+    def _absolute_ready(self):
+        return self._is_ready() and bool(self._state.get("homed")) and int(self._state.get("limit", 0) or 0) > 0
+    def _saved_maximum_mm(self):
+        scale = int(self._state.get("stepsPerMm", 200) or 200)
+        return int(self._state.get("limit", 0) or 0) / scale
+    def _goto_absolute(self, target_mm):
+        if not self._absolute_ready():
+            self._update_gates(); return
+        target_mm = float(target_mm)
+        maximum_mm = self._saved_maximum_mm()
+        if not 0.0 <= target_mm <= maximum_mm:
+            self._update_gates(); return
+        self._ctrl.goto(target_mm)
+    def _goto_saved_maximum(self):
+        if self._absolute_ready():
+            self._goto_absolute(self._saved_maximum_mm())
+        else:
+            self._update_gates()
+    def _is_ready(self):
+        s = self._state; return self._connected and bool(s.get("valid")) and s.get("protocol") == "stage-v2" and not s.get("moving") and not s.get("pending") and not s.get("cooldown")
+    def _on_connected(self):
+        self._connected = True; self._state = {}; self._connect.setText("Disconnect"); self._status.setText("● Connected — waiting for fresh status; zero required"); self._update_gates()
+    def _on_disconnected(self):
+        if self._reference_dialog is not None:
+            self._reference_dialog.reject()
+        self._connected = False; self._state = {}; self._connect.setText("Connect"); self._status.setText("○ Disconnected"); self._position.setText("Estimated distance from imaging end: unknown"); self._reference.setText("Reference: unknown"); self._limit.setText("Maximum: unknown"); self._frequency_readout.setText("Speed: unknown"); self._update_gates()
+    def _on_error(self, message):
+        self._status.setText("⚠ " + str(message)[:120]); self._update_gates()
+    def _on_state(self, state):
+        self._state = dict(state or {})
+        s = self._state; valid = bool(s.get("valid")); moving = bool(s.get("moving"));
+        if s.get("legacy"): self._status.setText("⚠ Firmware update required (stage-v2)")
+        else: self._status.setText(("● Moving" if moving else ("⏳ Command pending" if s.get("pending") else ("● Ready" if valid else "○ Position unknown"))) + (" — confirm imaging end" if valid and not s.get("homed") else "") + (f"  {s.get('message', '')}" if s.get("message") else ""))
+        scale = int(s.get("stepsPerMm", 200) or 200) if isinstance(s.get("stepsPerMm", 200), int) else 200
+        if not (valid and s.get("protocol") == "stage-v2" and not s.get("legacy")):
+            legacy = bool(s.get("legacy")) or (valid and isinstance(s.get("protocol"), str) and s.get("protocol") != "stage-v2")
+            suffix = "unavailable until firmware update" if legacy else "unknown"
+            self._position.setText(f"Estimated distance from imaging end: {suffix}")
+            self._reference.setText(f"Reference: {suffix}")
+            self._limit.setText(f"Maximum: {suffix}")
+            self._frequency_readout.setText(f"Firmware frequency: {s['frequencyHz']} Hz" if isinstance(s.get("frequencyHz"), int) else "Speed: unknown")
+            self._update_gates()
+            return
+        if valid: self._status.setText(self._status.text() + f"  [{scale} pulses/mm]")
+        if valid and s.get("homed") and isinstance(s.get("steps"), int): self._position.setText(f"Estimated distance from imaging end: {s['steps'] / scale:g} mm")
+        else: self._position.setText("Estimated distance from imaging end: unknown")
+        self._reference.setText("Reference: " + ("set" if valid and s.get("homed") else "not set / position unknown"))
+        if valid and isinstance(s.get("limit"), int) and s["limit"] > 0: self._limit.setText(f"Maximum: {s['limit'] / scale:g} mm left of imaging end")
+        else: self._limit.setText("Maximum: not set")
+        if valid and isinstance(s.get("frequencyHz"), int): self._frequency_readout.setText(f"Speed: {s['frequencyHz']} Hz, reported {s['frequencyHz'] / scale:g} mm/s max")
+        else: self._frequency_readout.setText("Speed: unknown")
+        if valid and isinstance(s.get("pulsesPerRev"), int) and not self._scale_dirty:
+            idx = self._scale.findData(s["pulsesPerRev"]); self._scale.blockSignals(True); self._scale.setCurrentIndex(idx); self._scale.blockSignals(False)
+        if valid and isinstance(s.get("directionAwayLevel"), bool) and not self._direction_dirty:
+            idx = self._direction.findData(s["directionAwayLevel"]); self._direction.blockSignals(True); self._direction.setCurrentIndex(idx); self._direction.blockSignals(False)
+        if valid and isinstance(s.get("limit"), int) and s["limit"] > 0 and not self._maximum_dirty: self._maximum.blockSignals(True); self._maximum.setValue(s["limit"] / scale); self._maximum.blockSignals(False)
+        if s.get("message") == "Scale updated" and isinstance(s.get("pulsesPerRev"), int) and s["pulsesPerRev"] == self._scale.currentData(): self._scale_dirty = False
+        if s.get("message") == "Direction updated" and isinstance(s.get("directionAwayLevel"), bool) and s["directionAwayLevel"] == self._direction.currentData(): self._direction_dirty = False
+        if s.get("message") in {"Maximum saved", "Upper limit saved"}: self._maximum_dirty = False
+        if valid and isinstance(s.get("pulsesPerRev"), int): cfg.imaging_stage.pulses_per_rev = s["pulsesPerRev"]
+        if valid and isinstance(s.get("directionAwayLevel"), bool): cfg.imaging_stage.direction_away_level = s["directionAwayLevel"]
+        if valid and isinstance(s.get("limit"), int): cfg.imaging_stage.maximum_mm = (s["limit"] / scale) if s["limit"] > 0 else 0.0
+        self._update_gates()
+    def _open_reference_dialog(self):
+        if self._reference_dialog is not None:
+            self._reference_dialog.raise_(); self._reference_dialog.activateWindow(); return
+        if not self._is_ready():
+            self._update_gates(); return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set imaging reference")
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.NonModal)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        layout = QVBoxLayout(dialog)
+        message = QLabel(
+            "Manually position the stage at the right imaging end before continuing. "
+            "The app cannot detect the endpoint. This records the current position "
+            "as 0 and does not move the stage."
+        )
+        message.setWordWrap(True); layout.addWidget(message)
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
+        set_button = buttons.addButton("Set current position to 0", QDialogButtonBox.AcceptRole)
+        cancel = buttons.button(QDialogButtonBox.Cancel)
+        cancel.setDefault(True); cancel.setAutoDefault(True); set_button.setAutoDefault(False)
+        buttons.rejected.connect(dialog.reject)
+        set_button.clicked.connect(lambda _checked=False: self._confirm_reference(dialog))
+        layout.addWidget(buttons)
+        self._reference_dialog = dialog
+        dialog.finished.connect(lambda _result: self._clear_reference_dialog(dialog))
+        dialog.show()
+
+    def _confirm_reference(self, dialog):
+        if dialog is not self._reference_dialog or not self._is_ready():
+            dialog.reject(); return
+        self._ctrl.send("zero")
+        dialog.accept()
+
+    def _clear_reference_dialog(self, dialog):
+        if self._reference_dialog is dialog:
+            self._reference_dialog = None
+    def save_state(self):
+        cfg.imaging_stage.com_port = self._port.currentText().strip(); cfg.imaging_stage.jog_mm = float(self._jog.value()); cfg.imaging_stage.frequency_hz = int(self._speed.currentData()); cfg.imaging_stage.fine_mm = float(self._fine_mm.value()); cfg.imaging_stage.medium_mm = float(self._medium_mm.value()); cfg.imaging_stage.coarse_mm = float(self._coarse_mm.value()); cfg.imaging_stage.slow_hz = int(self._slow_hz.value()); cfg.imaging_stage.normal_hz = int(self._normal_hz.value())
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -2068,9 +2295,7 @@ class _RotWorker(QObject):
                 pos = float(adapter.get_position())
                 self.position.emit(pos)
             else:  # "move"
-                adapter.move_to(self._target)
-                time.sleep(0.2)
-                pos = float(adapter.get_position())
+                pos = move_and_verify(adapter, self._target)
                 self.position.emit(pos)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -2104,9 +2329,7 @@ class _StageWorker(QObject):
                 pos = float(adapter.get_position())
                 self.position.emit(pos)
             else:  # "move"
-                adapter.move_to(self._target)
-                time.sleep(0.2)
-                pos = float(adapter.get_position())
+                pos = move_and_verify(adapter, self._target)
                 self.position.emit(pos)
         except Exception as exc:
             self.error.emit(str(exc))
@@ -2139,6 +2362,11 @@ class _PMReadWorker(QObject):
 
 
 # ── Rotation Section ──────────────────────────────────────────────────────────
+
+_ROTATION_DISPLAY_NAMES = {
+    "rot1": "RotIn (Excitation)",
+    "rot2": "RotOut (Detection)",
+}
 
 class _RotationBlock(QWidget):
     """One rotation mount block (rot1 or rot2)."""
@@ -2497,18 +2725,19 @@ class _RotationBlock(QWidget):
         _select_or_insert_combo_text(self._addr_combo, saved)
 
     def _apply_mapping_hint(self):
+        display_name = _ROTATION_DISPLAY_NAMES.get(self._slot, self._slot.upper())
         type_text = self._type_combo.currentText()
         if type_text == "Newport ESP300 (shared)":
             addr = self._addr_combo.currentText().strip() or self._cfg.visa_resource or "<select VISA>"
             axis = self._axis_combo.currentText().strip() or str(int(self._cfg.esp300_axis or 1))
             self._mapping_hint.setText(
-                f"{self._slot.upper()} uses shared Newport ESP300 at {addr}, axis {axis}."
+                f"{display_name} uses shared Newport ESP300 at {addr}, axis {axis}."
             )
         elif type_text == "Thorlabs Elliptec":
             addr = self._addr_combo.currentText().strip() or self._cfg.com_port or "<select COM>"
-            self._mapping_hint.setText(f"{self._slot.upper()} uses an independent Elliptec controller on {addr}.")
+            self._mapping_hint.setText(f"{display_name} uses an independent Elliptec controller on {addr}.")
         else:
-            self._mapping_hint.setText(f"{self._slot.upper()} is not connected.")
+            self._mapping_hint.setText(f"{display_name} is not connected.")
 
     @Slot(str)
     def _on_addr_changed(self, value: str):
@@ -3295,6 +3524,7 @@ class InstrumentPanel(QScrollArea):
         smu_ctrl=None,
         rotation_ctrl=None,
         stage_ctrl=None,
+        imaging_stage_ctrl=None,
         pm_ctrl=None,
         parent: Optional[QWidget] = None,
     ):
@@ -3338,12 +3568,15 @@ class InstrumentPanel(QScrollArea):
             )
             for slot in tuple(slots):
                 lay.addWidget(_Expander(
-                    f"Rotation — {str(slot).upper()}",
+                    _ROTATION_DISPLAY_NAMES.get(str(slot), f"Rotation — {str(slot).upper()}"),
                     _RotationBlock(str(slot), rotation_ctrl),
                 ))
 
         if stage_ctrl is not None:
             lay.addWidget(_Expander("Linear Stage", _StageSection(stage_ctrl)))
+
+        if imaging_stage_ctrl is not None:
+            lay.addWidget(_Expander("Sample Imaging Stage (ESP32)", _ESP32ImagingStageSection(imaging_stage_ctrl)))
 
         if pm_ctrl is not None:
             lay.addWidget(_Expander("PM100D Power Meter", _PM100DSection(pm_ctrl)))
@@ -3362,6 +3595,8 @@ class InstrumentPanel(QScrollArea):
                 key = section._slot
             elif isinstance(section, _StageSection):
                 key = "stage"
+            elif isinstance(section, _ESP32ImagingStageSection):
+                key = "imaging_stage"
             elif isinstance(section, _PM100DSection):
                 key = "pm100d"
             if key:
@@ -3445,6 +3680,10 @@ class InstrumentPanel(QScrollArea):
                 # session snapshot must not overwrite it.
                 "correction_factor": float(cfg.pm100d.correction_factor),
             }
+        imaging = self._sections.get("imaging_stage")
+        if isinstance(imaging, _ESP32ImagingStageSection):
+            imaging.save_state()
+            state["imaging_stage"] = {"port": imaging._port.currentText(), "jog": float(imaging._jog.value()), "frequency": int(imaging._speed.currentData()), "preset": imaging._preset.currentText(), "fine_mm": imaging._fine_mm.value(), "medium_mm": imaging._medium_mm.value(), "coarse_mm": imaging._coarse_mm.value(), "slow_hz": imaging._slow_hz.value(), "normal_hz": imaging._normal_hz.value()}
         return state
 
     def restore_session_state(self, state: dict) -> None:
@@ -3558,6 +3797,33 @@ class InstrumentPanel(QScrollArea):
                 stage._jog_spn.setValue(float(stage_state["jog"]))
             except (KeyError, TypeError, ValueError):
                 pass
+
+        imaging_state = state.get("imaging_stage")
+        imaging = self._sections.get("imaging_stage")
+        if isinstance(imaging_state, dict) and isinstance(imaging, _ESP32ImagingStageSection):
+            port = imaging_state.get("port")
+            if isinstance(port, str): _select_or_insert_combo_text(imaging._port, port)
+            try:
+                frequency = int(imaging_state["frequency"])
+                idx = imaging._speed.findData(frequency)
+                if idx >= 0: imaging._speed.setCurrentIndex(idx)
+            except (KeyError, TypeError, ValueError): pass
+            preset = imaging_state.get("preset")
+            if isinstance(preset, str):
+                idx = imaging._preset.findText(preset)
+                if idx >= 0: imaging._preset.setCurrentIndex(idx)
+            for key, spin in (("fine_mm", imaging._fine_mm), ("medium_mm", imaging._medium_mm), ("coarse_mm", imaging._coarse_mm), ("slow_hz", imaging._slow_hz), ("normal_hz", imaging._normal_hz)):
+                try: spin.setValue(float(imaging_state[key]))
+                except (KeyError, TypeError, ValueError): pass
+            imaging._sync_presets()
+            if isinstance(preset, str):
+                idx = imaging._preset.findText(preset)
+                if idx >= 0: imaging._preset.setCurrentIndex(idx)
+            try:
+                frequency = int(imaging_state["frequency"])
+                idx = imaging._speed.findData(frequency)
+                if idx >= 0: imaging._speed.setCurrentIndex(idx)
+            except (KeyError, TypeError, ValueError): pass
 
         pm_state = state.get("pm100d")
         pm = self._sections.get("pm100d")

@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QTreeWidget,
     QTreeWidgetItem,
-    QWidget,
+    QWidget, QDialog, QVBoxLayout,
 )
 from utils.filename_builder import build_condition_display_label
 from utils.when_condition import evaluate_when_expression
@@ -145,14 +145,14 @@ def _fmt_sweep_range(r: dict) -> str:
 
 
 def _fmt_ctx(ctx: dict, param_order: Optional[List[str]] = None) -> str:
-    default_keys = ["Center Wavelength (nm)", "Exposure Time (ms)", "Stage Position"]
+    default_keys = ["Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)", "Stage Position", "Rotation1 Angle (deg)", "Rotation2 Angle (deg)"]
     keys = param_order or default_keys
     aliases = {
         "Center Wavelength (nm)": "CW",
         "Exposure Time (ms)": "Exp",
         "Accumulations (EPF)": "EPF",
-        "Rotation1 Angle (deg)": "R1",
-        "Rotation2 Angle (deg)": "R2",
+        "Rotation1 Angle (deg)": "RotIn",
+        "Rotation2 Angle (deg)": "RotOut",
         "Stage Position": "Stage",
     }
     parts = []
@@ -318,6 +318,10 @@ class RunPlanTree(QTreeWidget):
         self.setUniformRowHeights(False)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._semantic_tree_built = False
+        self._show_full_sequence = False
+        self._full_sequence_tree = None
+        self._full_sequence_dialog = None
+        self._last_plan = None
         self._flat_signature = None
         self._flat_steps: Dict[int, Dict[str, object]] = {}
         self._flat_groups: List[Dict[str, object]] = []
@@ -330,6 +334,10 @@ class RunPlanTree(QTreeWidget):
 
     def _fit_columns_to_viewport(self) -> None:
         """Keep all four meanings visible inside the narrow preview pane."""
+        if self.columnCount() == 1:
+            self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            return
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         width = max(self.viewport().width(), 320)
         status_width = 46
         loop_width = 88
@@ -373,7 +381,25 @@ class RunPlanTree(QTreeWidget):
         loop_definition=None,
         loop_mode: str = "",
         run_outcome: str = "idle",
+        completed_points: Optional[int] = None,
+        preview_state: str = "Applied sequence",
     ) -> None:
+        plan = locals().copy()
+        plan.pop("self")
+        self._last_plan = plan
+        if self._full_sequence_tree is not None:
+            self._full_sequence_tree.update_plan(**plan)
+        if acquisition_schedule and all(task.get("nested") for task in acquisition_schedule):
+            self._update_nested_schedule(
+                list(acquisition_schedule), done=done, total_acq=total_acq,
+                current_step=current_seq_i, completed_points=completed_points,
+                run_outcome=run_outcome, max_show=max_seq_show,
+                preview_state=preview_state,
+            )
+            return
+        self.setColumnCount(4)
+        self.setHeaderLabels(["Status", "Batch row", "Loop setting", "Measurement details"])
+        self._fit_columns_to_viewport()
         if acquisition_schedule is not None:
             expanded_node_ids = (
                 self._expanded_node_ids() if self._semantic_tree_built else None
@@ -394,6 +420,7 @@ class RunPlanTree(QTreeWidget):
                 loop_mode=loop_mode,
                 expanded_node_ids=expanded_node_ids,
                 run_outcome=run_outcome,
+                preview_state=preview_state,
             )
             self._semantic_tree_built = True
             return
@@ -538,6 +565,101 @@ class RunPlanTree(QTreeWidget):
 
         self.expandAll()
 
+    def show_full_sequence(self) -> None:
+        """Open a resizable view of the same live applied schedule."""
+        if self._full_sequence_dialog is None:
+            self._full_sequence_dialog = QDialog(self)
+            self._full_sequence_dialog.setWindowTitle("Full measurement sequence")
+            self._full_sequence_dialog.resize(1000, 720)
+            layout = QVBoxLayout(self._full_sequence_dialog)
+            self._full_sequence_tree = RunPlanTree(self._full_sequence_dialog)
+            self._full_sequence_tree._show_full_sequence = True
+            layout.addWidget(self._full_sequence_tree)
+        if self._last_plan:
+            self._full_sequence_tree.update_plan(**self._last_plan)
+        self._full_sequence_dialog.show()
+        self._full_sequence_dialog.raise_()
+
+    def _update_nested_schedule(self, schedule, *, done, total_acq, current_step,
+                                completed_points, run_outcome, max_show,
+                                preview_state="Applied sequence"):
+        """Render task order directly; file counts never stand in for points."""
+        self.setColumnCount(1)
+        self.setHeaderLabels([f"{preview_state} - acquisition is last"])
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        completed = max(0, int(completed_points if completed_points is not None else max(current_step, 0)))
+        if run_outcome == "completed":
+            completed = len(schedule)
+        limit = len(schedule) if self._show_full_sequence else min(max_show, 8)
+        start = 0 if self._show_full_sequence else max(0, min(max(current_step, completed), len(schedule) - limit))
+        stop = min(len(schedule), start + limit)
+        signature = repr((schedule, start, stop, self._show_full_sequence, preview_state))
+        expanded = self._expanded_node_ids()
+        if self._flat_signature != signature:
+            self.clear()
+            self._flat_steps.clear()
+            self._flat_groups.clear()
+            root = QTreeWidgetItem(self, [""])
+            root.setData(0, _NODE_ID_ROLE, "nested-root")
+            self._flat_root = root
+            branches = {}
+            for task_i in range(start, stop):
+                task = schedule[task_i]
+                ctx, row, point = task["ctx"], task["row"], task["gate_point"]
+                parent, prefix = root, ()
+                for level in task["execution_order"]:
+                    kind, level_id = level["kind"], level["id"]
+                    if kind == "group":
+                        identity = task.get("group_instances", {}).get(level_id, 0)
+                        label = _fmt_ctx(task.get("group_values", {}).get(level_id, {}))
+                    elif kind == "conditions":
+                        identity = (task["row_i"], task["repeat_i"])
+                        label = f"Row {task['row_i'] + 1}: {_condition_name(row, task['row_i'])} - repetition {task['repeat_i'] + 1}/{task['repeat_total']}"
+                    else:
+                        identity = point["point_i"]
+                        label = f"Gate point {point['point_number']}/{point['point_total']}: Vbg={point['Vbg']:g} V, Vtg={point['Vtg']:g} V"
+                        if point.get("Vbias") is not None:
+                            label += f", Vbias={point['Vbias']:g} V"
+                    prefix += ((level_id, identity),)
+                    if prefix not in branches:
+                        item = QTreeWidgetItem(parent, [label])
+                        item.setData(0, _NODE_ID_ROLE, repr(prefix))
+                        item.setToolTip(0, label)
+                        item.setExpanded(repr(prefix) in expanded or (not expanded and self._show_full_sequence) or parent.childCount() == 1)
+                        branches[prefix] = item
+                    parent = branches[prefix]
+                text = (
+                    f"{task_i + 1}. {_fmt_ctx(ctx)} | Row {task['row_i'] + 1} "
+                    f"{_condition_name(row, task['row_i'])} | Rep {task['repeat_i'] + 1}/{task['repeat_total']} "
+                    f"| Point {point['point_number']}/{point['point_total']} "
+                    f"(Vbg={point['Vbg']:g}, Vtg={point['Vtg']:g} V)"
+                )
+                acquisition_label = f"{task_i + 1}. Acquire spectrum" + (" + power" if _to_bool(row.get("MeasurePower", False)) else "")
+                item = QTreeWidgetItem(parent, [acquisition_label])
+                item.setToolTip(0, text + (" | Measure power" if _to_bool(row.get("MeasurePower", False)) else ""))
+                self._flat_steps[task_i] = {"item": item, "text": acquisition_label}
+            root.setExpanded(True)
+            self._flat_signature = signature
+        root = self._flat_root
+        root.setText(0, f"{preview_state} · {run_outcome.capitalize()} | {done}/{total_acq} files | {completed}/{len(schedule)} spectra | steps {start + 1}-{stop}")
+        for task_i, record in self._flat_steps.items():
+            state = "done" if task_i < completed else "todo"
+            if task_i == current_step and task_i >= completed and run_outcome in {"running", "failed", "stopped"}:
+                state = {"running": "now", "failed": "failed", "stopped": "stopped"}[run_outcome]
+            marker = {"done": "\u2713", "todo": "\u25cb", "now": "\u25b6", "failed": "\u2715", "stopped": "\u25a0"}[state]
+            record["item"].setText(0, f"{marker} {record['text']}")
+            record["item"].setForeground(0, _brush({"done": _CLR_DONE_FG, "todo": _CLR_TODO_FG,
+                "now": _CLR_NOW_FG, "failed": _CLR_FAILED_FG, "stopped": _CLR_STOPPED_FG}[state]))
+            record["item"].setBackground(0, _brush(_CLR_NOW_BG if state == "now" else QColor("transparent")))
+            if state in {"now", "failed", "stopped"} and current_step != getattr(self, "_nested_last_active", None):
+                parent = record["item"].parent()
+                while parent is not None:
+                    parent.setExpanded(True)
+                    parent = parent.parent()
+                self.scrollToItem(record["item"], QAbstractItemView.ScrollHint.EnsureVisible)
+        self._nested_last_active = current_step
+        self._semantic_tree_built = True
+
     def _update_flat_schedule(
         self,
         schedule: List[Dict[str, object]],
@@ -556,6 +678,7 @@ class RunPlanTree(QTreeWidget):
         loop_mode: str,
         expanded_node_ids: Optional[set[str]],
         run_outcome: str,
+        preview_state: str = "Applied sequence",
     ) -> None:
         """Render a compact checklist with row and loop context side by side."""
         if _HAS_PANDAS and isinstance(df_batch, pd.DataFrame):
@@ -631,6 +754,7 @@ class RunPlanTree(QTreeWidget):
             (
                 acquisition_grouping,
                 loop_mode,
+                preview_state,
                 final_sequence,
                 batch_rows,
                 definition_rows,
@@ -896,7 +1020,7 @@ class RunPlanTree(QTreeWidget):
                 bool(expanded_node_ids and "loop-definitions" in expanded_node_ids)
             )
             for definition_i, row in enumerate(definition_rows):
-                parameter = str(row.get("Parameter", "Loop parameter"))
+                parameter = str(row.get("Parameter", "Loop parameter")).replace("Rotation1", "RotIn").replace("Rotation2", "RotOut")
                 values = str(row.get("Values", "")).strip() or "—"
                 suffix = ""
                 if loop_mode == "Customized":
@@ -936,6 +1060,7 @@ class RunPlanTree(QTreeWidget):
             current_frame_i=current_frame_i,
             current_frame_total=current_frame_total,
             run_outcome=run_outcome,
+            preview_state=preview_state,
         )
 
     def _update_flat_status(
@@ -948,6 +1073,7 @@ class RunPlanTree(QTreeWidget):
         current_frame_i: int,
         current_frame_total: int,
         run_outcome: str,
+        preview_state: str = "Applied sequence",
     ) -> None:
         """Update status cells without rebuilding the operator's checklist."""
         outcome_text = {
@@ -965,7 +1091,7 @@ class RunPlanTree(QTreeWidget):
             )
             self._flat_root.setText(
                 0,
-                f"{outcome_text} · {done}/{total_acq} files · "
+                f"{preview_state} · {outcome_text} · {done}/{total_acq} files · "
                 f"{len(self._flat_steps)} runnable step(s) · {skipped} skipped",
             )
 

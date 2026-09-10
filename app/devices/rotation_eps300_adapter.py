@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from typing import Iterable, List, Optional, Union
+from threading import RLock
 import time
 
 try:
@@ -49,6 +50,7 @@ class NewportEPS300:
         self.resource_name = resource
         self.rm = rm or pyvisa.ResourceManager()
         self._inst = None
+        self._io_lock = RLock()
         self._timeout_ms = int(timeout_ms)
         self._axis = int(axis) if axis is not None else 1
 
@@ -112,17 +114,23 @@ class NewportEPS300:
     def _write(self, s: str):
         if self._inst is None:
             raise RuntimeError("Controller not open")
-        return self._inst.write(s)
+        with self._io_lock:
+            return self._inst.write(s)
 
     def _read(self) -> str:
         if self._inst is None:
             raise RuntimeError("Controller not open")
-        return self._inst.read()
+        with self._io_lock:
+            return self._inst.read()
 
     def _query(self, s: str) -> str:
-        self._write(s)
-        time.sleep(0.02)
-        return self._read()
+        # Keep a query's write/read pair together.  Rotation and stage
+        # adapters can share one ESP300 port from different worker threads;
+        # locking only each individual I/O would allow response interleaving.
+        with self._io_lock:
+            self._write(s)
+            time.sleep(0.02)
+            return self._read()
 
     # ---------------------------
     # Public helpers
@@ -148,8 +156,8 @@ class NewportEPS300:
     # ---------------------------
     # Motion
     # ---------------------------
-    def is_motion_done(self, axis: Optional[int] = None) -> bool:
-        """Checks 'nMD?' -> returns True if done (1), False if moving (0)."""
+    def motion_status(self, axis: Optional[int] = None) -> Optional[bool]:
+        """Return stopped/moving/unknown without conflating I/O failure."""
         ax = int(self._axis if axis is None else axis)
         try:
             # 'MD?' returns 1 if motion is done, 0 if moving
@@ -158,33 +166,65 @@ class NewportEPS300:
             # Handle possible echo like "1MD?1" or just "1"
             if "MD?" in s:
                  s = s.split("?")[-1].strip()
-            return (s == "1")
+            if s == "1":
+                return True
+            if s == "0":
+                return False
+            return None
         except Exception:
-            return False
+            return None
 
-    def move_to(self, position_deg: Union[int, float], *, axis: Optional[int] = None, wait: bool = True, timeout_s: float = 60.0):
+    def is_motion_done(self, axis: Optional[int] = None) -> bool:
+        """Compatibility boolean; callers needing trust use ``motion_status``."""
+        return self.motion_status(axis=axis) is True
+
+    def stop_motion(self, axis: Optional[int] = None) -> None:
+        ax = int(self._axis if axis is None else axis)
+        self._write(f"{ax}ST")
+
+    def move_to(
+        self,
+        position_deg: Union[int, float],
+        *,
+        axis: Optional[int] = None,
+        wait: bool = True,
+        timeout_s: float = 60.0,
+        stop_event=None,
+    ):
         """
         Move to position. 
         If wait=True (default), blocks execution until the controller confirms 
         motion is complete (MD=1).
         """
         ax = int(self._axis if axis is None else axis)
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("motion cancelled before command")
+        if not math.isfinite(float(position_deg)) or not math.isfinite(float(timeout_s)) or timeout_s <= 0:
+            raise ValueError("motion target and positive timeout must be finite")
         self._write(f"{ax}PA{float(position_deg)}")
         
         if wait:
-            start_t = time.time()
+            deadline = time.monotonic() + float(timeout_s)
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    try:
+                        self.stop_motion(axis=ax)
+                    finally:
+                        raise RuntimeError("motion cancelled")
                 # Poll device status
-                if self.is_motion_done(axis=ax):
-                    break
-                
+                status = self.motion_status(axis=ax)
+                # A late status reply cannot turn an expired deadline into success.
                 # Timeout safety
-                if (time.time() - start_t) > timeout_s:
-                    # You could raise an error here if strict safety is needed
-                    print(f"WARNING: Move on axis {ax} timed out after {timeout_s}s")
-                    break
-                    
-                time.sleep(0.1)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"Move on axis {ax} did not report completion within {timeout_s:g}s"
+                    )
+
+                if status is True:
+                    return True
+                time.sleep(min(0.1, remaining))
+        return True
 
     def get_position(self, *, axis: Optional[int] = None) -> float:
         ax = int(self._axis if axis is None else axis)

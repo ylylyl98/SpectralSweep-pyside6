@@ -316,6 +316,7 @@ from controllers.lf6_controller      import LF6Controller
 from controllers.smu_controller      import SMUController
 from controllers.rotation_controller import RotationController
 from controllers.stage_controller    import StageController
+from controllers.esp32_stage_controller import ESP32StageController
 from controllers.pm100d_controller   import PM100DController
 from controllers.magnet_controller   import MagnetController
 
@@ -459,6 +460,7 @@ class MainWindow(QMainWindow):
         self._smu  = SMUController(parent=self)
         self._rot  = RotationController(parent=self)
         self._stg  = StageController(parent=self)
+        self._imaging_stg = ESP32StageController(parent=self)
         self._pm   = PM100DController(parent=self)
         self._magnet = MagnetController(parent=self)
 
@@ -501,6 +503,7 @@ class MainWindow(QMainWindow):
             smu_ctrl=self._smu,
             rotation_ctrl=self._rot,
             stage_ctrl=self._stg,
+            imaging_stage_ctrl=self._imaging_stg,
             pm_ctrl=self._pm,
         )
 
@@ -1288,6 +1291,19 @@ class MainWindow(QMainWindow):
             self._ntfy_notifier.shutdown()
         except Exception:
             pass
+        try:
+            if not self._imaging_stg.shutdown():
+                QMessageBox.critical(
+                    self,
+                    "Unable to close imaging stage",
+                    "The ESP32 imaging-stage worker did not confirm serial shutdown; the application remains open.",
+                )
+                event.ignore()
+                return
+        except Exception as exc:
+            QMessageBox.critical(self, "Unable to close imaging stage", str(exc))
+            event.ignore()
+            return
         for ctrl in (
             self._magnet,
             self._lf6,

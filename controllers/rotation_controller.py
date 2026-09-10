@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
+from app.devices.motion_verification import move_and_verify
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -127,9 +128,7 @@ class _RotationWorker(QObject):
             self.error.emit(f"Rotation {slot} not connected.")
             return
         try:
-            adapter.move_to(float(angle_deg))
-            # Readback after move
-            pos = float(adapter.get_position())
+            pos = move_and_verify(adapter, float(angle_deg))
             self.move_done.emit(slot, pos)
         except Exception as exc:
             self.error.emit(f"Rotation {slot} move_to failed: {exc}")

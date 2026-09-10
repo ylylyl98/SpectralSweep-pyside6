@@ -41,6 +41,8 @@ class FilenameContext:
     measured_power_uw: Optional[float] = None
     power_coefficient: float = 1.0
     decimal_style: str = "p"
+    # Dual Gate opts into role labels while older callers retain Rot1/Rot2.
+    rotation_labels: bool = False
 
 
 def _is_blank(value: Any) -> bool:
@@ -166,11 +168,13 @@ def format_rotation_token(
     degrees: Any,
     *,
     decimal_style: str = "p",
+    role_label: Optional[str] = None,
 ) -> str:
     deg = _coerce_float(degrees)
     if deg is None:
         return ""
-    return f"Rot{index}{format_compact_number(deg, decimals=2, decimal_style=decimal_style)}deg"
+    prefix = role_label or f"Rot{index}"
+    return f"{prefix}{format_compact_number(deg, decimals=2, decimal_style=decimal_style)}deg"
 
 
 def format_stage_position_token(position: Any, *, decimal_style: str = "p") -> str:
@@ -184,8 +188,13 @@ def resolve_power_uw(ctx: FilenameContext) -> Tuple[Optional[float], str]:
     # Meter readings arrive corrected; nominal power is already sample power.
     # Retain the legacy context field for loading old sessions, but ignore it.
     measured = _coerce_float(ctx.measured_power_uw)
-    if ctx.measure_power and measured is not None:
-        return measured, "measured"
+    if ctx.measure_power:
+        # A requested meter reading is a hard requirement.  Falling back to a
+        # stale/manual value would misattribute the output file to the wrong
+        # optical power, especially for Ref acquisitions.
+        if measured is not None:
+            return measured, "measured"
+        return None, "missing"
 
     manual = _coerce_float(ctx.nominal_power_uw)
     if manual is None:
@@ -200,7 +209,7 @@ def format_power_uw_decimal(value: float) -> str:
 
 def format_laser_power_token(ctx: FilenameContext) -> str:
     mode_txt = sanitize_token(ctx.mode).upper()
-    if mode_txt == "REF":
+    if mode_txt == "REF" and not ctx.measure_power:
         return ""
 
     laser = sanitize_token(ctx.laser_nm)
@@ -226,10 +235,12 @@ def build_part_values(ctx: FilenameContext) -> Dict[str, str]:
             decimal_style=ctx.decimal_style,
         ),
         "rotation1": format_rotation_token(
-            1, ctx.rotation1_deg, decimal_style=ctx.decimal_style
+            1, ctx.rotation1_deg, decimal_style=ctx.decimal_style,
+            role_label="RotIn" if ctx.rotation_labels else None,
         ),
         "rotation2": format_rotation_token(
-            2, ctx.rotation2_deg, decimal_style=ctx.decimal_style
+            2, ctx.rotation2_deg, decimal_style=ctx.decimal_style,
+            role_label="RotOut" if ctx.rotation_labels else None,
         ),
         "stage_position": format_stage_position_token(
             ctx.stage_position, decimal_style=ctx.decimal_style
