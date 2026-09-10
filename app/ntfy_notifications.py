@@ -3,17 +3,22 @@ import queue
 import threading
 import urllib.request
 from .experiment_lifecycle import subscribe, unsubscribe
+from .notification_config import runtime_url
 
-NTFY_URL = "https://ntfy.sh/lab-spectra-sweep-9f4c2a7e"
+NTFY_URL = runtime_url()
 
 class NtfyNotifier:
     URL = NTFY_URL
     TYPES = {"dual_gate_sweep", "gate_map_2d", "motion_sweep", "mcd_aps100", "mcd_attodry2100"}
     def __init__(self):
+        self.URL = runtime_url()
         self._queue = queue.Queue(maxsize=32)
         self._seen = set(); self._lock = threading.Lock(); self._closed = False
         self._thread = threading.Thread(target=self._send, daemon=True); self._thread.start()
         subscribe(self._on_event)
+    def set_url(self, url):
+        """Activate the saved subscription without restarting the application."""
+        self.URL = url
     def _on_event(self, event):
         if event.status == "cancelled" or event.experiment_type not in self.TYPES or event.status not in {"completed", "failed"}:
             return
@@ -50,6 +55,7 @@ class NtfyNotifier:
             with self._lock:
                 if self._closed: return
             if item is None: return
+            if not self.URL: continue
             try:
                 req = urllib.request.Request(self.URL, data=item[1].encode(), headers={"Title": item[0]}, method="POST")
                 urllib.request.urlopen(req, timeout=3).read()

@@ -33,6 +33,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
+from ui.notification_settings import NotificationSettings
 
 
 class SettingsPanel(QWidget):
@@ -43,6 +44,8 @@ class SettingsPanel(QWidget):
     Usage:
         panel = SettingsPanel(lf6_ctrl=lf6)
     """
+
+    notification_configured = Signal(str)
 
     def __init__(self, lf6_ctrl=None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -65,6 +68,9 @@ class SettingsPanel(QWidget):
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(10)
 
+        self._notifications = NotificationSettings()
+        self._notifications.configured.connect(self.notification_configured)
+        root.addWidget(self._notifications)
         root.addWidget(self._build_lf6_group())
         root.addWidget(self._build_output_group())
         root.addWidget(self._build_filename_group())

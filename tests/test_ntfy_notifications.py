@@ -5,6 +5,11 @@ from app.experiment_lifecycle import ExperimentTerminalEvent, publish
 from app.ntfy_notifications import NtfyNotifier
 
 class NtfyNotificationTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("app.ntfy_notifications.runtime_url", return_value="https://ntfy.sh/test-local-only")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_titles_cancel_and_duplicate(self):
         calls = []
         class Resp:

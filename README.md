@@ -78,6 +78,49 @@ To force mock LF6 mode:
 python main.py --mock
 ```
 
+## Per-PC ntfy subscriptions
+
+Open **Settings > PC Notifications**, enter a descriptive name such as
+`Attodry-PC`, and click **Save and lock PC name**. Click **Copy URL** and subscribe
+to that URL in ntfy. Saving activates notifications immediately; no restart is
+needed. The name becomes read-only after saving and remains visible with the
+subscription URL on later launches. Each setup creates a unique
+short topic such as `ss-attodry-pc-k7m4qx`
+(URL: `https://ntfy.sh/ss-attodry-pc-k7m4qx`). The topic includes up to 16 characters
+of the PC name and a six-character random suffix; Settings keeps the full name.
+Existing saved URLs
+are preserved so current subscriptions keep working. For an existing long URL,
+click **Use shorter URL (restart required)** in PC Notifications, restart the app,
+and subscribe to the new URL. The PC name stays locked, and the old URL is retained
+in the local configuration as `previous_url`. Each PC gets a separate
+topic, even if two PCs are given the same name. Completion, warning, error, crash,
+and watchdog alerts all use that PC's topic. The previous shared topic no longer
+receives alerts from updated installations.
+
+The Settings panel always shows the saved subscription. Optional command-line
+setup and display are also available:
+
+```powershell
+python -m app.notification_config --name "Attodry-PC"
+python -m app.notification_config
+```
+
+The configuration is saved outside Git at
+`%PROGRAMDATA%\SpectralSweep\notifications.json` on Windows and shared by the
+PC's Windows accounts. App updates and computer renaming do not change it.
+There is no rename control in the app, and rerunning `--name` refuses to overwrite
+the setup. This prevents accidental changes; it is not an administrator security
+lock. Back up this file to preserve the subscription after reinstalling Windows.
+Do not copy it to other PCs, since that would share the same subscription.
+
+Until setup is saved, notifications remain off and no topic is created
+automatically. To deliberately reset the setup,
+close the app, remove the configuration file, rerun setup, and subscribe to the
+new URL. On systems without `PROGRAMDATA`, the file is stored under
+`~/.config/SpectralSweep/notifications.json` for the current user.
+If the file is unreadable or damaged, the app emits a runtime warning and runs
+with notifications disabled. Restore the saved file to recover the same topic.
+
 ## Installation
 
 1. Create and activate a Python 3.11-3.13 virtual environment.

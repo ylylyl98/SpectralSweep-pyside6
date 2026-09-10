@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse, ctypes, json, os, secrets, subprocess, sys, tempfile, time, urllib.request, threading, queue
 from ctypes import wintypes
 from pathlib import Path
+from .notification_config import runtime_url
 
 _DIR = Path(tempfile.gettempdir()) / "SpectralSweep"
-_DEFAULT_URL = "https://ntfy.sh/lab-spectra-sweep-9f4c2a7e"
+_DEFAULT_URL = runtime_url()
 
 def _atomic_write(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +92,7 @@ class WatchdogMonitor:
 
     @staticmethod
     def _send(title, message, url):
+        if not url: return False
         req = urllib.request.Request(url, data=message.encode(), headers={"Title": title}, method="POST")
         with urllib.request.urlopen(req, timeout=3): pass
         return True
@@ -107,6 +109,11 @@ class WatchdogSession:
         self.pid = os.getpid()
         self._beats = queue.Queue(maxsize=1); self._stop = threading.Event(); self._normal = False; self._write_lock = threading.Lock(); self._closed = False
         self._writer = threading.Thread(target=self._write_loop, daemon=True)
+    def enable(self, url):
+        """Start monitoring after the initial in-app subscription setup."""
+        if self.url: return
+        self.url = url
+        self.start()
     def _write_loop(self):
         while not self._stop.is_set():
             try: hb = self._beats.get(timeout=.2)
@@ -116,6 +123,7 @@ class WatchdogSession:
                 try: _atomic_write(self.path, {"token": self.token, "pid": self.pid, "state": "running", "heartbeat": hb})
                 except Exception: pass
     def start(self):
+        if not self.url: return
         try:
             self.token = secrets.token_urlsafe(24)
             self.path = _DIR / f"watchdog-{self.pid}-{secrets.token_hex(8)}.json"

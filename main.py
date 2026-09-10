@@ -101,6 +101,7 @@ def main():
 
     from ui.main_window import MainWindow
     win = MainWindow(notifier=notifier)
+    win.notification_configured.connect(watchdog.enable)
     if not icon.isNull():
         win.setWindowIcon(icon)
     win.show()

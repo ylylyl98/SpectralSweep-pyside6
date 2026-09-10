@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRect, QSettings, QTimer, QObject, QEvent, Slot
+from PySide6.QtCore import Qt, QRect, QSettings, QTimer, QObject, QEvent, Slot, Signal
 from PySide6.QtGui  import QCloseEvent, QFont, QAction
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QStatusBar, QApplication,
@@ -427,6 +427,8 @@ class MainWindow(QMainWindow):
     Geometry and sidebar width persisted via QSettings.
     """
 
+    notification_configured = Signal(str)
+
     def __init__(self, parent: Optional[QWidget] = None, notifier=None):
         super().__init__(parent)
         self._ntfy_notifier = notifier if notifier is not None else NtfyNotifier()
@@ -570,6 +572,8 @@ class MainWindow(QMainWindow):
 
         # Settings
         self._settings = SettingsPanel(lf6_ctrl=self._lf6)
+        self._settings.notification_configured.connect(self._ntfy_notifier.set_url)
+        self._settings.notification_configured.connect(self.notification_configured)
         self._tabs.addTab(self._settings, "Settings")
 
         self._session_panels = {
