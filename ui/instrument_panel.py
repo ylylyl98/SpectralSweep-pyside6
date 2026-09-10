@@ -3007,6 +3007,7 @@ class _PM100DSection(QWidget):
         self._pm_thread: Optional[QThread] = None
         self._pm_worker: Optional[object] = None   # keep Python ref so GC can't destroy it
         self._retired_reads: list = []             # threads that stalled; keep refs so Qt can't crash on GC
+        self._external_busy = False
         self._poll_timer = QTimer()
         self._poll_timer.timeout.connect(self._do_read)
         self._build()
@@ -3115,6 +3116,8 @@ class _PM100DSection(QWidget):
             w.setEnabled(enabled)
 
     def _do_read(self):
+        if self._external_busy or not self.isEnabled():
+            return
         if self._pm_thread and self._pm_thread.isRunning():
             return
         worker = _PMReadWorker(self._ctrl)
@@ -3160,14 +3163,21 @@ class _PM100DSection(QWidget):
 
     @Slot()
     def _on_set_wavelength(self):
+        if self._external_busy or not self.isEnabled():
+            return
         try:
-            self._ctrl.adapter.set_wavelength(self._wl_spn.value())
+            from app.power_reading import power_reading_lock
+            with power_reading_lock:
+                self._ctrl.adapter.set_wavelength(self._wl_spn.value())
             self._status.setText(f"Wavelength set to {self._wl_spn.value():.1f} nm")
         except Exception as exc:
             self._status.setText(f"WL error: {exc}")
 
     @Slot(bool)
     def _on_auto_toggled(self, checked: bool):
+        if self._external_busy:
+            self._poll_timer.stop()
+            return
         if checked:
             interval_ms = int(self._interval_spn.value() * 1000)
             self._poll_timer.start(interval_ms)
@@ -3251,6 +3261,15 @@ class _PM100DSection(QWidget):
         self._set_ctrl_enabled(False)
         self._pwr_lbl.setText("— W")
         self._pwr_lbl.setStyleSheet("color: gray; font-weight: bold; font-size: 13px;")
+
+    @Slot(bool)
+    def set_external_busy(self, busy: bool):
+        """Suspend PM polling and manual PM writes while a sweep owns the meter."""
+        self._external_busy = bool(busy)
+        if self._external_busy:
+            self._poll_timer.stop()
+        elif self._auto_chk.isChecked() and self.isEnabled():
+            self._poll_timer.start(int(self._interval_spn.value() * 1000))
 
 
 # ── Main panel ────────────────────────────────────────────────────────────────
@@ -3359,7 +3378,12 @@ class InstrumentPanel(QScrollArea):
 
         self.setWidget(outer)
 
-        self._content = container
+    @Slot(bool)
+    def set_external_busy(self, busy: bool):
+        """Forward shared-instrument ownership to sections with background I/O."""
+        section = self._sections.get("pm100d")
+        if section is not None and hasattr(section, "set_external_busy"):
+            section.set_external_busy(bool(busy))
 
     def capture_session_state(self) -> dict:
         """Capture connection setup and harmless UI preferences only."""
@@ -3414,6 +3438,12 @@ class InstrumentPanel(QScrollArea):
                 "device": pm._device_combo.currentText(),
                 "wavelength_nm": float(pm._wl_spn.value()),
                 "poll_interval_s": float(pm._interval_spn.value()),
+                # Observe the canonical config value so MainWindow's session
+                # watcher schedules the normal debounced cfg.save() after a
+                # sidebar edit.  Restore intentionally leaves this field
+                # alone: cfg.pm100d is the startup source of truth and an old
+                # session snapshot must not overwrite it.
+                "correction_factor": float(cfg.pm100d.correction_factor),
             }
         return state
 
@@ -3543,6 +3573,10 @@ class InstrumentPanel(QScrollArea):
                     spin.setValue(float(pm_state[key]))
                 except (KeyError, TypeError, ValueError):
                     pass
+            # ``correction_factor`` is captured for change observation only.
+            # The sidebar was initialized from cfg.pm100d after config load;
+            # applying a duplicated session value here could resurrect stale
+            # settings over the canonical persisted value.
         try:
             scroll_y = max(0, int(state.get("scroll_y", 0)))
         except (TypeError, ValueError):

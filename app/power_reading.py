@@ -1,8 +1,15 @@
 """Shared meter correction. The hardware adapter always returns raw watts."""
 from dataclasses import dataclass
 import math
+import threading
 
 from utils.config import cfg
+
+
+# PM100D adapters are shared by the sidebar poller, calibration worker, and
+# sweep workers.  Serialize the short hardware transactions so a wavelength
+# write cannot overlap a read already in progress.
+power_reading_lock = threading.RLock()
 
 
 def power_correction_factor(value=None):
@@ -30,4 +37,5 @@ class PowerReading:
 def read_power(adapter, *, factor=None):
     # Capture the factor before the hardware read; callers can freeze it per run.
     factor = power_correction_factor(factor)
-    return PowerReading(float(adapter.get_power()), factor)
+    with power_reading_lock:
+        return PowerReading(float(adapter.get_power()), factor)

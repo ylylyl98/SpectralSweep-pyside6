@@ -99,6 +99,14 @@ class LightFieldMetadataTests(unittest.TestCase):
         self.assertIs(caught.exception, error)
         self.assertEqual(self.records()[-1]["event"], "capture_failed")
 
+    def test_context_uuid_is_the_durable_capture_id(self):
+        set_lightfield_context(self.controller, acquisition_id="measurement-uuid-1", purpose="measurement")
+        capture_with_metadata(self.setup, 1)
+        started = next(item for item in self.records() if item["event"] == "capture_started")
+        finished = next(item for item in self.records() if item["event"] == "capture_completed")
+        self.assertEqual(started["acquisition_id"], "measurement-uuid-1")
+        self.assertEqual(finished["acquisition_id"], "measurement-uuid-1")
+
     def test_optional_snapshot_failure_does_not_stop_capture(self):
         self.setup.read_metadata_snapshot = Mock(side_effect=RuntimeError("readback failed"))
         with self.assertLogs("app.lightfield_metadata", level="WARNING"):

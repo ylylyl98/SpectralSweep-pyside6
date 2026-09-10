@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import weakref
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -116,7 +117,10 @@ class LightFieldRecorder:
         self._settings = {}
         self._index = 0
         self.context = {}
-        self.path = run.path.with_name(run.path.stem.removesuffix(".metadata") + ".lightfield.jsonl")
+        # All backends append to the run's single journal.  ``path`` remains
+        # public for legacy integrations and tests.
+        self.path = getattr(run, "event_path",
+                            run.path.with_name(run.path.stem.removesuffix(".metadata") + ".lightfield.jsonl"))
 
     @property
     def active(self):
@@ -144,17 +148,43 @@ class LightFieldRecorder:
             if key not in self._settings:
                 settings_id = len(self._settings) + 1
                 self._settings[key] = settings_id
+                # The shared experiment settings table owns the full snapshot;
+                # the LightField compatibility view keeps only a reference.
                 state["settings_snapshots"].append({
-                    "settings_id": settings_id, "first_observed_utc": captured, **snapshot})
-                run.register_file(self.path, role="metadata", kind="lightfield_acquisitions")
+                    "settings_id": settings_id, "first_observed_utc": captured,
+                    "shared_settings_id": None})
+                if hasattr(run, "_register_event_file"):
+                    run._register_event_file(kind="lightfield_acquisitions")
+                else:
+                    run.register_file(self.path, role="metadata", kind="lightfield_acquisitions")
+            shared_settings_id = None
+            if hasattr(run, "register_settings_snapshot"):
+                try:
+                    shared_settings_id = run.register_settings_snapshot(snapshot, source="lightfield", observed_utc=captured)
+                    run.metadata.setdefault("settings", {}).setdefault("observed", {})[
+                        "lightfield_settings_id"] = shared_settings_id
+                    for item in state.get("settings_snapshots", []):
+                        if item.get("settings_id") == self._settings[key]:
+                            item["shared_settings_id"] = shared_settings_id
+                except Exception as exc:
+                    marker = getattr(run, "mark_metadata_failure", None)
+                    if callable(marker):
+                        marker(exc, event="settings_snapshot")
+                    log.warning("Shared settings snapshot could not be recorded", exc_info=True)
             self._index += 1
-            record = {"event": "capture_started", "acquisition_index": self._index,
-                      "settings_id": self._settings[key], "started_utc": captured,
+            record = {"event": "capture_started", "acquisition_id": str(self.context.get("acquisition_id") or uuid.uuid4()),
+                      "acquisition_index": self._index,
+                      "settings_id": shared_settings_id or self._settings[key], "started_utc": captured,
+                      "shared_settings_id": shared_settings_id,
                       "temperature_c": temperature, "capture_frames_requested": int(frames),
                       "purpose": self.context.get("purpose", purpose),
                       "context": dict(self.context)}
-            self._append(record)
-            return record
+            appended = self._append(record)
+            if appended is None:
+                marker = getattr(run, "mark_metadata_failure", None)
+                if callable(marker):
+                    marker(RuntimeError("LightField acquisition event was not durably recorded"), event="capture_started")
+            return appended
 
     def finish(self, record, *, dimensions=None, error=None):
         if record is None:
@@ -167,11 +197,30 @@ class LightFieldRecorder:
                 self._append({"event": "capture_failed" if error else "capture_completed",
                               "acquisition_index": record["acquisition_index"],
                               "settings_id": record["settings_id"], "finished_utc": timestamp(),
-                              "output_dimensions": dimensions, "error": error})
+                              "output_dimensions": dimensions, "error": error,
+                              "acquisition_id": record.get("acquisition_id")})
 
     def _append(self, record):
+        run = self._run()
+        if run is not None and hasattr(run, "record_event"):
+            event = record.get("event", "observation")
+            values = dict(record)
+            values.pop("event", None)
+            acquisition_id = values.pop("acquisition_id", None)
+            output_file = values.pop("output_file", None)
+            if output_file is None and isinstance(values.get("context"), dict):
+                output_file = values["context"].get("output_file")
+            output = {"file": output_file} if output_file else None
+            result = run.record_event(event, acquisition_id=acquisition_id, output=output,
+                                      **values)
+            if result is None:
+                marker = getattr(run, "mark_metadata_failure", None)
+                if callable(marker):
+                    marker(RuntimeError(f"LightField event {event!r} was not durably recorded"), event=event)
+            return result
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, allow_nan=False) + "\n")
+        return record
 
 
 def bind_lightfield_metadata(controller, run):
@@ -205,7 +254,11 @@ def capture_with_metadata(setup, frames, *, purpose="measurement"):
     if recorder is not None and recorder.active:
         try:
             record = recorder.begin(setup.read_metadata_snapshot(), frames, purpose)
-        except Exception:
+        except Exception as exc:
+            run = recorder._run()
+            marker = getattr(run, "mark_metadata_failure", None) if run is not None else None
+            if callable(marker):
+                marker(exc, event="capture_started")
             log.warning("LightField metadata snapshot could not be recorded", exc_info=True)
     try:
         dataset = setup.experiment.Capture(frames)

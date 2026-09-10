@@ -3,8 +3,11 @@ from __future__ import annotations
 import re
 import sys
 import time
+import hashlib
+import uuid
+import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -63,7 +66,8 @@ from utils.bfp_io import (
 )
 from utils.config import cfg
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
-from app.experiment_metadata import ExperimentMetadataService
+from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
+from app.power_reading import power_correction_factor
 
 pg.setConfigOption("background", "w")
 pg.setConfigOption("foreground", "k")
@@ -85,6 +89,62 @@ def _bfp_device_id(path: Optional[Path]) -> str:
         except Exception:
             pass
     return ""
+
+
+def _input_identity(path: str | Path, role: str) -> dict:
+    """Capture the exact input used by an RC computation."""
+    candidate = Path(path).expanduser().resolve()
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with candidate.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        sha256 = digest.hexdigest()
+    except OSError:
+        sha256 = None
+    parent_experiment_id = None
+    # If the source is an output of a recorded acquisition, retain the parent
+    # experiment link with the compute-time identity.  This is intentionally a
+    # small directory-local lookup and never places the absolute source path
+    # in the portable sidecar settings.
+    try:
+        for sidecar in sorted(candidate.parent.glob("*.experiment.metadata.json")):
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            listed = data.get("files", []) if isinstance(data, dict) else []
+            if any(Path(str(item.get("path", ""))).name == candidate.name
+                   and str(item.get("role", "")) in {"raw", "processed"}
+                   for item in listed if isinstance(item, dict)):
+                parent_experiment_id = data.get("experiment_id")
+                break
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        parent_experiment_id = None
+    return {"role": str(role), "path": str(candidate), "name": candidate.name,
+            "size_bytes": size, "sha256": sha256,
+            "captured_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "parent_experiment_id": parent_experiment_id}
+
+
+def _frozen_input(run, path: str | Path, identity: dict, kind: str) -> None:
+    """Register an input while retaining the compute-time content identity."""
+    # Keep the historical ``metadata`` file role for compatibility while the
+    # explicit input_role records whether this was sample or background.
+    portable = run.register_file(
+        path, role="metadata", kind=kind, external=True,
+        frozen_identity=identity,
+        details={"input_role": identity.get("role"),
+                 "parent_experiment_id": identity.get("parent_experiment_id")},
+    )
+    # ``register_file`` returns the exact registration.  Do not look it up by
+    # basename: sample and background files commonly share one, and the source
+    # can be replaced after compute has started.
+    if portable:
+        for item in run.metadata.get("files", []):
+            if item.get("path") == portable:
+                item.setdefault("input_role", identity.get("role"))
+                break
+        run._write()
 
 
 def _make_png_size_combo() -> QComboBox:
@@ -286,6 +346,7 @@ class _AcquiredRecord:
     mode: str
     y_axis: Optional[np.ndarray] = None
     csv_path: Optional[Path] = None
+    acquisition_ids: tuple[str, ...] = ()
 
 
 class _AcquireWorker(QObject):
@@ -335,19 +396,25 @@ class _AcquireWorker(QObject):
                 except Exception:
                     pass
             stack = []
+            acquisition_ids = []
             for idx in range(self._repeat):
                 self.status.emit(f"Acquiring frame {idx + 1}/{self._repeat}...")
-                set_lightfield_context(self._ctrl, purpose="measurement", repeat_index=idx + 1)
+                acquisition_id = str(uuid.uuid4())
+                acquisition_ids.append(acquisition_id)
+                set_lightfield_context(self._ctrl, purpose="measurement", repeat_index=idx + 1,
+                                       acquisition_id=acquisition_id)
                 stack.append(np.asarray(_do_raw_acquire(setup, self._roi_mode), dtype=float))
             raw = np.mean(np.stack(stack, axis=0), axis=0)
             wls = _get_wls(spec)
             mode, payload = _normalize_acquired_data(raw, wls, self._roi_mode.lower())
             if mode == "binned":
                 wl_plot, spectrum = payload
-                record = _AcquiredRecord(np.asarray(spectrum, dtype=float), np.asarray(wl_plot, dtype=float), mode="binned")
+                record = _AcquiredRecord(np.asarray(spectrum, dtype=float), np.asarray(wl_plot, dtype=float), mode="binned",
+                                         acquisition_ids=tuple(acquisition_ids))
             else:
                 wl_plot, y_axis, image = payload
-                record = _AcquiredRecord(np.asarray(image, dtype=float), np.asarray(wl_plot, dtype=float), mode="full", y_axis=np.asarray(y_axis, dtype=float))
+                record = _AcquiredRecord(np.asarray(image, dtype=float), np.asarray(wl_plot, dtype=float), mode="full",
+                                         y_axis=np.asarray(y_axis, dtype=float), acquisition_ids=tuple(acquisition_ids))
             self.result.emit(record)
             self.status.emit("Done.")
         except Exception as exc:
@@ -519,6 +586,8 @@ class _BRCWidget(QWidget):
         self._result: Optional[np.ndarray] = None
         self._rc_run = None
         self._rc_context_key = None
+        self._rc_processing_context = None
+        self._rc_processing_context = None
         self._build()
         self._wire()
         self.load_config()
@@ -652,6 +721,7 @@ class _BRCWidget(QWidget):
         # is intentionally deferred until the first CSV/PNG export.
         self._rc_run = None
         self._rc_context_key = None
+        self._rc_processing_context = None
         self._save_csv_btn.setEnabled(False)
         self._save_png_btn.setEnabled(False)
         self.save_config()
@@ -669,6 +739,7 @@ class _BRCWidget(QWidget):
             scale = self._scale_spin.value()
             b_scaled = scale * b_i
             mode = self._mode_combo.currentText()
+            smooth_window = None
             if mode == "contrast":
                 result = compute_rc_contrast(s_i, b_i, scale=scale)
             elif mode == "subtract":
@@ -707,12 +778,23 @@ class _BRCWidget(QWidget):
                 float(self._scale_spin.value()), int(self._order_combo.currentText()),
                 tuple(np.asarray(wl_show).tolist()),
             )
+            self._rc_processing_context = {
+                "inputs": {"sample": _input_identity(sample_path, "sample"),
+                           "background": _input_identity(bg_path, "background")},
+                "processing": {"mode": mode, "scale": float(scale),
+                               "smoothing_window": smooth_window,
+                               "gradient_order": int(self._order_combo.currentText()),
+                               "interpolation": "linear_to_sample_axis",
+                               "crop": {"x_min": x0, "x_max": x1, "y_min": y0, "y_max": y1}},
+                "result": {"rows": int(wl_show.size), "wavelength_nm": wl_show.tolist()},
+            }
             self._save_csv_btn.setEnabled(True)
             self._save_png_btn.setEnabled(True)
             self._info_lbl.setText(f"Binned result ready | x = {wl_show.min():.3f} to {wl_show.max():.3f} nm")
         except Exception as exc:
             self._rc_run = None
             self._rc_context_key = None
+            self._rc_processing_context = None
             self._info_lbl.setText(f"Binned RC failed: {exc}")
 
     def _ensure_rc_run(self):
@@ -721,20 +803,32 @@ class _BRCWidget(QWidget):
         if self._rc_context_key is None:
             raise RuntimeError("No successful binned RC computation is ready for export")
         sample_path = Path(self._sample_edit.text().strip())
+        context = dict(self._rc_processing_context or {})
+        sample_input = context.get("inputs", {}).get("sample", {})
+        background_input = context.get("inputs", {}).get("background", {})
+        sample_path = Path(str(sample_input.get("path") if isinstance(sample_input, dict) else sample_input or sample_path))
+        background_path = Path(str(background_input.get("path") if isinstance(background_input, dict) else background_input or self._bg_edit.text().strip()))
         device_id = _bfp_device_id(sample_path)
         if not device_id:
             raise ValueError("Sample ID is required for RC output")
         self._rc_run = ExperimentMetadataService(sample_path.parent).begin(
             "bfp_binned_rc", device_id, output_dir=sample_path.parent,
             allow_post_completion=True,
-            settings={"mode": self._mode_combo.currentText(), "scale": self._scale_spin.value(),
-                      "order": self._order_combo.currentText()},
+            settings={"processing_context": context,
+                      "mode": context.get("processing", {}).get("mode"),
+                      "scale": context.get("processing", {}).get("scale"),
+                      "order": context.get("processing", {}).get("gradient_order")},
         )
+        for role, input_path, identity in (("sample", sample_path, sample_input), ("background", background_path, background_input)):
+            _frozen_input(self._rc_run, input_path, identity if isinstance(identity, dict) else {"role": role}, "binned_spectrum_input")
+        self._rc_run.record_processing(context, context="binned_rc")
         return self._rc_run
 
     def _finish_rc_export(self, path: Path, role: str):
         run = self._ensure_rc_run()
         run.register_file(path, role)
+        run.record_export({"path": path.name, "role": role, "context": "binned_rc"},
+                          output={"file": path.name})
         if run.metadata.get("status") == "running":
             run.complete({"context": "binned_rc"})
         return run
@@ -961,6 +1055,7 @@ class _FRCWidget(QWidget):
     def compute(self):
         self._rc_run = None
         self._rc_context_key = None
+        self._rc_processing_context = None
         self._save_csv_btn.setEnabled(False)
         self._save_png_btn.setEnabled(False)
         self.save_config()
@@ -1022,12 +1117,25 @@ class _FRCWidget(QWidget):
                 sample_path, bg_path, self._calc_combo.currentText(), key,
                 tuple(np.asarray(wl_crop).tolist()), tuple(np.asarray(y_crop).tolist()),
             )
+            self._rc_processing_context = {
+                "inputs": {"sample": _input_identity(sample_path, "sample"),
+                           "background": _input_identity(bg_path, "background")},
+                "processing": {"calculation": self._calc_combo.currentText(),
+                               "display_key": key,
+                               "interpolation": "linear_to_sample_wavelength_and_y_grid",
+                               "crop": {"x_min": x0, "x_max": x1, "y_min": y0, "y_max": y1,
+                                        "z_min": z0, "z_max": z1},
+                               "auto_color_scale": bool(self._auto_color_chk.isChecked())},
+                "result": {"shape": list(img_crop.shape), "wavelength_nm": wl_crop.tolist(),
+                           "y": y_crop.tolist()},
+            }
             self._save_csv_btn.setEnabled(True)
             self._save_png_btn.setEnabled(True)
             self._info_lbl.setText(f"Full-sensor view ready | x = {wl_crop.min():.3f} to {wl_crop.max():.3f} nm")
         except Exception as exc:
             self._rc_run = None
             self._rc_context_key = None
+            self._rc_processing_context = None
             self._info_lbl.setText(f"Full-sensor RC failed: {exc}")
 
     def _ensure_rc_run(self):
@@ -1035,20 +1143,31 @@ class _FRCWidget(QWidget):
             return self._rc_run
         if self._rc_context_key is None:
             raise RuntimeError("No successful full-sensor RC computation is ready for export")
-        sample_path = Path(self._sample_edit.text().strip())
+        context = dict(self._rc_processing_context or {})
+        sample_input = context.get("inputs", {}).get("sample", {})
+        background_input = context.get("inputs", {}).get("background", {})
+        sample_path = Path(str(sample_input.get("path") if isinstance(sample_input, dict) else sample_input or self._sample_edit.text().strip()))
+        background_path = Path(str(background_input.get("path") if isinstance(background_input, dict) else background_input or self._bg_edit.text().strip()))
         device_id = _bfp_device_id(sample_path)
         if not device_id:
             raise ValueError("Sample ID is required for RC output")
         self._rc_run = ExperimentMetadataService(sample_path.parent).begin(
             "bfp_full_sensor_rc", device_id, output_dir=sample_path.parent,
             allow_post_completion=True,
-            settings={"calculation": self._calc_combo.currentText(), "display_key": self._display_key},
+            settings={"processing_context": context,
+                      "calculation": context.get("processing", {}).get("calculation"),
+                      "display_key": context.get("processing", {}).get("display_key")},
         )
+        for role, input_path, identity in (("sample", sample_path, sample_input), ("background", background_path, background_input)):
+            _frozen_input(self._rc_run, input_path, identity if isinstance(identity, dict) else {"role": role}, "full_sensor_spectrum_input")
+        self._rc_run.record_processing(context, context="full_sensor_rc")
         return self._rc_run
 
     def _finish_rc_export(self, path: Path, role: str):
         run = self._ensure_rc_run()
         run.register_file(path, role)
+        run.record_export({"path": path.name, "role": role, "context": "full_sensor_rc"},
+                          output={"file": path.name})
         if run.metadata.get("status") == "running":
             run.complete({"context": "full_sensor_rc"})
         return run
@@ -1555,9 +1674,12 @@ class BFPPanel(QWidget):
             self._experiment_run = ExperimentMetadataService(self._out_dir()).begin(
                 "bfp_acquisition", device_id, output_dir=self._out_dir(),
                 allow_post_completion=True,
+                instruments=instrument_inventory(lightfield=self._ctrl),
                 settings={"roi_mode": self._roi_combo.currentText(), "center_nm": self._center_spin.value(),
                           "exposure_ms": self._exp_spin.value(), "frames": self._epf_spin.value(),
-                          "repeat": self._repeat_spin.value(), "auto_save_csv": self._auto_save_csv_chk.isChecked()},
+                          "repeat": self._repeat_spin.value(), "auto_save_csv": self._auto_save_csv_chk.isChecked(),
+                          "power_correction_factor": power_correction_factor(),
+                          "calibration": {"source": "lightfield_capture_axis"}},
             )
             bind_lightfield_metadata(self._ctrl, self._experiment_run)
         except Exception as exc:
@@ -1593,9 +1715,12 @@ class BFPPanel(QWidget):
         self._display.update_data(record.data, record.wls, y_axis=record.y_axis)
         for btn in (self._save_csv_btn, self._save_png_btn, self._apply_bg_btn, self._use_sample_btn, self._use_bg_btn):
             btn.setEnabled(True)
+        csv_path = None
         if self._auto_save_csv_chk.isChecked():
             try:
-                csv_path = self._save_record_csv(record)
+                # Keep the run open until the aggregation membership is
+                # recorded below; saving the CSV must not close its journal.
+                csv_path = self._save_record_csv(record, finalize=False)
                 self._status_lbl.setText(f"Acquired and auto-saved -> {csv_path.name}")
                 self._status_lbl.setStyleSheet("color: green;")
             except Exception as exc:
@@ -1606,7 +1731,18 @@ class BFPPanel(QWidget):
             self._status_lbl.setText("Acquisition complete")
             self._status_lbl.setStyleSheet("color: green;")
         run = getattr(self, "_experiment_run", None)
-        if run is not None and run.metadata.get("status") == "running" and not self._auto_save_csv_chk.isChecked():
+        if run is not None and not self._acquire_error:
+            # The worker freezes the successful measurement UUIDs at capture
+            # time.  Warm-up and failed captures therefore cannot accidentally
+            # become contributors, and the relationship does not depend on a
+            # bounded scan of the event journal.
+            capture_ids = list(record.acquisition_ids)
+            run.record_processing({"mode": record.mode, "aggregation": {
+                "method": "mean_over_repeats", "repeat_count": len(capture_ids),
+                "acquisition_ids": capture_ids}},
+                output={"kind": "bfp_acquisition_result",
+                        **({"file": csv_path.name} if csv_path is not None else {})})
+        if run is not None and not self._acquire_error and run.metadata.get("status") == "running":
             try:
                 run.complete({"mode": record.mode})
             except Exception as exc:
@@ -1677,7 +1813,7 @@ class BFPPanel(QWidget):
         self._run_idx_spin.setValue(run_idx)
         return out_dir / f"{self._build_prefix_without_time_and_run()}_{_now_time()}_{run_idx:03d}"
 
-    def _save_record_csv(self, record: _AcquiredRecord) -> Path:
+    def _save_record_csv(self, record: _AcquiredRecord, *, finalize: bool = True) -> Path:
         base = self._next_base_path()
         csv_path = base.with_suffix(".csv")
         if record.mode == "binned":
@@ -1688,7 +1824,7 @@ class BFPPanel(QWidget):
         if run is None:
             raise RuntimeError("Acquisition metadata record is missing")
         run.register_file(csv_path, "raw")
-        if run.metadata.get("status") == "running":
+        if finalize and run.metadata.get("status") == "running":
             run.complete({"mode": record.mode})
         record.csv_path = csv_path
         self._refresh_preview()

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import sys
 import time
+import csv
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QComboBox, QCheckBox, QSizePolicy, QDoubleSpinBox,
     QSpinBox,
     QToolButton,
+    QFileDialog,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +46,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pyqtgraph as pg
 from utils.config import cfg
 from ui.andor_controls_widget import AndorControlsWidget
+from app.experiment_metadata import instrument_inventory
+from app.power_reading import power_correction_factor
 
 # Use a dark-on-white look that reads well in lab conditions
 pg.setConfigOption("background", "w")
@@ -183,6 +187,12 @@ class SpectrumPanel(QWidget):
         self._continuous_mode: Optional[str] = None
         self._continuous_frames = 0
         self._continuous_started_at = 0.0
+        self._last_data_kind: Optional[str] = None
+        self._last_data: Optional[np.ndarray] = None
+        self._last_wavelength: Optional[np.ndarray] = None
+        self._acquisition_settings_snapshot: Optional[dict] = None
+        self._pending_acquisition_snapshot: Optional[dict] = None
+        self._last_acquisition_snapshot: Optional[dict] = None
         self._build()
         self._wire()
 
@@ -237,6 +247,8 @@ class SpectrumPanel(QWidget):
         self._run_2d_btn = QPushButton("Run 2D")
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setEnabled(False)
+        self._save_btn = QPushButton("Save current…")
+        self._save_btn.setToolTip("Deliberately record the currently displayed acquisition with its saved setup.")
         self._status_lbl     = QLabel("Ready")
         self._status_lbl.setStyleSheet("color: gray;")
         btn_row.addWidget(self._acquire_btn)
@@ -246,6 +258,7 @@ class SpectrumPanel(QWidget):
         btn_row.addWidget(self._run_1d_btn)
         btn_row.addWidget(self._run_2d_btn)
         btn_row.addWidget(self._stop_btn)
+        btn_row.addWidget(self._save_btn)
         btn_row.addStretch()
         self._rate_lbl = QLabel("0 frames · 0.0 fps")
         btn_row.addWidget(self._rate_lbl)
@@ -280,6 +293,7 @@ class SpectrumPanel(QWidget):
         self._apply_btn.setEnabled(False)
         self._run_1d_btn.setEnabled(False)
         self._run_2d_btn.setEnabled(False)
+        self._save_btn.setEnabled(False)
 
     def _wire(self):
         self._acquire_btn.clicked.connect(self._on_acquire)
@@ -289,6 +303,7 @@ class SpectrumPanel(QWidget):
         self._run_1d_btn.clicked.connect(lambda: self._start_continuous("1d"))
         self._run_2d_btn.clicked.connect(lambda: self._start_continuous("2d"))
         self._stop_btn.clicked.connect(self._stop_continuous)
+        self._save_btn.clicked.connect(self._save_current_dialog)
         self._andor_toggle.toggled.connect(self._toggle_andor_controls)
         self._andor_controls.status_changed.connect(self._on_andor_status_text)
         self._center.valueChanged.connect(
@@ -375,18 +390,32 @@ class SpectrumPanel(QWidget):
         if self._ctrl is None or not self._connected:
             return
         self._pending_acquisition = acquisition
+        # Freeze the request at dispatch time.  The controls remain editable
+        # while the asynchronous controller applies settings; reading them in
+        # the completion callback can otherwise attribute a later UI edit to
+        # the spectrum that was acquired with the old request.
+        self._pending_acquisition_snapshot = {
+            "center_nm": float(self._center.value()),
+            "exposure_ms": float(self._exposure.value()),
+            "accumulations": int(self._accumulations.value()),
+            "requested_epoch_s": time.time(),
+        }
         self._set_action_controls_enabled(False)
         self._status_lbl.setText("Applying settings…")
         self._ctrl.apply_settings(
-            exposure_ms=float(self._exposure.value()),
-            center_nm=float(self._center.value()),
-            accumulations=int(self._accumulations.value()),
+            exposure_ms=self._pending_acquisition_snapshot["exposure_ms"],
+            center_nm=self._pending_acquisition_snapshot["center_nm"],
+            accumulations=self._pending_acquisition_snapshot["accumulations"],
         )
 
     @Slot()
     def _on_settings_applied(self) -> None:
         pending = self._pending_acquisition
         self._pending_acquisition = None
+        snapshot = dict(self._pending_acquisition_snapshot or {})
+        snapshot["applied_epoch_s"] = time.time()
+        self._acquisition_settings_snapshot = snapshot
+        self._pending_acquisition_snapshot = dict(snapshot)
         if pending in {"1d", "run_1d"}:
             if pending == "run_1d":
                 self._continuous_mode = "1d"
@@ -406,6 +435,7 @@ class SpectrumPanel(QWidget):
     @Slot(str)
     def _on_error(self, message: str) -> None:
         self._pending_acquisition = None
+        self._pending_acquisition_snapshot = None
         self._continuous_mode = None
         full = str(message)
         self._status_lbl.setText(f"Error: {full.splitlines()[0][:80]}")
@@ -524,6 +554,14 @@ class SpectrumPanel(QWidget):
 
     @Slot(object, object)
     def _on_spectrum_ready(self, wl: np.ndarray, cts: np.ndarray):
+        self._last_acquisition_snapshot = dict(
+            self._pending_acquisition_snapshot or self._acquisition_settings_snapshot or {}
+        )
+        self._pending_acquisition_snapshot = None
+        self._last_data_kind = "spectrum_1d"
+        self._last_wavelength = np.asarray(wl, dtype=float).copy()
+        self._last_data = np.asarray(cts, dtype=float).copy()
+        self._save_btn.setEnabled(True)
         self._spec_plot.update_spectrum(wl, cts)
         self._tabs.setCurrentIndex(0)
         self._status_lbl.setText("Ready")
@@ -531,6 +569,14 @@ class SpectrumPanel(QWidget):
 
     @Slot(object)
     def _on_frame_ready(self, img: np.ndarray):
+        self._last_acquisition_snapshot = dict(
+            self._pending_acquisition_snapshot or self._acquisition_settings_snapshot or {}
+        )
+        self._pending_acquisition_snapshot = None
+        self._last_data_kind = "frame_2d"
+        self._last_wavelength = None
+        self._last_data = np.asarray(img, dtype=float).copy()
+        self._save_btn.setEnabled(True)
         self._frame_plot.update_frame(img)
         self._tabs.setCurrentIndex(1)
         self._status_lbl.setText("Ready")
@@ -538,10 +584,74 @@ class SpectrumPanel(QWidget):
 
     # ── direct update (called by sweep loop without going through controller) ─
 
-    def push_spectrum(self, wl: np.ndarray, cts: np.ndarray) -> None:
+    def push_spectrum(self, wl: np.ndarray, cts: np.ndarray,
+                      settings_snapshot: Optional[dict] = None) -> None:
         """Update 1D plot directly (e.g. from a sweep step callback)."""
         self._spec_plot.update_spectrum(wl, cts)
+        self._last_data_kind = "spectrum_1d"
+        self._last_wavelength = np.asarray(wl, dtype=float).copy()
+        self._last_data = np.asarray(cts, dtype=float).copy()
+        self._last_acquisition_snapshot = dict(settings_snapshot or {
+            "available": False, "source": "external_push",
+        })
+        self._save_btn.setEnabled(True)
 
-    def push_frame(self, img: np.ndarray) -> None:
+    def push_frame(self, img: np.ndarray,
+                   settings_snapshot: Optional[dict] = None) -> None:
         """Update 2D plot directly."""
         self._frame_plot.update_frame(img)
+        self._last_data_kind = "frame_2d"
+        self._last_wavelength = None
+        self._last_data = np.asarray(img, dtype=float).copy()
+        self._last_acquisition_snapshot = dict(settings_snapshot or {
+            "available": False, "source": "external_push",
+        })
+        self._save_btn.setEnabled(True)
+
+    def _save_current_dialog(self) -> None:
+        if self._last_data is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Save current acquisition", "", "CSV (*.csv)")
+        if path:
+            try:
+                self.save_current(path)
+                self._status_lbl.setText("Saved current acquisition")
+            except Exception as exc:
+                self._status_lbl.setText(f"Save failed: {str(exc)[:80]}")
+
+    def save_current(self, output_path: str | Path) -> Path:
+        """Deliberately save the currently displayed data and sidecar."""
+        if self._last_data is None or self._last_data_kind is None:
+            raise RuntimeError("No acquired spectrum or frame is available")
+        output = Path(output_path).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if self._last_data_kind == "spectrum_1d":
+            if self._last_wavelength is None or self._last_wavelength.size != self._last_data.size:
+                raise ValueError("Spectrum wavelength and intensity axes do not match")
+            with output.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(("wavelength_nm", "intensity_counts"))
+                writer.writerows(zip(self._last_wavelength.tolist(), self._last_data.tolist()))
+        else:
+            np.savetxt(output, self._last_data, delimiter=",")
+        from app.experiment_metadata import ExperimentMetadataService
+        settings = {"display_kind": self._last_data_kind,
+                    "acquisition_time_snapshot": self._last_acquisition_snapshot,
+                    "power_correction_factor": power_correction_factor(),
+                    "calibration": {"wavelength_axis_nm":
+                                    self._last_wavelength.tolist()
+                                    if self._last_wavelength is not None else None,
+                                    "source": "acquired_data_axis"}}
+        identity = getattr(self._ctrl, "identity", {}) or {}
+        device_id = str(identity.get("serial_number") or identity.get("model") or "spectrum")
+        run = ExperimentMetadataService(output.parent).begin(
+            "spectrum_preview", device_id, output_dir=output.parent,
+            settings=settings,
+            instruments=instrument_inventory(lightfield=self._ctrl),
+        )
+        run.register_file(output, role="raw", kind=self._last_data_kind,
+                          details={"shape": list(self._last_data.shape)})
+        run.record_export({"path": output.name, "kind": self._last_data_kind},
+                          output={"file": output.name})
+        run.complete({"shape": list(self._last_data.shape)})
+        return output

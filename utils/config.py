@@ -138,6 +138,18 @@ class PM100DConfig:
 
 
 @dataclass
+class NDCalibrationConfig:
+    profile_name: str = "default"
+    wavelength_nm: Optional[float] = None
+    positions: List[float] = field(default_factory=list)
+    powers: List[float] = field(default_factory=list)
+    raw_powers: List[float] = field(default_factory=list)
+    correction_factor: float = 1.0
+    reference_position: Optional[float] = None
+    reference_power_uw: Optional[float] = None
+
+
+@dataclass
 class FilenameConfig:
     """Filename settings and output path."""
     base_out: str = r"D:\instrument_control_v3_1"
@@ -368,6 +380,7 @@ class AppConfig:
     ramp: RampConfig = field(default_factory=RampConfig)
     filename: FilenameConfig = field(default_factory=FilenameConfig)
     pm100d: PM100DConfig = field(default_factory=PM100DConfig)
+    nd_calibration: NDCalibrationConfig = field(default_factory=NDCalibrationConfig)
     bfp_naming: BFPNamingConfig = field(default_factory=BFPNamingConfig)
     bfp_rc: BFPRCConfig = field(default_factory=BFPRCConfig)
     rotation: RotationConfig = field(default_factory=RotationConfig)
@@ -466,6 +479,7 @@ class AppConfig:
             self.pm100d.correction_factor = factor if math.isfinite(factor) and factor > 0 else 1.0
         except (TypeError, ValueError):
             self.pm100d.correction_factor = 1.0
+        _update_dataclass(self.nd_calibration, data.get("nd_calibration", {}))
         _update_dataclass(self.bfp_naming, data.get("bfp_naming", {}))
         _update_dataclass(self.bfp_rc, data.get("bfp_rc", {}))
         rotation_data = data.get("rotation", {})

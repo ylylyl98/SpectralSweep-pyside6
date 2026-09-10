@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 from unittest.mock import patch
 
 import ui.bfp_panel_integrated as bfp_ui
-from ui.bfp_panel_integrated import BFPPanel, _BRCWidget, _FRCWidget
+from ui.bfp_panel_integrated import BFPPanel, _BRCWidget, _FRCWidget, _input_identity
 from utils.bfp_io import save_binned_csv, save_full_image_csv
 
 
@@ -39,6 +39,14 @@ class BFPMetadataTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_compute_input_identity_changes_when_source_content_changes(self):
+        sample = self.root / "sample.csv"
+        before = _input_identity(sample, "sample")
+        sample.write_text("changed\n", encoding="utf-8")
+        after = _input_identity(sample, "sample")
+        self.assertNotEqual(before["sha256"], after["sha256"])
+        self.assertEqual(before["role"], "sample")
 
     def _sidecar(self, kind):
         paths = sorted(self.root.glob("*.experiment.metadata.json"))

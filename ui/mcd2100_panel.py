@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from app.engine.mcd2100_worker import MCD2100Worker
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
-from app.experiment_metadata import ExperimentMetadataService
+from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from controllers.rotation_controller import RotationController
 from utils.config import cfg
 from utils.filename_builder import sanitize_token, make_unique_stem
@@ -120,7 +120,7 @@ class _LightFieldRotationService:
         self._last_position = float(rotator.get_position())
         return self._last_position
 
-    def acquire(self, angle, _label, stop_event):
+    def acquire(self, angle, _label, stop_event, acquisition_id=None):
         if stop_event.is_set():
             raise RuntimeError("measurement cancelled")
         spectrometer = getattr(self._lf6, "adapter", None)
@@ -131,7 +131,10 @@ class _LightFieldRotationService:
 
         def capture() -> None:
             try:
-                set_lightfield_context(self._lf6, angle_deg=float(angle), polarization_label=str(_label))
+                context = {"angle_deg": float(angle), "polarization_label": str(_label)}
+                if acquisition_id:
+                    context["acquisition_id"] = str(acquisition_id)
+                set_lightfield_context(self._lf6, **context)
                 result["value"] = spectrometer.acquire()
             except BaseException as exc:
                 result["error"] = exc
@@ -585,7 +588,7 @@ class MCD2100Panel(QWidget):
         self._gate_entry_a = QLineEdit("0")
         self._gate_entry_b = QLineEdit("0")
         for editor in (self._gate_entry_a, self._gate_entry_b):
-            editor.setToolTip("Enter one value, comma-separated values, or start:step:stop")
+            editor.setToolTip("Enter a scalar, comma-separated values, legacy start:step:stop, or (start,stop,step); a short preview is shown below.")
         self._gate_entry_vbias = self._spin(-1000, 1000, 4)
         self._gate_entry_vbias.setSuffix(" V")
         self._gate_entry_expansion_label = QLabel("Combine")
@@ -1443,9 +1446,12 @@ class MCD2100Panel(QWidget):
         self._gate_entry_add.setText(f"{action} {count} row{'s' if count != 1 else ''}")
         self._gate_entry_add.setEnabled(True)
         self._gate_entry_status.setStyleSheet("")
+        def _preview(values: list[float]) -> str:
+            shown = ", ".join(f"{value:.6g}" for value in values[:4])
+            return f"[{shown}{', …' if len(values) > 4 else ''}]"
         self._gate_entry_status.setText(
-            f"{count} row{'s' if count != 1 else ''} ready. "
-            "Use commas or start:step:stop for multiple values."
+            f"{count} row{'s' if count != 1 else ''} ready · "
+            f"A={_preview(values_a)}, B={_preview(values_b)}"
         )
 
     def _gate_entry_provenance(self) -> dict[str, Any]:
@@ -2132,7 +2138,18 @@ class MCD2100Panel(QWidget):
                     "mcd_attodry2100", device_id, output_dir=output,
                     sample_id=device_id, settings=settings_snapshot,
                     safety_policy=safety_policy,
+                    instruments=instrument_inventory(lightfield=self._lf6, magnet=self.controller,
+                                                     rotation=self._rotation, smu=self._smu),
                 )
+                self._experiment_run.record_event(
+                    "plan_requested", plan_id="mcd2100-plan-1",
+                    plan_summary={"condition_count": len(enabled_conditions),
+                                  "angle_count": len(angles),
+                                  "start_T": start_field, "stop_T": stop_field},
+                )
+                for condition_index, condition in enumerate(enabled_conditions, 1):
+                    self._experiment_run.register_condition(
+                        condition, condition_id=f"condition-{condition_index}")
                 bind_lightfield_metadata(self._lf6, self._experiment_run)
             optical = self._optical_factory() if self._optical_factory else _LightFieldRotationService(
                 self._lf6, self._rotation, rotator_name, self._smu
@@ -2165,6 +2182,7 @@ class MCD2100Panel(QWidget):
                     "filename_temperature_source": filename_temperature_source,
                     "experiment_type": "mcd_attodry2100",
                 },
+                metadata_run=self._experiment_run,
             )
         except Exception as exc:
             run = getattr(self, "_experiment_run", None)
@@ -2360,7 +2378,11 @@ class MCD2100Panel(QWidget):
                                          details=detail)
                 legacy = Path(result.get("metadata_path", ""))
                 if legacy.exists():
-                    run.register_file(legacy, "intermediate")
+                    run.register_file(
+                        legacy, "intermediate",
+                        details={"compatibility_projection": True,
+                                 "derived_from_experiment_id": run.experiment_id},
+                    )
                 if terminal == "COMPLETED":
                     run.complete({"spectra_written": spectra})
                 elif terminal == "CANCELLED":

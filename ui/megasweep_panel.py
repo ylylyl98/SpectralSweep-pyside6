@@ -56,7 +56,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pyqtgraph as pg
 from utils.config import cfg
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
-from app.experiment_metadata import ExperimentMetadataService
+from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from utils.filename_builder import format_compact_number, format_decimal_token, format_power_uw_decimal, sanitize_token
 from utils.mcd_common import (
     mcd_coordinates as _mcd_coordinates,
@@ -1940,11 +1940,12 @@ class _MegaSweepWorker(QObject):
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, params: dict, smu_ctrl=None, lf6_ctrl=None):
+    def __init__(self, params: dict, smu_ctrl=None, lf6_ctrl=None, metadata_run=None):
         super().__init__()
         self._p = params
         self._smu = smu_ctrl
         self._lf6 = lf6_ctrl
+        self._metadata_run = metadata_run
         self._stop = threading.Event()
         self._stopping = False
 
@@ -2112,10 +2113,26 @@ class _MegaSweepWorker(QObject):
         meta_fp = fp.with_suffix(".meta.txt")
         completed_points = 0
         status = "Running"
+        if self._metadata_run is not None:
+            initial_shared_state = self._metadata_run.record_compatibility_state(
+                meta_fp.name,
+                {"params": p, "wavelengths": wls.tolist(),
+                 "status": status, "completed_points": completed_points},
+            )
+            if initial_shared_state is None:
+                raise RuntimeError("shared compatibility metadata could not be recorded")
         with open(meta_fp, "w", encoding="utf-8", newline="") as meta_fh:
             meta_fh.write(_build_csv_metadata_text(
                 p, wls, status=status, completed_points=completed_points
             ))
+        if self._metadata_run is not None:
+            self._metadata_run.record_event(
+                "map_started", condition_id=f"condition-{int(p.get('condition_index', 1))}",
+                output={"file": fp.name, "metadata_file": meta_fp.name},
+                map_plan={"axis_a": p.get("axis_a"), "axis_b": p.get("axis_b"),
+                          "point_count": len(points),
+                          "optical_condition": p.get("condition_name")},
+            )
         with open(fp, "w", newline="") as fh:
             np.savetxt(fh, header, fmt="%s", delimiter=",")
         self._emit_log(f"Writing data to {fp}")
@@ -2210,13 +2227,46 @@ class _MegaSweepWorker(QObject):
         else:
             status = "Complete"
         finally:
-            with open(meta_fp, "w", encoding="utf-8", newline="") as meta_fh:
-                meta_fh.write(_build_csv_metadata_text(
-                    p,
-                    wls,
-                    status=status,
-                    completed_points=completed_points,
-                ))
+            original_error = sys.exc_info()[1]
+            projection_ready = True
+            if self._metadata_run is not None:
+                try:
+                    shared_state = self._metadata_run.record_compatibility_state(
+                        meta_fp.name,
+                        {"params": p, "wavelengths": wls.tolist(),
+                         "status": status, "completed_points": completed_points},
+                    )
+                    if shared_state is None:
+                        raise RuntimeError("shared compatibility metadata could not be recorded")
+                    legacy_params = dict(shared_state.get("params", {}))
+                    legacy_wls = np.asarray(shared_state.get("wavelengths", wls.tolist()), dtype=float)
+                except Exception as exc:
+                    self._metadata_run.mark_metadata_failure(exc, event="compatibility_state")
+                    if original_error is None:
+                        raise
+                    projection_ready = False
+            else:
+                legacy_params, legacy_wls = p, wls
+            if self._metadata_run is not None:
+                self._metadata_run.record_event(
+                    "map_completed", condition_id=f"condition-{int(p.get('condition_index', 1))}",
+                    output={"file": fp.name, "metadata_file": meta_fp.name,
+                            "rows": int(completed_points)},
+                    scientific_metadata={
+                        "axis_a": p.get("axis_a"), "axis_b": p.get("axis_b"),
+                        "wavelength_count": int(wls.size),
+                        "completed_points": int(completed_points),
+                        "status": status,
+                    },
+                )
+            if projection_ready:
+                with open(meta_fp, "w", encoding="utf-8", newline="") as meta_fh:
+                    meta_fh.write(_build_csv_metadata_text(
+                        legacy_params,
+                        legacy_wls,
+                        status=status,
+                        completed_points=completed_points,
+                    ))
 
         self._emit_log(f"Map complete. Saved -> {fp.name}")
 
@@ -3448,6 +3498,14 @@ class MegaSweepPanel(QWidget):
             self._experiment_run = ExperimentMetadataService(params["out_path"]).begin(
                 "gate_map_2d", str(params.get("sample", "")).strip(),
                 output_dir=params["out_path"], settings=params,
+                instruments=instrument_inventory(lightfield=self._lf6, smu=self._smu),
+            )
+            self._experiment_run.record_event(
+                "plan_requested", plan_id="gate-map-plan-1",
+                plan_summary={"axis_a": params.get("axis_a", ""),
+                              "axis_b": params.get("axis_b", ""),
+                              "point_count": len(params.get("valid_points", [])),
+                              "condition_count": len(params.get("optical_conditions", []))},
             )
             bind_lightfield_metadata(self._lf6, self._experiment_run)
         except Exception as exc:
@@ -3461,7 +3519,7 @@ class MegaSweepPanel(QWidget):
         self._stop_btn.setEnabled(True)
         self._set_status("Running...", "#b26a00")
         self._run_inner_count = max(1, len(params.get("axis_b_vals", [])))
-        self._worker = _MegaSweepWorker(params, self._smu, self._lf6)
+        self._worker = _MegaSweepWorker(params, self._smu, self._lf6, self._experiment_run)
         self._thread = QThread()
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
@@ -3538,7 +3596,15 @@ class MegaSweepPanel(QWidget):
                 for data_file in Path(run.path.parent).glob("*"):
                     if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".txt", ".log", ".json"}:
                         continue
-                    run.register_file(data_file, "raw" if data_file.suffix.lower() == ".csv" else "intermediate")
+                    run.register_file(
+                        data_file,
+                        "raw" if data_file.suffix.lower() == ".csv" else "intermediate",
+                        details=(
+                            {"compatibility_projection": True,
+                             "derived_from_experiment_id": run.experiment_id}
+                            if data_file.suffix.lower() in {".txt", ".log"} else None
+                        ),
+                    )
                 if self._run_failed:
                     run.fail("gate map failed")
                 elif worker is not None and worker._stop.is_set():

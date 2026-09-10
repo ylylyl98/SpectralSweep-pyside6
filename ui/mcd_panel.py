@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import uuid
 import time
 from typing import Optional
 
@@ -47,7 +48,7 @@ from PySide6.QtWidgets import (
 
 from utils.config import cfg
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
-from app.experiment_metadata import ExperimentMetadataService
+from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from utils.filename_builder import (
     FilenameContext,
     build_base_filename,
@@ -239,13 +240,14 @@ class _ContinuousMCDWorker(QObject):
     finished = Signal(object)
     error = Signal(str)
 
-    def __init__(self, params: dict, magnet_ctrl, lf6_ctrl, rotation_ctrl, smu_ctrl):
+    def __init__(self, params: dict, magnet_ctrl, lf6_ctrl, rotation_ctrl, smu_ctrl, metadata_run=None):
         super().__init__()
         self._p = params
         self._magnet_ctrl = magnet_ctrl
         self._lf6_ctrl = lf6_ctrl
         self._rotation_ctrl = rotation_ctrl
         self._smu_ctrl = smu_ctrl
+        self._metadata_run = metadata_run
         self._stop = threading.Event()
         self._csv_path: Optional[Path] = None
         self._metadata_path: Optional[Path] = None
@@ -581,6 +583,25 @@ class _ContinuousMCDWorker(QObject):
             raise RuntimeError(f"{p['rotator'].upper()} is not connected")
         self._csv_path, self._metadata_path = self._create_output_paths(p)
 
+        if self._metadata_run is not None:
+            condition_id = f"condition-{int(p.get('condition_index', 1))}"
+            self._metadata_run.register_condition(
+                {"vtg_v": float(p.get("vtg_v", 0.0)),
+                 "vbg_v": float(p.get("vbg_v", 0.0)),
+                 "vbias_v": float(p.get("vbias_v", 0.0))},
+                condition_id=condition_id)
+            self._metadata_run.record_event(
+                "condition_started",
+                condition_id=condition_id,
+                condition={
+                    "index": int(p.get("condition_index", 1)),
+                    "count": int(p.get("condition_count", 1)),
+                    "vtg_v": float(p.get("vtg_v", 0.0)),
+                    "vbg_v": float(p.get("vbg_v", 0.0)),
+                    "vbias_v": float(p.get("vbias_v", 0.0)),
+                },
+            )
+
         identity = getattr(magnet, "identity", None)
         doping, efield = _mcd_coordinates(
             p["vtg_v"], p["vbg_v"], p["gate_ratio"]
@@ -848,6 +869,16 @@ class _ContinuousMCDWorker(QObject):
                 "spectra_written": self._spectra_written,
             }
         )
+        if self._metadata_run is not None:
+            # The JSON compatibility file remains useful to older tooling, but
+            # the shared experiment journal owns the condition timing,
+            # stabilization, cleanup, readbacks, and output association.
+            self._metadata_run.record_event(
+                "condition_completed",
+                condition_id=f"condition-{int(p.get('condition_index', index))}",
+                output={"file": self._csv_path.name, "rows": int(self._spectra_written)},
+                condition_detail=self._metadata,
+            )
         self._write_metadata()
         self._emit_log(f"MCD spectra saved to {self._csv_path}")
         return {
@@ -979,6 +1010,8 @@ class _ContinuousMCDWorker(QObject):
                 f"Ibg={_fmt(ibg)} A, Itg={_fmt(itg)} A, Ibias={_fmt(ib)} A"
             )
         info["readback"] = readback
+        if self._metadata_run is not None:
+            self._metadata_run.update_applied({"mcd1000_gates": readback})
         self._emit_log("Sample voltages applied.")
         return info
 
@@ -1000,7 +1033,13 @@ class _ContinuousMCDWorker(QObject):
 
         def capture() -> None:
             try:
-                set_lightfield_context(self._lf6_ctrl, output_file=self._csv_path, spectrum_index=self._spectra_written + 1)
+                acquisition_id = str(uuid.uuid4())
+                result["acquisition_id"] = acquisition_id
+                set_lightfield_context(
+                    self._lf6_ctrl, output_file=self._csv_path,
+                    spectrum_index=self._spectra_written + 1,
+                    acquisition_id=acquisition_id,
+                )
                 result["value"] = spec.acquire()
             except BaseException as exc:
                 result["error"] = exc
@@ -1041,6 +1080,21 @@ class _ContinuousMCDWorker(QObject):
         value = result.get("value")
         if value is None:
             raise RuntimeError("LightField acquisition returned no spectrum")
+        if self._metadata_run is not None:
+            observed = {"spectrum_index": int(self._spectra_written + 1),
+                        "acquisition_id": result.get("acquisition_id")}
+            try:
+                observed["field_t"] = float(self._magnet_ctrl.adapter.get_field_t())
+            except Exception:
+                observed["field_t"] = None
+            # ``self._p`` is the first condition's parameter dictionary and is
+            # not replaced while a multi-condition worker is running.  Use
+            # the active worker condition for both the metadata link and the
+            # emitted observation.
+            active_condition = int(self._condition_index)
+            self._metadata_run.record_observation(
+                observed, condition_id=f"condition-{active_condition}",
+                acquisition_id=str(observed.get("acquisition_id")) if observed.get("acquisition_id") else None)
         return value
 
     def _emit_progress(self, field_t: float) -> None:
@@ -1089,11 +1143,17 @@ class _ContinuousMCDWorker(QObject):
 
     def _write_metadata(self) -> None:
         if self._metadata_path is not None:
+            payload = self._metadata
+            if self._metadata_run is not None:
+                key = self._metadata_path.name
+                payload = self._metadata_run.record_compatibility_state(key, self._metadata)
+                if payload is None:
+                    raise RuntimeError("shared compatibility metadata could not be recorded")
             temporary = self._metadata_path.with_name(
                 self._metadata_path.name + ".tmp"
             )
             with temporary.open("w", encoding="utf-8") as stream:
-                json.dump(self._metadata, stream, indent=2, sort_keys=True)
+                json.dump(payload, stream, indent=2, sort_keys=True)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, self._metadata_path)
@@ -1108,6 +1168,16 @@ class _ContinuousMCDWorker(QObject):
         self._metadata["spectra_written"] = self._spectra_written
         if error:
             self._metadata["error"] = str(error)
+        if self._metadata_run is not None:
+            try:
+                self._metadata_run.record_event(
+                    "condition_failed" if str(status).lower() == "failed" else "condition_stopped",
+                    condition_id=f"condition-{int(self._metadata.get('condition_index', 1))}",
+                    output={"file": self._csv_path.name} if self._csv_path else None,
+                    condition_detail=self._metadata,
+                )
+            except Exception:
+                pass
         try:
             self._write_metadata()
         except Exception:
@@ -1619,7 +1689,7 @@ class MCDPanel(QWidget):
         self._gate_entry_a = QLineEdit("0")
         self._gate_entry_b = QLineEdit("0")
         for editor in (self._gate_entry_a, self._gate_entry_b):
-            editor.setToolTip("Enter one value, comma-separated values, or start:step:stop")
+            editor.setToolTip("Enter a scalar, comma-separated values, legacy start:step:stop, or (start,stop,step); a short preview is shown below.")
             editor.setMaximumWidth(130)
             editor.setSizePolicy(
                 QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
@@ -2407,9 +2477,12 @@ class MCDPanel(QWidget):
         self._gate_entry_add.setText(f"Add {count} row{'s' if count != 1 else ''}")
         self._gate_entry_add.setEnabled(True)
         self._gate_entry_status.setStyleSheet("")
+        def _preview(values: list[float]) -> str:
+            shown = ", ".join(f"{value:.6g}" for value in values[:4])
+            return f"[{shown}{', …' if len(values) > 4 else ''}]"
         self._gate_entry_status.setText(
-            f"{count} row{'s' if count != 1 else ''} ready. "
-            "Use commas or start:step:stop for multiple values."
+            f"{count} row{'s' if count != 1 else ''} ready · "
+            f"A={_preview(values_a)}, B={_preview(values_b)}"
         )
 
     def _commit_gate_entry(self) -> None:
@@ -2946,7 +3019,14 @@ class MCDPanel(QWidget):
         try:
             run_root = self._current_output_dir(params) if hasattr(self, "_current_output_dir") else Path(params["base_output_dir"]) / _safe_name(params["sample_id"]) / _safe_name(params.get("subfolder", "mcd"))
             self._experiment_run = ExperimentMetadataService(run_root).begin(
-                "mcd_aps100", params["sample_id"], output_dir=run_root, settings=params
+                "mcd_aps100", params["sample_id"], output_dir=run_root, settings=params,
+                instruments=instrument_inventory(lightfield=self._lf6, magnet=self._magnet,
+                                                 rotation=self._rotation, smu=self._smu)
+            )
+            self._experiment_run.record_event(
+                "plan_requested", plan_id="mcd-aps100-plan-1",
+                plan_summary={"condition_count": len(params.get("conditions", [])),
+                              "leg_count": len(params.get("legs", []))},
             )
             bind_lightfield_metadata(self._lf6, self._experiment_run)
         except Exception as exc:
@@ -2954,7 +3034,8 @@ class MCDPanel(QWidget):
             self._magnet.release_exclusive("mcd")
             return
         self._worker = _ContinuousMCDWorker(
-            params, self._magnet, self._lf6, self._rotation, self._smu
+            params, self._magnet, self._lf6, self._rotation, self._smu,
+            metadata_run=self._experiment_run,
         )
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
@@ -3030,7 +3111,11 @@ class MCDPanel(QWidget):
                         run.register_file(path, "raw")
                         for sibling in (path.with_suffix(".meta.json"),):
                             if sibling.exists():
-                                run.register_file(sibling, "intermediate")
+                                run.register_file(
+                                    sibling, "intermediate",
+                                    details={"compatibility_projection": True,
+                                             "derived_from_experiment_id": run.experiment_id},
+                                )
                 if result.get("error"):
                     run.fail(result["error"])
                 elif result.get("stopped"):

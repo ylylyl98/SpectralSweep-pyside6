@@ -1,5 +1,7 @@
 import csv
+import copy
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,12 @@ from utils.filename_builder import FilenameContext, resolve_power_uw
 
 
 class PowerCorrectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        cls.app = QApplication.instance() or QApplication([])
+
     def test_raw_and_corrected_reading_and_filename_are_not_double_scaled(self):
         adapter = Mock()
         adapter.get_power.return_value = 12.5e-6
@@ -110,6 +118,56 @@ class PowerCorrectionTests(unittest.TestCase):
             self.assertIn("Raw: 2", section._pwr_lbl.toolTip())
             self.assertIn("factor: 4", section._pwr_lbl.toolTip())
             section.close()
+
+    def test_sidebar_factor_is_observed_autosaved_and_loaded_as_canonical_config(self):
+        from tests.test_pm100d_adapter import _FakePMController
+        from ui.instrument_panel import InstrumentPanel
+        from ui.main_window import MainWindow
+        import utils.config as config_module
+
+        old_factor = cfg.pm100d.correction_factor
+        old_session = copy.deepcopy(cfg.session)
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "config.json"
+                panel = InstrumentPanel(pm_ctrl=_FakePMController())
+                self.addCleanup(panel.close)
+                section = panel._sections["pm100d"]
+                main = MainWindow.__new__(MainWindow)
+                main._active_tab_id = lambda: "instrument"
+                main._session_panels = {"instrument": panel}
+                main._last_observed_session = MainWindow._capture_session(main)
+                main._session_save_timer = Mock()
+
+                section._factor_spn.setValue(2.75)
+                MainWindow._poll_session_changes(main)
+                self.assertTrue(main._session_save_timer.start.called)
+                self.assertEqual(
+                    main._last_observed_session["panels"]["instrument"]["pm100d"]["correction_factor"],
+                    2.75,
+                )
+
+                with patch.object(config_module, "_CONFIG_FILE", path):
+                    MainWindow._persist_session(main)
+                restored_config = AppConfig()
+                restored_config.load(path)
+                self.assertEqual(restored_config.pm100d.correction_factor, 2.75)
+                from ui.instrument_panel import _PM100DSection
+                with patch.object(cfg.pm100d, "correction_factor", restored_config.pm100d.correction_factor):
+                    fresh_sidebar = _PM100DSection(_FakePMController())
+                    self.assertEqual(fresh_sidebar._factor_spn.value(), 2.75)
+                    fresh_sidebar.close()
+
+                # A stale session duplicate is observation data only; startup
+                # and the sidebar continue to use the canonical cfg value.
+                stale = panel.capture_session_state()
+                stale["pm100d"]["correction_factor"] = 0.25
+                cfg.pm100d.correction_factor = 2.75
+                panel.restore_session_state(stale)
+                self.assertEqual(section._factor_spn.value(), 2.75)
+        finally:
+            cfg.pm100d.correction_factor = old_factor
+            cfg.session = old_session
 
     def test_presets_export_and_filename_share_one_frozen_correction(self):
         import threading

@@ -56,7 +56,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from utils.config import cfg
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
-from app.experiment_metadata import ExperimentMetadataService
+from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.power_reading import power_correction_factor, read_power
 from utils.hardware_incidents import (
     HardwareIncidentRecorder,
@@ -4362,7 +4362,7 @@ class PresetsPanel(QWidget):
         return loop_df, batch_df, seq, batch
 
     def _current_run_meta(self) -> Dict[str, Any]:
-        return {
+        meta = {
             "device_id": self._sample_edit.text().strip(),
             "point": self._point_edit.text().strip(),
             "tag": "",
@@ -4378,6 +4378,17 @@ class PresetsPanel(QWidget):
             ),
             "voltage_settle_s": float(self._voltage_settle_spin.value()),
         }
+        # The worker executes these derived structures, so they are part of
+        # the authoritative experiment record rather than UI-only state.
+        if getattr(self, "_final_seq", None):
+            meta["executed_plan"] = {
+                "sequence": list(self._final_seq),
+                "batch_table": getattr(self, "_df_batch", pd.DataFrame()),
+                "acquisition_schedule": list(getattr(self, "_acquisition_schedule", []) or []),
+                "loop_definition": getattr(self, "_loop_src", pd.DataFrame()),
+                "acquisition_grouping": getattr(self, "_acquisition_grouping", None),
+            }
+        return meta
 
     def _current_output_dir(self, run_meta: Dict[str, Any]) -> Path:
         device_id = run_meta["device_id"].strip() or "SampleID"
@@ -5271,7 +5282,14 @@ class PresetsPanel(QWidget):
         self._run_files_before = set(out_dir.glob("*"))
         try:
             self._experiment_run = ExperimentMetadataService(out_dir).begin(
-                "dual_gate_sweep", run_meta["device_id"], output_dir=out_dir, settings=run_meta
+                "dual_gate_sweep", run_meta["device_id"], output_dir=out_dir, settings=run_meta,
+                instruments=instrument_inventory(lightfield=self._lf6, smu=self._smu,
+                                                 rotation=self._rot, stage=self._stage, power_meter=self._pm)
+            )
+            self._experiment_run.record_event(
+                "plan_requested", plan_id="dual-gate-plan-1",
+                plan_summary={"sequence_count": len(run_meta.get("executed_plan", {}).get("sequence", [])),
+                              "batch_rows": len(run_meta.get("executed_plan", {}).get("batch_table", []))},
             )
             bind_lightfield_metadata(self._lf6, self._experiment_run)
         except Exception as exc:

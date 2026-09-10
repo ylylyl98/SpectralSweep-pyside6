@@ -117,6 +117,7 @@ class MotionSweepTests(unittest.TestCase):
         panel._apply_gates_chk.setChecked(False)
 
         self.assertTrue(panel._validate())
+        panel._hardware_grp.setChecked(True)
         self.assertTrue(panel._pm_notice_lbl.isVisibleTo(panel))
 
     def test_rot1_sweep_without_pm_omits_power_and_restores_position(self):
@@ -158,6 +159,32 @@ class MotionSweepTests(unittest.TestCase):
             [edit.text() for edit in edits],
             ["latest-sample"] * 3,
         )
+
+    def test_rot2_sweep_only_moves_rot2_and_saves_angles(self):
+        rotation = _FakeRotationController()
+        with tempfile.TemporaryDirectory() as tmp:
+            p = _worker_params(tmp, "rot2")
+            worker = _PowerSweepWorker(p, None, rotation, None, _FakeLF6Controller(), None)
+            worker._run_sweep(p)
+            with (Path(tmp) / "motion_rot2.csv").open(encoding="utf-8", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+        self.assertEqual(rotation.adapter("rot2").moves, [1.0, 2.0, 24.0])
+        self.assertEqual(rotation.adapter("rot1").moves, [])
+        self.assertEqual([float(row["rot2_deg_actual"]) for row in rows], [1.0, 2.0])
+
+    def test_rot_axis_ui_hides_stage_power_controls(self):
+        panel = PowerSweepPanel()
+        for axis in ("rot1", "rot2"):
+            panel._motion_buttons[axis].click()
+            self.assertEqual(panel._motion_combo.currentData(), axis)
+            self.assertTrue(panel._motion_buttons[axis].isChecked())
+            self.assertEqual(panel._motion_input_lbl.text(), "Angles (°):")
+            self.assertTrue(panel._input_mode.isHidden())
+            self.assertTrue(panel._cal_grp.isHidden())
+        panel._motion_combo.setCurrentIndex(panel._motion_combo.findData("stage"))
+        self.assertTrue(panel._motion_buttons["stage"].isChecked())
+        self.assertFalse(panel._input_mode.isHidden())
+        panel.close()
 
 
 if __name__ == "__main__":

@@ -225,3 +225,58 @@ Event Status Register Power-On bit, output state, and the oldest system error.
 A failed role is quarantined after the incident: the run does not resume, and a
 new run is blocked until the SMUs are disconnected and reconnected. The
 software never turns an output back on as part of diagnosis or recovery.
+
+## Motion Sweep with ND calibration
+
+In the Motion Sweep tab, open the ND calibration controls, enter stage
+positions, and use **Scan and save calibration** with the linear stage and
+PM100D connected. The plot shows the measured calibration curve and the
+currently planned points; enable the log power axis for a large dynamic range.
+Use **Measure reference** when corrected absolute µW values are needed for the
+current session. References are held in memory and are not silently restored
+from older runs.
+
+Select **Target power** to generate stage positions from numeric start/end/count
+values with linear or logarithmic spacing, or provide a custom power list.
+Target powers are corrected sample µW and require a valid measured session
+reference. Position sweeps can be previewed as relative transmission when no
+reference is available. Use **Use these stage positions** to copy the generated
+list into the normal position input while retaining target-power provenance in
+the resulting CSV rows.
+
+## Experiment metadata and event journal
+
+Every acquisition and processing workflow creates one portable
+`*.experiment.metadata.json` sidecar. It contains requested settings, applied
+and observed values, instrument identities, cached software commit/dirty
+status, immutable settings snapshots, conditions, output file links, and the
+terminal result. Spectrum and image CSV files remain the scientific data
+artifacts; metadata does not duplicate their axes or arrays.
+
+When a run reaches its first acquisition, the run also creates one append-only
+`*.experiment.events.jsonl` journal. Capture attempts, warmups, repeats,
+conditions, observations, processing, and late exports carry event IDs and
+links to the experiment, acquisition, condition, settings snapshot, and output
+file. The journal is written under one lock from worker threads and can be
+read in bounded slices after cancellation or an interrupted write. LightField
+and Andor integrations use the same journal; LightField-specific snapshot
+fields remain in the sidecar for compatibility.
+
+The metadata loader accepts older sidecars and fills additive fields without
+connecting to hardware. External input references use portable names plus
+content hashes, so equal basenames cannot silently merge. NumPy arrays are
+serialized with dtype and shape and are never converted to truncated repr
+strings. Unsupported ambiguous objects raise a serialization error so the
+run can report incomplete metadata instead of claiming provenance.
+# Motion Sweep condition batches
+
+Motion Sweep supports an optional across-conditions run. Enter paired or
+cartesian Doping/E-field (or Vtg/Vbg) arrays, choose independent Rot1 and Rot2
+plans, gate-first or rotation-first ordering, and repeats, then review the
+expanded count and optionally select/reorder entries in the sequence preview.
+Each selected entry repeats the complete inner actuator sweep and is written to
+its own uniquely suffixed CSV. The sequence emits an atomic JSON manifest with
+complete, stopped, failed, and not-started entries. Numeric inputs accept
+scalars, comma lists, `(start, stop, step)`, and the legacy `start:step:stop`
+syntax. Keep-current rotation plans preserve the live angle without requiring a
+rotation connection.

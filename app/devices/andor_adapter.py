@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import importlib
 import queue
 import threading
+import logging
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -20,6 +21,7 @@ from .spectrum_alignment import align_wavelengths_to_intensities
 
 
 _SHAMROCK_DISCOVERY_LOCK = threading.Lock()
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -119,6 +121,27 @@ class AndorSDK2Setup:
         except BaseException:
             self._owner.close()
             raise
+
+    def bind_metadata_run(self, run) -> None:
+        """Attach the shared recorder; all SDK reads remain on the owner thread."""
+        from app.lightfield_metadata import LightFieldRecorder
+        self._metadata_recorder = LightFieldRecorder(run)
+
+    def read_metadata_snapshot(self) -> dict[str, Any]:
+        """Return applied/read-back Andor state at acquisition time."""
+        from app.lightfield_metadata import timestamp
+        snapshot = {"schema_version": 1, "backend": "andor_sdk2",
+                    "captured_utc": timestamp(),
+                    "identity": self.identity,
+                    "acquisition": {"exposure_ms": float(self._exposure_ms),
+                                     "accumulations": int(self._accumulations),
+                                     "center_nm": float(self._center_nm),
+                                     "roi_mode": self._roi_mode}}
+        try:
+            snapshot["observed"] = self.get_control_snapshot(include_calibration=True)
+        except Exception as exc:
+            snapshot["unavailable"] = {"control_snapshot": f"{type(exc).__name__}: {exc}"}
+        return snapshot
 
     def _call(self, fn: Callable[[], Any], timeout_s: Optional[float] = None) -> Any:
         if self._closed:
@@ -787,13 +810,30 @@ class AndorSDK2Setup:
             + (self._exposure_ms / 1000.0 + self.options.timeout_margin_s)
             * self._accumulations
         )
+        recorder = getattr(self, "_metadata_recorder", None)
+        record = None
+        if recorder is not None and recorder.active:
+            try:
+                record = recorder.begin(self.read_metadata_snapshot(), self._accumulations, "measurement")
+            except Exception:
+                log.warning("Andor metadata snapshot could not be recorded", exc_info=True)
         try:
-            frame = np.asarray(
-                self._call(self._capture_frames_on_owner, timeout_s=timeout),
-                dtype=float,
-            )
+            frame = np.asarray(self._call(self._capture_frames_on_owner, timeout_s=timeout), dtype=float)
+        except Exception as exc:
+            if recorder is not None:
+                try:
+                    recorder.finish(record, error=f"{type(exc).__name__}: {exc}")
+                except Exception:
+                    log.warning("Andor capture failure metadata could not be recorded", exc_info=True)
+            raise
         finally:
             self._busy.clear()
+        if recorder is not None and record is not None:
+            try:
+                dimensions = {"shape": list(frame.shape)}
+                recorder.finish(record, dimensions=dimensions)
+            except Exception:
+                log.warning("Andor capture result metadata could not be recorded", exc_info=True)
         return frame
 
     def acquire(self) -> np.ndarray:

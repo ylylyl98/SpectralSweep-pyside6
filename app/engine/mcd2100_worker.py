@@ -7,6 +7,7 @@ import math
 import os
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
@@ -14,6 +15,19 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from utils.mcd_common import build_mcd2100_filename, resolve_gate_conditions
+
+
+def _optical_acquire(optical: Any, angle: float, label: str, stop_event: Any,
+                     acquisition_id: str) -> Any:
+    """Pass the recorder UUID through adapters while retaining old test adapters."""
+    try:
+        return optical.acquire(angle, label, stop_event, acquisition_id=acquisition_id)
+    except TypeError as exc:
+        # Legacy/fake optical services may not yet accept the optional context.
+        # Only retry for that exact API mismatch; surface all acquisition errors.
+        if "acquisition_id" not in str(exc):
+            raise
+        return optical.acquire(angle, label, stop_event)
 
 MCD2100_SCALAR_FIELDS = [
     "Bfield_T", "rotation_angle_deg", "Vtg_V", "Vbg_V", "Vbias_V",
@@ -247,11 +261,12 @@ class DiscreteMCD2100Worker:
             raise RuntimeError("optical wavelengths must be finite and non-empty")
         return values
 
-    def _acquire(self, target: float, angle: float) -> tuple[list[Any], list[float]]:
+    def _acquire(self, target: float, angle: float) -> tuple[list[Any], list[float], str]:
         self._check_cancelled()
         before = self._read_snapshot()
         field_before, _ = self._snapshot_values(before)
-        acquired = self.optical.acquire(angle, str(angle), self.stop_event)
+        acquisition_id = str(uuid.uuid4())
+        acquired = _optical_acquire(self.optical, angle, str(angle), self.stop_event, acquisition_id)
         self._check_cancelled()
         if not isinstance(acquired, tuple) or len(acquired) != 3:
             raise RuntimeError("optical acquire must return wavelengths, counts, measured angle")
@@ -264,7 +279,7 @@ class DiscreteMCD2100Worker:
         field_after, _ = self._snapshot_values(after)
         row = [(field_before + field_after) / 2.0, float(measured_angle), 0, 0, 0, 0, 0,
                target, field_before, field_after, str(angle)]
-        return row, counts
+        return row, counts, acquisition_id
 
     def _paths(self) -> tuple[Path, Path]:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -313,7 +328,7 @@ class DiscreteMCD2100Worker:
                     self._execute_handle(self.controller.start_field_control_async())
                     self._wait_stable(target)
                     for angle in self.angles:
-                        row, counts = self._acquire(target, angle)
+                        row, counts, _acquisition_id = self._acquire(target, angle)
                         writer.writerow(row + counts)
                         stream.flush()
                         metadata["spectra_written"] += 1
@@ -412,6 +427,7 @@ class MCD2100Worker:
         filename_temperature_source: str = "unspecified",
         conditions: Optional[Iterable[Mapping[str, Any]]] = None,
         metadata: Optional[Mapping[str, Any]] = None,
+        metadata_run: Any = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -461,6 +477,7 @@ class MCD2100Worker:
         self.conditions = self._normalize_conditions(conditions, self.gate_ratio)
         self.sleep, self.clock = sleep, clock
         self.metadata_seed = dict(metadata or {})
+        self.metadata_run = metadata_run
         self.stop_event = threading.Event()
         self._active_handle = None
         self._stop_handle = None
@@ -978,6 +995,14 @@ class MCD2100Worker:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
 
+    def _write_legacy_metadata(self, path: Path, data: Mapping[str, Any]) -> None:
+        payload = data
+        if self.metadata_run is not None:
+            payload = self.metadata_run.record_compatibility_state(path.name, data)
+            if payload is None:
+                raise RuntimeError("shared compatibility metadata could not be recorded")
+        self._write_metadata(path, payload)
+
     @staticmethod
     def _align_counts(header: list[float], row_wavelengths: list[float], counts: list[float]) -> list[float]:
         if len(row_wavelengths) != len(counts) or not row_wavelengths:
@@ -1123,8 +1148,11 @@ class MCD2100Worker:
                 sample_t0 = self._read_sample_temperature() if self.temperature_control_enabled else None
                 b0 = self._read_field()
                 timestamp_start = _utc_now()
+                acquisition_id = str(uuid.uuid4())
                 try:
-                    acquired = self.optical.acquire(angle, str(angle), self.stop_event)
+                    acquired = _optical_acquire(
+                        self.optical, angle, str(angle), self.stop_event, acquisition_id
+                    )
                 except BaseException as exc:
                     if self.stop_event.is_set():
                         raise MCD2100Cancelled(
@@ -1188,12 +1216,26 @@ class MCD2100Worker:
                         "label": chr(ord("A") + angle_index) if angle_index < 26 else str(angle_index + 1),
                         "wavelengths": list(wavelengths), "counts": list(counts),
                         "requested_angle_deg": float(angle), "measured_angle_deg": measured_angle,
+                        "acquisition_id": acquisition_id,
                         "B0_T": b0, "B1_T": b1, "Bmid_T": (b0 + b1) / 2.0,
                         "gate_index": condition_index, "gate_count": condition_count,
                         "direction": leg_label, "file_path": metadata.get("current_file_path"),
                         "total_spectra": int(metadata["spectra_written"]),
                     },
                 )
+                if self.metadata_run is not None:
+                    self.metadata_run.record_observation(
+                        {"spectrum_index": int(metadata["spectra_written"]),
+                         "acquisition_id": acquisition_id,
+                         "label": chr(ord("A") + angle_index) if angle_index < 26 else str(angle_index + 1),
+                         "requested_angle_deg": float(angle),
+                         "measured_angle_deg": measured_angle,
+                         "B0_T": b0, "B1_T": b1, "Bmid_T": (b0 + b1) / 2.0,
+                         "direction": leg_label,
+                        "file_path": metadata.get("current_file_path")},
+                        acquisition_id=acquisition_id,
+                        condition_id=f"condition-{int(condition_index)}",
+                    )
                 span = abs(target - start)
                 leg_fraction = 1.0 if span <= 1e-12 else min(
                     1.0, max(0.0, abs(b1 - start) / span)
@@ -1297,6 +1339,8 @@ class MCD2100Worker:
             metadata["setup_applied"] = self._apply_setup(
                 configure=True, apply_gate=False
             )
+            if self.metadata_run is not None and isinstance(metadata.get("setup_applied"), Mapping):
+                self.metadata_run.update_applied({"mcd2100": metadata["setup_applied"]})
             wavelengths = self._prepare_wavelengths()
             self._emit_log(f"Optical wavelength axis prepared: {len(wavelengths)} pixel(s)")
             if not self.conditions:
@@ -1328,6 +1372,13 @@ class MCD2100Worker:
                             verified_start_snapshot=turnaround_snapshot,
                         )
                         metadata["completed_legs"] = 2
+                if self.metadata_run is not None:
+                    self.metadata_run.record_event(
+                        "condition_completed", condition_id="condition-1",
+                        output={"file": csv_path.name,
+                                "rows": int(metadata["spectra_written"])},
+                        condition_detail=metadata,
+                    )
             else:
                 enabled = [item for item in self.conditions if item.get("enabled", True)]
                 metadata["batch_file_paths"] = []
@@ -1338,6 +1389,11 @@ class MCD2100Worker:
                         condition_index=condition_index,
                         condition_count=len(enabled),
                     )
+                    if self.metadata_run is not None and isinstance(applied, Mapping):
+                        self.metadata_run.update_applied({"mcd2100_condition": {
+                            "condition_index": condition_index,
+                            "readback": applied,
+                        }})
                     if self.apply_voltages:
                         self._wait_for_voltage_settle(
                             initial_ramp=condition_index == 1,
@@ -1425,6 +1481,14 @@ class MCD2100Worker:
                     detail["spectra_written"] = int(metadata["spectra_written"] - detail["spectra_start"])
                     detail["file_status"] = "complete"
                     detail["complete"] = True
+                    if self.metadata_run is not None:
+                        self.metadata_run.record_event(
+                            "condition_completed",
+                            condition_id=f"condition-{int(condition_index)}",
+                            output={"file": batch_path.name,
+                                    "rows": int(detail["spectra_written"])},
+                            condition_detail=detail,
+                        )
                     self._emit_log(
                         f"Gate {condition_index}/{len(enabled)} complete: "
                         f"{detail['spectra_written']} spectra written"
@@ -1528,6 +1592,21 @@ class MCD2100Worker:
                 metadata.pop("_path", None)
                 metadata.update({"status": outcome.value, "error": error, "cleanup_error": cleanup_error})
                 self._write_metadata(metadata_path, metadata)
+            if self.metadata_run is not None:
+                try:
+                    self.metadata_run.record_event(
+                        "cleanup_completed",
+                        cleanup={"status": outcome.value, "error": error,
+                                 "cleanup_error": cleanup_error,
+                                 "magnet_stop_requested": metadata.get("magnet_stop_requested", False)},
+                        output={"metadata_file": metadata_path.name},
+                    )
+                    # The cleanup event is part of the shared authoritative
+                    # record; refresh the retained compatibility projection
+                    # once after the terminal cleanup state is known.
+                    self._write_metadata(metadata_path, metadata)
+                except Exception:
+                    pass
         csv_paths = metadata.get("batch_file_paths") or [str(csv_path)]
         return {"status": outcome.value, "error": error, "cleanup_error": cleanup_error,
                 "csv_path": str(csv_paths[0]), "csv_paths": list(csv_paths),

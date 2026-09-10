@@ -1,6 +1,7 @@
 """Shared hardware-free MCD coordinates, conditions, safety and filenames."""
 from __future__ import annotations
 
+import ast
 import math
 from typing import Any, Iterable, Mapping
 
@@ -51,9 +52,37 @@ def gate_ratio_from_factors(vtg_factor: float, vbg_factor: float) -> float:
 
 
 def parse_numeric_spec(text: str, label: str, *, maximum_values: int = 1000) -> list[float]:
-    """Parse comma values and inclusive ``start:step:stop`` ranges."""
+    """Parse scalar/list/comma values and inclusive ranges.
+
+    Parenthesized ranges use ``(start, stop, step)``.  The historical
+    ``start:step:stop`` spelling remains accepted for MCD/MCD2100 drafts.
+    """
+    raw_text = str(text).strip()
+    if not raw_text:
+        raise ValueError(f"{label} must contain at least one value")
+    try:
+        node = ast.literal_eval(raw_text)
+    except (SyntaxError, ValueError):
+        node = None
+    if isinstance(node, tuple) and len(node) == 3 and raw_text.startswith("(") and raw_text.endswith(")"):
+        start, stop, step = (_finite(x, label) for x in node)
+        if abs(step) <= 1e-15 or (stop - start) * step < 0:
+            raise ValueError(f"{label} range step must point toward its stop")
+        try:
+            count = int(math.floor((stop - start) / step + 1e-12)) + 1
+        except (OverflowError, ValueError):
+            raise ValueError(f"{label} range is invalid")
+        if count > maximum_values:
+            raise ValueError(f"{label} expands beyond {maximum_values} values")
+        return [start + i * step for i in range(count)]
+    if isinstance(node, list):
+        if not node:
+            raise ValueError(f"{label} must contain at least one value")
+        if len(node) > maximum_values:
+            raise ValueError(f"{label} expands beyond {maximum_values} values")
+        return [_finite(x, label) for x in node]
     values: list[float] = []
-    for raw in str(text).split(","):
+    for raw in raw_text.split(","):
         token = raw.strip()
         if not token:
             continue
@@ -68,7 +97,10 @@ def parse_numeric_spec(text: str, label: str, *, maximum_values: int = 1000) -> 
             raise ValueError(f"{label} range step must be non-zero")
         if (stop - start) * step < 0:
             raise ValueError(f"{label} range step points away from its stop")
-        count = int(math.floor((stop - start) / step + 1e-12)) + 1
+        try:
+            count = int(math.floor((stop - start) / step + 1e-12)) + 1
+        except (OverflowError, ValueError):
+            raise ValueError(f"{label} range is invalid")
         if count < 1 or len(values) + count > maximum_values:
             raise ValueError(f"{label} expands beyond {maximum_values} values")
         values.extend(start + index * step for index in range(count))
@@ -87,6 +119,8 @@ def expand_condition_inputs(values_a: Iterable[float], values_b: Iterable[float]
         raise ValueError("Both gate inputs require at least one value")
     method = str(expansion).strip().lower()
     if method == "grid":
+        if len(a) and len(b) and len(a) * len(b) > maximum_rows:
+            raise ValueError(f"Gate inputs expand beyond {maximum_rows} rows")
         pairs = [(left, right) for left in a for right in b]
     elif method == "paired":
         if len(a) == 1:

@@ -6,6 +6,7 @@ new output receives the same schema-v1 sidecar and history entry.
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Any, Iterable, Mapping, Optional
 
 from .experiment_metadata import ExperimentMetadataService, ExperimentRun
@@ -52,12 +53,30 @@ def finalize_output_metadata(
     output = Path(output_file)
     if not output.exists():
         return None
-    run = begin_output_metadata(
-        output,
-        experiment_type=experiment_type,
-        device_id=device_id,
-        settings=settings,
-    )
+    # A late export may arrive after the acquisition sidecar is terminal. Reuse
+    # the existing run when its file list already identifies this output so a
+    # second format cannot create a competing experiment record.
+    service = ExperimentMetadataService(output.parent)
+    run = None
+    try:
+        for candidate in output.parent.glob("*.experiment.metadata.json"):
+            try:
+                metadata = service.load_metadata(candidate)
+                paths = {str(item.get("path", "")) for item in metadata.get("files", [])}
+                if output.name in paths or output.resolve().relative_to(output.parent.resolve()).as_posix() in paths:
+                    run = service.open_run(candidate, allow_post_completion=True)
+                    break
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+    except OSError:
+        pass
+    if run is None:
+        run = begin_output_metadata(
+            output,
+            experiment_type=experiment_type,
+            device_id=device_id,
+            settings=settings,
+        )
     run.register_file(output, role=role, kind=output.suffix.lstrip(".") or "data")
     discovered: list[tuple[Path, str]] = []
     for sibling, sibling_role in (
@@ -71,6 +90,10 @@ def finalize_output_metadata(
     for path, role in discovered:
         if Path(path).exists():
             run.register_file(path, role=role)
+    if run.metadata.get("status") in ("completed", "cancelled", "failed"):
+        run.record_export({"path": output.name, "role": role, "late": True},
+                          output={"file": output.name})
+        return run.path
     if status == "completed":
         run.complete(summary)
     elif status == "cancelled":

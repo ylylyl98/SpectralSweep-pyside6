@@ -26,9 +26,10 @@ from PySide6.QtGui  import QCloseEvent, QFont, QAction
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QStatusBar, QApplication,
     QMessageBox, QComboBox, QListWidget, QPushButton, QPlainTextEdit, QLabel,
+    QLineEdit,
     QVBoxLayout, QHBoxLayout, QListWidgetItem, QSplitter, QToolBar,
 )
-from app.experiment_metadata import ExperimentHistory
+from app.experiment_metadata import ExperimentHistory, ExperimentMetadataService
 from app.ntfy_notifications import NtfyNotifier
 
 # ── Global stylesheet ──────────────────────────────────────────────────────────
@@ -530,6 +531,7 @@ class MainWindow(QMainWindow):
             pm_ctrl=self._pm,
             smu_ctrl=self._smu,
         )
+        self._power_sweep.busy_changed.connect(self._on_power_sweep_state_changed)
         self._tabs.addTab(self._power_sweep, "Motion Sweep")
 
         # Continuous magnetic circular dichroism
@@ -556,6 +558,7 @@ class MainWindow(QMainWindow):
         )
         self._tabs.addTab(self._mcd2100, "MCD 2100")
         self._active_mcd_panel = None
+        self._power_sweep_running = False
 
         # BFP
         self._bfp = BFPPanel(lf6_ctrl=self._lf6)
@@ -670,6 +673,14 @@ class MainWindow(QMainWindow):
         ])
         top.addWidget(self._history_device)
         top.addWidget(self._history_type)
+        self._history_filter = QLineEdit()
+        self._history_filter.setPlaceholderText("Filter history")
+        self._history_filter.setClearButtonEnabled(True)
+        top.addWidget(self._history_filter)
+        self._event_filter = QLineEdit()
+        self._event_filter.setPlaceholderText("Filter events")
+        self._event_filter.setClearButtonEnabled(True)
+        top.addWidget(self._event_filter)
         layout.addLayout(top)
         self._history_list = QListWidget()
         layout.addWidget(self._history_list)
@@ -682,9 +693,19 @@ class MainWindow(QMainWindow):
         self._history_preview_btn = QPushButton("Preview settings")
         self._history_load = QPushButton("Load compatible settings")
         self._history_load.setEnabled(False)
+        self._history_prev = QPushButton("‹")
+        self._history_next = QPushButton("›")
+        self._history_page_label = QLabel("Page 1")
+        self._event_prev = QPushButton("Earlier events")
+        self._event_next = QPushButton("Later events")
         buttons.addWidget(self._history_refresh)
+        buttons.addWidget(self._history_prev)
+        buttons.addWidget(self._history_next)
+        buttons.addWidget(self._history_page_label)
         buttons.addWidget(self._history_preview_btn)
         buttons.addWidget(self._history_load)
+        buttons.addWidget(self._event_prev)
+        buttons.addWidget(self._event_next)
         layout.addLayout(buttons)
         panel.setMinimumWidth(0)
         self._history_panel = panel
@@ -694,6 +715,14 @@ class MainWindow(QMainWindow):
         self._history_list.currentRowChanged.connect(self._history_selection_changed)
         self._history_preview_btn.clicked.connect(self._preview_selected_history)
         self._history_load.clicked.connect(self._load_history_settings)
+        self._history_filter.textChanged.connect(self._history_query_changed)
+        self._event_filter.textChanged.connect(lambda: self._preview_history(self._history_list.currentRow()))
+        self._history_page = 0
+        self._event_offset = 0
+        self._history_prev.clicked.connect(lambda: self._change_history_page(-1))
+        self._history_next.clicked.connect(lambda: self._change_history_page(1))
+        self._event_prev.clicked.connect(lambda: self._change_event_page(-20))
+        self._event_next.clicked.connect(lambda: self._change_event_page(20))
         self._sample_id_binder._edits[0].textChanged.connect(self._refresh_history)
         self._refresh_history()
         self._bfp._tabs.currentChanged.connect(lambda _i: self._history_type_for_active_tab(self._tabs.currentIndex()))
@@ -840,6 +869,8 @@ class MainWindow(QMainWindow):
             return "bfp_acquisition"
 
     def _history_type_changed(self, value: str) -> None:
+        self._history_page = 0
+        self._event_offset = 0
         if value.startswith("bfp_"):
             index = {"bfp_acquisition": 0, "bfp_binned_rc": 1, "bfp_full_sensor_rc": 2}.get(value)
             if index is not None:
@@ -855,7 +886,14 @@ class MainWindow(QMainWindow):
         self._history_preview_btn.setEnabled(False)
         if not device:
             return
-        rows = self._history.query(device, self._history_type.currentText())
+        rows = self._history.query(device, self._history_type.currentText(), limit=500)
+        query = self._history_filter.text().strip().lower()
+        if query:
+            rows = [row for row in rows if query in json.dumps(row, default=str).lower()]
+        page_size = 20
+        total_rows = len(rows)
+        start = self._history_page * page_size
+        rows = rows[start:start + page_size]
         for row in rows:
             item = QListWidgetItem(
                 f"{row['started_at']} · {row['status']} · {row['experiment_id'][:12]}"
@@ -863,8 +901,24 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, row)
             self._history_list.addItem(item)
         self._history_preview_btn.setEnabled(self._history_list.count() > 0)
+        self._history_page_label.setText(f"Page {self._history_page + 1}")
+        self._history_prev.setEnabled(self._history_page > 0)
+        self._history_next.setEnabled(start + page_size < total_rows)
+
+    def _change_history_page(self, delta: int) -> None:
+        self._history_page = max(0, self._history_page + int(delta))
+        self._refresh_history()
+
+    def _history_query_changed(self, _value: str = "") -> None:
+        self._history_page = 0
+        self._refresh_history()
+
+    def _change_event_page(self, delta: int) -> None:
+        self._event_offset = max(0, self._event_offset + int(delta))
+        self._preview_history(self._history_list.currentRow())
 
     def _history_selection_changed(self, _row: int) -> None:
+        self._event_offset = 0
         self._history_preview.clear()
         self._history_load.setEnabled(False)
         self._history_preview_btn.setEnabled(self._history_list.currentItem() is not None)
@@ -882,11 +936,40 @@ class MainWindow(QMainWindow):
         metadata = {}
         if path.exists():
             try:
-                metadata = json.loads(path.read_text(encoding="utf-8"))
+                metadata = ExperimentMetadataService.load_metadata(path)
+                event_info = metadata.get("event_log", {})
+                event_path = event_info.get("path") if isinstance(event_info, dict) else None
+                if event_path:
+                    candidate = path.parent / Path(str(event_path)).name
+                    events = []
+                    if candidate.exists():
+                        event_filter = self._event_filter.text().strip().lower()
+                        matched = 0
+                        with candidate.open(encoding="utf-8") as stream:
+                            for line in stream:
+                                try:
+                                    event = json.loads(line)
+                                except json.JSONDecodeError:
+                                    continue
+                                if event_filter and event_filter not in json.dumps(event, default=str).lower():
+                                    continue
+                                if matched < self._event_offset:
+                                    matched += 1
+                                    continue
+                                events.append(event)
+                                matched += 1
+                                if len(events) >= 20:
+                                    break
+                    metadata["events_preview"] = events
             except Exception:
                 pass
-        self._history_preview.setPlainText(json.dumps(metadata.get("settings", {}), indent=2, sort_keys=True))
+        self._history_preview.setPlainText(
+            ExperimentMetadataService.format_history_preview(metadata, event_limit=20)
+            if metadata else "Metadata sidecar could not be read."
+        )
         self._history_load.setEnabled(bool(metadata))
+        self._event_prev.setEnabled(self._event_offset >= 20)
+        self._event_next.setEnabled(len(metadata.get("events_preview", [])) == 20)
 
     def _preview_selected_history(self) -> None:
         self._preview_history(self._history_list.currentRow())
@@ -1041,6 +1124,8 @@ class MainWindow(QMainWindow):
     def _on_mcd_workflow_state_changed(self, source, running: bool) -> None:
         """Reserve shared instruments for exactly one MCD workflow."""
         if running:
+            if getattr(self, "_power_sweep_running", False):
+                return
             if self._active_mcd_panel not in (None, source):
                 return
             self._active_mcd_panel = source
@@ -1065,7 +1150,42 @@ class MainWindow(QMainWindow):
         else:
             self._status.showMessage("MCD finished — instrument controls unlocked")
 
+    def _on_power_sweep_state_changed(self, running: bool) -> None:
+        """Reserve shared instruments while the motion sweep owns hardware."""
+        self._power_sweep_running = bool(running)
+        if running and self._active_mcd_panel is not None:
+            return
+        self._inst_panel.setEnabled(not running)
+        # Newer instrument panels may suspend their PM polling worker here;
+        # keep this optional for older panels and lightweight test doubles.
+        pm_busy_setter = getattr(self._inst_panel, "set_external_busy", None)
+        if callable(pm_busy_setter):
+            pm_busy_setter(bool(running))
+        for index in range(self._tabs.count()):
+            self._tabs.setTabEnabled(index, (not running) or self._tabs.widget(index) is self._power_sweep)
+        for panel in (self._mcd, self._mcd2100):
+            setter = getattr(panel, "set_externally_busy", None)
+            if callable(setter):
+                setter(bool(running))
+        if running:
+            self._tabs.setCurrentWidget(self._power_sweep)
+            self._status.showMessage("Motion sweep running — instrument controls locked")
+        else:
+            if self._active_mcd_panel is not None:
+                self._on_mcd_workflow_state_changed(self._active_mcd_panel, True)
+            else:
+                self._status.showMessage("Motion sweep finished — instrument controls unlocked")
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        try:
+            if not self._power_sweep.shutdown():
+                QMessageBox.critical(self, "Motion sweep is still stopping", "The motion sweep worker did not stop within 30 seconds.")
+                event.ignore()
+                return
+        except Exception as exc:
+            QMessageBox.critical(self, "Unable to stop motion sweep safely", str(exc))
+            event.ignore()
+            return
         try:
             if not self._mcd2100.shutdown():
                 self._ntfy_notifier.notify_warning(
