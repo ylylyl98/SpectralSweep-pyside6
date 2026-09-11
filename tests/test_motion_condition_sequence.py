@@ -167,6 +167,44 @@ class MotionConditionSequenceTests(unittest.TestCase):
         self.assertEqual(rot.adapter("rot2").moves, [24.0])
         self.assertEqual(last, {"rot2": 24.0, "rot2_actual": 23.9992})
 
+    def test_rotation_gate_switch_uses_verified_elliptec_wrapper(self):
+        from app.devices.rotation_thorlabs_elliptec_adapter import ElliptecRotation
+
+        class Driver:
+            def __init__(self):
+                self.positions = [0.0, 0.0, 10.0, 10.0]
+                self.statuses = ["ok", "ok", "ok"]
+                self.moves = []
+                self.position = 0.0
+
+            def get_position(self):
+                return self.positions.pop(0) if self.positions else self.position
+
+            def get_status(self):
+                return self.statuses.pop(0) if self.statuses else "ok"
+
+            def move_to(self, target, *, timeout):
+                self.moves.append(float(target))
+                self.position = float(target)
+                return True
+
+        adapter = ElliptecRotation.__new__(ElliptecRotation)
+        adapter._drv = Driver()
+        adapter._last = 0.0
+        adapter.position_unit = "deg"
+        adapter.motion_tolerance = 0.25
+
+        class RotationController:
+            def adapter(self, axis):
+                return adapter if axis == "rot2" else None
+
+        worker = _PowerSweepWorker({}, None, RotationController(), None, None, None)
+        last = worker._sequence_apply_rotations(
+            {"rotation_settle_s": 0.0}, {"rot2": 10.0}, {}
+        )
+        self.assertEqual(last, {"rot2": 10.0, "rot2_actual": 10.0})
+        self.assertEqual(adapter._drv.moves, [10.0])
+
     def test_stop_during_readback_prevents_further_moves_and_restore(self):
         rot = _FakeRotationController()
         adapter = rot.adapter("rot2")

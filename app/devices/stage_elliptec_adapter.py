@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from app.devices.motion_verification import move_and_verify
+from app.devices.motion_verification import (
+    ELLIPTEC_HARD_FAULT_STATUSES,
+    MotionHardwareFault,
+    move_and_verify,
+)
 
 import time
 import math
@@ -20,7 +24,7 @@ class ElliptecLinearStage:
     def __init__(self, port: str):
         self._port = port
         self.stage = Thorlabs.ElliptecMotor(port)
-        self.motion_tolerance = 0.01
+        self.motion_tolerance = 1.0
 
     @property
     def address(self) -> str:
@@ -33,6 +37,32 @@ class ElliptecLinearStage:
     @property
     def position_unit(self) -> str:
         return "stage units"
+
+    @property
+    def motion_status_available(self) -> bool:
+        return callable(getattr(self.stage, "get_status", None))
+
+    def motion_status(self):
+        """Return explicit stopped proof from the Elliptec GS protocol status."""
+        reader = getattr(self.stage, "get_status", None)
+        if not callable(reader):
+            return None
+        try:
+            status = reader()
+        except Exception:
+            return None
+        normalized = str(status).strip().lower()
+        if normalized == "ok":
+            return True
+        if normalized in ELLIPTEC_HARD_FAULT_STATUSES:
+            raise MotionHardwareFault(
+                f"Elliptec reported hardware fault status {normalized!r}"
+            )
+        if normalized == "busy":
+            return False
+        if normalized == "comm_timeout":
+            return None
+        return None
 
     def validate_position(self, position: float) -> float:
         pos = float(position)

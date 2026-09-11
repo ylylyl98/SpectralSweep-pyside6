@@ -18,6 +18,10 @@ class MotionVerificationError(RuntimeError):
     """The device did not prove that the requested position was reached."""
 
 
+class MotionHardwareFault(MotionVerificationError):
+    """The controller reported a hardware fault which must not be retried."""
+
+
 class MotionCancelledError(MotionVerificationError):
     """The caller requested cancellation while a move was in progress."""
 
@@ -31,12 +35,20 @@ class MotionVerificationConfig:
     read_retry_delay_s: float = 0.10
     stable_readings: int = 2
     settling_s: float = 0.10
-    max_corrections: int = 1
+    max_corrections: int = 3
     default_timeout_s: float = 60.0
     timeout_margin_s: float = 5.0
+    uncertain_recovery_timeout_s: float = 5.0
 
 
 DEFAULT_MOTION_CONFIG = MotionVerificationConfig()
+
+
+ELLIPTEC_HARD_FAULT_STATUSES = frozenset({
+    "mech_timeout", "not_supported", "value_out_of_range", "isolated",
+    "out_of_isolation", "init_error", "therm_error", "sens_error",
+    "motor_error", "out_of_range", "overcurrent", "reserved",
+})
 
 
 def _profile_value(adapter: Any, *names: str) -> Optional[float]:
@@ -120,6 +132,11 @@ def _strict_position(adapter: Any) -> float:
 
 
 def _status_reader(adapter: Any) -> Optional[Callable[[], Optional[bool]]]:
+    # Adapters can explicitly report that their underlying controller has no
+    # status API.  This keeps a latched failure from causing a meaningless
+    # multi-second polling loop on a readback-only device.
+    if getattr(adapter, "motion_status_available", None) is False:
+        return None
     for name in ("motion_status", "get_motion_status"):
         reader = getattr(adapter, name, None)
         if callable(reader):
@@ -128,9 +145,128 @@ def _status_reader(adapter: Any) -> Optional[Callable[[], Optional[bool]]]:
     return reader if callable(reader) else None
 
 
+def _recover_uncertain_motion(
+    adapter: Any,
+    status_reader: Optional[Callable[[], Optional[bool]]],
+    *,
+    tolerance: float,
+    stop_event: Any,
+    config: MotionVerificationConfig,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    operation_deadline: Optional[float] = None,
+) -> None:
+    """Clear a failed-move latch only after independent stopped/readback proof."""
+    if status_reader is None:
+        raise MotionVerificationError(
+            "previous motion is unconfirmed; stopped status unavailable; no new move issued"
+        )
+    try:
+        recovery_budget = float(config.uncertain_recovery_timeout_s)
+    except (TypeError, ValueError):
+        recovery_budget = 0.0
+    if not math.isfinite(recovery_budget) or recovery_budget <= 0:
+        raise MotionVerificationError("uncertain-motion recovery timeout must be finite and positive")
+
+    deadline = clock() + recovery_budget
+    if operation_deadline is not None:
+        deadline = min(deadline, operation_deadline)
+    required_stable = max(1, int(config.stable_readings))
+    stable = 0
+    previous = None
+    reason = "stopped status not confirmed"
+
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            _cancel(adapter)
+            raise MotionCancelledError("motion recovery cancelled")
+        if clock() >= deadline:
+            raise MotionVerificationError(
+                "previous motion is unconfirmed; recovery timed out after "
+                f"{recovery_budget:g}s ({reason}); no new move issued"
+            )
+
+        status = _status_value(status_reader)
+        if stop_event is not None and stop_event.is_set():
+            _cancel(adapter)
+            raise MotionCancelledError("motion recovery cancelled")
+        if clock() >= deadline:
+            raise MotionVerificationError(
+                "previous motion is unconfirmed; recovery timed out after "
+                f"{recovery_budget:g}s ({reason}); no new move issued"
+            )
+        if status is not True:
+            stable = 0
+            previous = None
+            reason = (
+                "device still reports motion active"
+                if status is False
+                else "stopped status unavailable or unreadable"
+            )
+            delay = min(max(float(config.poll_interval_s), 0.001), max(0.0, deadline - clock()))
+            sleep(delay)
+            continue
+
+        try:
+            sample = _strict_position(adapter)
+            validator = getattr(adapter, "validate_position", None)
+            if callable(validator):
+                validated = float(validator(sample))
+                if not math.isfinite(validated) or abs(validated - sample) > tolerance:
+                    raise MotionVerificationError("position readback is outside the valid stage range")
+        except Exception as exc:
+            stable = 0
+            previous = None
+            reason = f"stable position unavailable ({exc})"
+            delay = min(max(float(config.read_retry_delay_s), 0.001), max(0.0, deadline - clock()))
+            sleep(delay)
+            continue
+
+        if stop_event is not None and stop_event.is_set():
+            _cancel(adapter)
+            raise MotionCancelledError("motion recovery cancelled")
+        if clock() >= deadline:
+            raise MotionVerificationError(
+                "previous motion is unconfirmed; recovery timed out after "
+                f"{recovery_budget:g}s ({reason}); no new move issued"
+            )
+
+        same = previous is not None and abs(sample - previous) <= tolerance
+        stable = stable + 1 if same else 1
+        previous = sample
+        if stable >= required_stable:
+            # The device can begin moving again between position reads.  Keep
+            # the latch until a fresh status query confirms it is still idle.
+            final_status = _status_value(status_reader)
+            if stop_event is not None and stop_event.is_set():
+                _cancel(adapter)
+                raise MotionCancelledError("motion recovery cancelled")
+            if clock() >= deadline:
+                raise MotionVerificationError(
+                    "previous motion is unconfirmed; recovery timed out after "
+                    f"{recovery_budget:g}s (final stopped status arrived too late); no new move issued"
+                )
+            if final_status is True:
+                adapter._motion_uncertain = False
+                return
+            stable = 0
+            previous = None
+            reason = (
+                "device still reports motion active after stable position"
+                if final_status is False
+                else "stopped status unavailable or unreadable after stable position"
+            )
+            continue
+        reason = "stable position not confirmed"
+        delay = min(max(float(config.poll_interval_s), 0.001), max(0.0, deadline - clock()))
+        sleep(delay)
+
+
 def _status_value(reader: Callable[[], Any]) -> Optional[bool]:
     try:
         value = reader()
+    except MotionHardwareFault:
+        raise
     except Exception:
         return None
     if value is None:
@@ -195,7 +331,7 @@ def move_and_verify(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
 ) -> float:
-    """Verify a move under one deadline, with at most one stopped correction.
+    """Verify a move under one deadline, with bounded stopped corrections.
 
     Hardware adapters call this from their public move_to and expose their raw
     command privately, so direct callers and helper callers share one policy.
@@ -208,12 +344,30 @@ def move_and_verify(
     tolerance = motion_tolerance(adapter, fallback=tolerance)
     if not math.isfinite(tolerance):
         raise MotionVerificationError(f"invalid motion tolerance: {tolerance!r}")
+    explicit_timeout = None
+    operation_deadline = None
+    if timeout_s is not None:
+        try:
+            explicit_timeout = float(timeout_s)
+        except (TypeError, ValueError):
+            explicit_timeout = 0.0
+        if not math.isfinite(explicit_timeout) or explicit_timeout <= 0:
+            raise MotionVerificationError("motion timeout must be finite and positive")
+        operation_deadline = clock() + explicit_timeout
     status_reader = _status_reader(adapter)
     if stop_event is not None and stop_event.is_set():
         raise MotionCancelledError("motion cancelled before command")
     if getattr(adapter, "_motion_uncertain", False):
-        if status_reader is None or _status_value(status_reader) is not True:
-            raise MotionVerificationError("previous motion is unconfirmed; no new move issued")
+        _recover_uncertain_motion(
+            adapter,
+            status_reader,
+            tolerance=tolerance,
+            stop_event=stop_event,
+            config=config,
+            clock=clock,
+            sleep=sleep,
+            operation_deadline=operation_deadline,
+        )
 
     refresh = getattr(adapter, "refresh_motion_profile", None)
     if callable(refresh):
@@ -226,11 +380,19 @@ def move_and_verify(
         initial = _strict_position(adapter)
     except Exception:
         initial = None
-    timeout_budget = (motion_timeout_s(adapter, abs(target - initial) if initial is not None else None,
-                                       config=config) if timeout_s is None else float(timeout_s))
+    if explicit_timeout is None:
+        timeout_budget = motion_timeout_s(
+            adapter,
+            abs(target - initial) if initial is not None else None,
+            config=config,
+        )
+        deadline = clock() + timeout_budget
+    else:
+        timeout_budget = max(0.0, operation_deadline - clock())
+        deadline = operation_deadline
     if not math.isfinite(timeout_budget) or timeout_budget <= 0:
+        _cancel(adapter)
         raise MotionVerificationError("motion timeout must be finite and positive")
-    deadline = clock() + timeout_budget
 
     def check_deadline():
         if stop_event is not None and stop_event.is_set():
@@ -327,7 +489,8 @@ def move_and_verify(
                     else:
                         raise MotionVerificationError(
                             f"move to {target:g} readback {actual:g} differs by {abs(actual-target):g} "
-                            f"(tolerance {tolerance:g}, device status stopped)"
+                            f"(tolerance {tolerance:g}, device status stopped) "
+                            f"after {corrections} correction retries"
                         )
                 pause(config.read_retry_delay_s)
     except Exception:

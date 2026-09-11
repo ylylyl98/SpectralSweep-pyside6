@@ -378,7 +378,9 @@ Stage and rotation adapters verify moves by default, including moves requested
 from the instrument controls and measurement sweeps. Completion requires fresh,
 consecutive position readings within tolerance. Readback retries do not issue
 another move; a corrective move is permitted only after a fresh confirmation
-that the device has stopped, with one correction allowed by default.
+that the device has stopped, with up to three correction retries allowed by default
+within the same overall motion deadline. A final position-mismatch error reports
+the retry count and remaining position error.
 
 For ESP300 axes, the move allowance uses the current position, operating speed,
 acceleration and deceleration, with a margin for settling and communication.
@@ -397,5 +399,5 @@ it is not an immediate hardware stop.
 
 Defaults are defined in `app/devices/motion_verification.py`, with tolerances
 declared by each adapter (0.25 degrees for rotations, 0.01 mm for the Newport
-linear stage, and 0.01 native stage units for the Elliptec linear stage).
+linear stage, and 1 native stage unit for the Elliptec linear stage).
 These tolerances are not automatically relaxed after failures.

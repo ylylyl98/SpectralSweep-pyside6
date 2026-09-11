@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from app.devices.motion_verification import move_and_verify
+from app.devices.motion_verification import (
+    ELLIPTEC_HARD_FAULT_STATUSES,
+    MotionHardwareFault,
+    move_and_verify,
+)
 import pylablib as pll
 from pylablib.devices import Thorlabs
 
@@ -16,6 +20,32 @@ class ElliptecRotation:
         self.backend_key = "elliptec"
         self.position_unit = "deg"
         self.motion_tolerance = 0.25
+
+    @property
+    def motion_status_available(self) -> bool:
+        return callable(getattr(self._drv, "get_status", None))
+
+    def motion_status(self):
+        """Return explicit stopped proof from the Elliptec GS protocol status."""
+        reader = getattr(self._drv, "get_status", None)
+        if not callable(reader):
+            return None
+        try:
+            status = reader()
+        except Exception:
+            return None
+        normalized = str(status).strip().lower()
+        if normalized == "ok":
+            return True
+        if normalized in ELLIPTEC_HARD_FAULT_STATUSES:
+            raise MotionHardwareFault(
+                f"Elliptec reported hardware fault status {normalized!r}"
+            )
+        if normalized == "busy":
+            return False
+        if normalized == "comm_timeout":
+            return None
+        return None
 
     def move_to(self, angle_deg: float, *, stop_event=None, timeout_s=None) -> bool:
         move_and_verify(self, angle_deg, stop_event=stop_event, timeout_s=timeout_s)

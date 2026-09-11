@@ -6,6 +6,7 @@ from unittest.mock import patch
 from app.devices.motion_verification import (
     MotionVerificationConfig,
     MotionVerificationError,
+    MotionHardwareFault,
     move_and_verify,
     motion_timeout_s,
 )
@@ -53,6 +54,59 @@ class _Device:
 
 
 class MotionVerificationTests(unittest.TestCase):
+    def test_default_retries_stopped_misses_up_to_three_times(self):
+        from app.devices.motion_verification import DEFAULT_MOTION_CONFIG
+
+        class MissedTarget(_Device):
+            def get_position(self):
+                return 10.0 if len(self.moves) >= 4 else 8.0
+
+        device = MissedTarget()
+        clock = _Clock()
+        actual = move_and_verify(device, 10.0, config=DEFAULT_MOTION_CONFIG,
+                                 clock=clock.monotonic, sleep=clock.sleep)
+        self.assertEqual(actual, 10.0)
+        self.assertEqual(device.moves, [10.0] * 4)
+        self.assertFalse(device._motion_uncertain)
+
+    def test_default_retry_exhaustion_reports_three_retries(self):
+        from app.devices.motion_verification import DEFAULT_MOTION_CONFIG
+
+        class NeverReached(_Device):
+            def get_position(self):
+                return 8.0
+
+        device = NeverReached()
+        clock = _Clock()
+        with self.assertRaisesRegex(MotionVerificationError, "after 3 correction retries"):
+            move_and_verify(device, 10.0, config=DEFAULT_MOTION_CONFIG,
+                            clock=clock.monotonic, sleep=clock.sleep)
+        self.assertEqual(device.moves, [10.0] * 4)
+        self.assertTrue(device._motion_uncertain)
+
+    def test_elliptec_stage_one_unit_tolerance(self):
+        from types import SimpleNamespace
+        from app.devices.stage_elliptec_adapter import ElliptecLinearStage
+
+        # Use the real adapter default and verification with a stationary
+        # simulated controller; never open a hardware connection.
+        for offset, accepted in ((0.25390625, True), (1.0, True), (1.01, False)):
+            with self.subTest(offset=offset):
+                driver = SimpleNamespace(
+                    get_status=lambda: "ok",
+                    get_position=lambda: 3400.0 + offset,
+                    move_to=lambda target, **kwargs: True,
+                )
+                with patch("app.devices.stage_elliptec_adapter.Thorlabs.ElliptecMotor", return_value=driver):
+                    device = ElliptecLinearStage("simulated")
+                clock = _Clock()
+                kwargs = dict(config=self._config(), clock=clock.monotonic, sleep=clock.sleep)
+                if accepted:
+                    self.assertEqual(move_and_verify(device, 3400.0, **kwargs), 3400.0 + offset)
+                else:
+                    with self.assertRaisesRegex(MotionVerificationError, "tolerance 1,"):
+                        move_and_verify(device, 3400.0, **kwargs)
+
     def _config(self, **overrides):
         values = dict(
             poll_interval_s=0.5,
@@ -259,6 +313,208 @@ class MotionVerificationTests(unittest.TestCase):
             move_and_verify(device, 10.0, config=self._config(), clock=clock.monotonic, sleep=clock.sleep)
         self.assertEqual(device.moves, [10.0])
 
+    def test_uncertain_move_recovers_after_stopped_status_and_stable_readback(self):
+        clock = _Clock()
+
+        class Recoverable(_Device):
+            def __init__(self):
+                super().__init__(statuses=(False, True, True, True), positions=(5.0, 5.0, 5.0))
+                self._motion_uncertain = True
+
+        device = Recoverable()
+        self.assertEqual(
+            move_and_verify(
+                device,
+                10.0,
+                config=self._config(
+                    stable_readings=2,
+                    uncertain_recovery_timeout_s=2.0,
+                ),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            ),
+            10.0,
+        )
+        self.assertEqual(device.moves, [10.0])
+        self.assertFalse(device._motion_uncertain)
+
+    def test_uncertain_move_does_not_wait_when_status_capability_is_absent(self):
+        clock = _Clock()
+
+        class Unknown(_Device):
+            motion_status_available = False
+
+        device = Unknown(statuses=(None,), positions=(5.0, 5.0))
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "stopped status unavailable"):
+            move_and_verify(
+                device,
+                10.0,
+                config=self._config(uncertain_recovery_timeout_s=1.0),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(device.moves, [])
+        self.assertEqual(clock.now, 0.0)
+
+    def test_uncertain_move_times_out_without_stopped_status(self):
+        clock = _Clock()
+        device = _Device(statuses=[False] * 20, positions=(5.0,))
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "recovery timed out"):
+            move_and_verify(
+                device,
+                10.0,
+                config=self._config(uncertain_recovery_timeout_s=1.0),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(device.moves, [])
+
+    def test_uncertain_move_distinguishes_unknown_status_from_active_motion(self):
+        clock = _Clock()
+        unknown = _Device(statuses=[None] * 20, positions=(5.0,))
+        unknown._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "unavailable or unreadable"):
+            move_and_verify(
+                unknown,
+                10.0,
+                config=self._config(uncertain_recovery_timeout_s=0.75),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+
+        clock = _Clock()
+        active = _Device(statuses=[False] * 20, positions=(5.0,))
+        active._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "reports motion active"):
+            move_and_verify(
+                active,
+                10.0,
+                config=self._config(uncertain_recovery_timeout_s=0.75),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(active.moves, [])
+
+    def test_uncertain_recovery_and_new_move_share_explicit_timeout_budget(self):
+        clock = _Clock()
+        device = _Device(statuses=[True, True, True], positions=(5.0, 5.0))
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "timed out"):
+            move_and_verify(
+                device,
+                10.0,
+                timeout_s=0.5,
+                config=self._config(stable_readings=2, uncertain_recovery_timeout_s=5.0),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(device.moves, [])
+
+    def test_late_final_recovery_status_cannot_clear_latch(self):
+        clock = _Clock()
+
+        class LateStatus(_Device):
+            def motion_status(self):
+                value = super().motion_status()
+                if self.status_calls >= 3:
+                    clock.now = 1.0
+                return value
+
+        device = LateStatus(statuses=[True, True, True], positions=(5.0, 5.0))
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "timed out"):
+            move_and_verify(
+                device,
+                10.0,
+                timeout_s=0.75,
+                config=self._config(stable_readings=2, uncertain_recovery_timeout_s=5.0),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(device.moves, [])
+        self.assertTrue(device._motion_uncertain)
+
+    def test_uncertain_move_recovery_rejects_unstable_position(self):
+        clock = _Clock()
+        device = _Device(statuses=[True] * 20, positions=(5.0, 5.2, 5.0, 5.2))
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "stable position"):
+            move_and_verify(
+                device,
+                10.0,
+                config=self._config(
+                    stable_readings=2,
+                    uncertain_recovery_timeout_s=0.75,
+                ),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(device.moves, [])
+
+    def test_uncertain_recovery_rejects_out_of_range_position(self):
+        clock = _Clock()
+
+        class Bounded(_Device):
+            def validate_position(self, position):
+                if not 0.0 <= float(position) <= 50.0:
+                    raise ValueError("outside stage range")
+                return float(position)
+
+        device = Bounded(statuses=[True] * 20, positions=(100.0,) * 20)
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "stable position unavailable"):
+            move_and_verify(
+                device,
+                10.0,
+                config=self._config(uncertain_recovery_timeout_s=0.75),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(device.moves, [])
+
+    def test_uncertain_recovery_requires_final_stopped_status(self):
+        clock = _Clock()
+        device = _Device(statuses=[True, True, False] + [False] * 20, positions=(5.0, 5.0))
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "recovery timed out"):
+            move_and_verify(
+                device,
+                10.0,
+                config=self._config(
+                    stable_readings=2,
+                    uncertain_recovery_timeout_s=0.75,
+                ),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(device.moves, [])
+
+    def test_uncertain_move_recovery_honors_cancellation(self):
+        clock = _Clock()
+
+        class Stop:
+            def __init__(self):
+                self.calls = 0
+
+            def is_set(self):
+                self.calls += 1
+                return self.calls > 1
+
+        device = _Device(statuses=[False] * 5, positions=(5.0,))
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionVerificationError, "cancelled"):
+            move_and_verify(
+                device,
+                10.0,
+                stop_event=Stop(),
+                config=self._config(uncertain_recovery_timeout_s=1.0),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(device.moves, [])
+
     def test_direct_esp_stage_uses_configured_axis_speed_and_verifies(self):
         from types import SimpleNamespace
         from app.devices.stage_newport_adapter import NewportESP300LinearStage
@@ -304,6 +560,240 @@ class MotionVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(MotionVerificationError, "previous motion is unconfirmed"):
             device.move_to(0.0)
         self.assertEqual(device._drv.move_to.call_count, 1)
+
+    def test_elliptec_status_maps_only_ok_to_stopped(self):
+        from app.devices.stage_elliptec_adapter import ElliptecLinearStage
+        from types import SimpleNamespace
+
+        device = ElliptecLinearStage.__new__(ElliptecLinearStage)
+        device.stage = SimpleNamespace(get_status=lambda: "busy")
+        self.assertTrue(device.motion_status_available)
+        self.assertFalse(device.motion_status())
+        device.stage.get_status = lambda: "ok"
+        self.assertTrue(device.motion_status())
+        device.stage.get_status = lambda: "mech_timeout"
+        with self.assertRaisesRegex(MotionHardwareFault, "mech_timeout"):
+            device.motion_status()
+        device.stage.get_status = lambda: "busy"
+        self.assertFalse(device.motion_status())
+        device.stage.get_status = lambda: "comm_timeout"
+        self.assertIsNone(device.motion_status())
+        device.stage.get_status = lambda: None
+        self.assertIsNone(device.motion_status())
+        device.stage.get_status = lambda: "unexpected"
+        self.assertIsNone(device.motion_status())
+
+    def test_elliptec_without_status_api_is_reported_unavailable(self):
+        from app.devices.stage_elliptec_adapter import ElliptecLinearStage
+        from types import SimpleNamespace
+
+        device = ElliptecLinearStage.__new__(ElliptecLinearStage)
+        device.stage = SimpleNamespace()
+        self.assertFalse(device.motion_status_available)
+        self.assertIsNone(device.motion_status())
+
+    def test_elliptec_rotation_recovers_latch_before_issuing_new_move(self):
+        from app.devices.rotation_thorlabs_elliptec_adapter import ElliptecRotation
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        class Driver:
+            def __init__(self):
+                self.statuses = []
+                self.positions = [0.0]
+                self.move_result = False
+                self.move_calls = []
+                self.position = 0.0
+
+            def move_to(self, target, *, timeout):
+                self.move_calls.append((float(target), float(timeout)))
+                if self.move_result:
+                    self.position = float(target)
+                return self.move_result
+
+            def get_status(self):
+                return self.statuses.pop(0) if self.statuses else "ok"
+
+            def get_position(self):
+                return self.positions.pop(0) if self.positions else self.position
+
+        device = ElliptecRotation.__new__(ElliptecRotation)
+        device._last = 0.0
+        device.motion_tolerance = 0.25
+        device.position_unit = "deg"
+        device._drv = Driver()
+        clock = _Clock()
+        with self.assertRaisesRegex(RuntimeError, "failed"):
+            device.move_to(10.0, timeout_s=1.0)
+        self.assertTrue(device._motion_uncertain)
+        self.assertEqual(len(device._drv.move_calls), 1)
+
+        device._drv.move_result = True
+        device._drv.statuses = ["ok", "ok", "ok"]
+        self.assertTrue(device.move_to(10.0, timeout_s=2.0))
+        self.assertEqual(len(device._drv.move_calls), 2)
+        self.assertFalse(device._motion_uncertain)
+
+    def test_elliptec_rotation_unknown_status_rejects_without_new_move(self):
+        from app.devices.rotation_thorlabs_elliptec_adapter import ElliptecRotation
+
+        class Driver:
+            def __init__(self):
+                self.move_calls = []
+                self.position = 0.0
+
+            def move_to(self, target, *, timeout):
+                self.move_calls.append(float(target))
+                return True
+
+            def get_status(self):
+                return None
+
+            def get_position(self):
+                return self.position
+
+        device = ElliptecRotation.__new__(ElliptecRotation)
+        device._last = 0.0
+        device.motion_tolerance = 0.25
+        device.position_unit = "deg"
+        device._drv = Driver()
+        device._motion_uncertain = True
+        clock = _Clock()
+        with self.assertRaisesRegex(MotionVerificationError, "unavailable or unreadable"):
+            move_and_verify(
+                device,
+                10.0,
+                config=self._config(uncertain_recovery_timeout_s=0.5),
+                clock=clock.monotonic,
+                sleep=clock.sleep,
+            )
+        self.assertEqual(device._drv.move_calls, [])
+
+    def test_elliptec_rotation_hardware_fault_is_terminal_during_recovery(self):
+        from app.devices.rotation_thorlabs_elliptec_adapter import ElliptecRotation
+
+        class Driver:
+            def __init__(self):
+                self.statuses = ["motor_error", "ok", "ok"]
+                self.move_calls = []
+
+            def move_to(self, target, *, timeout):
+                self.move_calls.append(float(target))
+                return True
+
+            def get_status(self):
+                return self.statuses.pop(0) if self.statuses else "ok"
+
+            def get_position(self):
+                return 0.0
+
+        device = ElliptecRotation.__new__(ElliptecRotation)
+        device._drv = Driver()
+        device._last = 0.0
+        device.motion_tolerance = 0.25
+        device.position_unit = "deg"
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionHardwareFault, "motor_error"):
+            move_and_verify(device, 10.0, config=self._config(uncertain_recovery_timeout_s=1.0))
+        self.assertEqual(device._drv.move_calls, [])
+        self.assertTrue(device._motion_uncertain)
+
+    def test_elliptec_stage_hardware_fault_is_terminal_during_recovery(self):
+        from app.devices.stage_elliptec_adapter import ElliptecLinearStage
+
+        class Driver:
+            def __init__(self):
+                self.statuses = ["overcurrent", "ok", "ok"]
+                self.move_calls = []
+
+            def move_to(self, target, *, timeout):
+                self.move_calls.append(float(target))
+                return True
+
+            def get_status(self):
+                return self.statuses.pop(0) if self.statuses else "ok"
+
+            def get_position(self):
+                return 0.0
+
+        device = ElliptecLinearStage.__new__(ElliptecLinearStage)
+        device.stage = Driver()
+        device.motion_tolerance = 0.01
+        device._motion_uncertain = True
+        with self.assertRaisesRegex(MotionHardwareFault, "overcurrent"):
+            move_and_verify(device, 10.0, config=self._config(uncertain_recovery_timeout_s=1.0))
+        self.assertEqual(device.stage.move_calls, [])
+        self.assertTrue(device._motion_uncertain)
+
+    def test_elliptec_hardware_fault_is_terminal_during_normal_verification(self):
+        from app.devices.rotation_thorlabs_elliptec_adapter import ElliptecRotation
+
+        class Driver:
+            def __init__(self):
+                self.move_calls = []
+
+            def move_to(self, target, *, timeout):
+                self.move_calls.append(float(target))
+                return True
+
+            def get_status(self):
+                return "therm_error"
+
+            def get_position(self):
+                return 0.0
+
+        device = ElliptecRotation.__new__(ElliptecRotation)
+        device._drv = Driver()
+        device._last = 0.0
+        device.motion_tolerance = 0.25
+        device.position_unit = "deg"
+        with self.assertRaisesRegex(MotionHardwareFault, "therm_error"):
+            move_and_verify(device, 10.0, config=self._config())
+        self.assertEqual(device._drv.move_calls, [10.0])
+        self.assertTrue(device._motion_uncertain)
+
+    def test_esp300_rotation_recovers_latch_and_verifies_target(self):
+        from app.devices.rotation_esp300_shared_adapter import SharedESP300Rotation
+        from types import SimpleNamespace
+
+        class Controller:
+            def __init__(self):
+                self.statuses = [True, True, True, True]
+                self.positions = [0.0, 0.0, 10.0, 10.0]
+                self.moves = []
+                self.position = 0.0
+
+            def get_motion_profile(self, *, axis):
+                return SimpleNamespace(velocity=1.0, acceleration=1.0, deceleration=1.0)
+
+            def motion_status(self, *, axis):
+                return self.statuses.pop(0) if self.statuses else True
+
+            def get_position(self, *, axis):
+                return self.positions.pop(0) if self.positions else self.position
+
+            def move_to(self, target, *, axis, stop_event, timeout_s):
+                self.moves.append((float(target), float(timeout_s)))
+                self.position = float(target)
+                return True
+
+        device = SharedESP300Rotation.__new__(SharedESP300Rotation)
+        device._controller = Controller()
+        device._axis = 2
+        device._role = "rotation"
+        device.motion_tolerance = 0.25
+        device._motion_uncertain = True
+        clock = _Clock()
+        observed = move_and_verify(
+            device,
+            10.0,
+            config=self._config(uncertain_recovery_timeout_s=2.0),
+            clock=clock.monotonic,
+            sleep=clock.sleep,
+        )
+        self.assertEqual(observed, 10.0)
+        self.assertEqual([target for target, _ in device._controller.moves], [10.0])
+        self.assertFalse(device._motion_uncertain)
 
     def test_elliptec_display_readback_does_not_substitute_cached_target(self):
         from app.devices.rotation_thorlabs_elliptec_adapter import ElliptecRotation
