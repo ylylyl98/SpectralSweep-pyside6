@@ -115,6 +115,28 @@ class ConfigPersistenceTests(unittest.TestCase):
                 [],
             )
 
+    def test_sample_profiles_round_trip_with_unapplied_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            config = AppConfig()
+            config.session.schema_version = 3
+            config.session.sample_id = "YZ365"
+            config.session.sample_profiles = {
+                "YZ365": {
+                    "schema_version": 1,
+                    "updated_at": "2026-09-12T12:00:00+00:00",
+                    "state": {"panels": {"dual_gate": {"draft_loop": [{"Group": "partial"}]}}},
+                }
+            }
+            config.save(path)
+            restored = AppConfig()
+            restored.load(path)
+            self.assertEqual(restored.session.schema_version, 3)
+            self.assertEqual(
+                restored.session.sample_profiles["YZ365"]["state"]["panels"]["dual_gate"]["draft_loop"][0]["Group"],
+                "partial",
+            )
+
     def test_legacy_andor_cooling_defaults_migrate_to_both_camera_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"

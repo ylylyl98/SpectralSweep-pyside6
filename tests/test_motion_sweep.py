@@ -160,6 +160,17 @@ class MotionSweepTests(unittest.TestCase):
             ["latest-sample"] * 3,
         )
 
+    def test_shared_sample_id_binder_can_defer_until_explicit_commit(self):
+        edits = [QLineEdit("old-a"), QLineEdit("old-b")]
+        binder = _SharedSampleIdBinder(edits, initial="initial", commit_on_edit=True)
+        edits[0].setText("draft")
+
+        self.assertEqual(binder.value, "initial")
+        self.assertEqual(edits[1].text(), "initial")
+        binder.commit("draft")
+        self.assertEqual(binder.value, "draft")
+        self.assertEqual([edit.text() for edit in edits], ["draft", "draft"])
+
     def test_rot2_sweep_only_moves_rot2_and_saves_angles(self):
         rotation = _FakeRotationController()
         with tempfile.TemporaryDirectory() as tmp:
@@ -178,7 +189,7 @@ class MotionSweepTests(unittest.TestCase):
             panel._motion_buttons[axis].click()
             self.assertEqual(panel._motion_combo.currentData(), axis)
             self.assertTrue(panel._motion_buttons[axis].isChecked())
-            self.assertEqual(panel._motion_input_lbl.text(), "Angles (°):")
+            self.assertIn("Values are interpreted in deg", panel._pos_input.toolTip())
             self.assertTrue(panel._input_mode.isHidden())
             self.assertTrue(panel._cal_grp.isHidden())
         panel._motion_combo.setCurrentIndex(panel._motion_combo.findData("stage"))

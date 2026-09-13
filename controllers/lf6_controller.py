@@ -34,12 +34,13 @@ import sys
 import traceback
 import time
 import logging
+import threading
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QObject, QMetaObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QMetaObject, QThread, QTimer, Qt, Signal, Slot
 
 # ── project root on sys.path so app/ and utils/ are importable ────────────────
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +77,8 @@ class _LF6Worker(QObject):
     wavelengths_updated = Signal(object)      # wl ndarray
     state_changed      = Signal(object)
     temperature_ready  = Signal(object)
+    temperature_snapshot_ready = Signal(object)
+    acquisition_finished = Signal()
     cooler_changed     = Signal(bool)
     andor_status_ready = Signal(object)
     andor_controls_applied = Signal(object)
@@ -87,6 +90,7 @@ class _LF6Worker(QObject):
         self._state = LightFieldLifecycleState.DISCONNECTED
         self._backend = "lightfield"
         self._identity = {}
+        self.temperature_monitor_paused = threading.Event()
 
     def _transition(self, state: LightFieldLifecycleState) -> None:
         self._state = state
@@ -378,17 +382,21 @@ class _LF6Worker(QObject):
     def acquire_single(self) -> None:
         if self._adapter is None:
             self.error.emit("Spectrometer not connected.")
+            self.acquisition_finished.emit()
             return
         try:
             wl, cts = self._adapter.acquire()
             self.spectrum_ready.emit(wl, cts)
         except Exception as exc:
             self.error.emit(f"Spectrometer acquire failed: {exc}")
+        finally:
+            self.acquisition_finished.emit()
 
     @Slot()
     def acquire_2d(self) -> None:
         if self._setup is None:
             self.error.emit("Spectrometer not connected.")
+            self.acquisition_finished.emit()
             return
         try:
             if self._backend == "andor_ingaas":
@@ -404,6 +412,8 @@ class _LF6Worker(QObject):
             self.frame_ready.emit(img)
         except Exception as exc:
             self.error.emit(f"Spectrometer acquire_2d failed: {exc}")
+        finally:
+            self.acquisition_finished.emit()
 
     @Slot()
     def read_temperature(self) -> None:
@@ -417,6 +427,21 @@ class _LF6Worker(QObject):
             self.temperature_ready.emit(method())
         except Exception as exc:
             self.error.emit(f"Detector temperature read failed: {exc}")
+
+    @Slot(int)
+    def read_temperature_snapshot(self, generation: int) -> None:
+        # Recheck after queueing: a measurement may have started meanwhile.
+        result = None
+        try:
+            if not self.temperature_monitor_paused.is_set() and not self.is_busy:
+                method = getattr(self._setup, "get_temperature_snapshot", None)
+                if callable(method):
+                    result = method()
+        except Exception as exc:
+            # A monitor failure must never abort a measurement via error.
+            result = {"error": str(exc)}
+        finally:
+            self.temperature_snapshot_ready.emit((generation, result))
 
     @Slot(bool)
     def set_cooler(self, on: bool) -> None:
@@ -510,6 +535,8 @@ class LF6Controller(QObject):
     wavelengths_updated = Signal(object)
     state_changed       = Signal(object)
     temperature_ready   = Signal(object)
+    temperature_snapshot_ready = Signal(object)
+    temperature_monitor_state = Signal(str)
     cooler_changed      = Signal(bool)
     andor_status_ready  = Signal(object)
     andor_controls_applied = Signal(object)
@@ -520,6 +547,7 @@ class LF6Controller(QObject):
     _acquire_requested = Signal()
     _acquire_2d_requested = Signal()
     _temperature_requested = Signal()
+    _temperature_snapshot_requested = Signal(int)
     _cooler_requested = Signal(bool)
     _andor_status_requested = Signal()
     _andor_controls_requested = Signal(object)
@@ -530,6 +558,14 @@ class LF6Controller(QObject):
         self._thread = QThread(self)
         self._worker = _LF6Worker()
         self._worker.moveToThread(self._thread)
+        self._temperature_pending = False
+        self._temperature_generation = 0
+        self._acquisition_requests = 0
+        self._temperature_pause_sources: set[str] = set()
+        self._temperature_timer = QTimer(self)
+        self._temperature_timer.setInterval(2000)
+        self._temperature_timer.timeout.connect(self.poll_temperature)
+        self._temperature_timer.start()
 
         # wire worker → controller signals (queued across thread boundary)
         self._worker.connected.connect(self.connected)
@@ -541,6 +577,8 @@ class LF6Controller(QObject):
         self._worker.wavelengths_updated.connect(self.wavelengths_updated)
         self._worker.state_changed.connect(self.state_changed)
         self._worker.temperature_ready.connect(self.temperature_ready)
+        self._worker.temperature_snapshot_ready.connect(self._on_temperature_snapshot)
+        self._worker.acquisition_finished.connect(self._on_acquisition_finished)
         self._worker.cooler_changed.connect(self.cooler_changed)
         self._worker.andor_status_ready.connect(self.andor_status_ready)
         self._worker.andor_controls_applied.connect(self.andor_controls_applied)
@@ -551,6 +589,7 @@ class LF6Controller(QObject):
         self._acquire_requested.connect(self._worker.acquire_single)
         self._acquire_2d_requested.connect(self._worker.acquire_2d)
         self._temperature_requested.connect(self._worker.read_temperature)
+        self._temperature_snapshot_requested.connect(self._worker.read_temperature_snapshot)
         self._cooler_requested.connect(self._worker.set_cooler)
         self._andor_status_requested.connect(self._worker.refresh_andor_status)
         self._andor_controls_requested.connect(self._worker.apply_andor_controls)
@@ -565,9 +604,15 @@ class LF6Controller(QObject):
         """Connect the selected LightField or Andor spectrum backend."""
         selected = str(backend or cfg.lf6.backend or "lightfield")
         cfg.lf6.backend = selected
+        self._temperature_generation += 1
+        self._temperature_timer.start()
+        self.set_temperature_monitor_paused("disconnect", False)
         self._connect_requested.emit(bool(use_mock), selected)
 
     def disconnect_instrument(self) -> None:
+        self._temperature_generation += 1
+        self.set_temperature_monitor_paused("disconnect", True)
+        self._temperature_timer.stop()
         self._disconnect_requested.emit()
 
     def apply_settings(
@@ -607,13 +652,56 @@ class LF6Controller(QObject):
     prepare_acquisition = configure_for_acquisition
 
     def acquire_single(self) -> None:
+        self._acquisition_requests += 1
+        self.set_temperature_monitor_paused("acquisition", True)
         self._acquire_requested.emit()
 
     def acquire_2d(self) -> None:
+        self._acquisition_requests += 1
+        self.set_temperature_monitor_paused("acquisition", True)
         self._acquire_2d_requested.emit()
+
+    @Slot()
+    def _on_acquisition_finished(self) -> None:
+        self._acquisition_requests = max(0, self._acquisition_requests - 1)
+        self.set_temperature_monitor_paused("acquisition", self._acquisition_requests > 0)
 
     def read_temperature(self) -> None:
         self._temperature_requested.emit()
+
+    def set_temperature_monitor_paused(self, source: str, paused: bool) -> None:
+        if paused:
+            self._temperature_pause_sources.add(source)
+        else:
+            self._temperature_pause_sources.discard(source)
+        if self._temperature_pause_sources:
+            self._worker.temperature_monitor_paused.set()
+        else:
+            self._worker.temperature_monitor_paused.clear()
+        self.temperature_monitor_state.emit(
+            "Paused during measurement" if self._temperature_pause_sources else "Auto refresh: 2 s"
+        )
+
+    @Slot()
+    def poll_temperature(self) -> None:
+        if not self.is_connected or self.identity.get("backend") != "andor_sdk2":
+            return
+        if self._temperature_pause_sources or self.is_busy:
+            self.temperature_monitor_state.emit("Paused during measurement")
+            return
+        self.temperature_monitor_state.emit("Auto refresh: 2 s")
+        if self._temperature_pending:
+            return
+        self._temperature_pending = True
+        self._temperature_snapshot_requested.emit(self._temperature_generation)
+
+    @Slot(object)
+    def _on_temperature_snapshot(self, result) -> None:
+        generation, snapshot = result
+        self._temperature_pending = False
+        if (generation == self._temperature_generation and snapshot is not None
+                and self.is_connected and not self._temperature_pause_sources):
+            self.temperature_snapshot_ready.emit(snapshot)
 
     def set_cooler(self, on: bool) -> None:
         self._cooler_requested.emit(bool(on))
@@ -687,6 +775,8 @@ class LF6Controller(QObject):
 
     def shutdown(self) -> None:
         """Call from main.py on application exit."""
+        self._temperature_timer.stop()
+        self._worker.temperature_monitor_paused.set()
         if self._thread.isRunning():
             QMetaObject.invokeMethod(
                 self._worker,

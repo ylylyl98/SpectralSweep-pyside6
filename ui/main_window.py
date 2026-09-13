@@ -3,7 +3,7 @@
 # Top-level application window.
 #
 # Layout:
-#   Left splitter pane : shared InstrumentPanel + Experiment History
+#   Left splitter pane : shared InstrumentPanel + per-sample settings
 #   Main tabs         : Dual Gate | 2D Sweep | Motion Sweep | MCD | BFP | ...
 #
 # Controllers are created once here and injected into all panels.
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 
@@ -27,10 +28,12 @@ from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QStatusBar, QApplication,
     QMessageBox, QComboBox, QListWidget, QPushButton, QPlainTextEdit, QLabel,
     QLineEdit,
-    QVBoxLayout, QHBoxLayout, QListWidgetItem, QSplitter, QToolBar,
+    QVBoxLayout, QHBoxLayout, QListWidgetItem, QSplitter, QToolBar, QDialog,
+    QInputDialog,
 )
 from app.experiment_metadata import ExperimentHistory, ExperimentMetadataService
 from app.ntfy_notifications import NtfyNotifier
+from app.sample_settings import SampleSettingsStore
 
 # ── Global stylesheet ──────────────────────────────────────────────────────────
 _STYLESHEET = """
@@ -364,13 +367,17 @@ def _clamp_window_rect(rect: QRect, available: QRect, margin: int = 8) -> QRect:
 class _SharedSampleIdBinder(QObject):
     """Keep workflow Sample ID edits synchronized without recursive updates."""
 
-    def __init__(self, edits, initial: str = "", parent=None):
+    def __init__(self, edits, initial: str = "", parent=None, *, commit_on_edit: bool = False):
         super().__init__(parent)
         self._edits = list(edits)
         self._value = ""
         self._updating = False
+        self._commit_on_edit = bool(commit_on_edit)
         for edit in self._edits:
-            edit.textChanged.connect(self._on_text_changed)
+            if self._commit_on_edit:
+                edit.textChanged.connect(self._on_deferred_text_changed)
+            else:
+                edit.textChanged.connect(self._on_text_changed)
         self.set_value(initial)
 
     @property
@@ -392,6 +399,18 @@ class _SharedSampleIdBinder(QObject):
         if self._updating:
             return
         self.set_value(value)
+
+    def _on_deferred_text_changed(self, _value: str) -> None:
+        # Keep the in-progress edit local until the owner explicitly commits
+        # the Sample ID (Enter or a selector action).
+        return
+
+    def commit(self, value: Optional[str] = None) -> str:
+        if value is None:
+            value = next((edit.text() for edit in self._edits if edit.hasFocus()), self._value)
+        value = str(value).strip()
+        self.set_value(value)
+        return value
 
 
 class _SessionChangeWatcher(QObject):
@@ -497,7 +516,7 @@ class MainWindow(QMainWindow):
             lambda message: self._status.showMessage(f"APS100 error: {message[:80]}")
         )
 
-        # ── shared instrument panel (left sidebar, assembled after history) ──
+        # ── shared instrument panel (left sidebar, assembled with sample settings) ──
         self._inst_panel = InstrumentPanel(
             lf6_ctrl=self._lf6,
             smu_ctrl=self._smu,
@@ -571,6 +590,9 @@ class MainWindow(QMainWindow):
 
         # Spectrum
         self._spectrum = SpectrumPanel(lf6_ctrl=self._lf6)
+        self._spectrum.set_sidebar_snapshot_provider(
+            self._inst_panel.capture_spectrum_readbacks
+        )
         self._tabs.addTab(self._spectrum, "Spectrum")
 
         # Settings
@@ -606,6 +628,18 @@ class MainWindow(QMainWindow):
         self._initialize_history_ui()
         self._build_sidebar_splitter()
         self._restore_geometry()
+        # Keep a pristine fallback for a newly named sample.  This snapshot is
+        # captured before restoring the legacy/current profile.
+        self._default_profile_state = deepcopy(self._capture_session())
+        legacy_state = {
+            "schema_version": cfg.session.schema_version,
+            "active_tab": cfg.session.active_tab,
+            "sample_id": cfg.session.sample_id,
+            "panels": deepcopy(cfg.session.panels),
+        }
+        current_id = self._sample_id_binder.value.strip()
+        if current_id:
+            self._sample_store.migrate_legacy(current_id, legacy_state)
         self._restore_session()
 
         # User input schedules a debounced observation.  A slow fallback poll
@@ -649,8 +683,27 @@ class MainWindow(QMainWindow):
         if cfg.session.schema_version >= 2:
             initial = cfg.session.sample_id
         else:
+            # Legacy sessions kept Sample ID inside panel metadata rather than
+            # on SessionConfig.  Read those harmless fields before widgets are
+            # restored so migration selects the right profile.
+            initial = ""
+            for panel_state in cfg.session.panels.values():
+                if not isinstance(panel_state, dict):
+                    continue
+                for candidate in (
+                    panel_state.get("sample_id"),
+                    (panel_state.get("metadata") or {}).get("sample_id")
+                    if isinstance(panel_state.get("metadata"), dict) else None,
+                    (panel_state.get("naming") or {}).get("device")
+                    if isinstance(panel_state.get("naming"), dict) else None,
+                ):
+                    if isinstance(candidate, str) and candidate.strip():
+                        initial = candidate
+                        break
+                if initial:
+                    break
             active_edit = edits_by_panel.get(self._tabs.currentWidget())
-            initial = active_edit.text() if active_edit is not None else ""
+            initial = initial or (active_edit.text() if active_edit is not None else "")
             if not initial:
                 initial = next(
                     (
@@ -664,7 +717,14 @@ class MainWindow(QMainWindow):
             edits_by_panel.values(),
             initial=initial,
             parent=self,
+            commit_on_edit=True,
         )
+        for edit in edits_by_panel.values():
+            edit.returnPressed.connect(lambda edit=edit: self._commit_sample_id_edit(edit))
+
+    def _commit_sample_id_edit(self, edit) -> None:
+        """Commit a Sample ID only after the user confirms the field."""
+        self._commit_sample_selection(edit.text())
 
     def _initialize_history_ui(self) -> None:
         """Compact, explicit history browser shared by all experiment tabs."""
@@ -730,12 +790,127 @@ class MainWindow(QMainWindow):
         self._history_next.clicked.connect(lambda: self._change_history_page(1))
         self._event_prev.clicked.connect(lambda: self._change_event_page(-20))
         self._event_next.clicked.connect(lambda: self._change_event_page(20))
-        self._sample_id_binder._edits[0].textChanged.connect(self._refresh_history)
         self._refresh_history()
         self._bfp._tabs.currentChanged.connect(lambda _i: self._history_type_for_active_tab(self._tabs.currentIndex()))
 
+        # Sample settings are the primary sidebar workflow.  Run history is
+        # still available from a separate window via the button below.
+        self._sample_store = SampleSettingsStore({"sample_profiles": cfg.session.sample_profiles})
+        sample_panel = QWidget()
+        sample_layout = QVBoxLayout(sample_panel)
+        sample_layout.setContentsMargins(0, 0, 0, 0)
+        sample_layout.setSpacing(4)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Sample ID"))
+        self._sample_selector = QComboBox()
+        self._sample_selector.setEditable(True)
+        self._sample_selector.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._sample_selector.setPlaceholderText("Select or enter Sample ID")
+        row.addWidget(self._sample_selector, 1)
+        sample_layout.addLayout(row)
+        self._sample_filter = QLineEdit()
+        self._sample_filter.setPlaceholderText("Search saved samples")
+        self._sample_filter.setClearButtonEnabled(True)
+        sample_layout.addWidget(self._sample_filter)
+        actions = QHBoxLayout()
+        self._sample_new_btn = QPushButton("New sample")
+        self._sample_duplicate_btn = QPushButton("Duplicate current")
+        self._sample_save_btn = QPushButton("Save now")
+        actions.addWidget(self._sample_new_btn)
+        actions.addWidget(self._sample_duplicate_btn)
+        actions.addWidget(self._sample_save_btn)
+        sample_layout.addLayout(actions)
+        self._sample_save_status = QLabel("Not saved")
+        sample_layout.addWidget(self._sample_save_status)
+        self._run_history_btn = QPushButton("Open run history")
+        self._run_history_btn.setToolTip("Open completed and failed acquisition records.")
+        sample_layout.addWidget(self._run_history_btn)
+        self._sample_settings_panel = sample_panel
+        self._refresh_sample_selector()
+        self._sample_selector.lineEdit().returnPressed.connect(
+            lambda: self._commit_sample_selection(self._sample_selector.currentText())
+        )
+        self._sample_selector.activated.connect(self._sample_selector_activated)
+        self._sample_filter.textChanged.connect(lambda _text: self._refresh_sample_selector())
+        self._sample_new_btn.clicked.connect(lambda _checked=False: self._new_sample())
+        self._sample_duplicate_btn.clicked.connect(
+            lambda _checked=False: self._duplicate_current_sample()
+        )
+        self._sample_save_btn.clicked.connect(lambda _checked=False: self._persist_session())
+        self._run_history_btn.clicked.connect(lambda _checked=False: self._show_run_history())
+
+    def _refresh_sample_selector(self) -> None:
+        if not hasattr(self, "_sample_selector"):
+            return
+        current = self._sample_id_binder.value if hasattr(self, "_sample_id_binder") else ""
+        query = self._sample_filter.text() if hasattr(self, "_sample_filter") else ""
+        combo = self._sample_selector
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItems(self._sample_store.ids(query))
+            combo.setEditText(current)
+        finally:
+            combo.blockSignals(False)
+
+    def _sample_selector_activated(self, index: int) -> None:
+        combo = self._sample_selector
+        value = combo.itemText(index) if isinstance(index, int) else str(index)
+        self._commit_sample_selection(value)
+
+    def _new_sample(self) -> None:
+        value, accepted = QInputDialog.getText(self, "New sample", "Sample ID:")
+        if accepted:
+            target = self._sample_store.normalize_id(value)
+            if target in self._sample_store.ids():
+                self._status.showMessage("That Sample ID already exists; use Duplicate current", 5000)
+                return
+            self._commit_sample_selection(target)
+
+    def _duplicate_current_sample(self, target_id: Optional[str] = None) -> None:
+        source = self._sample_id_binder.value.strip()
+        if target_id is None:
+            value, accepted = QInputDialog.getText(
+                self, "Duplicate current sample", "New Sample ID:", text=source
+            )
+            if not accepted:
+                return
+            target = str(value).strip()
+        else:
+            target = str(target_id).strip()
+        if not target or not source:
+            self._status.showMessage("Both current and new Sample IDs are required", 5000)
+            return
+        self._persist_session()
+        if not self._sample_store.duplicate(source, target):
+            self._status.showMessage("Could not duplicate: target Sample ID already exists", 5000)
+            return
+        cfg.session.sample_profiles = self._sample_store._profiles
+        try:
+            cfg.save()
+        except Exception as exc:
+            self._status.showMessage(f"Could not save sample settings: {exc}", 8000)
+            return
+        self._refresh_sample_selector()
+        self._commit_sample_selection(target)
+
+    def _show_run_history(self) -> None:
+        dialog = getattr(self, "_run_history_dialog", None)
+        if dialog is not None and not dialog.isHidden():
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Experiment run history")
+        dialog.resize(760, 620)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(self._history_panel)
+        self._run_history_dialog = dialog
+        dialog.finished.connect(lambda _code: setattr(self, "_run_history_dialog", None))
+        dialog.show()
+
     def _build_sidebar_splitter(self) -> None:
-        """Host instruments and history in one responsive, collapsible sidebar."""
+        """Host instruments and sample settings in one responsive sidebar."""
         sidebar = QWidget()
         sidebar.setObjectName("SharedInstrumentHistorySidebar")
         sidebar.setMinimumWidth(0)
@@ -744,7 +919,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.setSpacing(4)
 
         header = QHBoxLayout()
-        title = QLabel("Instruments & history")
+        title = QLabel("Instruments & sample settings")
         title.setStyleSheet("font-weight: 700; color: #29384c;")
         self._sidebar_hide = QPushButton("Hide sidebar")
         self._sidebar_hide.setToolTip("Collapse the instrument and experiment-history sidebar.")
@@ -758,7 +933,7 @@ class MainWindow(QMainWindow):
         inner.setObjectName("SidebarContentSplitter")
         inner.setChildrenCollapsible(True)
         self._sidebar_content_splitter = inner
-        self._history_panel.setMinimumHeight(0)
+        self._sample_settings_panel.setMinimumHeight(0)
 
         history_container = QWidget()
         history_container.setObjectName("ExperimentHistoryContainer")
@@ -766,10 +941,10 @@ class MainWindow(QMainWindow):
         history_layout.setContentsMargins(0, 0, 0, 0)
         history_layout.setSpacing(2)
         self._history_toggle = QPushButton()
-        self._history_toggle.setToolTip("Collapse or expand saved experiment settings.")
+        self._history_toggle.setToolTip("Collapse or expand saved sample settings.")
         self._history_toggle.clicked.connect(self._toggle_history)
         history_layout.addWidget(self._history_toggle)
-        history_layout.addWidget(self._history_panel, 1)
+        history_layout.addWidget(self._sample_settings_panel, 1)
         self._history_container = history_container
         self._history_height = 260
         inner.addWidget(self._inst_panel)
@@ -813,21 +988,22 @@ class MainWindow(QMainWindow):
 
     def _set_history_collapsed(self, collapsed: bool, *, persist: bool = True) -> None:
         collapsed = bool(collapsed)
+        content_panel = getattr(self, "_sample_settings_panel", self._history_panel)
         if collapsed:
             sizes = self._sidebar_content_splitter.sizes()
             if len(sizes) > 1 and sizes[1] > 40:
                 self._history_height = int(sizes[1])
-            self._history_panel.hide()
+            content_panel.hide()
             compact_height = self._history_toggle.sizeHint().height() + 4
             self._history_container.setMaximumHeight(compact_height)
-            self._history_toggle.setText("▶ Experiment history")
+            self._history_toggle.setText("▶ Sample settings")
         else:
             self._history_container.setMaximumHeight(16777215)
-            self._history_panel.show()
+            content_panel.show()
             total = max(sum(self._sidebar_content_splitter.sizes()), 520)
             history_height = min(max(int(getattr(self, "_history_height", 260)), 140), total // 2)
             self._sidebar_content_splitter.setSizes([total - history_height, history_height])
-            self._history_toggle.setText("▼ Experiment history")
+            self._history_toggle.setText("▼ Sample settings")
         self._history_collapsed = collapsed
         if persist:
             QSettings(_ORG, _APP).setValue("historyCollapsed", collapsed)
@@ -885,6 +1061,8 @@ class MainWindow(QMainWindow):
         self._refresh_history()
 
     def _refresh_history(self) -> None:
+        if not hasattr(self, "_history_device"):
+            return
         device = self._sample_id_binder.value.strip()
         self._history_device.setText(f"Device: {device}")
         self._history_list.clear()
@@ -1017,6 +1195,7 @@ class MainWindow(QMainWindow):
         }
 
     def _capture_session(self) -> dict:
+        capture_errors: list[str] = []
         panels = {
             str(key): value
             for key, value in cfg.session.panels.items()
@@ -1028,12 +1207,21 @@ class MainWindow(QMainWindow):
                 continue
             try:
                 value = capture()
-            except Exception:
+            except Exception as exc:
+                capture_errors.append(f"{key}: {exc}")
                 continue
             if isinstance(value, dict):
                 panels[key] = value
+        if capture_errors:
+            self._session_capture_errors = capture_errors
+            self._status.showMessage(
+                "Some settings could not be captured: " + "; ".join(capture_errors),
+                8000,
+            )
+        else:
+            self._session_capture_errors = []
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "active_tab": self._active_tab_id(),
             "sample_id": (
                 self._sample_id_binder.value
@@ -1041,10 +1229,10 @@ class MainWindow(QMainWindow):
                 else cfg.session.sample_id
             ),
             "panels": panels,
+            "capture_errors": capture_errors,
         }
 
-    def _restore_session(self) -> None:
-        panels = cfg.session.panels
+    def _restore_panels(self, panels: object) -> None:
         if isinstance(panels, dict):
             for key, panel in self._session_panels.items():
                 restore = getattr(panel, "restore_session_state", None)
@@ -1058,32 +1246,179 @@ class MainWindow(QMainWindow):
                         f"Some saved {key.replace('_', ' ')} settings were skipped: {exc}",
                         8000,
                     )
-        wanted = cfg.session.active_tab
+    def _restore_state(self, state: object) -> None:
+        if not isinstance(state, dict):
+            return
+        self._restore_panels(state.get("panels"))
+        wanted = state.get("active_tab", "dual_gate")
         for widget, tab_id in self._tab_ids.items():
             if tab_id == wanted:
                 self._tabs.setCurrentWidget(widget)
                 break
 
+    @staticmethod
+    def _sample_scoped_state(state: object) -> dict:
+        """Remove global connection/output preferences from a sample profile."""
+        if not isinstance(state, dict):
+            return {}
+        scoped = deepcopy(state)
+        panels = scoped.get("panels")
+        if not isinstance(panels, dict):
+            return scoped
+        # Settings owns global detector defaults and output paths.  Instrument
+        # setup keeps useful per-sample UI presets (jog, expansion, wavelength)
+        # while connection identities remain global.
+        settings = panels.get("settings")
+        if isinstance(settings, dict):
+            output = settings.get("output")
+            if isinstance(output, dict):
+                # Output root is global; temperature/mode/coefficient remain
+                # useful sample metadata and therefore stay profile-scoped.
+                output.pop("base_out", None)
+            andor = settings.get("andor")
+            if isinstance(andor, dict):
+                for key in ("sdk_dir", "shamrock_dir", "si_serial", "ingaas_serial", "spectrograph_index"):
+                    andor.pop(key, None)
+        instruments = panels.get("instruments")
+        if isinstance(instruments, dict):
+            lf6 = instruments.get("lf6")
+            if isinstance(lf6, dict):
+                lf6.pop("backend", None)
+                lf6.pop("use_mock", None)
+            smu = instruments.get("smu")
+            if isinstance(smu, dict):
+                for key in (
+                    "vbg_resource", "vtg_resource", "vbias_resource",
+                    "termination", "compliance_by_addr",
+                ):
+                    smu.pop(key, None)
+            for key in ("rot1", "rot2", "stage"):
+                section = instruments.get(key)
+                if isinstance(section, dict):
+                    section.pop("backend", None)
+                    section.pop("address", None)
+                    section.pop("axis", None)
+                    section.pop("include_asrl", None)
+            imaging = instruments.get("imaging_stage")
+            if isinstance(imaging, dict):
+                imaging.pop("port", None)
+            pm = instruments.get("pm100d")
+            if isinstance(pm, dict):
+                pm.pop("device", None)
+                pm.pop("correction_factor", None)
+        return scoped
+
+    def _restore_session(self) -> None:
+        sample_id = self._sample_id_binder.value.strip()
+        # Restore global connection/UI controls once at startup.  Sample
+        # switching later uses the scoped profile and deliberately leaves
+        # these identities untouched.
+        self._restore_panels(cfg.session.panels)
+        profile = self._sample_store.load(sample_id) if sample_id else None
+        if profile is not None:
+            self._restore_state(self._sample_scoped_state(profile))
+        elif sample_id:
+            self._restore_state(self._sample_scoped_state(self._default_profile_state))
+        else:
+            self._restore_state({
+                "active_tab": cfg.session.active_tab,
+                "panels": cfg.session.panels,
+            })
+        if sample_id:
+            self._sample_id_binder.commit(sample_id)
+        self._refresh_sample_selector()
+
+    def _acquisition_active(self) -> bool:
+        if getattr(self, "_power_sweep_running", False) or getattr(self, "_active_mcd_panel", None) is not None:
+            return True
+        for panel, thread_attrs in (
+            (getattr(self, "_presets", None), ("_run_thread",)),
+            (getattr(self, "_mega", None), ("_thread",)),
+            (getattr(self, "_bfp", None), ("_thread",)),
+        ):
+            for attr in thread_attrs:
+                thread = getattr(panel, attr, None)
+                if thread is not None and callable(getattr(thread, "isRunning", None)) and thread.isRunning():
+                    return True
+        spectrum = getattr(self, "_spectrum", None)
+        return bool(
+            getattr(spectrum, "_continuous_mode", None) is not None
+            or getattr(spectrum, "_pending_acquisition", None) is not None
+            or bool(getattr(getattr(spectrum, "_abort_btn", None), "isEnabled", lambda: False)())
+        )
+
+    def _commit_sample_selection(self, sample_id: object) -> bool:
+        target = self._sample_store.normalize_id(sample_id)
+        current = self._sample_id_binder.value.strip()
+        if not target:
+            self._status.showMessage("Sample ID cannot be empty", 5000)
+            self._refresh_sample_selector()
+            return False
+        if self._acquisition_active():
+            self._status.showMessage("Sample settings cannot change during acquisition", 5000)
+            self._refresh_sample_selector()
+            return False
+        if target == current:
+            self._sample_id_binder.commit(target)
+            self._refresh_sample_selector()
+            self._refresh_history()
+            return True
+        # Persist the outgoing sample synchronously before any controls are
+        # restored, preventing a debounce timer from crossing profile keys.
+        self._persist_session()
+        self._sample_restore_in_progress = True
+        try:
+            profile = self._sample_store.load(target)
+            self._restore_state(
+                self._sample_scoped_state(
+                    profile if profile is not None else self._default_profile_state
+                )
+            )
+            self._sample_id_binder.commit(target)
+            self._refresh_sample_selector()
+            self._refresh_history()
+        finally:
+            self._sample_restore_in_progress = False
+        self._persist_session()
+        self._status.showMessage(f"Loaded sample settings: {target}", 4000)
+        return True
+
     def _poll_session_changes(self) -> None:
+        if getattr(self, "_sample_restore_in_progress", False):
+            return
         current = self._capture_session()
         if current != self._last_observed_session:
             self._last_observed_session = current
+            if hasattr(self, "_sample_save_status"):
+                self._sample_save_status.setText("Unsaved changes")
             self._session_save_timer.start()
 
     def _schedule_session_observation(self, *_args) -> None:
         self._session_observe_timer.start()
 
     def _persist_session(self) -> None:
+        if getattr(self, "_sample_restore_in_progress", False):
+            return
         session = self._capture_session()
         cfg.session.schema_version = int(session["schema_version"])
         cfg.session.active_tab = str(session["active_tab"])
         cfg.session.sample_id = str(session["sample_id"])
         cfg.session.panels = session["panels"]
+        sample_id = str(session["sample_id"]).strip()
+        if sample_id and hasattr(self, "_sample_store"):
+            self._sample_store.save(sample_id, self._sample_scoped_state(session))
+            cfg.session.sample_profiles = self._sample_store._profiles
         self._last_observed_session = session
         try:
             cfg.save()
+            if hasattr(self, "_sample_save_status"):
+                self._sample_save_status.setText(
+                    "Saved with warnings" if session.get("capture_errors") else "Saved just now"
+                )
         except Exception as exc:
             self._status.showMessage(f"Could not save settings: {exc}", 8000)
+            if hasattr(self, "_sample_save_status"):
+                self._sample_save_status.setText("Save failed")
 
     def _available_geometry_for_window(self) -> Optional[QRect]:
         app = QApplication.instance()
@@ -1142,6 +1477,9 @@ class MainWindow(QMainWindow):
             return
 
         active = self._active_mcd_panel
+        pause = getattr(getattr(self, "_lf6", None), "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("mcd", active is not None)
         self._inst_panel.setEnabled(not running)
         for index in range(self._tabs.count()):
             widget = self._tabs.widget(index)
@@ -1160,6 +1498,9 @@ class MainWindow(QMainWindow):
     def _on_power_sweep_state_changed(self, running: bool) -> None:
         """Reserve shared instruments while the motion sweep owns hardware."""
         self._power_sweep_running = bool(running)
+        pause = getattr(getattr(self, "_lf6", None), "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("power_sweep", bool(running))
         if running and self._active_mcd_panel is not None:
             return
         self._inst_panel.setEnabled(not running)

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import importlib
 import queue
+import re
 import threading
 import logging
 from typing import Any, Callable, Optional
@@ -27,7 +28,7 @@ log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class AndorConnectionOptions:
     camera_role: str = "ingaas"
-    camera_index: int = 0
+    camera_index: int = 0  # Legacy configuration only; selection uses serial/model.
     camera_serial: str = ""
     spectrograph_index: int = 0
     sdk2_dll_dir: str = ""
@@ -106,6 +107,7 @@ class AndorSDK2Setup:
         self._spectrograph = None
         self._closed = False
         self._busy = threading.Event()
+        self._temperature_read_lock = threading.Lock()
         self._abort = threading.Event()
         self._exposure_ms = 1000.0
         self._accumulations = 1
@@ -173,12 +175,38 @@ class AndorSDK2Setup:
             return str(info[2])
         return str(getattr(info, "serial_number", ""))
 
+    @staticmethod
+    def _model_from_info(info: Any) -> str:
+        if isinstance(info, dict):
+            return str(info.get("head_model", ""))
+        if isinstance(info, (tuple, list)) and len(info) >= 2:
+            return str(info[1])
+        return str(getattr(info, "head_model", ""))
+
+    @staticmethod
+    def _role_from_model(model: str) -> Optional[str]:
+        # Explicit iDus families, not sensor dimensions or enumeration order.
+        # Andor iDus CCD combined brochure: DU401/416/420.
+        # Andor iDus InGaAs 1.7/2.2 specifications: DU490/491/492.
+        model = model.strip().upper()
+        match = re.search(r"\b(?:DU|IDUS)[\s-]*(401|416|420|490|491|492)(?!\d)", model)
+        if match:
+            return "ingaas" if match.group(1) in {"490", "491", "492"} else "si"
+        if re.search(r"\bINGAAS\b", model):
+            return "ingaas"
+        if re.search(r"\b(?:SI|SILICON)\s+CCD\b", model):
+            return "si"
+        return None
+
     def _select_camera_index(self, module: Any) -> tuple[int, list[dict[str, Any]]]:
         count = int(module.get_cameras_number_SDK2())
         if count < 1:
             raise RuntimeError("No Andor SDK2 cameras were detected")
         discovered: list[dict[str, Any]] = []
-        selected = None
+        role = self.options.camera_role.strip().lower()
+        if role not in {"si", "ingaas"}:
+            raise ValueError(f"Unknown Andor camera role: {self.options.camera_role!r}")
+        role_label = "Si" if role == "si" else "InGaAs"
         wanted_serial = self.options.camera_serial.strip()
         for index in range(count):
             camera = module.AndorSDK2Camera(
@@ -187,27 +215,41 @@ class AndorSDK2Setup:
             try:
                 info = camera.get_device_info()
                 serial = self._serial_from_info(info)
-                discovered.append({"index": index, "serial": serial, "info": info})
-                if wanted_serial and serial == wanted_serial:
-                    selected = index
+                model = self._model_from_info(info)
+                discovered.append({"index": index, "serial": serial, "model": model,
+                                   "detected_role": self._role_from_model(model), "info": info})
             finally:
                 camera.close()
-        if wanted_serial and selected is None:
-            available = ", ".join(
-                f"idx={item['index']} serial={item['serial'] or '?'}"
-                for item in discovered
-            )
+        available = "; ".join(
+            f"model={item['model'] or '?'} serial={item['serial'] or '?'} "
+            f"type={item['detected_role'] or 'unknown'} (idx={item['index']})"
+            for item in discovered
+        )
+        if wanted_serial:
+            matches = [item for item in discovered if item["serial"] == wanted_serial]
+            if not matches:
+                raise RuntimeError(f"Configured Andor {role_label} serial {wanted_serial!r} "
+                                   f"was not found; detected: {available}")
+            if len(matches) != 1:
+                raise RuntimeError(f"Multiple cameras report serial {wanted_serial!r}; detected: {available}")
+            selected = matches[0]
+            if selected["detected_role"] not in {None, role}:
+                actual = "InGaAs" if selected["detected_role"] == "ingaas" else "Si"
+                raise RuntimeError(f"Serial {wanted_serial} is an {actual} camera, not {role_label}; "
+                                   f"correct the camera backend or serial binding. Detected: {available}")
+            return selected["index"], discovered
+        matches = [item for item in discovered if item["detected_role"] == role]
+        if len(matches) == 1:
+            return matches[0]["index"], discovered
+        if len(matches) > 1:
             raise RuntimeError(
-                f"Configured Andor {self.options.camera_role} serial "
-                f"{wanted_serial!r} was not found; detected: {available}"
+                f"Multiple {role_label} cameras detected. Set the {role_label} serial in Settings "
+                f"to choose one. Detected: {available}"
             )
-        if selected is None:
-            selected = int(self.options.camera_index)
-        if selected < 0 or selected >= count:
-            raise RuntimeError(
-                f"Configured Andor camera index {selected} is outside 0..{count - 1}"
-            )
-        return selected, discovered
+        raise RuntimeError(
+            f"No {role_label} camera could be identified. Connect the requested camera; "
+            f"for an unknown model, bind its serial in Settings. Detected: {available}"
+        )
 
     @staticmethod
     def _open_shamrock(module: Any, index: int) -> tuple[Any, Optional[str]]:
@@ -298,6 +340,7 @@ class AndorSDK2Setup:
                 "camera_role": self.options.camera_role,
                 "camera_index": index,
                 "camera_serial": self._serial_from_info(info),
+                "camera_model": self._model_from_info(info),
                 "device_info": info,
                 "detector_size": camera.get_detector_size(),
                 "spectrograph_index": int(self.options.spectrograph_index),
@@ -400,6 +443,7 @@ class AndorSDK2Setup:
             "camera_role": self.options.camera_role,
             "camera_index": self._identity.get("camera_index"),
             "camera_serial": self._identity.get("camera_serial", ""),
+            "camera_model": self._identity.get("camera_model", ""),
             "spectrograph_index": int(self.options.spectrograph_index),
             "spectrograph_serial": self._identity.get("spectrograph_serial", ""),
             "calibration_source": "Shamrock stored coefficients",
@@ -889,6 +933,31 @@ class AndorSDK2Setup:
 
     def get_temperature(self) -> Any:
         return self._call(lambda: self._require_camera().get_temperature())
+
+    def get_temperature_snapshot(self) -> Optional[dict[str, Any]]:
+        """Lightweight idle readback; never change camera settings."""
+        if self._busy.is_set():
+            return None
+        if not self._temperature_read_lock.acquire(blocking=False):
+            return None
+
+        def read():
+            try:
+                if self._busy.is_set():
+                    return None
+                camera = self._require_camera()
+                return {
+                    "temperature_c": float(camera.get_temperature()),
+                    "temperature_status": str(camera.get_temperature_status()),
+                    "temperature_setpoint_c": float(camera.get_temperature_setpoint()),
+                    "cooler_on": bool(camera.is_cooler_on()),
+                }
+            finally:
+                # A caller timeout does not cancel the SDK job. Keep the guard
+                # until the owner actually finishes, so retries cannot pile up.
+                self._temperature_read_lock.release()
+
+        return self._call(read)
 
     def get_disconnect_safety_snapshot(self) -> dict[str, Any]:
         def read() -> dict[str, Any]:

@@ -32,6 +32,7 @@ if importlib.util.find_spec("pylablib") is None:
 from ui.presets_panel import (
     BATCH_SCHEMA,
     PresetsPanel,
+    _resolve_sweep_vectors,
     _build_acquisition_schedule,
     _format_duration,
     _parse_sweep_constants,
@@ -168,10 +169,12 @@ class SweepLineSolverTests(unittest.TestCase):
         )
         self.assertIsNotNone(result)
         vbg_start, vbg_stop, vtg_start, vtg_stop = result
-        self.assertAlmostEqual(vbg_start, -3.0)
-        self.assertAlmostEqual(vbg_stop, 3.0)
-        self.assertAlmostEqual(vtg_start, 1.5)
-        self.assertAlmostEqual(vtg_stop, -1.5)
+        self.assertAlmostEqual(vbg_start, 3.0)
+        self.assertAlmostEqual(vbg_stop, -3.0)
+        self.assertAlmostEqual(vtg_start, -1.5)
+        self.assertAlmostEqual(vtg_stop, 1.5)
+        self.assertAlmostEqual(vtg_start - 0.5 * vbg_start, -3.0)
+        self.assertAlmostEqual(vtg_stop - 0.5 * vbg_stop, 3.0)
 
     def test_rejects_line_whose_fixed_coordinate_is_outside_limits(self):
         result = _solve_condition_line(
@@ -201,6 +204,34 @@ class SweepLinePanelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_constant_doping_calculator_inserts_increasing_efield_sweeps(self):
+        for constants in ("0", "-1:1:1"):
+            with self.subTest(constants=constants):
+                panel = PresetsPanel()
+                self.addCleanup(panel.deleteLater)
+                calc = panel._sweep_calc
+                calc._op_combo.setCurrentText("+")
+                calc._ratio_spin.setValue(0.5)
+                calc._constant_edit.setText(constants)
+                calc._vtg_min_spin.setValue(-10.0)
+                calc._vtg_max_spin.setValue(10.0)
+                calc._vbg_min_spin.setValue(-10.0)
+                calc._vbg_max_spin.setValue(10.0)
+                calc._doping_min_spin.setValue(-2.0)
+                calc._doping_max_spin.setValue(2.0)
+                calc._efield_min_spin.setValue(-3.0)
+                calc._efield_max_spin.setValue(3.0)
+                calc._recalculate()
+                self.assertTrue(calc._add_btn.isEnabled())
+                captured = []
+                calc.add_rows_requested.connect(captured.extend)
+                calc._on_add_clicked()
+                self.assertEqual(len(captured), 1 if constants == "0" else 3)
+                for row in captured:
+                    sweep = _resolve_sweep_vectors(row)
+                    self.assertAlmostEqual(sweep["vtg_start"] - 0.5 * sweep["vbg_start"], -3.0)
+                    self.assertAlmostEqual(sweep["vtg_stop"] - 0.5 * sweep["vbg_stop"], 3.0)
 
     def test_measurement_order_options_use_action_based_names(self):
         panel = PresetsPanel()

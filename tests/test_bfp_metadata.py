@@ -85,6 +85,15 @@ class BFPMetadataTests(unittest.TestCase):
         self.assertEqual({item["role"] for item in data["files"]}, {"metadata", "figure", "processed"})
         widget.close()
 
+    def test_binned_rc_mode_restores_as_sample_setting(self):
+        widget = _BRCWidget()
+        widget._mode_combo.setCurrentText("subtract")
+        state = widget.capture_session_state()
+        widget._mode_combo.setCurrentText("division")
+        widget.restore_session_state(state)
+        self.assertEqual(widget._mode_combo.currentText(), "subtract")
+        widget.close()
+
     def test_recompute_invalidates_processing_context(self):
         widget = _BRCWidget()
         widget._sample_edit.setText(str(self.root / "sample.csv"))

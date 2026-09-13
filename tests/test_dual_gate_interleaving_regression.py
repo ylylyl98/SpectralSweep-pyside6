@@ -9,7 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import pandas as pd
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from ui.presets_panel import _build_nested_execution_schedule, _build_plan, _RunWorker, _validate_safe_jumps
+from ui.presets_panel import (_build_nested_execution_schedule, _build_plan, _RunWorker,
+    _validate_safe_jumps, _measurement_output_dir, _experiment_output_files)
 from tests import test_smu_resilience as fixtures
 from tests.test_smu_resilience import _HealthyRunDevice, _FakeLFController
 from utils.config import cfg
@@ -84,7 +85,7 @@ class DualGateInterleavingRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             events, finished, progress, frames, acquired = self.run_worker(folder)
             self.assertTrue(finished and finished[-1][0], finished)
-            paths = list(Path(folder).glob('*.csv'))
+            paths = list((Path(folder) / 'REF').glob('*.csv'))
             self.assertEqual(len(paths), 8)
             for path in paths:
                 with path.open(newline='', encoding='utf-8-sig') as stream:
@@ -98,6 +99,52 @@ class DualGateInterleavingRegressionTests(unittest.TestCase):
             self.assertEqual(len([event for event in events if event[0]=='gate']), 12)
             self.assertEqual(frames[-1], (24,24))
             self.assertEqual(progress[-1], (8,8))
+
+    def test_measurement_modes_use_sibling_output_folders(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.assertEqual(_measurement_output_dir(root, {'measurement_mode': 'PL'}), root / 'PL')
+            self.assertEqual(_measurement_output_dir(root, {'measurement_mode': 'Ref'}), root / 'REF')
+            self.assertEqual(_measurement_output_dir(root, {'measurement_mode': 'REF'}), root / 'REF')
+            self.assertEqual(_measurement_output_dir(root, {}), root / 'PL')
+
+    def test_worker_writes_selected_mode_folder_and_collision_isolation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for mode in ('PL', 'Ref', 'PL'):
+                metadata = fixtures.SMUResilienceTests._run_meta()
+                metadata.update(initial_voltage_settle_s=0., voltage_settle_s=0., measurement_mode=mode)
+                rows = pd.DataFrame([fixtures.SMUResilienceTests._batch_row()])
+                worker = _RunWorker(
+                    [{'Center Wavelength (nm)': 700.0}], rows, lf6_ctrl=_FakeLFController(),
+                    smu_ctrl=SimpleNamespace(is_connected=True, device=_HealthyRunDevice()),
+                    out_dir=root, run_meta=metadata, filename_parts=['device_id'],
+                    stop_event=threading.Event(),
+                )
+                finished = []
+                worker.finished.connect(lambda *args: finished.append(args))
+                with patch.object(cfg.ramp, 'delay_s', 0.), patch.object(cfg.ramp, 'settle_s', 0.):
+                    worker.run()
+                self.assertTrue(finished[-1][0], finished)
+            pl_files = list((root / 'PL').glob('*.csv'))
+            ref_files = list((root / 'REF').glob('*.csv'))
+            self.assertEqual(len(pl_files), 2)
+            self.assertEqual(len(ref_files), 1)
+            self.assertEqual({path.name for path in pl_files}, {ref_files[0].name, f'{ref_files[0].stem}_001.csv'})
+            self.assertEqual(list(root.glob('*.csv')), [])
+
+    def test_metadata_file_scope_includes_new_mode_files_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'root.log').write_text('root')
+            (root / 'PL').mkdir()
+            (root / 'REF').mkdir()
+            (root / 'PL' / 'new.csv').write_text('pl')
+            (root / 'REF' / 'new.csv').write_text('ref')
+            (root / 'PL' / 'nested').mkdir()
+            (root / 'PL' / 'nested' / 'ignored.csv').write_text('nested')
+            self.assertEqual({path.relative_to(root).as_posix() for path in _experiment_output_files(root)},
+                             {'root.log', 'PL/new.csv', 'REF/new.csv'})
 
     def test_inner_angle_is_applied_after_gate_point(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -128,7 +175,7 @@ class DualGateInterleavingRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             events, finished, *_ = self.run_worker(folder, measure_power=True)
             self.assertTrue(finished and finished[-1][0], finished)
-            paths = list(Path(folder).glob('*.csv'))
+            paths = list((Path(folder) / 'REF').glob('*.csv'))
             self.assertEqual(len(paths), 8)
             for path in paths:
                 expected = 91. if 'RotIn90deg' in path.name else 1.
@@ -143,7 +190,7 @@ class DualGateInterleavingRegressionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             events, finished, *_ = self.run_worker(folder, angles='0, 90, 0')
             self.assertTrue(finished and finished[-1][0], finished)
-            paths = list(Path(folder).glob('*.csv'))
+            paths = list((Path(folder) / 'REF').glob('*.csv'))
             self.assertEqual(len(paths), 12)
             for path in paths:
                 with path.open(newline='', encoding='utf-8-sig') as stream:
@@ -174,7 +221,7 @@ class DualGateInterleavingRegressionTests(unittest.TestCase):
             events, finished, progress, frames, acquired = self.run_worker(folder, connected=False)
             self.assertTrue(finished and not finished[-1][0], finished)
             self.assertEqual(acquired, [])
-            self.assertEqual(list(Path(folder).glob('*.csv')), [])
+            self.assertEqual(list((Path(folder) / 'REF').rglob('*.csv')), [])
 
     def test_cancellation_closes_interleaved_files_without_false_completion(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -183,7 +230,7 @@ class DualGateInterleavingRegressionTests(unittest.TestCase):
             self.assertTrue(finished)
             self.assertIn('stop', finished[-1][1].lower())
             self.assertTrue(not frames or frames[-1][0] < frames[-1][1])
-            for path in Path(folder).glob('*.csv'):
+            for path in (Path(folder) / 'REF').glob('*.csv'):
                 with path.open('a') as stream:
                     stream.write('')
 

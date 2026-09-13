@@ -69,8 +69,8 @@ class LF6Config:
     auto_load_on_connect: bool = True # load saved experiment automatically
     andor_sdk2_dll_dir: str = str(_BUNDLED_ANDOR_DLL_DIR)
     andor_shamrock_dll_dir: str = str(_BUNDLED_SHAMROCK_DLL_DIR)
-    andor_si_camera_index: int = 1
-    andor_ingaas_camera_index: int = 0
+    andor_si_camera_index: int = 1       # legacy; serial/model now determines selection
+    andor_ingaas_camera_index: int = 0   # legacy; retained for config compatibility
     andor_si_serial: str = ""
     andor_ingaas_serial: str = ""
     andor_spectrograph_index: int = 0
@@ -392,6 +392,9 @@ class SessionConfig:
     active_tab: str = "dual_gate"
     sample_id: str = ""
     panels: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Sample ID keyed editable setup snapshots.  Run history remains in the
+    # experiment metadata database and is intentionally separate from this map.
+    sample_profiles: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -542,6 +545,13 @@ class AppConfig:
                 self.session.panels = {
                     str(key): value
                     for key, value in panels.items()
+                    if isinstance(value, dict)
+                }
+            profiles = session_data.get("sample_profiles")
+            if isinstance(profiles, dict):
+                self.session.sample_profiles = {
+                    str(key): value
+                    for key, value in profiles.items()
                     if isinstance(value, dict)
                 }
         if "font_size_pt" in data:

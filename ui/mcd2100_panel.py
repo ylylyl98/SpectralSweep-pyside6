@@ -1238,6 +1238,21 @@ class MCD2100Panel(QWidget):
             })
         return resolve_gate_conditions(rows, self._gate_ratio())
 
+    def _condition_rows_raw(self) -> list[dict[str, Any]]:
+        """Capture editable condition cells verbatim, including invalid drafts."""
+        rows = []
+        for row in range(self._condition_table.rowCount()):
+            check = self._condition_table.item(row, 0)
+            mode_widget = self._condition_table.cellWidget(row, 2)
+            rows.append({
+                "enabled": bool(check and check.checkState() == Qt.CheckState.Checked),
+                "mode": mode_widget.currentData() if mode_widget is not None else MODE_DIRECT,
+                "input_a": self._condition_table.item(row, 8).text() if self._condition_table.item(row, 8) else "",
+                "input_b": self._condition_table.item(row, 9).text() if self._condition_table.item(row, 9) else "",
+                "vbias_v": self._condition_table.item(row, 5).text() if self._condition_table.item(row, 5) else "",
+            })
+        return rows
+
     def _gate_ratio(self) -> float:
         return gate_ratio_from_factors(
             self.gate_vtg_factor.value(), self.gate_vbg_factor.value()
@@ -1268,6 +1283,13 @@ class MCD2100Panel(QWidget):
             item = QTableWidgetItem()
             self._condition_table.setItem(row, column, item)
         item.setText(f"{float(value):.6g}")
+
+    def _set_row_text(self, row: int, column: int, value: object) -> None:
+        item = self._condition_table.item(row, column)
+        if item is None:
+            item = QTableWidgetItem()
+            self._condition_table.setItem(row, column, item)
+        item.setText(str(value))
 
     def _set_row_error(self, row: int, message: str = "") -> None:
         for column in range(2, 10):
@@ -1323,9 +1345,14 @@ class MCD2100Panel(QWidget):
                                  "input_b": condition.get("vbg_v", 0.0)}
                 self._condition_table.setItem(row, 1, QTableWidgetItem(str(row + 1)))
                 self._condition_table.setCellWidget(row, 2, self._mode_combo(row, mode))
-                self._set_row_value(row, 8, float(condition.get("input_a", condition.get("vtg_v", 0.0))))
-                self._set_row_value(row, 9, float(condition.get("input_b", condition.get("vbg_v", 0.0))))
-                self._set_row_value(row, 5, float(condition.get("vbias_v", 0.0)))
+                for column, key, fallback in ((8, "input_a", condition.get("vtg_v", 0.0)),
+                                               (9, "input_b", condition.get("vbg_v", 0.0)),
+                                               (5, "vbias_v", 0.0)):
+                    raw_value = condition.get(key, fallback)
+                    try:
+                        self._set_row_value(row, column, float(raw_value))
+                    except (TypeError, ValueError):
+                        self._set_row_text(row, column, raw_value)
                 for column in (3, 4, 6, 7):
                     self._set_row_value(row, column, 0.0)
         finally:
@@ -1680,19 +1707,29 @@ class MCD2100Panel(QWidget):
         return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
 
     def capture_session_state(self) -> dict:
-        return {
+        raw_conditions = self._condition_rows_raw()
+        try:
+            ratio = self._gate_ratio()
+            conditions = self._condition_rows()
+        except (TypeError, ValueError, KeyError):
+            # A partially edited factor/table must remain restorable even when
+            # it is not currently runnable.
+            ratio = None
+            conditions = []
+        state = {
             "sample_id": self._sample_id.text(),
             "point": self._point.text(),
             "start_field_t": self.start_field.text(),
             "stop_field_t": self.stop_field.text(),
             "angles": self.angles.text(),
             "rotator": self.rotator.currentText(),
-            "conditions": self._condition_rows(),
-            "gate_conditions": self._condition_rows(),
+            "conditions": conditions,
+            "gate_conditions": conditions,
+            "condition_drafts": raw_conditions,
             "gate_batches": list(self._gate_batch_provenance),
             "mcd2100_settings_version": 4,
             "gate_mode": self._gate_mode.currentData(),
-            "gate_ratio": self._gate_ratio(),
+            "gate_ratio": ratio,
             "gate_vtg_factor": self.gate_vtg_factor.value(),
             "gate_vbg_factor": self.gate_vbg_factor.value(),
             "initial_voltage_settle_s": self.initial_voltage_settle.value(),
@@ -1707,13 +1744,38 @@ class MCD2100Panel(QWidget):
             "temperature_tolerance_k": self.temperature_tolerance.value(),
             "temperature_stable_s": self.temperature_stable.value(),
             "temperature_timeout_s": self.temperature_timeout.value(),
+            "gate_entry_mode": self._gate_entry_mode.currentData(),
+            "gate_entry_a": self._gate_entry_a.text(),
+            "gate_entry_b": self._gate_entry_b.text(),
+            "gate_entry_vbias": self._gate_entry_vbias.value(),
+            "gate_entry_expansion": self._gate_entry_expansion.currentData(),
             "splitter_sizes": [int(value) for value in self._splitter.sizes()],
             "plot_log_sizes": [int(value) for value in self._plot_log_splitter.sizes()],
         }
+        return state
 
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
             return
+        for key, widget in (("gate_entry_a", self._gate_entry_a), ("gate_entry_b", self._gate_entry_b)):
+            value = state.get(key)
+            if isinstance(value, str):
+                widget.setText(value)
+        mode = state.get("gate_entry_mode")
+        if mode is not None:
+            index = self._gate_entry_mode.findData(mode)
+            if index >= 0:
+                self._gate_entry_mode.setCurrentIndex(index)
+        expansion = state.get("gate_entry_expansion")
+        if expansion is not None:
+            index = self._gate_entry_expansion.findData(expansion)
+            if index >= 0:
+                self._gate_entry_expansion.setCurrentIndex(index)
+        try:
+            if "gate_entry_vbias" in state:
+                self._gate_entry_vbias.setValue(float(state["gate_entry_vbias"]))
+        except (TypeError, ValueError):
+            pass
         if "sample_id" in state:
             self._sample_id.setText(str(state["sample_id"]))
         if "point" in state:
@@ -1724,7 +1786,10 @@ class MCD2100Panel(QWidget):
                 widget.setText(str(state[key]))
         if "rotator" in state:
             self.rotator.setCurrentText(str(state["rotator"]))
-        saved_rows = state.get("gate_conditions", state.get("conditions"))
+        saved_rows = state.get(
+            "condition_drafts",
+            state.get("gate_conditions", state.get("conditions")),
+        )
         if isinstance(saved_rows, list):
             self._seed_condition_table(saved_rows)
         elif any(key in state for key in ("vtg_v", "vbg_v", "vbias_v")):

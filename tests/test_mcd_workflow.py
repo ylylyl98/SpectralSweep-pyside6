@@ -263,6 +263,21 @@ class MCDWorkflowTests(unittest.TestCase):
         self.assertIn("Device01", panel._filename_preview.text())
         self.assertIn("mcd", panel._path_preview.text())
 
+    def test_session_state_preserves_unapplied_gate_entry_draft(self):
+        panel = MCDPanel(
+            _PanelMagnetController(), _EmptyController(), _EmptyController(), _EmptyController()
+        )
+        self.addCleanup(panel.close)
+        panel._gate_entry_a.setText("[1, unfinished")
+        panel._gate_entry_b.setText(" ")
+        panel._gate_entry_vbias.setValue(2.5)
+        state = panel.capture_session_state()
+        panel._gate_entry_a.setText("[9, unfinished")
+        panel.restore_session_state(state)
+        self.assertEqual(panel._gate_entry_a.text(), "[1, unfinished")
+        self.assertEqual(panel._gate_entry_b.text(), " ")
+        self.assertAlmostEqual(panel._gate_entry_vbias.value(), 2.5)
+
     def test_panel_controls_have_explanatory_tooltips(self):
         panel = MCDPanel(
             _PanelMagnetController(),

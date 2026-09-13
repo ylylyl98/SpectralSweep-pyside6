@@ -215,6 +215,108 @@ class _FakeAndorModule:
 
 
 class AndorAdapterTests(unittest.TestCase):
+    def test_single_camera_is_selected_by_model_despite_stale_index(self):
+        for role, model in (("si", "DU420A-BEX2-DD"), ("ingaas", "DU490_17")):
+            with self.subTest(role=role):
+                module = _FakeAndorModule()
+                module.models, module.serials = (model,), ("17029",)
+                setup = AndorSDK2Setup(AndorConnectionOptions(
+                    camera_role=role, camera_index=1, operation_timeout_s=2), andor_module=module)
+                try:
+                    self.assertEqual(setup.identity["camera_index"], 0)
+                    self.assertEqual(setup.identity["camera_model"], model)
+                finally:
+                    setup.close()
+
+    def test_camera_selection_does_not_depend_on_usb_order(self):
+        for models in (("DU490_17", "DU420A"), ("DU420A", "DU490_17")):
+            for role, expected_model in (("si", "DU420A"), ("ingaas", "DU490_17")):
+                with self.subTest(models=models, role=role):
+                    module = _FakeAndorModule()
+                    module.models = models
+                    setup = AndorSDK2Setup(AndorConnectionOptions(
+                        camera_role=role, camera_index=0, operation_timeout_s=2), andor_module=module)
+                    try:
+                        self.assertEqual(setup.identity["camera_index"], models.index(expected_model))
+                    finally:
+                        setup.close()
+
+    def test_wrong_type_unknown_model_and_ambiguous_models_require_correction(self):
+        for models, serial, message in (
+            (("DU490_17",), "", "No Si camera"),
+            (("DU490_17",), "CAM-0", "InGaAs"),
+            (("unrecognized",), "", "serial"),
+            (("DU420A", "DU401A"), "", "Multiple Si"),
+            (("DU4200",), "", "serial"),
+        ):
+            with self.subTest(models=models, serial=serial):
+                module = _FakeAndorModule()
+                module.models = models
+                module.serials = tuple(f"CAM-{i}" for i in range(len(models)))
+                with self.assertRaisesRegex(RuntimeError, message):
+                    AndorSDK2Setup(AndorConnectionOptions(camera_role="si", camera_serial=serial,
+                        operation_timeout_s=2), andor_module=module)
+                self.assertFalse(any(name == "set_temperature" for name, *_ in module.calls))
+
+    def test_serial_binding_can_select_unknown_model_and_disambiguate_same_type(self):
+        for models in (("DU420A", "unrecognized"), ("DU420A", "DU401A")):
+            with self.subTest(models=models):
+                module = _FakeAndorModule()
+                module.models = models
+                setup = AndorSDK2Setup(AndorConnectionOptions(camera_role="si",
+                    camera_serial="SI-002", camera_index=0, operation_timeout_s=2), andor_module=module)
+                try:
+                    self.assertEqual(setup.identity["camera_index"], 1)
+                finally:
+                    setup.close()
+
+    def test_lab_serial_bindings_work_with_either_camera_alone(self):
+        for role, model, serial in (("si", "unknown Si head", 19275),
+                                    ("ingaas", "DU490_17", 17029)):
+            with self.subTest(role=role):
+                module = _FakeAndorModule()
+                module.models, module.serials = (model,), (serial,)
+                setup = AndorSDK2Setup(AndorConnectionOptions(camera_role=role,
+                    camera_serial=str(serial), camera_index=1, operation_timeout_s=2), andor_module=module)
+                try:
+                    self.assertEqual(setup.identity["camera_serial"], str(serial))
+                    self.assertEqual(setup.identity["camera_index"], 0)
+                finally:
+                    setup.close()
+
+    def test_temperature_snapshot_is_read_only_and_skips_busy_camera(self):
+        module, setup = self.make_setup()
+        try:
+            module.calls.clear()
+            snapshot = setup.get_temperature_snapshot()
+            self.assertEqual(snapshot, dict(temperature_c=-70.0, temperature_setpoint_c=-70.0,
+                                            temperature_status="stabilized", cooler_on=True))
+            self.assertTrue(all(name.startswith("get_") for name, *_ in module.calls))
+            self.assertEqual({thread_id for _, thread_id, _ in module.calls},
+                             {setup.identity["owner_thread_id"]})
+            setup._busy.set()
+            module.calls.clear()
+            self.assertIsNone(setup.get_temperature_snapshot())
+            self.assertEqual(module.calls, [])
+        finally:
+            setup._busy.clear()
+            setup.close()
+
+    def test_timed_out_temperature_job_does_not_queue_more_reads(self):
+        _, setup = self.make_setup(operation_timeout_s=.1)
+        release = threading.Event()
+        original = setup._camera.get_temperature
+        setup._camera.get_temperature = lambda: (release.wait(2), -70.0)[1]
+        try:
+            with self.assertRaises(TimeoutError):
+                setup.get_temperature_snapshot()
+            self.assertIsNone(setup.get_temperature_snapshot())
+            self.assertEqual(setup._owner._jobs.qsize(), 0)
+        finally:
+            release.set()
+            setup._camera.get_temperature = original
+            setup.close()
+
     def make_setup(self, **changes):
         module = _FakeAndorModule()
         values = {

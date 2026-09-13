@@ -340,6 +340,26 @@ class _OpticalSequenceWidget(QWidget):
                 result.append(condition)
         return result
 
+    def raw_conditions(self) -> list[dict]:
+        """Capture table text exactly, including blank/partial names."""
+        rows = []
+        for row in range(self._table.rowCount()):
+            enabled = self._table.item(row, 0)
+            name = self._table.item(row, 1)
+            center = self._table.cellWidget(row, 2)
+            exposure = self._table.cellWidget(row, 3)
+            frames = self._table.cellWidget(row, 4)
+            if center is None or exposure is None or frames is None:
+                continue
+            rows.append({
+                "enabled": bool(enabled and enabled.checkState() == Qt.CheckState.Checked),
+                "name": name.text() if name is not None else "",
+                "center_nm": float(center.value()),
+                "exposure_ms": float(exposure.value()),
+                "frames": int(frames.value()),
+            })
+        return rows
+
     def set_conditions(self, conditions: list[OpticalCondition | dict]) -> None:
         parsed: list[OpticalCondition] = []
         for index, condition in enumerate(conditions):
@@ -470,9 +490,10 @@ class _CollapsibleSection(QFrame):
         )
 
         self._content = content
-        self._content.setVisible(expanded)
         layout.addWidget(self._header)
         layout.addWidget(self._content)
+        # Establish widget ownership before show to avoid a startup popup.
+        self._content.setVisible(expanded)
         self._header.toggled.connect(self._on_toggled)
 
         self.setStyleSheet(
@@ -2877,6 +2898,7 @@ class MegaSweepPanel(QWidget):
             "optical_sequence": [
                 condition.as_dict() for condition in optical_conditions
             ],
+            "optical_sequence_drafts": self._optical_widget.raw_conditions(),
             "metadata": {
                 "sample_id": self._sample_edit.text(),
                 "tag": self._tag_edit.text(),
@@ -2987,7 +3009,7 @@ class MegaSweepPanel(QWidget):
             if "advanced_open" in timing:
                 self._timing_widget._toggle.setChecked(bool(timing["advanced_open"]))
 
-        optical_sequence = state.get("optical_sequence")
+        optical_sequence = state.get("optical_sequence_drafts", state.get("optical_sequence"))
         if isinstance(optical_sequence, list) and optical_sequence:
             self._optical_widget.set_conditions(optical_sequence)
             self._sync_primary_optical_aliases()

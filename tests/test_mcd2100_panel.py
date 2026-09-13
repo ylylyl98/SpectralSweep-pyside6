@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import inspect
+import copy
 import os
 import tempfile
 import threading
 import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QGroupBox, QHeade
 from ui.main_window import MainWindow
 from ui.mcd2100_panel import MCD2100Panel, _LightFieldRotationService
 from utils.mcd_common import MODE_DIRECT, MODE_DOPING_EFIELD, build_condition_batch
+from utils.config import FilenameConfig, MCD2100Config, cfg
 
 
 class FakeHandle:
@@ -133,6 +136,20 @@ class MCD2100PanelTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def setUp(self):
+        # Keep the real application's persistent config untouched while
+        # making panel defaults deterministic for each isolated test.
+        self._cfg_snapshot = copy.deepcopy(cfg.__dict__)
+        self._cfg_save_patch = patch.object(cfg, "save")
+        self._cfg_save_patch.start()
+        cfg.mcd2100 = MCD2100Config()
+        cfg.filename = FilenameConfig()
+
+    def tearDown(self):
+        self._cfg_save_patch.stop()
+        cfg.__dict__.clear()
+        cfg.__dict__.update(self._cfg_snapshot)
+
     def make_panel(self, *, controller=None, workers=None):
         self.output = tempfile.TemporaryDirectory()
         self.addCleanup(self.output.cleanup)
@@ -156,6 +173,22 @@ class MCD2100PanelTests(unittest.TestCase):
             loop.exec()
         self.app.processEvents()
         self.assertIsNone(panel.worker)
+
+    def test_session_state_preserves_raw_gate_entry_draft(self):
+        panel, _controller, _factory = self.make_panel()
+        panel._condition_table.item(0, 8).setText("partial")
+        state = panel.capture_session_state()
+        restored, _controller2, _factory2 = self.make_panel()
+        restored.restore_session_state(state)
+        self.assertEqual(restored._condition_table.item(0, 8).text(), "partial")
+
+    def test_session_state_captures_invalid_partial_ratio(self):
+        panel, _controller, _factory = self.make_panel()
+        panel.gate_vtg_factor.setValue(0.0)
+        panel._condition_table.item(0, 5).setText("unfinished")
+        state = panel.capture_session_state()
+        self.assertIsNone(state["gate_ratio"])
+        self.assertEqual(state["condition_drafts"][0]["vbias_v"], "unfinished")
 
     def make_arbiter(self):
         old, new = WorkflowStub(), WorkflowStub()

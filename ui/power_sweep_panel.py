@@ -1563,11 +1563,6 @@ class PowerSweepPanel(QWidget):
             "List [v1, v2, ...] → exact positions\n"
             "Single number → one position"
         )
-        self._motion_input_lbl = QLabel("Positions:")
-        # The shared Stage editor is already placed in the Motion axes grid;
-        # retain this label as a compatibility attribute without a duplicate
-        # input row in the rendered panel.
-        self._motion_input_lbl.hide()
         self._input_mode = QComboBox()
         self._input_mode.addItem("Stage positions", "position")
         self._input_mode.addItem("Target power", "power")
@@ -2183,7 +2178,6 @@ class PowerSweepPanel(QWidget):
             self._clear_freeze()
             self._last_motion_key = key
         spec = _MOTION_SPECS[key]
-        self._motion_input_lbl.setText("Positions:" if key == "stage" else "Angles (°):")
         unit = spec["unit"]
         if key == "stage" and self._stg is not None and bool(getattr(self._stg, "is_connected", False)):
             unit = getattr(self._stg.adapter, "position_unit", unit)
@@ -2370,7 +2364,6 @@ class PowerSweepPanel(QWidget):
 
     def _update_plan_visibility(self):
         is_power = self._motion_combo.currentData() == "stage" and self._input_mode.currentData() == "power"
-        self._motion_input_lbl.setVisible(not is_power)
         self._pos_input.setVisible(not is_power)
         self._freeze_positions_btn.setVisible(is_power)
         self._freeze_positions_lbl.setVisible(is_power)

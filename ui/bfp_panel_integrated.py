@@ -865,6 +865,34 @@ class _BRCWidget(QWidget):
                 skipped.append(key)
         return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
 
+    def capture_session_state(self) -> dict:
+        return {
+            "sample": self._sample_edit.text(), "background": self._bg_edit.text(),
+            "scale": self._scale_spin.value(), "mode": self._mode_combo.currentText(),
+            "smooth": self._smooth_spin.value(), "order": self._order_combo.currentText(),
+            "xmin": self._xmin_edit.text(), "xmax": self._xmax_edit.text(),
+            "ymin": self._ymin_edit.text(), "ymax": self._ymax_edit.text(),
+        }
+
+    def restore_session_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        for key, widget in (("sample", self._sample_edit), ("background", self._bg_edit),
+                            ("xmin", self._xmin_edit), ("xmax", self._xmax_edit),
+                            ("ymin", self._ymin_edit), ("ymax", self._ymax_edit)):
+            if isinstance(state.get(key), str):
+                widget.setText(state[key])
+        for key, widget in (("scale", self._scale_spin), ("smooth", self._smooth_spin), ("order", self._order_combo)):
+            try:
+                if key == "order": widget.setCurrentText(str(state[key]))
+                elif key == "smooth": widget.setValue(int(state[key]))
+                else: widget.setValue(float(state[key]))
+            except (KeyError, TypeError, ValueError):
+                pass
+        mode = state.get("mode")
+        if isinstance(mode, str) and self._mode_combo.findText(mode) >= 0:
+            self._mode_combo.setCurrentText(mode)
+
     def save_png(self):
         if self._wl is None or self._result is None or self._sample is None or self._bg_scaled is None:
             return
@@ -1204,6 +1232,32 @@ class _FRCWidget(QWidget):
                 skipped.append(key)
         return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
 
+    def capture_session_state(self) -> dict:
+        return {
+            "sample": self._sample_edit.text(), "background": self._bg_edit.text(),
+            "display": self._display_combo.currentText(), "calculation": self._calc_combo.currentText(),
+            "auto_color": self._auto_color_chk.isChecked(),
+            "xmin": self._xmin_edit.text(), "xmax": self._xmax_edit.text(),
+            "ymin": self._ymin_edit.text(), "ymax": self._ymax_edit.text(),
+            "zmin": self._zmin_edit.text(), "zmax": self._zmax_edit.text(),
+        }
+
+    def restore_session_state(self, state: dict) -> None:
+        if not isinstance(state, dict):
+            return
+        for key, widget in (("sample", self._sample_edit), ("background", self._bg_edit),
+                            ("xmin", self._xmin_edit), ("xmax", self._xmax_edit),
+                            ("ymin", self._ymin_edit), ("ymax", self._ymax_edit),
+                            ("zmin", self._zmin_edit), ("zmax", self._zmax_edit)):
+            if isinstance(state.get(key), str):
+                widget.setText(state[key])
+        for key, combo in (("display", self._display_combo), ("calculation", self._calc_combo)):
+            value = state.get(key)
+            if isinstance(value, str) and combo.findText(value) >= 0:
+                combo.setCurrentText(value)
+        if isinstance(state.get("auto_color"), bool):
+            self._auto_color_chk.setChecked(state["auto_color"])
+
     def save_png(self):
         if self._display_img is None or self._display_wl is None or self._display_y is None:
             return
@@ -1522,6 +1576,8 @@ class BFPPanel(QWidget):
                 "colormap": self._display._cmap_combo.currentText(),
                 "auto_color": bool(self._display._auto_color_chk.isChecked()),
             },
+            "binned_rc": self._brc.capture_session_state(),
+            "full_sensor_rc": self._frc.capture_session_state(),
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
         }
 
@@ -1613,8 +1669,16 @@ class BFPPanel(QWidget):
             except (KeyError, TypeError, ValueError):
                 pass
             path = background.get("path")
-            if isinstance(path, str) and path:
-                self._bg_panel.load_path(path)
+            if isinstance(path, str):
+                if path:
+                    self._bg_panel.load_path(path)
+                else:
+                    # Clear both the visible path and cached arrays so an
+                    # empty sample profile cannot reuse another sample's BG.
+                    self._bg_panel._path_edit.clear()
+                    self._bg_panel._bg_data = None
+                    self._bg_panel._bg_wls = np.array([])
+                    self._bg_panel._status_lbl.clear()
             if "enabled" in background:
                 self._bg_panel._enable_chk.setChecked(bool(background["enabled"]))
 
@@ -1638,6 +1702,12 @@ class BFPPanel(QWidget):
                     tabs.setCurrentIndex(index)
                 except (KeyError, TypeError, ValueError):
                     pass
+        binned = state.get("binned_rc")
+        if isinstance(binned, dict):
+            self._brc.restore_session_state(binned)
+        full_sensor = state.get("full_sensor_rc")
+        if isinstance(full_sensor, dict):
+            self._frc.restore_session_state(full_sensor)
         sizes = state.get("splitter_sizes")
         if isinstance(sizes, list) and len(sizes) == 2:
             try:

@@ -28,6 +28,13 @@ class _FakeSpectrumController(QObject):
         self.acquire_1d_calls = 0
         self.acquire_2d_calls = 0
         self.abort_calls = 0
+        self.temperature_pause_sources = set()
+
+    def set_temperature_monitor_paused(self, source, paused):
+        if paused:
+            self.temperature_pause_sources.add(source)
+        else:
+            self.temperature_pause_sources.discard(source)
 
     def apply_settings(self, exposure_ms, center_nm, accumulations):
         self.apply_calls.append((exposure_ms, center_nm, accumulations))
@@ -96,11 +103,13 @@ class SpectrumPanelControlTests(unittest.TestCase):
         controller.connected.emit([])
 
         panel._run_1d_btn.click()
+        self.assertIn("spectrum", controller.temperature_pause_sources)
         self.assertEqual(len(controller.apply_calls), 1)
         controller.settings_applied.emit()
         self.assertEqual(controller.acquire_1d_calls, 1)
 
         controller.spectrum_ready.emit(np.array([1.0, 2.0]), np.array([3.0, 4.0]))
+        self.assertIn("spectrum", controller.temperature_pause_sources)
         panel._stop_btn.click()
         self.app.processEvents()
 
@@ -108,6 +117,7 @@ class SpectrumPanelControlTests(unittest.TestCase):
         self.assertEqual(controller.abort_calls, 1)
         self.assertIsNone(panel._continuous_mode)
         self.assertEqual(panel._status_lbl.text(), "Stopped")
+        self.assertNotIn("spectrum", controller.temperature_pause_sources)
 
     def test_continuous_2d_requests_next_frame_only_after_result(self):
         controller = _FakeSpectrumController()

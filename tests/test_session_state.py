@@ -73,6 +73,18 @@ class SessionStateTests(unittest.TestCase):
         self.assertAlmostEqual(restored._initial_voltage_settle_spin.value(), 3.5)
         self.assertAlmostEqual(restored._voltage_settle_spin.value(), 3.5)
 
+    def test_dual_gate_keeps_unapplied_raw_table_drafts(self):
+        panel = PresetsPanel()
+        panel._loop_table.item(0, 2).setText("")
+        panel._loop_table.item(0, 3).setText("partial")
+        state = panel.capture_session_state()
+
+        restored = PresetsPanel()
+        restored.restore_session_state(state)
+
+        self.assertEqual(restored._loop_table.item(0, 2).text(), "")
+        self.assertEqual(restored._loop_table.item(0, 3).text(), "partial")
+
     def test_dual_gate_restores_drift_minimized_acquisition_order(self):
         panel = PresetsPanel()
         panel._acquisition_group_combo.setCurrentIndex(
@@ -128,6 +140,10 @@ class SessionStateTests(unittest.TestCase):
         self.assertAlmostEqual(mega_restored._axis_a._start.value(), -2.5)
         self.assertAlmostEqual(mega_restored._timing_widget.settle(), 0.8)
         self.assertEqual(mega_restored._sample_edit.text(), "mega-device")
+        mega._optical_widget._table.item(0, 1).setText("   ")
+        mega_state = mega.capture_session_state()
+        mega_restored.restore_session_state(mega_state)
+        self.assertEqual(mega_restored._optical_widget._table.item(0, 1).text(), "   ")
 
     def test_bfp_state_is_per_workflow_and_display_preferences_restore(self):
         original_default = cfg.lf6.center_nm
@@ -149,15 +165,32 @@ class SessionStateTests(unittest.TestCase):
         self.assertFalse(restored._warmup_chk.isChecked())
         self.assertEqual(restored._display._cmap_combo.currentText(), "plasma")
 
+    def test_bfp_empty_background_profile_clears_cached_data(self):
+        panel = BFPPanel()
+        panel._bg_panel._path_edit.setText("")
+        panel._bg_panel._bg_data = object()
+        panel._bg_panel._bg_wls = [1.0]
+        state = panel.capture_session_state()
+        panel._bg_panel._path_edit.setText("other-sample.csv")
+        panel._bg_panel._bg_data = object()
+        panel.restore_session_state(state)
+        self.assertEqual(panel._bg_panel._path_edit.text(), "")
+        self.assertIsNone(panel._bg_panel._bg_data)
+        self.assertEqual(len(panel._bg_panel._bg_wls), 0)
+
     def test_settings_and_spectrum_preferences_restore(self):
         settings = SettingsPanel()
         settings._base_out_edit.setText("D:/new-output")
         settings._exposure.setValue(1234.0)
+        settings._andor_grating.setValue(7)
+        settings._andor_si_fan.setCurrentText("low")
         state = settings.capture_session_state()
         restored_settings = SettingsPanel()
         restored_settings.restore_session_state(state)
         self.assertEqual(restored_settings._base_out_edit.text(), "D:/new-output")
         self.assertEqual(restored_settings._exposure.value(), 1234.0)
+        self.assertEqual(restored_settings._andor_grating.value(), 7)
+        self.assertEqual(restored_settings._andor_si_fan.currentText(), "low")
 
         spectrum = SpectrumPanel()
         spectrum._spec_plot._autoscale_chk.setChecked(False)
@@ -173,6 +206,25 @@ class SessionStateTests(unittest.TestCase):
         )
         self.assertEqual(restored_spectrum._tabs.currentIndex(), 1)
 
+        spectrum._andor_controls.grating.addItem("test grating", 19)
+        spectrum._andor_controls.grating.setCurrentText("test grating")
+        spectrum._andor_controls.slit.setValue(123.0)
+        spectrum._andor_controls.read_mode.setCurrentText("2D image")
+        spectrum._andor_controls.roi_hstart.setValue(11)
+        spectrum._andor_controls.hbin.setValue(4)
+        andor_state = spectrum.capture_session_state()
+        spectrum._andor_controls.slit.setValue(456.0)
+        spectrum._andor_controls.restore_session_state(andor_state["andor"])
+        self.assertAlmostEqual(spectrum._andor_controls.slit.value(), 123.0)
+        self.assertEqual(spectrum._andor_controls.grating.currentData(), 19)
+        self.assertEqual(spectrum._andor_controls.read_mode.currentData(), "image")
+        self.assertEqual(spectrum._andor_controls.roi_hstart.value(), 11)
+        self.assertEqual(spectrum._andor_controls.hbin.value(), 4)
+        restarted = SpectrumPanel()
+        restarted.restore_session_state(andor_state)
+        self.assertEqual(restarted._andor_controls.grating.currentData(), 19)
+        self.assertAlmostEqual(restarted._andor_controls.slit.value(), 123.0)
+
     def test_instrument_restore_never_connects_or_disconnects(self):
         controller = _FakeLF6Controller()
         panel = InstrumentPanel(lf6_ctrl=controller)
@@ -183,6 +235,26 @@ class SessionStateTests(unittest.TestCase):
         restored = InstrumentPanel(lf6_ctrl=restored_controller)
         restored.restore_session_state(state)
         self.assertFalse(restored._sections["lf6"]._mock_chk.isChecked())
+        self.assertEqual(restored_controller.connect_calls, 0)
+        self.assertEqual(restored_controller.disconnect_calls, 0)
+
+    def test_instrument_sidebar_presets_restore_without_hardware_side_effects(self):
+        controller = _FakeLF6Controller()
+        panel = InstrumentPanel(lf6_ctrl=controller)
+        lf6 = panel._sections["lf6"]
+        lf6._andor_grating.setValue(9)
+        lf6._andor_slit.setValue(321.0)
+        lf6._andor_read_mode.setCurrentText("2D full sensor")
+        lf6._andor_hbin.setValue(3)
+        state = panel.capture_session_state()
+        restored_controller = _FakeLF6Controller()
+        restored = InstrumentPanel(lf6_ctrl=restored_controller)
+        restored.restore_session_state(state)
+        restored_lf6 = restored._sections["lf6"]
+        self.assertEqual(restored_lf6._andor_grating.value(), 9)
+        self.assertAlmostEqual(restored_lf6._andor_slit.value(), 321.0)
+        self.assertEqual(restored_lf6._andor_read_mode.currentData(), "image")
+        self.assertEqual(restored_lf6._andor_hbin.value(), 3)
         self.assertEqual(restored_controller.connect_calls, 0)
         self.assertEqual(restored_controller.disconnect_calls, 0)
 

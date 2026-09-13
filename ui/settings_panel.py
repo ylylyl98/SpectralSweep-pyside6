@@ -141,24 +141,26 @@ class SettingsPanel(QWidget):
         self._andor_shamrock_dir.setMinimumWidth(320)
         form.addRow("Shamrock DLL folder:", self._andor_shamrock_dir)
 
-        self._andor_si_index = QSpinBox()
-        self._andor_si_index.setRange(0, 31)
         self._andor_si_serial = QLineEdit()
-        self._andor_si_serial.setPlaceholderText("optional serial override")
+        self._andor_si_serial.setMinimumWidth(260)
+        self._andor_si_serial.setPlaceholderText("Auto by model; optional serial")
+        self._andor_si_serial.setToolTip(
+            "Leave blank to identify a Si iDus by model. Enter its serial number "
+            "to bind a specific camera, including models not recognized automatically."
+        )
         si_row = QHBoxLayout()
-        si_row.addWidget(QLabel("index"))
-        si_row.addWidget(self._andor_si_index)
         si_row.addWidget(QLabel("serial"))
         si_row.addWidget(self._andor_si_serial)
         form.addRow("Andor Si camera:", si_row)
 
-        self._andor_ingaas_index = QSpinBox()
-        self._andor_ingaas_index.setRange(0, 31)
         self._andor_ingaas_serial = QLineEdit()
-        self._andor_ingaas_serial.setPlaceholderText("optional serial override")
+        self._andor_ingaas_serial.setMinimumWidth(260)
+        self._andor_ingaas_serial.setPlaceholderText("Auto by model; optional serial")
+        self._andor_ingaas_serial.setToolTip(
+            "Leave blank to identify an InGaAs iDus by model. Enter its serial number "
+            "to bind a specific camera, including models not recognized automatically."
+        )
         ingaas_row = QHBoxLayout()
-        ingaas_row.addWidget(QLabel("index"))
-        ingaas_row.addWidget(self._andor_ingaas_index)
         ingaas_row.addWidget(QLabel("serial"))
         ingaas_row.addWidget(self._andor_ingaas_serial)
         form.addRow("Andor InGaAs camera:", ingaas_row)
@@ -344,12 +346,6 @@ class SettingsPanel(QWidget):
         self._andor_shamrock_dir.textChanged.connect(
             lambda value: setattr(cfg.lf6, "andor_shamrock_dll_dir", value.strip())
         )
-        self._andor_si_index.valueChanged.connect(
-            lambda value: setattr(cfg.lf6, "andor_si_camera_index", int(value))
-        )
-        self._andor_ingaas_index.valueChanged.connect(
-            lambda value: setattr(cfg.lf6, "andor_ingaas_camera_index", int(value))
-        )
         self._andor_si_serial.textChanged.connect(
             lambda value: setattr(cfg.lf6, "andor_si_serial", value.strip())
         )
@@ -429,8 +425,6 @@ class SettingsPanel(QWidget):
         self._accum.setValue(cfg.lf6.accumulations)
         self._andor_sdk_dir.setText(cfg.lf6.andor_sdk2_dll_dir)
         self._andor_shamrock_dir.setText(cfg.lf6.andor_shamrock_dll_dir)
-        self._andor_si_index.setValue(int(cfg.lf6.andor_si_camera_index))
-        self._andor_ingaas_index.setValue(int(cfg.lf6.andor_ingaas_camera_index))
         self._andor_si_serial.setText(cfg.lf6.andor_si_serial)
         self._andor_ingaas_serial.setText(cfg.lf6.andor_ingaas_serial)
         self._andor_spec_index.setValue(int(cfg.lf6.andor_spectrograph_index))
@@ -479,6 +473,28 @@ class SettingsPanel(QWidget):
                 "measurement_mode": self._measurement_mode.currentText(),
                 "power_coefficient": float(self._power_coeff.value()),
             },
+            "andor": {
+                "sdk_dir": self._andor_sdk_dir.text(),
+                "shamrock_dir": self._andor_shamrock_dir.text(),
+                "si_serial": self._andor_si_serial.text(),
+                "ingaas_serial": self._andor_ingaas_serial.text(),
+                "spectrograph_index": int(self._andor_spec_index.value()),
+                "si_temperature": float(self._andor_si_temperature.value()),
+                "si_cooler": bool(self._andor_si_cooler.isChecked()),
+                "si_fan": self._andor_si_fan.currentText(),
+                "si_output_port": self._andor_si_output_port.currentText(),
+                "ingaas_temperature": float(self._andor_ingaas_temperature.value()),
+                "ingaas_cooler": bool(self._andor_ingaas_cooler.isChecked()),
+                "ingaas_fan": self._andor_ingaas_fan.currentText(),
+                "ingaas_output_port": self._andor_ingaas_output_port.currentText(),
+                "safe_disconnect_temperature": float(self._andor_safe_disconnect_temperature.value()),
+                "shutter": self._andor_shutter.currentText(),
+                "shamrock_shutter": self._andor_shamrock_shutter.currentText(),
+                "grating": int(self._andor_grating.value()),
+                "slit_width": float(self._andor_slit.value()),
+                "invert_wavelength": bool(self._andor_invert_wl.isChecked()),
+                "discard_first": bool(self._andor_discard_first.isChecked()),
+            },
         }
 
     def restore_session_state(self, state: dict) -> None:
@@ -514,6 +530,47 @@ class SettingsPanel(QWidget):
                 self._power_coeff.setValue(float(output["power_coefficient"]))
             except (KeyError, TypeError, ValueError):
                 pass
+        andor = state.get("andor")
+        if isinstance(andor, dict):
+            for key, widget in (
+                ("sdk_dir", self._andor_sdk_dir), ("shamrock_dir", self._andor_shamrock_dir),
+                ("si_serial", self._andor_si_serial), ("ingaas_serial", self._andor_ingaas_serial),
+            ):
+                if isinstance(andor.get(key), str):
+                    widget.setText(andor[key])
+            for key, widget in (
+                ("spectrograph_index", self._andor_spec_index), ("grating", self._andor_grating),
+            ):
+                try:
+                    if key in andor:
+                        widget.setValue(int(andor[key]))
+                except (TypeError, ValueError):
+                    pass
+            for key, widget in (
+                ("si_temperature", self._andor_si_temperature),
+                ("ingaas_temperature", self._andor_ingaas_temperature),
+                ("safe_disconnect_temperature", self._andor_safe_disconnect_temperature),
+                ("slit_width", self._andor_slit),
+            ):
+                try:
+                    if key in andor:
+                        widget.setValue(float(andor[key]))
+                except (TypeError, ValueError):
+                    pass
+            for key, widget in (
+                ("si_cooler", self._andor_si_cooler), ("ingaas_cooler", self._andor_ingaas_cooler),
+                ("invert_wavelength", self._andor_invert_wl), ("discard_first", self._andor_discard_first),
+            ):
+                if isinstance(andor.get(key), bool):
+                    widget.setChecked(andor[key])
+            for key, combo in (
+                ("si_fan", self._andor_si_fan), ("si_output_port", self._andor_si_output_port),
+                ("ingaas_fan", self._andor_ingaas_fan), ("ingaas_output_port", self._andor_ingaas_output_port),
+                ("shutter", self._andor_shutter), ("shamrock_shutter", self._andor_shamrock_shutter),
+            ):
+                value = andor.get(key)
+                if isinstance(value, str) and combo.findText(value) >= 0:
+                    combo.setCurrentText(value)
 
     @Slot()
     def _on_apply_lf6(self):

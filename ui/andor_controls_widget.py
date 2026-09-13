@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
@@ -24,6 +25,22 @@ from PySide6.QtWidgets import (
 from utils.config import cfg
 
 
+def temperature_summary(data: dict) -> str:
+    """Display observed target and SDK stability without implying a readiness gate."""
+    labels = {"off": "Cooler off", "not_reached": "Cooling",
+              "not_stabilized": "Not stabilized", "stabilized": "Temperature stable",
+              "drifted": "Temperature drifted"}
+    status = str(data.get("temperature_status", "unknown"))
+    if data.get("cooler_on") is False:
+        status = "off"
+    current = float(data["temperature_c"])
+    text = f"Detector: {current:.1f} °C"
+    target = data.get("temperature_setpoint_c")
+    if target is not None:
+        text += f" · Target: {float(target):.1f} °C · Difference: {abs(current - float(target)):.1f} °C"
+    return f"{text}\n{labels.get(status, status)} · Updated {datetime.now():%H:%M:%S}"
+
+
 class AndorControlsWidget(QWidget):
     """Apply-and-readback UI for one connected Andor/Shamrock pair."""
 
@@ -39,6 +56,7 @@ class AndorControlsWidget(QWidget):
         self._slit_present = False
         self._shutter_present = False
         self._output_flipper_present = False
+        self._temperature_stable = False
         self._build()
         self._wire()
         self.set_backend_identity({})
@@ -156,6 +174,8 @@ class AndorControlsWidget(QWidget):
         self.identity.setWordWrap(True)
         self.cooling_status = QLabel("Cooling status: —")
         self.cooling_status.setWordWrap(True)
+        self.cooling_monitor = QLabel("")
+        self.cooling_monitor.setWordWrap(True)
         self.calibration = QLabel("Stored calibration: not read")
         self.calibration.setWordWrap(True)
         self.calibration.setToolTip(
@@ -164,6 +184,7 @@ class AndorControlsWidget(QWidget):
         )
         layout.addWidget(self.identity)
         layout.addWidget(self.cooling_status)
+        layout.addWidget(self.cooling_monitor)
         layout.addWidget(self.calibration)
         layout.addStretch()
 
@@ -190,6 +211,32 @@ class AndorControlsWidget(QWidget):
         if applied_signal is not None:
             applied_signal.connect(self._on_applied)
         self._ctrl.error.connect(self._on_error)
+        temperature_signal = getattr(self._ctrl, "temperature_snapshot_ready", None)
+        if temperature_signal is not None:
+            temperature_signal.connect(self._on_temperature_snapshot)
+        monitor_signal = getattr(self._ctrl, "temperature_monitor_state", None)
+        if monitor_signal is not None:
+            monitor_signal.connect(self._on_temperature_monitor_state)
+
+    @Slot(str)
+    def _on_temperature_monitor_state(self, state: str) -> None:
+        self.cooling_monitor.setText(state)
+        self.cooling_status.setToolTip(state + ". Temperature stability does not block measurement.")
+
+    @Slot(object)
+    def _on_temperature_snapshot(self, data) -> None:
+        if not self._available:
+            return
+        if "error" in data:
+            self.cooling_status.setText(self.cooling_status.text().split("\nRead failed")[0]
+                                        + "\nRead failed; showing last reading")
+            self.cooling_status.setToolTip(str(data["error"]))
+            return
+        self.cooling_status.setText(temperature_summary(data))
+        stable = data.get("temperature_status") == "stabilized" and data.get("cooler_on") is True
+        if stable and not self._temperature_stable:
+            self.status_changed.emit("Andor detector temperature is stable")
+        self._temperature_stable = stable
 
     def set_backend_identity(self, identity: dict[str, Any]) -> None:
         self._identity = dict(identity or {})
@@ -197,6 +244,7 @@ class AndorControlsWidget(QWidget):
         self.setVisible(self._available)
         self._update_enabled()
         if not self._available:
+            self._temperature_stable = False
             return
         role = str(self._identity.get("camera_role", "ingaas"))
         target = getattr(
@@ -216,6 +264,89 @@ class AndorControlsWidget(QWidget):
     def set_controls_locked(self, locked: bool) -> None:
         self._locked = bool(locked)
         self._update_enabled()
+
+    def capture_session_state(self) -> dict[str, Any]:
+        """Capture editable Andor/Shamrock controls without reading hardware."""
+        grating = self.grating.currentData()
+        return {
+            "center_nm": float(self.center.value()),
+            "grating": grating if grating is not None else self.grating.currentText(),
+            "slit_um": float(self.slit.value()),
+            "shutter": self.shutter.currentText(),
+            "output_port": self.output_port.currentText(),
+            "temperature_target_c": float(self.temperature_target.value()),
+            "cooler": bool(self.cooler.isChecked()),
+            "fan": self.fan.currentText(),
+            "read_mode": self.read_mode.currentData()
+            if self.read_mode.currentData() is not None
+            else self.read_mode.currentText(),
+            "roi_hstart": int(self.roi_hstart.value()),
+            "roi_hend": int(self.roi_hend.value()),
+            "roi_vstart": int(self.roi_vstart.value()),
+            "roi_vend": int(self.roi_vend.value()),
+            "hbin": int(self.hbin.value()),
+            "vbin": int(self.vbin.value()),
+        }
+
+    def restore_session_state(self, state: dict[str, Any]) -> None:
+        """Restore editable controls only; no apply, refresh, or hardware I/O."""
+        if not isinstance(state, dict):
+            return
+        widgets = (
+            self.center, self.grating, self.slit, self.shutter, self.output_port,
+            self.temperature_target, self.cooler, self.fan, self.read_mode,
+            self.roi_hstart, self.roi_hend, self.roi_vstart, self.roi_vend,
+            self.hbin, self.vbin,
+        )
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            for key, widget in (
+                ("center_nm", self.center),
+                ("slit_um", self.slit),
+                ("temperature_target_c", self.temperature_target),
+            ):
+                if key in state:
+                    try:
+                        widget.setValue(float(state[key]))
+                    except (TypeError, ValueError):
+                        pass
+            for key, combo in (
+                ("grating", self.grating), ("shutter", self.shutter),
+                ("output_port", self.output_port), ("fan", self.fan),
+                ("read_mode", self.read_mode),
+            ):
+                value = state.get(key)
+                if value is None:
+                    continue
+                index = combo.findData(value)
+                if index < 0:
+                    index = combo.findText(str(value))
+                if index < 0 and combo is self.grating:
+                    # A disconnected restart has no enumerated gratings yet;
+                    # retain the user's pending numeric selection.
+                    try:
+                        combo.addItem(str(value), int(value))
+                        index = combo.count() - 1
+                    except (TypeError, ValueError):
+                        pass
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            if isinstance(state.get("cooler"), bool):
+                self.cooler.setChecked(state["cooler"])
+            for key, widget in (
+                ("roi_hstart", self.roi_hstart), ("roi_hend", self.roi_hend),
+                ("roi_vstart", self.roi_vstart), ("roi_vend", self.roi_vend),
+                ("hbin", self.hbin), ("vbin", self.vbin),
+            ):
+                if key in state:
+                    try:
+                        widget.setValue(int(state[key]))
+                    except (TypeError, ValueError):
+                        pass
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
 
     def _update_enabled(self) -> None:
         enabled = self._available and not self._locked
@@ -426,6 +557,7 @@ class AndorControlsWidget(QWidget):
     def _populate_status(self, data: dict[str, Any]) -> None:
         self.identity.setText(
             f"Camera {str(data.get('camera_role', '')).upper()} · "
+            f"{data.get('camera_model') or 'model unknown'} · "
             f"S/N {data.get('camera_serial', '—')} · detector {data.get('detector_size', '—')}\n"
             f"Shamrock S/N {data.get('spectrograph_serial', '—')}"
         )

@@ -2439,6 +2439,22 @@ class MCDPanel(QWidget):
             )
         return rows
 
+    def _condition_rows_raw(self) -> list[dict]:
+        """Capture condition table text verbatim for editable drafts."""
+        rows = []
+        for row in range(self._condition_table.rowCount()):
+            check = self._condition_table.item(row, 0)
+            rows.append({
+                "enabled": bool(check and check.checkState() == Qt.CheckState.Checked),
+                **{
+                    key: (self._condition_table.item(row, column).text()
+                          if self._condition_table.item(row, column) is not None else "")
+                    for column, key in ((1, "vtg_v"), (2, "vbg_v"), (3, "vbias_v"),
+                                        (4, "doping_v"), (5, "efield_v"))
+                },
+            })
+        return rows
+
     def _update_gate_entry(self, *_args) -> None:
         """Rebuild the pending gate batch from the entry fields (like the 2100 tab)."""
         direct = self._gate_entry_mode.currentData() == MODE_DIRECT
@@ -2539,6 +2555,13 @@ class MCDPanel(QWidget):
             self._condition_table.setItem(row, column, item)
         item.setText(f"{value:.6g}")
 
+    def _set_row_value_text(self, row: int, column: int, value: str) -> None:
+        item = self._condition_table.item(row, column)
+        if item is None:
+            item = QTableWidgetItem()
+            self._condition_table.setItem(row, column, item)
+        item.setText(str(value))
+
     def _seed_condition_table(self, conditions: list) -> None:
         self._updating_table = True
         try:
@@ -2562,7 +2585,11 @@ class MCDPanel(QWidget):
                     (4, "doping_v"),
                     (5, "efield_v"),
                 ):
-                    self._set_row_value(row, column, float(condition.get(key, 0.0)))
+                    raw_value = condition.get(key, 0.0)
+                    try:
+                        self._set_row_value(row, column, float(raw_value))
+                    except (TypeError, ValueError):
+                        self._set_row_value_text(row, column, str(raw_value))
             for row in range(self._condition_table.rowCount()):
                 if self._condition_table.item(row, 0) is None:
                     check = QTableWidgetItem()
@@ -3197,15 +3224,46 @@ class MCDPanel(QWidget):
 
     def capture_session_state(self) -> dict:
         return {
+            "sample_id": self._sample_id.text(),
+            "point": self._point.text(),
+            "start_t": self._start_t.value(),
+            "stop_t": self._stop_t.value(),
+            "angle_a_deg": self._angle_a.value(),
+            "angle_b_deg": self._angle_b.value(),
+            "rotator": self._rotator.currentText(),
+            "sweep_mode": self._sweep_mode.currentData(),
+            "condition_label": self._condition.text(),
+            "temperature": self._temperature.text(),
+            "measurement_mode": self._mode.currentText(),
+            "laser_nm": self._laser.text(),
+            "power_uw": self._power.text(),
+            "power_coefficient": self._power_coefficient.value(),
+            "filename_parts": [
+                key for key, checkbox in self._filename_part_checks.items()
+                if checkbox.isChecked()
+            ],
+            "center_nm": self._center.value(),
+            "exposure_ms": self._exposure.value(),
+            "frames": self._frames.value(),
+            "gate_ratio": self._gate_ratio.value(),
+            "gate_vtg_factor": self.gate_vtg_factor.value(),
+            "gate_vbg_factor": self.gate_vbg_factor.value(),
+            "initial_voltage_settle_s": self._initial_voltage_settle.value(),
+            "voltage_settle_s": self._voltage_settle.value(),
             "start_settle_s": self._start_settle.value(),
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
             "plot_log_sizes": [int(v) for v in self._plot_log_splitter.sizes()],
             "spectrum_visible": bool(self._show_spectrum_chk.isChecked()),
-            "conditions": self._condition_rows(),
+            "conditions": self._condition_rows_raw(),
             "safe_target_t": self._safe_target.value(),
             "safe_final_mode": self._safe_final_mode.currentData(),
             "safe_settle_s": self._safe_settle.value(),
             "safe_zero_leads": self._zero_leads.isChecked(),
+            "gate_entry_mode": self._gate_entry_mode.currentData(),
+            "gate_entry_a": self._gate_entry_a.text(),
+            "gate_entry_b": self._gate_entry_b.text(),
+            "gate_entry_vbias": self._gate_entry_vbias.value(),
+            "gate_entry_expansion": self._gate_entry_expansion.currentData(),
         }
 
     def apply_saved_experiment_settings(self, settings: dict) -> dict:
@@ -3236,6 +3294,48 @@ class MCDPanel(QWidget):
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
             return
+        for key, widget in (
+            ("sample_id", self._sample_id), ("point", self._point),
+            ("condition_label", self._condition),
+            ("temperature", self._temperature), ("laser_nm", self._laser),
+            ("power_uw", self._power),
+        ):
+            value = state.get(key)
+            if isinstance(value, str):
+                widget.setText(value)
+        for key, widget in (("start_t", self._start_t), ("stop_t", self._stop_t),
+                            ("power_coefficient", self._power_coefficient),
+                            ("angle_a_deg", self._angle_a), ("angle_b_deg", self._angle_b),
+                            ("center_nm", self._center), ("exposure_ms", self._exposure),
+                            ("gate_ratio", self._gate_ratio),
+                            ("gate_vtg_factor", self.gate_vtg_factor),
+                            ("gate_vbg_factor", self.gate_vbg_factor),
+                            ("initial_voltage_settle_s", self._initial_voltage_settle),
+                            ("voltage_settle_s", self._voltage_settle)):
+            try:
+                if key in state:
+                    widget.setValue(float(state[key]))
+            except (TypeError, ValueError):
+                pass
+        try:
+            if "frames" in state:
+                self._frames.setValue(int(state["frames"]))
+        except (TypeError, ValueError):
+            pass
+        for key, combo in (("rotator", self._rotator), ("measurement_mode", self._mode)):
+            value = state.get(key)
+            if isinstance(value, str) and combo.findText(value) >= 0:
+                combo.setCurrentText(value)
+        mode = state.get("sweep_mode")
+        if mode is not None:
+            index = self._sweep_mode.findData(mode)
+            if index >= 0:
+                self._sweep_mode.setCurrentIndex(index)
+        parts = state.get("filename_parts")
+        if isinstance(parts, list):
+            selected = {str(value) for value in parts}
+            for key, checkbox in self._filename_part_checks.items():
+                checkbox.setChecked(key in selected)
         if isinstance(state.get("spectrum_visible"), bool):
             self._show_spectrum_chk.setChecked(state["spectrum_visible"])
         if isinstance(state.get("conditions"), list):
@@ -3260,6 +3360,24 @@ class MCDPanel(QWidget):
             self._safe_final_mode.setCurrentIndex(mode_index)
         if isinstance(state.get("safe_zero_leads"), bool):
             self._zero_leads.setChecked(state["safe_zero_leads"])
+        gate_mode = state.get("gate_entry_mode")
+        if gate_mode is not None:
+            index = self._gate_entry_mode.findData(gate_mode)
+            if index >= 0:
+                self._gate_entry_mode.setCurrentIndex(index)
+        for key, widget in (("gate_entry_a", self._gate_entry_a), ("gate_entry_b", self._gate_entry_b)):
+            if isinstance(state.get(key), str):
+                widget.setText(state[key])
+        try:
+            if "gate_entry_vbias" in state:
+                self._gate_entry_vbias.setValue(float(state["gate_entry_vbias"]))
+        except (TypeError, ValueError):
+            pass
+        expansion = state.get("gate_entry_expansion")
+        if expansion is not None:
+            index = self._gate_entry_expansion.findData(expansion)
+            if index >= 0:
+                self._gate_entry_expansion.setCurrentIndex(index)
         sizes = state.get("splitter_sizes")
         if isinstance(sizes, (list, tuple)) and len(sizes) == 2:
             try:

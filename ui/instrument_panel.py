@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import sys
 import threading
+import copy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from ui.andor_controls_widget import temperature_summary
 
 from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
@@ -40,6 +43,19 @@ if str(_PROJECT_ROOT) not in sys.path:
 from utils.config import cfg
 from app.devices.stage_profiles import get_linear_stage_profile
 from app.devices.motion_verification import move_and_verify
+
+
+def _record_spectrum_readback(owner: object, source: str, value: object) -> None:
+    """Cache displayed hardware readbacks with their arrival timestamp."""
+    cache = getattr(owner, "_spectrum_readbacks", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(owner, "_spectrum_readbacks", cache)
+    cache[str(source)] = {
+        "available": True,
+        "value": copy.deepcopy(value),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 class _ESP32ImagingStageSection(QWidget):
@@ -409,12 +425,14 @@ class _Expander(QWidget):
         )
 
         self._content = content
-        self._content.setVisible(not collapsed)
         # Left indent so content feels nested under the header
         self._content.setContentsMargins(8, 2, 0, 4)
 
         lay.addWidget(self._btn)
         lay.addWidget(self._content)
+        # Parent the content before showing it, or Qt briefly opens a separate
+        # native window while the main instrument panel is being constructed.
+        self._content.setVisible(not collapsed)
 
         self._btn.toggled.connect(self._on_toggle)
 
@@ -436,6 +454,7 @@ class _LF6Section(QWidget):
         self._last_temperature_c: Optional[float] = None
         self._warming_disconnect = False
         self._last_andor_snapshot: dict = {}
+        self._temperature_read_error = ""
         self._warmup_timer = QTimer(self)
         self._warmup_timer.setInterval(5000)
         self._warmup_timer.timeout.connect(self._poll_warmup_temperature)
@@ -493,6 +512,12 @@ class _LF6Section(QWidget):
         detector_row.addWidget(self._temperature_refresh)
         detector_row.addWidget(self._cooler)
         lay.addLayout(detector_row)
+        self._temperature_detail = QLabel("")
+        self._temperature_detail.setWordWrap(True)
+        self._temperature_monitor = QLabel("")
+        self._temperature_monitor.setWordWrap(True)
+        lay.addWidget(self._temperature_detail)
+        lay.addWidget(self._temperature_monitor)
 
         self._andor_group = self._build_andor_controls()
         self._andor_group.setVisible(False)
@@ -608,11 +633,17 @@ class _LF6Section(QWidget):
         self._ctrl.error.connect(self._on_error)
         read_temperature = getattr(self._ctrl, "read_temperature", None)
         if callable(read_temperature):
-            self._temperature_refresh.clicked.connect(read_temperature)
+            self._temperature_refresh.clicked.connect(self._request_temperature)
         self._cooler.toggled.connect(self._on_cooler_toggled)
         temperature_ready = getattr(self._ctrl, "temperature_ready", None)
         if temperature_ready is not None:
             temperature_ready.connect(self._on_temperature_ready)
+        snapshot_ready = getattr(self._ctrl, "temperature_snapshot_ready", None)
+        if snapshot_ready is not None:
+            snapshot_ready.connect(self._on_temperature_snapshot)
+        monitor_state = getattr(self._ctrl, "temperature_monitor_state", None)
+        if monitor_state is not None:
+            monitor_state.connect(self._on_temperature_monitor_state)
         cooler_changed = getattr(self._ctrl, "cooler_changed", None)
         if cooler_changed is not None:
             cooler_changed.connect(self._on_cooler_changed)
@@ -652,6 +683,9 @@ class _LF6Section(QWidget):
             detail = f" · Shamrock + {role.upper()} CCD"
         if serial:
             detail += f" · S/N {serial}"
+        model = str(identity.get("camera_model", "")).strip()
+        if model:
+            detail += f" · {model}"
         self._status.setText(f"Connected{detail}")
         warnings = identity.get("connection_warnings", [])
         if isinstance(warnings, list) and warnings:
@@ -709,6 +743,9 @@ class _LF6Section(QWidget):
         self._exp_combo.setEnabled(False)
         self._exp_combo.clear()
         self._temperature.setText("Detector: N/A")
+        self._temperature_detail.clear()
+        self._temperature_monitor.clear()
+        self._temperature_read_error = ""
         self._last_temperature_c = None
         self._last_andor_snapshot = {}
         self._real_andor = False
@@ -740,11 +777,43 @@ class _LF6Section(QWidget):
             set_cooler(self._cooler.isChecked())
 
     @Slot(object)
+    def _on_temperature_snapshot(self, data):
+        if not self._real_andor or self._warming_disconnect:
+            return
+        if "error" in data:
+            self._temperature_read_error = str(data["error"])
+            self._temperature_monitor.setText("Temperature read failed; showing last reading. Retrying…")
+            self._temperature_monitor.setToolTip(str(data["error"]))
+            return
+        self._on_temperature_ready(data["temperature_c"])
+        self._temperature_read_error = ""
+        summary = temperature_summary(data)
+        self._temperature_detail.setText(summary.partition(" · ")[2])
+        self._andor_temperature_status.setText(summary)
+        self._temperature_monitor.setText("Auto refresh: 2 s")
+        self._temperature_monitor.setToolTip("Temperature stability does not block measurement.")
+
+    @Slot(str)
+    def _on_temperature_monitor_state(self, state):
+        if self._real_andor and not self._warming_disconnect:
+            suffix = " · Last temperature read failed" if self._temperature_read_error else ""
+            self._temperature_monitor.setText(state + suffix)
+
+    @Slot()
+    def _request_temperature(self):
+        poll = getattr(self._ctrl, "poll_temperature", None)
+        if self._real_andor and callable(poll):
+            poll()
+        else:
+            self._ctrl.read_temperature()
+
+    @Slot(object)
     def _on_temperature_ready(self, value):
         try:
             temperature = float(value)
             self._last_temperature_c = temperature
             self._temperature.setText(f"Detector: {temperature:.1f} °C")
+            _record_spectrum_readback(self, "detector_temperature", {"temperature_c": temperature})
             if self._warming_disconnect:
                 threshold = float(cfg.lf6.andor_safe_disconnect_temperature_c)
                 self._andor_temperature_status.setText(
@@ -818,6 +887,7 @@ class _LF6Section(QWidget):
     def _on_andor_status(self, snapshot: object) -> None:
         data = dict(snapshot or {})
         self._last_andor_snapshot = data
+        _record_spectrum_readback(self, "andor_status", data)
         self._andor_refresh.setEnabled(self._real_andor)
         self._andor_apply.setEnabled(self._real_andor)
         camera_serial = data.get("camera_serial", "?")
@@ -2103,6 +2173,7 @@ class _ManualControlSection(QWidget):
     def _on_controller_readings_ready(self, readings: object) -> None:
         if not isinstance(readings, dict):
             return
+        _record_spectrum_readback(self, "smu", dict(readings))
         for role, voltage_key, current_key in (
             ("Vbg", "Vbg_meas", "Ibg"),
             ("Vtg", "Vtg_meas", "Itg"),
@@ -2636,6 +2707,7 @@ class _RotationBlock(QWidget):
         self._pos_lbl.setText(f"{pos:+.3f} °")
         self._pos_lbl.setStyleSheet("color: black;")
         self._target_spn.setValue(pos)
+        _record_spectrum_readback(self, "rotation_" + self._slot, {"position_deg": float(pos)})
 
     @Slot(str)
     def _on_type_changed(self, type_str: str):
@@ -3129,6 +3201,7 @@ class _StageSection(QWidget):
     def _on_position(self, pos: float):
         self._set_position_label(pos)
         self._target_spn.setValue(pos)
+        _record_spectrum_readback(self, "stage", {"position": float(pos)})
 
     @Slot()
     def _on_refresh(self):
@@ -3446,6 +3519,7 @@ class _PM100DSection(QWidget):
         self._pwr_lbl.setStyleSheet(
             "color: darkgreen; font-weight: bold; font-size: 13px;"
         )
+        _record_spectrum_readback(self, "power_meter", {"power_w": float(p_w)})
 
     @Slot(list)
     def _on_devices_scanned(self, devices: list):
@@ -3613,6 +3687,49 @@ class InstrumentPanel(QScrollArea):
 
         self.setWidget(outer)
 
+    def capture_spectrum_readbacks(self) -> dict:
+        """Return cached sidebar readbacks with their source timestamps.
+
+        Values come from successful controller callbacks in the sidebar.  A
+        missing section is represented explicitly so spectrum metadata never
+        invents zero-valued readings.
+        """
+        result: dict[str, object] = {"captured_utc": datetime.now(timezone.utc).isoformat(), "instruments": {}}
+        for key, section in self._sections.items():
+            cache = getattr(section, "_spectrum_readbacks", {})
+            controller = getattr(section, "_ctrl", None)
+            connected = getattr(controller, "is_connected", False)
+            if callable(connected):
+                try:
+                    connected = bool(connected(key) if key.startswith("rot") else connected())
+                except Exception:
+                    connected = False
+            elif not isinstance(connected, bool):
+                connected = bool(connected)
+            readbacks = (copy.deepcopy(cache) if isinstance(cache, dict) and cache else {
+                "available": False,
+                "reason": "No successful readback has been received for this section",
+            })
+            result["instruments"][key] = {
+                "connected": connected,
+                "readbacks": readbacks,
+            }
+        # The SMU controller's shared readings signal is consumed by the
+        # Manual Control section; expose that cache under the owning SMU
+        # instrument entry as well.
+        manual = result["instruments"].get("manual_smu")
+        if isinstance(manual, dict) and manual.get("readbacks", {}).get("available", True):
+            smu = result["instruments"].setdefault(
+                "smu", {"connected": manual.get("connected", False), "readbacks": {}}
+            )
+            if isinstance(manual["readbacks"], dict):
+                smu.setdefault("readbacks", {}).update(copy.deepcopy(manual["readbacks"]))
+        try:
+            result["settings"] = self.capture_session_state()
+        except Exception as exc:
+            result["settings"] = {"available": False, "reason": f"Sidebar settings snapshot failed: {exc}"}
+        return result
+
     @Slot(bool)
     def set_external_busy(self, busy: bool):
         """Forward shared-instrument ownership to sections with background I/O."""
@@ -3634,6 +3751,17 @@ class InstrumentPanel(QScrollArea):
             state["lf6"] = {
                 "use_mock": bool(lf6._mock_chk.isChecked()),
                 "backend": str(lf6._backend.currentData()),
+                "experiment": lf6._exp_combo.currentText(),
+                "cooler": bool(lf6._cooler.isChecked()),
+                "andor_wavelength": float(lf6._andor_wavelength.value()),
+                "andor_grating": int(lf6._andor_grating.value()),
+                "andor_slit_um": float(lf6._andor_slit.value()),
+                "andor_shutter": lf6._andor_spec_shutter.currentText(),
+                "andor_temperature_c": float(lf6._andor_target_temperature.value()),
+                "andor_fan": lf6._andor_fan.currentText(),
+                "andor_read_mode": lf6._andor_read_mode.currentData(),
+                "andor_hbin": int(lf6._andor_hbin.value()),
+                "andor_vbin": int(lf6._andor_vbin.value()),
             }
         smu = self._sections.get("smu")
         if isinstance(smu, _SMUSection):
@@ -3648,6 +3776,7 @@ class InstrumentPanel(QScrollArea):
         if isinstance(manual_smu, _ManualControlSection):
             state["manual_smu"] = {
                 "step_v": float(manual_smu._step_spn.value()),
+                "targets": {role: float(widget.value()) for role, widget in manual_smu._target_spn.items()},
             }
         for key in ("rot1", "rot2"):
             rotation = self._sections.get(key)
@@ -3658,6 +3787,9 @@ class InstrumentPanel(QScrollArea):
                     "axis": rotation._axis_combo.currentText(),
                     "include_asrl": bool(rotation._asrl_chk.isChecked()),
                     "jog": float(rotation._jog_spn.value()),
+                    "target": float(rotation._target_spn.value()),
+                    "velocity_pct": float(rotation._velocity_pct.value()),
+                    "acceleration_pct": float(rotation._acceleration_pct.value()),
                 }
         stage = self._sections.get("stage")
         if isinstance(stage, _StageSection):
@@ -3666,6 +3798,7 @@ class InstrumentPanel(QScrollArea):
                 "address": stage._addr_combo.currentText(),
                 "axis": stage._axis_combo.currentText(),
                 "jog": float(stage._jog_spn.value()),
+                "target": float(stage._target_spn.value()),
             }
         pm = self._sections.get("pm100d")
         if isinstance(pm, _PM100DSection):
@@ -3673,6 +3806,7 @@ class InstrumentPanel(QScrollArea):
                 "device": pm._device_combo.currentText(),
                 "wavelength_nm": float(pm._wl_spn.value()),
                 "poll_interval_s": float(pm._interval_spn.value()),
+                "auto_read": bool(pm._auto_chk.isChecked()),
                 # Observe the canonical config value so MainWindow's session
                 # watcher schedules the normal debounced cfg.save() after a
                 # sidebar edit.  Restore intentionally leaves this field
@@ -3683,7 +3817,7 @@ class InstrumentPanel(QScrollArea):
         imaging = self._sections.get("imaging_stage")
         if isinstance(imaging, _ESP32ImagingStageSection):
             imaging.save_state()
-            state["imaging_stage"] = {"port": imaging._port.currentText(), "jog": float(imaging._jog.value()), "frequency": int(imaging._speed.currentData()), "preset": imaging._preset.currentText(), "fine_mm": imaging._fine_mm.value(), "medium_mm": imaging._medium_mm.value(), "coarse_mm": imaging._coarse_mm.value(), "slow_hz": imaging._slow_hz.value(), "normal_hz": imaging._normal_hz.value()}
+            state["imaging_stage"] = {"port": imaging._port.currentText(), "jog": float(imaging._jog.value()), "frequency": int(imaging._speed.currentData()), "preset": imaging._preset.currentText(), "fine_mm": imaging._fine_mm.value(), "medium_mm": imaging._medium_mm.value(), "coarse_mm": imaging._coarse_mm.value(), "slow_hz": imaging._slow_hz.value(), "normal_hz": imaging._normal_hz.value(), "maximum_mm": imaging._maximum.value(), "direction": imaging._direction.currentData(), "scale": imaging._scale.currentData(), "target_mm": imaging._target.value(), "advanced": bool(imaging._advanced_btn.isChecked())}
         return state
 
     def restore_session_state(self, state: dict) -> None:
@@ -3707,6 +3841,39 @@ class InstrumentPanel(QScrollArea):
                 index = lf6._backend.findData(backend)
                 if index >= 0:
                     lf6._backend.setCurrentIndex(index)
+            widgets = (
+                lf6._exp_combo, lf6._cooler, lf6._andor_wavelength,
+                lf6._andor_grating, lf6._andor_slit, lf6._andor_spec_shutter,
+                lf6._andor_target_temperature, lf6._andor_fan,
+                lf6._andor_read_mode, lf6._andor_hbin, lf6._andor_vbin,
+            )
+            for widget in widgets:
+                widget.blockSignals(True)
+            try:
+                if isinstance(lf6_state.get("experiment"), str):
+                    _select_or_insert_combo_text(lf6._exp_combo, lf6_state["experiment"])
+                if isinstance(lf6_state.get("cooler"), bool):
+                    lf6._cooler.setChecked(lf6_state["cooler"])
+                for key, widget in (("andor_wavelength", lf6._andor_wavelength), ("andor_slit_um", lf6._andor_slit), ("andor_temperature_c", lf6._andor_target_temperature)):
+                    if key in lf6_state:
+                        try: widget.setValue(float(lf6_state[key]))
+                        except (TypeError, ValueError): pass
+                if "andor_grating" in lf6_state:
+                    try: lf6._andor_grating.setValue(int(lf6_state["andor_grating"]))
+                    except (TypeError, ValueError): pass
+                for key, combo in (("andor_shutter", lf6._andor_spec_shutter), ("andor_fan", lf6._andor_fan), ("andor_read_mode", lf6._andor_read_mode)):
+                    value = lf6_state.get(key)
+                    if value is not None:
+                        idx = combo.findData(value)
+                        if idx < 0: idx = combo.findText(str(value))
+                        if idx >= 0: combo.setCurrentIndex(idx)
+                for key, widget in (("andor_hbin", lf6._andor_hbin), ("andor_vbin", lf6._andor_vbin)):
+                    if key in lf6_state:
+                        try: widget.setValue(int(lf6_state[key]))
+                        except (TypeError, ValueError): pass
+            finally:
+                for widget in widgets:
+                    widget.blockSignals(False)
 
         smu_state = state.get("smu")
         smu = self._sections.get("smu")
@@ -3759,6 +3926,19 @@ class InstrumentPanel(QScrollArea):
                 manual_smu._step_spn.setValue(float(manual_state["step_v"]))
             except (KeyError, TypeError, ValueError):
                 pass
+            targets = manual_state.get("targets")
+            if isinstance(targets, dict):
+                for role, value in targets.items():
+                    widget = manual_smu._target_spn.get(str(role))
+                    if widget is None:
+                        continue
+                    try:
+                        widget.blockSignals(True)
+                        widget.setValue(float(value))
+                    except (TypeError, ValueError):
+                        pass
+                    finally:
+                        widget.blockSignals(False)
 
         for key in ("rot1", "rot2"):
             rotation_state = state.get(key)
@@ -3780,6 +3960,14 @@ class InstrumentPanel(QScrollArea):
                 rotation._jog_spn.setValue(float(rotation_state["jog"]))
             except (KeyError, TypeError, ValueError):
                 pass
+            for key, widget in (("target", rotation._target_spn), ("velocity_pct", rotation._velocity_pct), ("acceleration_pct", rotation._acceleration_pct)):
+                try:
+                    widget.blockSignals(True)
+                    widget.setValue(float(rotation_state[key]))
+                except (KeyError, TypeError, ValueError):
+                    pass
+                finally:
+                    widget.blockSignals(False)
 
         stage_state = state.get("stage")
         stage = self._sections.get("stage")
@@ -3797,6 +3985,13 @@ class InstrumentPanel(QScrollArea):
                 stage._jog_spn.setValue(float(stage_state["jog"]))
             except (KeyError, TypeError, ValueError):
                 pass
+            try:
+                stage._target_spn.blockSignals(True)
+                stage._target_spn.setValue(float(stage_state["target"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+            finally:
+                stage._target_spn.blockSignals(False)
 
         imaging_state = state.get("imaging_stage")
         imaging = self._sections.get("imaging_stage")
@@ -3808,6 +4003,20 @@ class InstrumentPanel(QScrollArea):
                 idx = imaging._speed.findData(frequency)
                 if idx >= 0: imaging._speed.setCurrentIndex(idx)
             except (KeyError, TypeError, ValueError): pass
+            for key, widget in (("maximum_mm", imaging._maximum), ("target_mm", imaging._target)):
+                try:
+                    widget.blockSignals(True)
+                    widget.setValue(float(imaging_state[key]))
+                except (KeyError, TypeError, ValueError): pass
+                finally: widget.blockSignals(False)
+            for key, combo in (("direction", imaging._direction), ("scale", imaging._scale)):
+                value = imaging_state.get(key)
+                if value is not None:
+                    idx = combo.findData(value)
+                    if idx >= 0:
+                        combo.blockSignals(True); combo.setCurrentIndex(idx); combo.blockSignals(False)
+            if isinstance(imaging_state.get("advanced"), bool):
+                imaging._advanced_btn.setChecked(imaging_state["advanced"])
             preset = imaging_state.get("preset")
             if isinstance(preset, str):
                 idx = imaging._preset.findText(preset)
@@ -3839,6 +4048,17 @@ class InstrumentPanel(QScrollArea):
                     spin.setValue(float(pm_state[key]))
                 except (KeyError, TypeError, ValueError):
                     pass
+            if isinstance(pm_state.get("auto_read"), bool):
+                # Never start a polling timer during profile restore.
+                pm._auto_chk.blockSignals(True)
+                pm._auto_chk.setChecked(pm_state["auto_read"])
+                pm._auto_chk.blockSignals(False)
+                if not pm_state["auto_read"]:
+                    pm._poll_timer.stop()
+                connected = bool(getattr(pm._ctrl, "is_connected", False))
+                active_auto = bool(pm_state["auto_read"]) and connected and not pm._external_busy
+                pm._read_pwr_btn.setEnabled(connected and not active_auto and not pm._external_busy)
+                pm._interval_spn.setEnabled(connected and not active_auto and not pm._external_busy)
             # ``correction_factor`` is captured for change observation only.
             # The sidebar was initialized from cfg.pm100d after config load;
             # applying a duplicated session value here could resurrect stale

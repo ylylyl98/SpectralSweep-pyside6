@@ -195,7 +195,7 @@ class PowerCorrectionTests(unittest.TestCase):
             with patch.object(cfg.ramp, "delay_s", 0.0), patch.object(cfg.ramp, "settle_s", 0.0):
                 worker.run()
             self.assertTrue(finished and finished[0][0], finished)
-            paths = list(Path(folder).glob("*.csv"))
+            paths = list((Path(folder) / "PL").glob("*.csv"))
             self.assertEqual(len(paths), 2)
             for path in paths:
                 self.assertIn("633nm8.000uW", path.name)

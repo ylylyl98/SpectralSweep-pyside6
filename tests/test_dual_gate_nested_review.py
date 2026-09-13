@@ -167,7 +167,7 @@ class NestedReviewTests(unittest.TestCase):
             with patch.object(panel.cfg.lf6, "center_nm", 999.), patch.object(panel.cfg.ramp, "delay_s", 0.):
                 worker.run()
             contents = []
-            for path in Path(folder).glob("*.csv"):
+            for path in (Path(folder) / "PL").glob("*.csv"):
                 with path.open(newline="", encoding="utf-8") as stream:
                     contents.append(list(csv.DictReader(stream)))
         return events, finished, contexts, contents

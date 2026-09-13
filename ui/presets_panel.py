@@ -213,6 +213,22 @@ def _sanitize(s: str) -> str:
     return s.strip()
 
 
+def _measurement_output_dir(root: Path, run_meta: Dict[str, Any]) -> Path:
+    """Return the mode folder below one experiment output directory."""
+    mode = str((run_meta or {}).get("measurement_mode", "")).strip().upper()
+    return Path(root) / ("REF" if mode in {"REF", "REFERENCE"} else "PL")
+
+
+def _experiment_output_files(root: Path) -> List[Path]:
+    """List files directly in the experiment root and its two mode folders."""
+    root = Path(root)
+    files = [path for path in root.glob("*") if path.is_file()]
+    for mode_dir in (root / "PL", root / "REF"):
+        if mode_dir.exists():
+            files.extend(path for path in mode_dir.glob("*") if path.is_file())
+    return files
+
+
 def _parse_values(s: str, param: str = "") -> Optional[List[float]]:
     if not s or not str(s).strip():
         return None
@@ -1105,6 +1121,9 @@ def _solve_condition_line(
         if t_lo >= t_hi - 1e-12:
             return None
 
+    # For fixed D, decreasing Vbg sweeps F from low to high.
+    if eff - r < 0:
+        return t_hi, t_lo, C + eff * t_hi, C + eff * t_lo
     return t_lo, t_hi, C + eff * t_lo, C + eff * t_hi
 
 
@@ -2949,8 +2968,10 @@ class _RunWorker(QObject):
                                         )
                                         repetition = display_rep_i if nested_point is not None else r_i + 1
                                         rep_suffix = f"_rep{repetition:02d}" if display_rep_total > 1 else ""
-                                        stem_final = make_unique_stem(self._out_dir, stem_base + rep_suffix)
-                                        csv_path = self._out_dir / f"{stem_final}.csv"
+                                        measurement_dir = _measurement_output_dir(self._out_dir, self._meta)
+                                        measurement_dir.mkdir(parents=True, exist_ok=True)
+                                        stem_final = make_unique_stem(measurement_dir, stem_base + rep_suffix)
+                                        csv_path = measurement_dir / f"{stem_final}.csv"
                                         writer = CSVWriter(
                                             out_dir=str(csv_path.parent), file_base=csv_path.stem,
                                             wavelength_headers=[],
@@ -3248,7 +3269,11 @@ def _populate_loop_table(table: QTableWidget, df: pd.DataFrame) -> None:
         table.setCellWidget(r, 0, _make_check_cell(_to_bool(row.get("Enable", False))))
         table.setCellWidget(r, 1, _make_param_combo(str(row.get("Parameter", LOOP_PARAMS[0]))))
         table.setItem(r, 2, QTableWidgetItem(str(row.get("Values", ""))))
-        table.setItem(r, 3, QTableWidgetItem(str(int(row.get("Group", 1)))))
+        # Draft snapshots must preserve exactly what the user typed, including
+        # blanks and temporarily invalid values.  Validation happens only when
+        # Apply/Run parses the recipe.
+        group = row.get("Group", 1)
+        table.setItem(r, 3, QTableWidgetItem("" if group is None else str(group)))
 
 
 def _read_loop_table(table: QTableWidget) -> pd.DataFrame:
@@ -3270,6 +3295,26 @@ def _read_loop_table(table: QTableWidget) -> pd.DataFrame:
             group = 1
         rows.append({"Enable": enabled, "Parameter": param, "Values": values, "Group": group})
     return pd.DataFrame(rows, columns=LOOP_SCHEMA) if rows else pd.DataFrame(columns=LOOP_SCHEMA)
+
+
+def _read_loop_table_raw(table: QTableWidget) -> list[dict]:
+    """Capture editable loop cells without coercing unfinished input."""
+    rows = []
+    for r in range(table.rowCount()):
+        combo = table.cellWidget(r, 1)
+        value_item = table.item(r, 2)
+        group_item = table.item(r, 3)
+        rows.append({
+            "Enable": _cell_checked(table.cellWidget(r, 0)),
+            "Parameter": (
+                str(combo.currentData())
+                if combo is not None and combo.currentData() is not None
+                else (combo.currentText() if combo else LOOP_PARAMS[0])
+            ),
+            "Values": value_item.text() if value_item is not None else "",
+            "Group": group_item.text() if group_item is not None else "",
+        })
+    return rows
 
 
 # ── Batch table read / write ───────────────────────────────────────────────────
@@ -4329,7 +4374,7 @@ class PresetsPanel(QWidget):
             "applied_execution_order": [dict(item) for item in (self._applied_execution_order or [])],
             "execution_order": [dict(item) for item in (self._execution_order or [])],
             "nested_schedule_enabled": bool(self._nested_schedule_enabled),
-            "draft_loop": self._session_records(_read_loop_table(self._loop_table)),
+            "draft_loop": _read_loop_table_raw(self._loop_table),
             "draft_batch": self._session_records(_read_batch_table(self._batch_table)),
             "applied_loop": self._session_records(self._loop_src),
             "applied_batch": self._session_records(self._batch_src),
@@ -4484,14 +4529,39 @@ class PresetsPanel(QWidget):
             except Exception:
                 return fallback.copy()
 
+        def raw_records_frame(key: str, fallback: pd.DataFrame) -> pd.DataFrame:
+            records = state.get(key)
+            if not isinstance(records, list):
+                return fallback.copy()
+            try:
+                frame = pd.DataFrame(records)
+                for column in LOOP_SCHEMA:
+                    if column not in frame:
+                        frame[column] = "" if column in ("Values", "Group") else False
+                return frame.loc[:, LOOP_SCHEMA].copy()
+            except Exception:
+                return fallback.copy()
+
         self._loop_src = records_frame(
             "applied_loop", _normalize_loop, self._loop_src
         )
         self._batch_src = records_frame(
             "applied_batch", _normalize_batch, self._batch_src
         )
-        draft_loop = records_frame("draft_loop", _normalize_loop, self._loop_src)
-        draft_batch = records_frame("draft_batch", _normalize_batch, self._batch_src)
+        draft_loop = raw_records_frame("draft_loop", self._loop_src)
+        draft_batch = None
+        batch_records = state.get("draft_batch")
+        if isinstance(batch_records, list):
+            try:
+                frame = pd.DataFrame(batch_records)
+                for column in BATCH_SCHEMA:
+                    if column not in frame:
+                        frame[column] = "" if column not in _BATCH_BOOL_COLUMNS else False
+                draft_batch = frame.loc[:, BATCH_SCHEMA].copy()
+            except Exception:
+                draft_batch = self._batch_src.copy()
+        else:
+            draft_batch = self._batch_src.copy()
         for attribute, definition, mode in (
             ("_execution_order", draft_loop, self._mode_combo.currentText()),
             ("_applied_execution_order", self._loop_src, self._applied_mode),
@@ -5632,7 +5702,7 @@ class PresetsPanel(QWidget):
             return
 
         run_meta = self._current_run_meta()
-        out_dir = self._current_output_dir(run_meta)
+        out_dir = _measurement_output_dir(self._current_output_dir(run_meta), run_meta)
         selected_row = self._selected_batch_row_dict(batch_df)
         ctx = _first_applicable_seq_ctx(seq, selected_row)
         # A previous meter reading may belong to a different optical setup.
@@ -5655,7 +5725,7 @@ class PresetsPanel(QWidget):
             )
             self._save_path_preview_lbl.setText(f"Folder: {out_dir}")
             note = (
-                "Files are saved under output_root / Sample ID / Subfolder. "
+                "Files are saved under output_root / Sample ID / Subfolder / PL or REF. "
                 "Numeric suffixes like _001 are added only when a name collision exists."
             )
             if _to_bool(selected_row.get("MeasurePower", False)):
@@ -6558,8 +6628,8 @@ class PresetsPanel(QWidget):
             self._log(err)
             return
         out_dir = self._current_output_dir(run_meta)
-        self._run_csv_before = set(out_dir.glob("*.csv"))
-        self._run_files_before = set(out_dir.glob("*"))
+        self._run_csv_before = {path for path in _experiment_output_files(out_dir) if path.suffix.lower() == ".csv"}
+        self._run_files_before = set(_experiment_output_files(out_dir))
         try:
             self._experiment_run = ExperimentMetadataService(out_dir).begin(
                 "dual_gate_sweep", run_meta["device_id"], output_dir=out_dir, settings=run_meta,
@@ -6619,6 +6689,9 @@ class PresetsPanel(QWidget):
         self._status_lbl.setText("Running…")
         self._status_lbl.setStyleSheet("color: orange;")
         self._on_progress(0, self._total_acq)
+        pause = getattr(self._lf6, "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("presets", True)
         self._run_thread.start()
 
     @Slot(bool)
@@ -6778,6 +6851,9 @@ class PresetsPanel(QWidget):
 
     @Slot(bool, str)
     def _on_finished(self, success: bool, message: str):
+        pause = getattr(self._lf6, "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("presets", False)
         self._stop_btn.setEnabled(False)
         self._initial_voltage_settle_spin.setEnabled(True)
         self._voltage_settle_spin.setEnabled(True)
@@ -6804,7 +6880,7 @@ class PresetsPanel(QWidget):
         run = getattr(self, "_experiment_run", None)
         if run is not None:
             try:
-                for data_file in Path(run.path.parent).glob("*"):
+                for data_file in _experiment_output_files(Path(run.path.parent)):
                     if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".log", ".json", ".txt"}:
                         continue
                     run.register_file(data_file, "raw" if data_file.suffix.lower() == ".csv" else "intermediate")
