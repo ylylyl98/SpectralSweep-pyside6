@@ -4,8 +4,11 @@ from __future__ import annotations
 import math
 import threading
 import time
+import concurrent.futures
+import inspect
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -14,12 +17,15 @@ from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QHeaderView, QLineEdit, QPlainTextEdit,
+    QDialog, QGroupBox, QHBoxLayout, QLabel, QHeaderView, QLineEdit, QPlainTextEdit,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QGridLayout, QSplitter, QWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QGridLayout, QSplitter, QWidget,
 )
 
 from app.engine.mcd2100_worker import MCD2100Worker
+from app.engine.magnet_preparation import (
+    MagnetPreparationWorker, format_preparation_progress, preparation_mode_observation,
+)
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from controllers.rotation_controller import RotationController
@@ -64,6 +70,14 @@ class _LightFieldRotationService:
             spectrometer.calibration_wavelengths(force=False), dtype=float
         ).ravel().tolist()
         return self.wavelengths
+
+    def ensure_ready(self):
+        ensure = getattr(self._lf6, "ensure_ready", None)
+        if callable(ensure):
+            ensure(timeout_s=15.0, poll_interval_s=0.05)
+        ready = getattr(self._lf6, "is_ready", None)
+        if ready is not None and not bool(ready() if callable(ready) else ready):
+            raise RuntimeError("LightField is not ready; shared controller did not publish READY")
 
     def configure(self, *, center_nm=None, exposure_ms=None, frames=None):
         """Use only the established LightField controller surface."""
@@ -177,6 +191,77 @@ class _LightFieldRotationService:
         return None
 
 
+class _LazyOpticalService:
+    """Delay injected optical construction until magnet preparation succeeds."""
+    def __init__(self, factory):
+        self._factory = factory
+        self._instance = None
+
+    def _get(self):
+        if self._instance is None:
+            self._instance = self._factory()
+        return self._instance
+
+    def __getattr__(self, name):
+        return getattr(self._get(), name)
+
+
+class _RampTablesDialog(QDialog):
+    """Small nonmodal read-only view of a raw ramp-table report."""
+    def __init__(self, report, parent=None, *, generation=None, read_at=None,
+                 elapsed_s=None, stale=False, stale_reason=None, last_error=None):
+        super().__init__(parent)
+        self.setWindowTitle("attoDRY2100 ramp tables")
+        self.resize(720, 420)
+        layout = QVBoxLayout(self)
+        caveat = QLabel(
+            "Raw SDK values; units and index base are unverified. "
+            "Requested indices: 0 through count − 1."
+        )
+        if read_at is not None:
+            caveat.setText(
+                caveat.text() + f" Read at {read_at.isoformat()}"
+                + (f" · elapsed {elapsed_s:.3f}s" if elapsed_s is not None else "")
+                + (f" · {stale_reason}" if stale_reason else
+                   (" · previous connection / stale" if stale else ""))
+                + (f" · latest read error: {last_error}" if last_error else "")
+            )
+        caveat.setWordWrap(True)
+        layout.addWidget(caveat)
+        tabs = QTabWidget()
+        layout.addWidget(tabs)
+        for table in (report.current, report.default):
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            row_errors = sum(1 for row in table.rows if row.error)
+            table_errors = "; ".join(table.errors) if table.errors else "None"
+            summary = QLabel(
+                f"Reported count: {table.reported_count!r} · Table errors: {table_errors}"
+                f" · Row errors: {row_errors}"
+            )
+            summary.setWordWrap(True)
+            page_layout.addWidget(summary)
+            grid = QTableWidget(len(table.rows), 5)
+            grid.setHorizontalHeaderLabels(
+                ["Channel", "Requested index", "Raw range", "Raw rate", "Error"]
+            )
+            grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            grid.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+            grid.horizontalHeader().resizeSections(QHeaderView.ResizeMode.ResizeToContents)
+            grid.horizontalHeader().setStretchLastSection(True)
+            for row_index, row in enumerate(table.rows):
+                values = (
+                    str(report.channel), str(row.index),
+                    "" if row.error else repr(row.raw_range),
+                    "" if row.error else repr(row.raw_rate),
+                    row.error or "",
+                )
+                for column, value in enumerate(values):
+                    grid.setItem(row_index, column, QTableWidgetItem(value))
+            page_layout.addWidget(grid)
+            tabs.addTab(page, table.kind.title())
+
+
 class _Runner(QObject):
     finished = Signal(object)
     progress = Signal(float, float, int, int)
@@ -184,19 +269,21 @@ class _Runner(QObject):
     spectrum_event = Signal(object)
     log = Signal(str)
     phase = Signal(str)
+    preparation_progress = Signal(object)
 
     def __init__(self, worker):
         super().__init__()
         self.worker = worker
         setter = getattr(worker, "set_callbacks", None)
         if callable(setter):
-            try:
-                setter(progress=self.progress.emit, spectrum=self.spectrum.emit,
-                       spectrum_event=self.spectrum_event.emit, log=self.log.emit,
-                       phase=self.phase.emit)
-            except TypeError:
-                setter(progress=self.progress.emit, spectrum=self.spectrum.emit,
-                       log=self.log.emit)
+            callbacks = dict(progress=self.progress.emit, spectrum=self.spectrum.emit,
+                             spectrum_event=self.spectrum_event.emit, log=self.log.emit,
+                             phase=self.phase.emit,
+                             preparation_progress=self.preparation_progress.emit)
+            parameters = inspect.signature(setter).parameters
+            if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+                callbacks = {key: value for key, value in callbacks.items() if key in parameters}
+            setter(**callbacks)
 
     @Slot()
     def run(self):
@@ -251,6 +338,10 @@ class MCD2100Panel(QWidget):
         self._connected = getattr(getattr(controller, "state", None), "name", "") in {"IDLE", "ARMED", "ACTIVE"}
         self._detached_after_completion = getattr(getattr(controller, "state", None), "name", "") == "DETACHED"
         self._last_telemetry_time = None
+        self._last_magnet_success_at = None
+        self._last_temperature_success_at = None
+        self._telemetry_cycle = None
+        self._telemetry_generation = None
         self._last_sample_temperature_k: Optional[float] = None
         self._last_sample_setpoint_k: Optional[float] = None
         self._applied_sample_target_k: Optional[float] = None
@@ -258,16 +349,49 @@ class MCD2100Panel(QWidget):
         self._phase_started_at = time.monotonic()
         self._spectrum_count = 0
         self._active_phase = "Idle"
+        self._preparation_progress = None
+        self._preparation_closed = False
+        self._mode_progress_logged_at = 0.
         self._settle_deadline: Optional[float] = None
         self._externally_busy = False
+        self._interlock_held = False
         self._terminal_status = "Disconnected" if not self._connected else "Ready"
         self._connect_handle = None
         self._disconnect_handle = None
         self._temperature_apply_handle = None
         self._temperature_monitor_handle = None
+        self._ramp_tables_handle = None
+        self._ramp_tables_report = None
+        self._ramp_tables_cache_generation = None
+        self._ramp_tables_read_at = None
+        self._ramp_tables_elapsed_s = None
+        self._ramp_tables_started_at = None
+        self._ramp_tables_cache_valid = False
+        self._ramp_tables_auto_active = False
+        self._ramp_tables_request_generation = None
+        self._ramp_tables_request_token = 0
+        self._ramp_tables_shutdown_token = 0
+        self._ramp_tables_last_error = None
+        # Once shutdown starts, queued connection/cycle callbacks must not
+        # start another automatic diagnostic read.
+        self._closing = False
+        self._workflow_intent = None
+        self._workflow_intent_token = 0
+        self._workflow_waiting_drain = False
+        self._workflow_restore_state = None
+        self._ramp_auto_generation = None
+        self._ramp_auto_pending = False
+        self._ramp_auto_attempted = False
+        self._ramp_auto_telemetry_ready = False
+        self._ramp_tables_dialog = None
+        self._ramp_tables_timed_out = False
         self._temperature_monitor_timer = QTimer(self)
         self._temperature_monitor_timer.setInterval(1000)
         self._temperature_monitor_timer.timeout.connect(self._monitor_applied_temperature)
+        self._telemetry_age_timer = QTimer(self)
+        self._telemetry_age_timer.setInterval(250)
+        self._telemetry_age_timer.timeout.connect(self._refresh_telemetry_age)
+        self._telemetry_age_timer.start()
         self._build_ui()
         self._legacy_table_api = False
         self._wire_controller()
@@ -341,10 +465,21 @@ class MCD2100Panel(QWidget):
         self.connect_btn = QPushButton("Connect")
         self.disconnect_btn = QPushButton("Disconnect")
         self.refresh_btn = QPushButton("Refresh telemetry")
+        self.read_ramp_tables_btn = QPushButton("Refresh ramp tables")
+        self.read_ramp_tables_btn.setToolTip(
+            "Explicitly read raw current and factory-default ramp tables"
+        )
+        self.view_ramp_tables_btn = QPushButton("View ramp tables")
+        self.view_ramp_tables_btn.setToolTip("View the last cached ramp-table report without communicating")
         buttons.addWidget(self.connect_btn)
         buttons.addWidget(self.disconnect_btn)
         buttons.addWidget(self.refresh_btn)
+        buttons.addWidget(self.read_ramp_tables_btn)
+        buttons.addWidget(self.view_ramp_tables_btn)
         connection_layout.addLayout(buttons)
+        self.ramp_tables_status = QLabel("Ramp tables not read")
+        self.ramp_tables_status.setWordWrap(True)
+        connection_layout.addWidget(self.ramp_tables_status)
         content_layout.addWidget(connection)
 
         workflow = QGroupBox("Continuous attoDRY2100 MCD")
@@ -425,7 +560,7 @@ class MCD2100Panel(QWidget):
         temperature_form.setContentsMargins(8, 6, 8, 6)
         temperature_form.setVerticalSpacing(4)
         self.temperature_control_enabled = QCheckBox("Control temperature")
-        self.sample_target = self._spin(1.8, 300.0, 3)
+        self.sample_target = self._spin(1.67, 300.0, 3)
         self.sample_ramp_rate = self._spin(0.1, 100.0, 2)
         self.temperature_tolerance = self._spin(0.001, 20.0, 3)
         self.temperature_stable = self._spin(0.0, 3600.0, 1)
@@ -723,12 +858,18 @@ class MCD2100Panel(QWidget):
         controls.setContentsMargins(8, 6, 8, 6)
         controls.setSpacing(8)
         self.start_btn = QPushButton("Start MCD 2100")
+        self.start_btn.setToolTip(
+            "Magnet safety and Driven readiness are checked automatically before MCD starts"
+        )
+        self.prepare_magnet_btn = QPushButton("Prepare magnet")
+        self.prepare_magnet_btn.setToolTip("Prepare the magnet automatically before starting MCD")
         self.stop_btn = QPushButton("Stop / Cancel")
         for button in (self.start_btn, self.stop_btn):
             button.setMinimumHeight(36)
         self.start_btn.setStyleSheet("font-weight: 700; background: #e6f3e8;")
         self.stop_btn.setStyleSheet("font-weight: 700; background: #f9e5e5;")
         controls.addWidget(self.start_btn)
+        controls.addWidget(self.prepare_magnet_btn)
         controls.addWidget(self.stop_btn)
         content_layout.addWidget(run_group)
 
@@ -739,6 +880,7 @@ class MCD2100Panel(QWidget):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.status = QLabel(self._terminal_status)
+        self.status.setWordWrap(True)
         self.progress = QLabel("0 spectra")
         self.current_field = QLabel("N/A")
         self.direction_value = QLabel("N/A")
@@ -815,7 +957,10 @@ class MCD2100Panel(QWidget):
         self.connect_btn.clicked.connect(self.connect_instrument)
         self.disconnect_btn.clicked.connect(self.disconnect_instrument)
         self.refresh_btn.clicked.connect(self.refresh_telemetry)
+        self.read_ramp_tables_btn.clicked.connect(self.read_ramp_tables)
+        self.view_ramp_tables_btn.clicked.connect(self.view_ramp_tables)
         self.start_btn.clicked.connect(self.start)
+        self.prepare_magnet_btn.clicked.connect(self.prepare_magnet)
         self.stop_btn.clicked.connect(self.stop)
         self.terminal.connect(self._on_terminal)
         self._clear_log_btn.clicked.connect(self._log.clear)
@@ -867,7 +1012,20 @@ class MCD2100Panel(QWidget):
         return widget
 
     def _update_temperature_controls(self, *_args) -> None:
-        enabled = self.temperature_control_enabled.isChecked() and self.worker is None
+        recovery = bool(getattr(self.controller, "mode_recovery_required", False))
+        pending_snapshot = self._pending_work_snapshot()
+        pending = pending_snapshot.pending
+        control_pending = pending_snapshot.control_pending
+        reading_ramp = self._ramp_tables_handle is not None
+        enabled = (
+            self.temperature_control_enabled.isChecked()
+            and self.worker is None
+            and self._workflow_intent is None
+            and not recovery
+            and not control_pending
+            and not pending
+            and not reading_ramp
+        )
         for widget in (
             self.sample_target, self.sample_ramp_rate, self.temperature_tolerance,
             self.temperature_stable, self.temperature_timeout,
@@ -891,13 +1049,21 @@ class MCD2100Panel(QWidget):
 
     @Slot()
     def apply_temperature(self) -> None:
-        if self._temperature_apply_handle is not None:
+        if (self._temperature_apply_handle is not None
+                or self._ramp_tables_handle is not None
+                or self._workflow_intent is not None):
             return
         if not self._connected:
             self._show_error("Connect the attoDRY2100 before applying temperature")
             return
         if self.worker is not None or self._externally_busy:
             self._show_error("Temperature cannot be changed while an MCD workflow is active")
+            return
+        if bool(getattr(self.controller, "mode_recovery_required", False)):
+            self._show_error("Magnet mode recovery is required; use Prepare magnet first")
+            return
+        if self._pending_work_snapshot().pending:
+            self._show_error("attoDRY2100 owner work is still draining")
             return
         if not self.temperature_control_enabled.isChecked():
             self._show_error("Enable Control temperature before applying the target")
@@ -937,7 +1103,9 @@ class MCD2100Panel(QWidget):
         handle = self._temperature_apply_handle
         if handle is None:
             return
-        if getattr(getattr(handle, "state", None), "name", "") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        state = getattr(getattr(handle, "state", None), "name", "")
+        if state not in {"SUCCEEDED", "FAILED", "CANCELLED"} and not (
+                state == "TIMED_OUT_DRAINING" and bool(getattr(handle, "drained_done", False))):
             QTimer.singleShot(20, self._poll_apply_temperature)
             return
         self._temperature_apply_handle = None
@@ -949,6 +1117,9 @@ class MCD2100Panel(QWidget):
             self._show_error(f"Temperature apply failed: {exc}")
         else:
             self._applied_sample_target_k = float(self.sample_target.value())
+            invalidate = getattr(self.controller, "invalidate_display_cache", None)
+            if callable(invalidate):
+                invalidate("temperature")
             self._on_temperature_snapshot(snapshot)
             self._append_log(
                 f"Sample temperature target applied immediately: "
@@ -974,14 +1145,16 @@ class MCD2100Panel(QWidget):
             not self._connected or self.worker is not None
             or self._temperature_apply_handle is not None
             or self._temperature_monitor_handle is not None
+            or self._ramp_tables_handle is not None
+            or self._workflow_intent is not None
         ):
             return
-        read = getattr(self.controller, "read_temperature_snapshot_async", None)
+        read = getattr(self.controller, "read_display_temperature_async", None)
         if not callable(read):
             self._temperature_monitor_timer.stop()
             return
         try:
-            self._temperature_monitor_handle = read()
+            self._temperature_monitor_handle = read(source="monitor")
         except Exception as exc:
             self._temperature_monitor_timer.stop()
             self._show_error(f"Temperature telemetry failed: {exc}")
@@ -992,7 +1165,9 @@ class MCD2100Panel(QWidget):
         handle = self._temperature_monitor_handle
         if handle is None:
             return
-        if getattr(getattr(handle, "state", None), "name", "") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        state = getattr(getattr(handle, "state", None), "name", "")
+        if state not in {"SUCCEEDED", "FAILED", "CANCELLED"} and not (
+                state == "TIMED_OUT_DRAINING" and bool(getattr(handle, "drained_done", False))):
             QTimer.singleShot(20, self._poll_applied_temperature)
             return
         self._temperature_monitor_handle = None
@@ -1000,10 +1175,25 @@ class MCD2100Panel(QWidget):
             snapshot = handle.result(timeout=0)
             handle.wait_drained(timeout=0)
         except Exception as exc:
-            self._temperature_monitor_timer.stop()
-            self._show_error(f"Temperature telemetry failed: {exc}")
+            # A display subscriber can time out while its owner still drains.
+            # Preserve the owner completion timestamp/generation when the
+            # late display result is available, rather than making a cache hit
+            # appear newly measured.
+            try:
+                snapshot = handle.wait_drained(timeout=0)
+            except Exception:
+                self._temperature_monitor_timer.stop()
+                self._show_error(f"Temperature telemetry failed: {exc}")
+                return
+            self._on_temperature_snapshot(
+                snapshot, completed_at=getattr(handle, "completed_at", None),
+                generation=getattr(handle, "generation", None),
+            )
         else:
-            self._on_temperature_snapshot(snapshot)
+            self._on_temperature_snapshot(
+                snapshot, completed_at=getattr(handle, "completed_at", None),
+                generation=getattr(handle, "generation", None),
+            )
             if self._temperature_is_stable(snapshot):
                 self._temperature_monitor_timer.stop()
 
@@ -1011,7 +1201,11 @@ class MCD2100Panel(QWidget):
         for name, slot in (
             ("connected", self._on_connected), ("disconnected", self._on_disconnected),
             ("state_changed", self._on_controller_state),
+            ("work_status_changed", self._on_work_status_changed),
             ("snapshot_updated", self._on_snapshot), ("error", self._show_error),
+            ("display_snapshot_updated", self._on_snapshot),
+            ("display_temperature_updated", self._on_temperature_snapshot),
+            ("display_cycle_finished", self._on_display_cycle_finished),
         ):
             signal = getattr(self.controller, name, None)
             if signal is not None and hasattr(signal, "connect"):
@@ -1854,7 +2048,196 @@ class MCD2100Panel(QWidget):
 
     def set_externally_busy(self, busy: bool):
         self._externally_busy = bool(busy)
+        if self._workflow_intent is not None:
+            self._advance_workflow_intent(self._workflow_intent.token)
+            self._refresh_controls()
+            return
+        if not self._externally_busy:
+            self._restore_workflow_display_state()
+        if not self._externally_busy and self._ramp_auto_pending:
+            # Let an in-flight controller display cycle publish its final
+            # drain state before retrying automatic ramp admission.  The
+            # queued callback is still local and performs no I/O by itself.
+            if bool(getattr(self.controller, "_display_polling_enabled", False)):
+                generation = self._ramp_auto_generation
+                QTimer.singleShot(
+                    0, lambda: (
+                        self._start_ramp_tables_read(auto=True)
+                        if generation == getattr(self.controller, "generation", generation)
+                        else None
+                    )
+                )
+            else:
+                self._start_ramp_tables_read(auto=True)
         self._refresh_controls()
+
+    def _pending_work_snapshot(self):
+        snapshot = getattr(self.controller, "pending_work_snapshot", None)
+        if callable(snapshot):
+            return snapshot()
+        pending = bool(getattr(self.controller, "has_pending_work", False))
+        slots = getattr(self.controller, "_display_slots", {})
+        display_pending = any(value is not None for value in slots.values())
+        return SimpleNamespace(
+            generation=getattr(self.controller, "generation", None),
+            pending=pending, display_pending=display_pending,
+            control_pending=pending and not display_pending,
+            pending_request_ids=(), display_request_ids=(),
+        )
+
+    def _workflow_admission_error(self, operation, snapshot=None, *, intent=None):
+        """Return a lifecycle conflict before a worker is launched."""
+        snapshot = snapshot or self._pending_work_snapshot()
+        if self._closing:
+            return "The MCD panel is closing"
+        if (intent is not None and intent.generation
+                != getattr(self.controller, "generation", intent.generation)):
+            return "The attoDRY2100 connection generation changed"
+        if not self._connected or self._connect_handle is not None or self._disconnect_handle is not None:
+            return "Connect the attoDRY2100 before starting"
+        if self.worker is not None or (self.thread is not None and self.thread.isRunning()):
+            return "Wait for the current operation to finish"
+        if self._workflow_intent is not None and self._workflow_intent is not intent:
+            return "Wait for the current operation to finish"
+        if self._ramp_tables_handle is not None or self._temperature_apply_handle is not None:
+            return "Wait for the current operation to finish"
+        if self._externally_busy:
+            return "Another MCD workflow is using the shared instruments"
+        if snapshot.control_pending:
+            return "attoDRY2100 owner work is still draining"
+        if operation != "magnet_preparation" and bool(
+                getattr(self.controller, "mode_recovery_required", False)):
+            return "Magnet mode recovery is required; use Prepare magnet first"
+        return None
+
+    def _restore_workflow_display_state(self):
+        saved = self._workflow_restore_state
+        if saved is None:
+            return
+        saved_generation = getattr(saved, "generation", None)
+        current_generation = getattr(self.controller, "generation", None)
+        if (saved_generation is not None and current_generation is not None
+                and saved_generation != current_generation):
+            # Do not apply state captured from a previous connection.
+            self._workflow_restore_state = None
+            return
+        if (self._closing or not self._connected or self._externally_busy
+                or self.worker is not None
+                or (self.thread is not None and self.thread.isRunning())
+                or self._workflow_intent is not None
+                or bool(getattr(self.controller, "mode_recovery_required", False))
+                or self._pending_work_snapshot().control_pending
+                or self._pending_work_snapshot().pending):
+            return
+        self._workflow_restore_state = None
+        polling = getattr(self.controller, "set_polling_enabled", None)
+        if callable(polling):
+            polling(bool(saved.polling))
+        if saved.monitor:
+            self._temperature_monitor_timer.start()
+        else:
+            self._temperature_monitor_timer.stop()
+
+    def _handoff_worker(self, worker, operation, metadata_run=None):
+        """Launch now or defer behind already accepted display requests."""
+        snapshot = self._pending_work_snapshot()
+        admission_error = self._workflow_admission_error(operation, snapshot)
+        if admission_error is not None:
+            if metadata_run is not None:
+                self._finalize_workflow_intent(
+                    SimpleNamespace(metadata_run=metadata_run), error=admission_error
+                )
+            self._show_error(admission_error)
+            return False
+        if self._workflow_restore_state is None:
+            self._workflow_restore_state = SimpleNamespace(
+                polling=bool(getattr(self.controller, "_display_polling_enabled", False)),
+                monitor=self._temperature_monitor_timer.isActive(),
+                generation=getattr(self.controller, "generation", None),
+            )
+        if not snapshot.display_pending:
+            try:
+                self._launch_worker(worker, operation)
+            except Exception as exc:
+                if metadata_run is not None:
+                    try:
+                        metadata_run.fail(exc)
+                    except Exception:
+                        pass
+                self._show_error(str(exc))
+                self._restore_workflow_display_state()
+                self._release_interlock_if_drained()
+                return False
+            return True
+        self._workflow_intent_token += 1
+        intent = SimpleNamespace(
+            token=self._workflow_intent_token,
+            generation=getattr(self.controller, "generation", None),
+            worker=worker, operation=operation, metadata_run=metadata_run,
+        )
+        # Install before emitting the shared lock signal; MainWindow callbacks
+        # must observe the intent rather than race a new automatic read.
+        self._workflow_intent = intent
+        self._workflow_waiting_drain = False
+        self._interlock_held = True
+        self.run_state_changed.emit(True)
+        polling = getattr(self.controller, "set_polling_enabled", None)
+        if callable(polling):
+            polling(False)
+        self._temperature_monitor_timer.stop()
+        self._terminal_status = "Waiting for display telemetry to drain"
+        self.status.setText(self._terminal_status)
+        self.stop_btn.setText("Cancel waiting")
+        self._advance_workflow_intent(intent.token)
+        self._refresh_controls()
+        return True
+
+    def _finalize_workflow_intent(self, intent, *, error=None):
+        run = getattr(intent, "metadata_run", None)
+        if run is None:
+            return
+        try:
+            if run.metadata.get("status") == "running":
+                if error is None:
+                    run.cancel("workflow handoff cancelled")
+                else:
+                    run.fail(error)
+        except Exception:
+            pass
+
+    def _advance_workflow_intent(self, token):
+        intent = self._workflow_intent
+        if intent is None or intent.token != token:
+            return
+        snapshot = self._pending_work_snapshot()
+        admission_error = self._workflow_admission_error(
+            intent.operation, snapshot, intent=intent
+        )
+        if admission_error is not None:
+            self._workflow_waiting_drain = snapshot.display_pending
+            self._workflow_intent = None
+            self._finalize_workflow_intent(intent, error=admission_error)
+            self._terminal_status = "Workflow handoff cancelled"
+            self.status.setText(self._terminal_status)
+            self._refresh_controls()
+            self._release_interlock_if_drained()
+            self._restore_workflow_display_state()
+            return
+        if snapshot.display_pending:
+            self._terminal_status = "Waiting for display telemetry to drain"
+            self.status.setText(self._terminal_status)
+            QTimer.singleShot(25, lambda: self._advance_workflow_intent(token))
+            return
+        self._workflow_intent = None
+        self._workflow_waiting_drain = False
+        try:
+            self._launch_worker(intent.worker, intent.operation, from_intent=True)
+        except Exception as exc:
+            self._finalize_workflow_intent(intent, error=exc)
+            self._show_error(str(exc))
+            self._release_interlock_if_drained()
+            self._refresh_controls()
+            self._restore_workflow_display_state()
 
     @Slot()
     def connect_instrument(self):
@@ -1877,7 +2260,9 @@ class MCD2100Panel(QWidget):
         handle = self._connect_handle
         if handle is None:
             return
-        if getattr(getattr(handle, "state", None), "name", "") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        state = getattr(getattr(handle, "state", None), "name", "")
+        if state not in {"SUCCEEDED", "FAILED", "CANCELLED"} and not (
+                state == "TIMED_OUT_DRAINING" and bool(getattr(handle, "drained_done", False))):
             QTimer.singleShot(20, self._poll_connect)
             return
         self._connect_handle = None
@@ -1896,8 +2281,12 @@ class MCD2100Panel(QWidget):
     def disconnect_instrument(self):
         if (
             not self._connected or self.worker is not None
+            or self._ramp_tables_handle is not None
             or self._disconnect_handle is not None
             or self._temperature_apply_handle is not None
+            or self._workflow_intent is not None
+            or bool(getattr(self.controller, "mode_recovery_required", False))
+            or self._pending_work_snapshot().control_pending
         ):
             return
         self.connection_status.setText("Disconnecting…")
@@ -1912,7 +2301,9 @@ class MCD2100Panel(QWidget):
         handle = self._disconnect_handle
         if handle is None:
             return
-        if getattr(getattr(handle, "state", None), "name", "") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        state = getattr(getattr(handle, "state", None), "name", "")
+        if state not in {"SUCCEEDED", "FAILED", "CANCELLED"} and not (
+                state == "TIMED_OUT_DRAINING" and bool(getattr(handle, "drained_done", False))):
             QTimer.singleShot(20, self._poll_disconnect)
             return
         self._disconnect_handle = None
@@ -1927,40 +2318,115 @@ class MCD2100Panel(QWidget):
 
     @Slot()
     def refresh_telemetry(self):
-        if not self._connected:
+        if self._workflow_intent is not None:
             return
+        control_pending = self._pending_work_snapshot().control_pending
+        if (
+            not self._connected or self._ramp_tables_handle is not None
+            or self.worker is not None or self._temperature_apply_handle is not None
+            or self._telemetry_cycle is not None
+            or bool(getattr(self.controller, "mode_recovery_required", False))
+            or control_pending
+        ):
+            return
+        magnet_reader = getattr(self.controller, "read_display_snapshot_async", None)
+        temperature_reader = getattr(self.controller, "read_display_temperature_async", None)
+        if not callable(magnet_reader) or not callable(temperature_reader):
+            self._show_error("Display telemetry broker is unavailable")
+            return
+        self._telemetry_generation = getattr(self.controller, "generation", None)
+        cycle = {"magnet": None, "temperature": None, "done": set(),
+                 "timed_out": set(), "errors": {}, "generation": self._telemetry_generation}
+        cycle["started_at"] = time.monotonic()
+        self._telemetry_cycle = cycle
+        self.refresh_btn.setText("Refreshing…")
         try:
-            handle = self.controller.read_snapshot_async()
+            cycle["magnet"] = magnet_reader(max_age_s=0.5, source="manual")
+            cycle["temperature"] = temperature_reader(max_age_s=0.5, source="manual")
         except Exception as exc:
+            self._telemetry_cycle = None
+            self.refresh_btn.setText("Refresh telemetry")
             self._show_error(str(exc))
+            self._refresh_controls()
             return
-        self._telemetry_handle = handle
-        QTimer.singleShot(0, lambda: self._poll_telemetry(handle))
+        self._refresh_controls()
+        QTimer.singleShot(0, lambda: self._poll_telemetry(cycle))
 
-    def _poll_telemetry(self, handle):
-        if getattr(getattr(handle, "state", None), "name", "") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
-            QTimer.singleShot(20, lambda: self._poll_telemetry(handle))
+    def _poll_telemetry(self, cycle=None):
+        if cycle is None:
+            cycle = self._telemetry_cycle
+        if cycle is None or cycle is not self._telemetry_cycle:
             return
-        try:
-            snap = handle.result(timeout=0)
-            handle.wait_drained(timeout=0)
-        except Exception as exc:
-            self._show_error(f"Telemetry failed: {exc}")
-        else:
-            self._on_snapshot(snap)
-            read_temperature = getattr(self.controller, "read_temperature_snapshot_async", None)
-            if callable(read_temperature):
-                try:
-                    temperature_handle = read_temperature()
-                except Exception as exc:
-                    self._show_error(f"Temperature telemetry failed: {exc}")
+        current_generation = getattr(self.controller, "generation", cycle.get("generation"))
+        if (cycle.get("generation") is not None and current_generation is not None
+                and current_generation != cycle.get("generation")):
+            self._telemetry_cycle = None
+            self.refresh_btn.setText("Refresh telemetry")
+            self.telemetry_note.setText("Telemetry refresh discarded after reconnect")
+            self._refresh_controls()
+            return
+        for group, handle in (("magnet", cycle["magnet"]), ("temperature", cycle["temperature"])):
+            if group in cycle["done"]:
+                continue
+            state = getattr(getattr(handle, "state", None), "name", "")
+            drained_done = bool(getattr(handle, "drained_done", False))
+            if state not in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT_DRAINING"}:
+                continue
+            if state == "TIMED_OUT_DRAINING" and not drained_done:
+                cycle["timed_out"].add(group)
+                self.telemetry_note.setText("Refresh timed out; waiting for device response")
+                continue
+            result = None
+            try:
+                result = handle.result(timeout=0)
+            except Exception as exc:
+                cycle["errors"][group] = exc
+                if "timed out" in str(exc).lower() or state == "TIMED_OUT_DRAINING":
+                    cycle["timed_out"].add(group)
+            try:
+                drained = handle.wait_drained(timeout=0)
+            except concurrent.futures.TimeoutError:
+                continue
+            except Exception as exc:
+                cycle["errors"].setdefault(group, exc)
+                drained = None
+            result = drained if drained is not None else result
+            if result is not None:
+                completed_at = getattr(handle, "completed_at", None)
+                if group == "magnet":
+                    self._on_snapshot(result, completed_at=completed_at)
                 else:
-                    QTimer.singleShot(
-                        0, lambda: self._poll_temperature_telemetry(temperature_handle)
-                    )
+                    self._on_temperature_snapshot(result, completed_at=completed_at)
+            cycle["done"].add(group)
+        if len(cycle["done"]) < 2:
+            QTimer.singleShot(20, lambda: self._poll_telemetry(cycle))
+            return
+        if cycle.get("generation") == getattr(self.controller, "generation", cycle.get("generation")):
+            self._ramp_auto_telemetry_ready = True
+        self._telemetry_cycle = None
+        self.refresh_btn.setText("Refresh telemetry")
+        errors = [f"{group}: {error}" for group, error in cycle["errors"].items()]
+        if errors:
+            self._show_error("Telemetry failed: " + " | ".join(errors))
+            self._append_log(
+                f"Telemetry refresh partial/errors ({len(errors)} group(s)) after "
+                f"{max(0.0, time.monotonic() - cycle.get('started_at', time.monotonic())):.3f}s"
+            )
+        else:
+            self._append_log(
+                f"Telemetry refresh completed in "
+                f"{max(0.0, time.monotonic() - cycle.get('started_at', time.monotonic())):.3f}s"
+            )
+        if self._ramp_auto_pending and self._workflow_intent is None:
+            self._start_ramp_tables_read(auto=True)
+        if cycle["timed_out"] and not errors:
+            self.telemetry_note.setText("Refresh timed out; waiting for device response")
+        self._refresh_controls()
 
     def _poll_temperature_telemetry(self, handle):
-        if getattr(getattr(handle, "state", None), "name", "") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+        state = getattr(getattr(handle, "state", None), "name", "")
+        if state not in {"SUCCEEDED", "FAILED", "CANCELLED"} and not (
+                state == "TIMED_OUT_DRAINING" and bool(getattr(handle, "drained_done", False))):
             QTimer.singleShot(20, lambda: self._poll_temperature_telemetry(handle))
             return
         try:
@@ -1971,25 +2437,364 @@ class MCD2100Panel(QWidget):
         else:
             self._on_temperature_snapshot(snapshot)
 
+    @Slot()
+    def read_ramp_tables(self):
+        self._start_ramp_tables_read(auto=False)
+
+    def view_ramp_tables(self):
+        report = self._ramp_tables_report
+        if report is None:
+            self._show_error("No ramp-table report is cached yet")
+            return
+        self._show_ramp_tables_report(report)
+
+    def _on_display_cycle_finished(self, generation):
+        if self._closing or self._workflow_intent is not None:
+            return
+        if generation != getattr(self.controller, "generation", generation):
+            return
+        self._ramp_auto_telemetry_ready = True
+        if self._ramp_auto_pending:
+            self._start_ramp_tables_read(auto=True)
+
+    def _start_ramp_tables_read(self, *, auto=False):
+        if self._closing or self._workflow_intent is not None or self._workflow_waiting_drain:
+            return
+        if self._ramp_tables_handle is not None:
+            return
+        generation = getattr(self.controller, "generation", None)
+        if auto and (not self._ramp_auto_pending or self._ramp_auto_attempted
+                     or generation != self._ramp_auto_generation
+                     or not self._ramp_auto_telemetry_ready):
+            return
+        if self.thread is not None and self.thread.isRunning():
+            return
+        if (getattr(self.controller, "_display_poll_cycle", None) is not None
+                or self._telemetry_cycle is not None):
+            return
+        if (
+            not self._connected
+            or self.worker is not None
+            or self._externally_busy
+            or self._temperature_apply_handle is not None
+            or bool(getattr(self.controller, "mode_recovery_required", False))
+            or self._pending_work_snapshot().control_pending
+        ):
+            self._show_error("Ramp-table read is unavailable while the instrument is busy or disconnected")
+            return
+        pending_snapshot = self._pending_work_snapshot()
+        pending = pending_snapshot.pending
+        display_pending = pending_snapshot.display_pending
+        owner_requests = getattr(self.controller, "_requests", {})
+        non_display_pending = any(
+            getattr(request, "command", None).name != "READ_RAMP_TABLES"
+            and getattr(request, "source", "fresh") not in {"manual", "background", "monitor"}
+            for request in owner_requests.values()
+            if getattr(getattr(request, "state", None), "name", "")
+            in {"QUEUED", "RUNNING", "TIMED_OUT_DRAINING"}
+        )
+        if pending_snapshot.control_pending or (pending and not display_pending and non_display_pending):
+            return
+        reader = getattr(self.controller, "read_ramp_tables_async", None)
+        if not callable(reader):
+            self._show_error("The connected attoDRY2100 does not expose ramp-table diagnostics")
+            if auto:
+                self._ramp_auto_attempted = True
+                self._ramp_auto_pending = False
+            return
+        self._ramp_tables_auto_active = bool(auto)
+        self._ramp_tables_request_generation = generation
+        self._ramp_tables_request_token = self._ramp_tables_shutdown_token
+        self._ramp_tables_started_at = time.monotonic()
+        self._interlock_held = True
+        self.run_state_changed.emit(True)
+        self.ramp_tables_status.setText("Reading ramp tables…")
+        self._ramp_tables_timed_out = False
+        try:
+            self._ramp_tables_handle = reader()
+        except Exception as exc:
+            self._ramp_tables_handle = None
+            self.ramp_tables_status.setText("Ramp-table read failed")
+            self._ramp_tables_cache_valid = False
+            self._ramp_tables_last_error = str(exc)
+            if auto:
+                self._ramp_auto_attempted = True
+                self._ramp_auto_pending = False
+            self._show_error(str(exc))
+            self._release_interlock_if_drained()
+            self._refresh_controls()
+            return
+        accepted = getattr(self._ramp_tables_handle, "accepted", False) is True
+        if accepted and self._ramp_auto_pending:
+            self._ramp_auto_attempted = True
+            self._ramp_auto_pending = False
+        handle = self._ramp_tables_handle
+        QTimer.singleShot(0, lambda: self._poll_ramp_tables(handle))
+        self._refresh_controls()
+
+    def _show_ramp_tables_report(self, report):
+        self._ramp_tables_report = report
+        if self._ramp_tables_dialog is not None:
+            self._ramp_tables_dialog.close()
+        generation = self._ramp_tables_cache_generation
+        current_generation = getattr(self.controller, "generation", generation)
+        generation_stale = (
+            generation is not None and current_generation is not None
+            and generation != current_generation
+        )
+        stale = not self._ramp_tables_cache_valid or generation_stale
+        if generation_stale or not self._connected:
+            stale_reason = "previous connection / stale"
+        elif not self._ramp_tables_cache_valid and self._ramp_tables_last_error:
+            stale_reason = "latest read failed; historical"
+        elif stale:
+            stale_reason = "historical / stale"
+        else:
+            stale_reason = None
+        self._ramp_tables_dialog = _RampTablesDialog(
+            report, self, generation=generation, read_at=self._ramp_tables_read_at,
+            elapsed_s=self._ramp_tables_elapsed_s,
+            stale=stale, stale_reason=stale_reason,
+            last_error=self._ramp_tables_last_error,
+        )
+        self._ramp_tables_dialog.show()
+
+    def _store_ramp_tables_report(self, report, *, elapsed_s=None, generation=None):
+        self._ramp_tables_report = report
+        self._ramp_tables_cache_generation = (
+            generation if generation is not None
+            else getattr(self.controller, "generation", None)
+        )
+        self._ramp_tables_read_at = datetime.now().astimezone()
+        self._ramp_tables_elapsed_s = elapsed_s
+        self._ramp_tables_cache_valid = True
+
+    @staticmethod
+    def _ramp_table_error_messages(report):
+        """Return one ordered message per table error, without mutating report.
+
+        The adapter preserves a row failure in both the table-level and row
+        fields.  Deduplicate only within each table so the two SDK tables keep
+        independent error evidence.
+        """
+        messages = []
+        for table in (getattr(report, "current", None), getattr(report, "default", None)):
+            if table is None:
+                continue
+            seen = set()
+            table_errors = getattr(table, "errors", ()) or ()
+            if isinstance(table_errors, (str, bytes)):
+                table_errors = (table_errors,)
+            candidates = [str(error) for error in table_errors if error is not None]
+            candidates.extend(
+                str(row.error)
+                for row in (getattr(table, "rows", ()) or ())
+                if getattr(row, "error", None) is not None
+            )
+            for message in candidates:
+                if message not in seen:
+                    seen.add(message)
+                    messages.append(message)
+        return messages
+
+    def _poll_ramp_tables(self, handle=None):
+        active = self._ramp_tables_handle
+        if active is None or (handle is not None and handle is not active):
+            return
+        state = getattr(getattr(active, "state", None), "name", "")
+        stale_request = (
+            not self._connected
+            or
+            getattr(active, "generation", self._ramp_tables_request_generation)
+            != getattr(self.controller, "generation", self._ramp_tables_request_generation)
+            or self._ramp_tables_request_token != self._ramp_tables_shutdown_token
+        )
+        timed_out = self._ramp_tables_timed_out or state == "TIMED_OUT_DRAINING"
+        if timed_out:
+            self._ramp_tables_timed_out = True
+        if state not in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT_DRAINING"}:
+            QTimer.singleShot(25, lambda: self._poll_ramp_tables(active))
+            return
+        client_result = None
+        client_error = None
+        if state == "SUCCEEDED" and not timed_out:
+            try:
+                client_result = active.result(timeout=0)
+            except Exception as exc:
+                client_error = exc
+                timed_out = "timed out" in str(exc).lower()
+                self._ramp_tables_timed_out = timed_out
+        elif state in {"FAILED", "CANCELLED"}:
+            try:
+                client_result = active.result(timeout=0)
+            except Exception as exc:
+                client_error = exc
+        try:
+            drained = active.wait_drained(timeout=0)
+        except concurrent.futures.TimeoutError:
+            if not stale_request:
+                self.ramp_tables_status.setText(
+                    "Read timed out; waiting for owner drain…"
+                    if timed_out else "Reading ramp tables…"
+                )
+            QTimer.singleShot(25, lambda: self._poll_ramp_tables(active))
+            return
+        except Exception as exc:
+            client_error = client_error or exc
+            drained = None
+        report = drained if drained is not None else client_result
+        auto = self._ramp_tables_auto_active
+        self._ramp_tables_auto_active = False
+        self._ramp_tables_handle = None
+        if stale_request:
+            self._refresh_controls()
+            self._release_interlock_if_drained()
+            return
+        stored_current = False
+        ramp_errors = []
+        if report is not None and hasattr(report, "current"):
+            elapsed_s = (
+                max(0.0, time.monotonic() - self._ramp_tables_started_at)
+                if self._ramp_tables_started_at is not None else None
+            )
+            self._store_ramp_tables_report(
+                report, elapsed_s=elapsed_s,
+                generation=self._ramp_tables_request_generation,
+            )
+            stored_current = True
+            ramp_errors = self._ramp_table_error_messages(report)
+            if ramp_errors:
+                self._ramp_tables_last_error = (
+                    f"{len(ramp_errors)} ramp-table error(s): "
+                    + " | ".join(ramp_errors)
+                )
+                self._append_log(
+                    f"Ramp-table read completed with {len(ramp_errors)} error(s): "
+                    + " | ".join(ramp_errors)
+                )
+        if client_error is not None:
+            reason = str(client_error)
+            self.ramp_tables_status.setText(
+                "Read timed out; partial results retained; "
+                f"error: {reason}" if timed_out else f"Read finished with errors: {reason}"
+            )
+            self._ramp_tables_cache_valid = False
+            self._ramp_tables_last_error = reason
+            self._show_error(reason)
+        elif timed_out:
+            suffix = f" ({len(ramp_errors)} error(s))" if ramp_errors else ""
+            self.ramp_tables_status.setText(
+                f"Read timed out; partial results retained{suffix}"
+            )
+        elif report is not None and (
+            getattr(report, "interrupted", False)
+            or any(
+                getattr(table, "errors", ()) or ()
+                for table in (getattr(report, "current", None), getattr(report, "default", None))
+                if table is not None
+            )
+            or any(
+                getattr(row, "error", None)
+                for table in (getattr(report, "current", None), getattr(report, "default", None))
+                if table is not None
+                for row in (getattr(table, "rows", ()) or ())
+            )
+        ):
+            self.ramp_tables_status.setText(
+                f"Read finished with errors ({len(ramp_errors)} error(s))"
+                if ramp_errors else "Read finished with errors"
+            )
+            self._ramp_tables_cache_valid = True
+        else:
+            self.ramp_tables_status.setText("Ramp tables read")
+            self._ramp_tables_last_error = None
+        if stored_current and self._ramp_tables_read_at is not None:
+            elapsed = (
+                f" · elapsed {self._ramp_tables_elapsed_s:.3f}s"
+                if self._ramp_tables_elapsed_s is not None else ""
+            )
+            self.ramp_tables_status.setToolTip(
+                f"Read at {self._ramp_tables_read_at.isoformat()}{elapsed}"
+            )
+            self._append_log(
+                f"Ramp-table read {'automatic' if auto else 'manual'} completed; "
+                f"read_at={self._ramp_tables_read_at.isoformat()}"
+                + (f" elapsed={self._ramp_tables_elapsed_s:.3f}s"
+                   if self._ramp_tables_elapsed_s is not None else "")
+            )
+        self._refresh_controls()
+        self._release_interlock_if_drained()
+        # The owner terminal signal may be queued behind this polling callback;
+        # retry once after that bookkeeping opportunity without issuing any
+        # device request.
+        QTimer.singleShot(0, self._release_interlock_if_drained)
+
     @Slot(object)
     def _on_connected(self, identity=None):
+        if self._closing:
+            return
+        if self._workflow_intent is not None:
+            self._advance_workflow_intent(self._workflow_intent.token)
+            return
+        generation = getattr(self.controller, "generation", None)
+        if self._connected and generation == self._ramp_auto_generation:
+            self._refresh_controls()
+            return
         self._connected = True
+        if (self._ramp_tables_cache_generation is not None
+                and generation != self._ramp_tables_cache_generation):
+            self._ramp_tables_cache_valid = False
+        self._ramp_auto_generation = generation
+        self._ramp_auto_pending = True
+        self._ramp_auto_attempted = False
+        self._ramp_auto_telemetry_ready = False
         self._detached_after_completion = False
+        self._telemetry_cycle = None
+        self._last_magnet_success_at = None
+        self._last_temperature_success_at = None
         host = getattr(identity, "host", "") if identity is not None else ""
         self.connection_status.setText(f"Connected{f' — {host}' if host else ''}")
         self.connect_btn.setText("Connect")
         self.telemetry_note.setText("Live telemetry — awaiting update")
         self._terminal_status = "Ready"
         self.status.setText("Ready")
+        polling = getattr(self.controller, "set_polling_enabled", None)
+        if callable(polling):
+            polling(True)
         self._refresh_controls()
 
     @Slot()
     def _on_disconnected(self):
+        if self._workflow_intent is not None:
+            intent = self._workflow_intent
+            self._workflow_intent = None
+            self._workflow_intent_token += 1
+            self._workflow_waiting_drain = self._pending_work_snapshot().pending
+            self._finalize_workflow_intent(intent, error="workflow handoff cancelled after disconnect")
+        # Disconnection invalidates saved state even when no waiting intent
+        # was installed (for example, an idle worker handoff).
+        self._workflow_restore_state = None
         self._connected = False
+        self._ramp_auto_pending = False
+        self._ramp_tables_cache_valid = False
+        if self._ramp_tables_report is not None:
+            self.ramp_tables_status.setText("Ramp tables are historical (previous connection)")
+        elif self._ramp_tables_last_error:
+            self.ramp_tables_status.setText(
+                f"Ramp-table read failed; historical ({self._ramp_tables_last_error})"
+            )
+        else:
+            self.ramp_tables_status.setText("Ramp tables unavailable (disconnected)")
+        self._telemetry_cycle = None
+        polling = getattr(self.controller, "set_polling_enabled", None)
+        if callable(polling):
+            polling(False)
         self._temperature_monitor_timer.stop()
         self._temperature_monitor_handle = None
         self.sample_temperature_setpoint_value.setText("N/A")
         self.temperature_apply_status.setText("Disconnected")
+        if self._last_magnet_success_at is not None or self._last_temperature_success_at is not None:
+            self.telemetry_note.setText("Telemetry values are last-known, not live")
         if self._detached_after_completion:
             self._show_completed_detach()
         else:
@@ -2004,11 +2809,32 @@ class MCD2100Panel(QWidget):
     def _on_controller_state(self, state):
         """Preserve the reason when completed-run detach settles to DISCONNECTED."""
         name = getattr(state, "name", str(state)).upper()
+        if name == "RECOVERY_REQUIRED":
+            self._terminal_status = "Magnet mode recovery required"
+            self.status.setText(self._terminal_status)
         if name == "DETACHED":
             self._detached_after_completion = True
+        if name == "DISCONNECTED" and self._detached_after_completion:
             self._connected = False
             self._show_completed_detach()
             self._refresh_controls()
+        else:
+            self._refresh_controls()
+        self._release_interlock_if_drained()
+        self._restore_workflow_display_state()
+
+    @Slot()
+    def _on_work_status_changed(self):
+        """Refresh pending-owner controls after terminal bookkeeping."""
+        if self._workflow_intent is not None:
+            self._advance_workflow_intent(self._workflow_intent.token)
+            self._refresh_controls()
+            return
+        if self._ramp_auto_pending:
+            self._start_ramp_tables_read(auto=True)
+        self._refresh_controls()
+        self._release_interlock_if_drained()
+        self._restore_workflow_display_state()
 
     def _show_completed_detach(self):
         self.connection_status.setText("Detached — magnet left at final field")
@@ -2024,8 +2850,28 @@ class MCD2100Panel(QWidget):
         self.status.setText(self._terminal_status)
 
     @Slot(object)
-    def _on_snapshot(self, snapshot):
+    def _on_snapshot(self, snapshot, *, completed_at=None, generation=None):
+        generation = generation if generation is not None else getattr(snapshot, "generation", None)
+        if hasattr(snapshot, "value") and hasattr(snapshot, "completed_at"):
+            completed_at = snapshot.completed_at
+            snapshot = snapshot.value
+        current_generation = getattr(self.controller, "generation", generation)
+        if (generation is not None and current_generation is not None
+                and generation != current_generation):
+            return
+        progress = self._preparation_progress
+        sampled_at = getattr(snapshot, "monotonic_s", None)
+        if (progress is not None and progress["stage"] == "mode readiness"
+                and not self._preparation_closed and sampled_at is not None
+                and sampled_at >= progress["started_at"]
+                and (progress["sampled_at"] is None or sampled_at > progress["sampled_at"])):
+            # Mode preparation already publishes owner snapshots. Reuse them.
+            self._preparation_progress = dict(progress, sampled_at=sampled_at,
+                field_t=getattr(snapshot, "field_t", None),
+                mode_observation=preparation_mode_observation(snapshot))
+            self._refresh_activity()
         self._last_telemetry_time = datetime.now().astimezone()
+        self._last_magnet_success_at = completed_at if completed_at is not None else time.monotonic()
         def display(value, suffix=""):
             return f"{float(value):.6g}{suffix}" if isinstance(value, (int, float)) and math.isfinite(float(value)) else "N/A"
         self.field_value.setText(display(getattr(snapshot, "field_t", None), " T"))
@@ -2043,12 +2889,19 @@ class MCD2100Panel(QWidget):
         quench = getattr(status, "quench", None) if status is not None else None
         self.quench_value.setText("YES" if quench is True else "No" if quench is False else "N/A")
         if self._connected:
-            self.telemetry_note.setText(
-                f"Live telemetry updated {self._last_telemetry_time.strftime('%H:%M:%S')}"
-            )
+            self._refresh_telemetry_age()
 
     @Slot(object)
-    def _on_temperature_snapshot(self, snapshot):
+    def _on_temperature_snapshot(self, snapshot, *, completed_at=None, generation=None):
+        generation = generation if generation is not None else getattr(snapshot, "generation", None)
+        if hasattr(snapshot, "value") and hasattr(snapshot, "completed_at"):
+            completed_at = snapshot.completed_at
+            snapshot = snapshot.value
+        current_generation = getattr(self.controller, "generation", generation)
+        if (generation is not None and current_generation is not None
+                and generation != current_generation):
+            return
+        self._last_temperature_success_at = completed_at if completed_at is not None else time.monotonic()
         def display(value):
             return (
                 f"{float(value):.6g} K"
@@ -2081,6 +2934,17 @@ class MCD2100Panel(QWidget):
         else:
             self.temperature_apply_status.setText("Temperature control active")
 
+    def _refresh_telemetry_age(self) -> None:
+        if not self._connected:
+            return
+        now = time.monotonic()
+        def age(value):
+            return "never" if value is None else f"{max(0.0, now - value):.1f}s ago"
+        self.telemetry_note.setText(
+            f"Live telemetry · Magnet {age(self._last_magnet_success_at)} · "
+            f"Temperature {age(self._last_temperature_success_at)}"
+        )
+
     @Slot(str)
     def _show_error(self, message):
         self.error_display.setPlainText(str(message))
@@ -2089,8 +2953,116 @@ class MCD2100Panel(QWidget):
             self._append_log(f"ERROR: {message}")
 
     @Slot()
+    def prepare_magnet(self):
+        admission_error = self._workflow_admission_error("magnet_preparation")
+        if admission_error is not None:
+            self._show_error(admission_error)
+            return
+        if (self.worker is not None or self._temperature_apply_handle is not None
+                or self._ramp_tables_handle is not None
+                or self._workflow_intent is not None):
+            self._show_error("Wait for the current operation to finish")
+            return
+        if self._pending_work_snapshot().control_pending:
+            self._show_error("attoDRY2100 owner work is still draining")
+            return
+        if self._externally_busy:
+            self._show_error("Another MCD workflow is using the shared instruments")
+            return
+        if not self._connected:
+            self._show_error("Connect the attoDRY2100 before preparing the magnet")
+            return
+        try:
+            start_field = float(self.start_field.text().strip())
+            if not math.isfinite(start_field) or abs(start_field) > 6.0:
+                raise ValueError("Start field must be finite and within ±6 T")
+        except (TypeError, ValueError) as exc:
+            self._show_error(str(exc))
+            return
+        try:
+            worker = MagnetPreparationWorker(
+                self.controller, start_field,
+                targets_t=(start_field,),
+                gate_t=float(cfg.mcd2100.gate_t or 0.001),
+                poll_interval_s=cfg.attodry2100.poll_interval_s,
+                timeout_s=cfg.attodry2100.mode_prepare_timeout_s,
+                position_timeout_s=cfg.attodry2100.position_timeout_s,
+                operation_timeout_s=cfg.mcd2100.operation_timeout_s,
+                cleanup_timeout_s=cfg.mcd2100.operation_timeout_s,
+            )
+        except Exception as exc:
+            self._show_error(f"Magnet preparation could not start: {exc}")
+            return
+        self.error_display.clear(); self.error_display.setVisible(False)
+        self._handoff_worker(worker, "magnet_preparation")
+
+    def _launch_worker(self, worker, operation="measurement", *, from_intent=False):
+        polling = getattr(self.controller, "set_polling_enabled", None)
+        if callable(polling):
+            polling(False)
+        runner = None
+        thread = None
+        try:
+            runner = _Runner(worker)
+            runner.progress.connect(self._on_progress)
+            runner.spectrum_event.connect(self._on_spectrum_event)
+            runner.log.connect(self._append_log)
+            runner.phase.connect(self._on_phase)
+            runner.preparation_progress.connect(self._on_preparation_progress)
+            thread = QThread(self)
+            runner.moveToThread(thread)
+            thread.started.connect(runner.run)
+            runner.finished.connect(self.terminal)
+            runner.finished.connect(thread.quit, Qt.ConnectionType.DirectConnection)
+            thread.finished.connect(self._thread_finished)
+            # Publish panel ownership only after all pre-start construction
+            # and signal wiring has succeeded.
+            self.worker = worker
+            self.runner = runner
+            self.thread = thread
+        except Exception:
+            self.worker = self.runner = self.thread = None
+            if runner is not None:
+                runner.deleteLater()
+            if thread is not None:
+                thread.deleteLater()
+            raise
+        self._operation = operation
+        self._preparation_progress = None
+        self._preparation_closed = False
+        self._terminal_status = "Preparing magnet" if operation == "magnet_preparation" else "Running"
+        self.status.setText(self._terminal_status)
+        self._active_phase = self._terminal_status
+        self._phase_started_at = time.monotonic()
+        self._last_spectrum_at = None
+        self._spectrum_count = 0
+        self.progress_bar.setValue(0)
+        if not self._interlock_held:
+            self._interlock_held = True
+            self.run_state_changed.emit(True)
+        self._refresh_controls()
+        try:
+            self.thread.start()
+        except Exception:
+            self.worker = self.runner = self.thread = None
+            runner.deleteLater()
+            thread.deleteLater()
+            raise
+
+    @Slot()
     def start(self):
-        if self.worker is not None:
+        admission_error = self._workflow_admission_error("measurement")
+        if admission_error is not None:
+            self._show_error(admission_error)
+            return
+        if (self.worker is not None or self._ramp_tables_handle is not None
+                or self._workflow_intent is not None):
+            return
+        if self._pending_work_snapshot().control_pending:
+            self._show_error("attoDRY2100 owner work is still draining")
+            return
+        if bool(getattr(self.controller, "mode_recovery_required", False)):
+            self._show_error("Magnet mode recovery is required; use Prepare magnet first")
             return
         if self._temperature_apply_handle is not None:
             self._show_error("Wait for the temperature target to finish applying")
@@ -2101,18 +3073,6 @@ class MCD2100Panel(QWidget):
         if not self._connected:
             self._show_error("Connect the attoDRY2100 before starting")
             return
-        if self._lf6 is not None:
-            try:
-                ensure_ready = getattr(self._lf6, "ensure_ready", None)
-                if callable(ensure_ready):
-                    self.status.setText("LightField: Initializing...")
-                    ensure_ready(timeout_s=15.0, poll_interval_s=0.05)
-                lf_ready = getattr(self._lf6, "is_ready", None)
-                if lf_ready is not None and not bool(lf_ready() if callable(lf_ready) else lf_ready):
-                    raise RuntimeError("LightField is not ready; shared controller did not publish READY")
-            except Exception as exc:
-                self._show_error(f"LightField readiness failed: {exc}")
-                return
         if self.apply_voltages.isChecked():
             if self._smu is None or not bool(getattr(self._smu, "is_connected", False)) or getattr(self._smu, "device", None) is None:
                 self._show_error("SMU is not connected")
@@ -2216,7 +3176,7 @@ class MCD2100Panel(QWidget):
                     self._experiment_run.register_condition(
                         condition, condition_id=f"condition-{condition_index}")
                 bind_lightfield_metadata(self._lf6, self._experiment_run)
-            optical = self._optical_factory() if self._optical_factory else _LightFieldRotationService(
+            optical = _LazyOpticalService(self._optical_factory) if self._optical_factory else _LightFieldRotationService(
                 self._lf6, self._rotation, rotator_name, self._smu
             )
             worker = self._worker_factory(
@@ -2260,38 +3220,25 @@ class MCD2100Panel(QWidget):
             return
         self.error_display.clear()
         self.error_display.setVisible(False)
-        self.worker = worker
-        self.runner = _Runner(worker)
-        self.runner.progress.connect(self._on_progress)
-        self.runner.spectrum_event.connect(self._on_spectrum_event)
-        self.runner.log.connect(self._append_log)
-        self.runner.phase.connect(self._on_phase)
-        self.thread = QThread(self)
-        self.runner.moveToThread(self.thread)
-        self.thread.started.connect(self.runner.run)
-        self.runner.finished.connect(self.terminal)
-        # QThread lives in the GUI thread; invoke its thread-safe quit directly
-        # so owner-loop termination never depends on another queued GUI event.
-        self.runner.finished.connect(
-            self.thread.quit, Qt.ConnectionType.DirectConnection
-        )
-        self.thread.finished.connect(self._thread_finished)
-        self._terminal_status = "Running"
-        self.status.setText("Running")
-        self._active_phase = "Starting"
-        self._phase_started_at = time.monotonic()
-        self._last_spectrum_at = None
-        self._spectrum_count = 0
         self._plot_overlay.setText("Waiting for first spectrum")
         self.spectrum_activity.setText("Spectrum 0 · no spectrum yet")
-        self.progress_bar.setValue(0)
-        self.run_state_changed.emit(True)
-        self._refresh_controls()
-        self.thread.start()
+        self._handoff_worker(worker, "measurement", self._experiment_run)
 
     @Slot()
     def stop(self):
         if self.worker is None:
+            intent = self._workflow_intent
+            if intent is not None:
+                self._workflow_intent = None
+                self._workflow_intent_token += 1
+                self._finalize_workflow_intent(intent)
+                self._workflow_waiting_drain = self._pending_work_snapshot().display_pending
+                self._terminal_status = "Workflow handoff cancelled"
+                self.status.setText(self._terminal_status)
+                self.stop_btn.setText("Stop")
+                self._refresh_controls()
+                self._release_interlock_if_drained()
+                self._restore_workflow_display_state()
             return
         self.worker.request_cancel()
         self._on_phase("Cancellation requested — waiting for safe cleanup")
@@ -2338,6 +3285,13 @@ class MCD2100Panel(QWidget):
 
     @Slot(str)
     def _on_phase(self, message: str) -> None:
+        sender = self.sender()
+        if isinstance(sender, _Runner) and (sender is not self.runner or self._preparation_closed
+                and self._terminal_status in {"FAILED", "CANCELLED", "COMPLETED", "Magnet ready at Start"}):
+            return
+        if str(message).startswith(("Cancellation", "Run failed", "Stopping magnet")):
+            self._preparation_progress = None
+            self._preparation_closed = True
         self._active_phase = str(message)
         self._phase_started_at = time.monotonic()
         self._settle_deadline = None
@@ -2351,10 +3305,29 @@ class MCD2100Panel(QWidget):
         self._append_log(self._active_phase)
         self._refresh_activity()
 
+    @Slot(object)
+    def _on_preparation_progress(self, progress):
+        if self.worker is None or self.sender() is not self.runner or self._preparation_closed:
+            return
+        if progress["stage"] in {"ready", "position timeout"}:
+            self._preparation_progress = None
+            self._preparation_closed = True
+            return
+        self._preparation_progress = dict(progress)
+        if progress["stage"] == "mode readiness":
+            self._mode_progress_logged_at = time.monotonic()
+        self._refresh_activity()
+
     @Slot()
     def _refresh_activity(self) -> None:
         now = time.monotonic()
         running = self.worker is not None
+        preparation = self._preparation_progress if running else None
+        if preparation is not None:
+            self.status.setText(format_preparation_progress(preparation, now))
+            if preparation["stage"] == "mode readiness" and now - self._mode_progress_logged_at >= 15.:
+                self._append_log(format_preparation_progress(preparation, now))
+                self._mode_progress_logged_at = now
         since_spectrum = (
             None if self._last_spectrum_at is None
             else max(0.0, now - self._last_spectrum_at)
@@ -2363,7 +3336,10 @@ class MCD2100Panel(QWidget):
         waiting = any(token in phase_lower for token in (
             "settling", "ramping gate", "positioning", "configuring", "starting"
         ))
-        if running and since_spectrum is not None and since_spectrum < 1.5:
+        if preparation is not None:
+            self.run_activity.setText("● Preparing magnet")
+            self.run_activity.setStyleSheet("color: #b45309; font-weight: 700;")
+        elif running and since_spectrum is not None and since_spectrum < 1.5:
             self.run_activity.setText("● New spectrum")
             self.run_activity.setStyleSheet("color: #15803d; font-weight: 700;")
         elif running and self._settle_deadline is not None:
@@ -2408,10 +3384,25 @@ class MCD2100Panel(QWidget):
 
     @Slot(object)
     def _on_terminal(self, result):
+        self._preparation_progress = None
+        self._preparation_closed = True
         terminal = str(result.get("status", "FAILED")).upper()
         if terminal not in {"COMPLETED", "CANCELLED", "FAILED"}:
             terminal = "FAILED"
-        if terminal == "COMPLETED":
+        standalone_prepare = result.get("operation") == "magnet_preparation"
+        if standalone_prepare and terminal == "COMPLETED":
+            self._detached_after_completion = False
+            self._connected = True
+            self._terminal_status = "Magnet ready at Start"
+            self.status.setText(self._terminal_status)
+        elif standalone_prepare:
+            self._terminal_status = terminal
+            self.status.setText(
+                "Preparation cancelled; device mode transition may continue. Use Prepare magnet to recheck readiness."
+                if terminal == "CANCELLED" or result.get("recovery_required")
+                else terminal
+            )
+        elif terminal == "COMPLETED":
             self._detached_after_completion = True
             self._connected = False
             self._show_completed_detach()
@@ -2425,10 +3416,15 @@ class MCD2100Panel(QWidget):
         self._phase_started_at = time.monotonic()
         self._append_log(f"Run finished: {terminal}; {spectra} spectra written")
         self._refresh_activity()
-        error = result.get("error") or result.get("cleanup_error")
-        if error:
-            self._show_error(str(error))
+        primary_error = result.get("error")
+        cleanup_error = result.get("cleanup_error")
+        errors = [str(value) for value in (primary_error, cleanup_error) if value]
+        if errors:
+            self._show_error("\n".join(errors))
         run = getattr(self, "_experiment_run", None)
+        if standalone_prepare:
+            self._refresh_controls()
+            return
         if run is not None:
             try:
                 csv_paths = result.get("csv_paths") or ([result.get("csv_path")] if result.get("csv_path") else [])
@@ -2459,39 +3455,147 @@ class MCD2100Panel(QWidget):
 
     @Slot()
     def _thread_finished(self):
+        # Capture before releasing the shared interlock: its synchronous
+        # callback may re-enter the panel and consume saved state.
+        had_restore_state = self._workflow_restore_state is not None
         if self.runner is not None:
             self.runner.deleteLater()
         if self.thread is not None:
             self.thread.deleteLater()
         self.worker = self.runner = self.thread = None
-        self.run_state_changed.emit(False)
+        if self._ramp_auto_pending:
+            self._start_ramp_tables_read(auto=True)
+        self._release_interlock_if_drained()
+        self._restore_workflow_display_state()
+        if (not had_restore_state and self._workflow_restore_state is None
+                and self._connected and not self._closing):
+            polling = getattr(self.controller, "set_polling_enabled", None)
+            if callable(polling):
+                polling(True)
         self.status.setText(self._terminal_status)
         self._refresh_controls()
 
     def _refresh_controls(self):
         running = self.worker is not None
         applying_temperature = self._temperature_apply_handle is not None
+        reading_ramp = self._ramp_tables_handle is not None
+        recovery = bool(getattr(self.controller, "mode_recovery_required", False))
+        pending_snapshot = self._pending_work_snapshot()
+        pending = pending_snapshot.pending
+        display_pending = pending_snapshot.display_pending
+        control_pending = pending_snapshot.control_pending
+        refreshing = self._telemetry_cycle is not None
+        waiting_intent = self._workflow_intent is not None
+        # An in-flight display cycle is admissible for a workflow handoff;
+        # the intent pauses its continuations and waits for both owners.
+        blocked = recovery or control_pending or reading_ramp or waiting_intent
         self.start_btn.setEnabled(
-            self._connected and not running and not self._externally_busy and not applying_temperature
+            self._connected and not running and not blocked and not self._externally_busy and not applying_temperature
         )
-        self.stop_btn.setEnabled(running)
+        self.prepare_magnet_btn.setEnabled(
+            self._connected and not running and not control_pending and not reading_ramp
+            and not waiting_intent and not self._externally_busy and not applying_temperature
+        )
+        self.stop_btn.setEnabled(running or waiting_intent)
+        self.stop_btn.setText("Cancel waiting" if waiting_intent and not running else "Stop")
         self.connect_btn.setEnabled(not self._connected and not running and self._connect_handle is None)
         self.disconnect_btn.setEnabled(
             self._connected and not running and self._disconnect_handle is None
+            and not applying_temperature and not blocked and not refreshing
+        )
+        self.read_ramp_tables_btn.setEnabled(
+            self._connected and not running and not blocked and not refreshing
+            and not self._externally_busy
+        )
+        self.view_ramp_tables_btn.setEnabled(self._ramp_tables_report is not None)
+        self.refresh_btn.setEnabled(
+            self._connected and not running and not blocked and not refreshing
             and not applying_temperature
         )
-        self.refresh_btn.setEnabled(self._connected and not running and not applying_temperature)
-        self.temperature_control_enabled.setEnabled(not running)
+        self.temperature_control_enabled.setEnabled(not running and not blocked)
         self.initial_voltage_settle.setEnabled(not running)
         self.voltage_settle.setEnabled(not running)
         self._update_temperature_controls()
 
+    def _release_interlock_if_drained(self) -> None:
+        """Release the shared workflow lock only after owner work drains."""
+        if not self._interlock_held:
+            return
+        # Runner completion is a separate lifecycle from owner request drain;
+        # never unlock while this panel still owns a live worker/thread.
+        if self.worker is not None:
+            return
+        if self.thread is not None and self.thread.isRunning():
+            return
+        if self._workflow_intent is not None:
+            return
+        if self._workflow_waiting_drain:
+            if self._pending_work_snapshot().pending:
+                return
+            self._workflow_waiting_drain = False
+        # A timed-out read can finish its client future before the SDK owner
+        # has drained. Keep the shared workflow lock until that owner work is
+        # fully terminal, even if a stale status signal arrives first.
+        if self._ramp_tables_handle is not None:
+            return
+        if bool(getattr(self.controller, "mode_recovery_required", False)):
+            return
+        if self._pending_work_snapshot().control_pending:
+            return
+        self._interlock_held = False
+        self.run_state_changed.emit(False)
+
     def shutdown(self, timeout_ms=30_000):
+        restore_state = self._workflow_restore_state or SimpleNamespace(
+            polling=bool(getattr(self.controller, "_display_polling_enabled", False)),
+            monitor=self._temperature_monitor_timer.isActive(),
+            generation=getattr(self.controller, "generation", None),
+        )
+
+        def refused():
+            # MainWindow keeps the window open when shutdown is refused.
+            # Recovery must remain available, with display work deferred until
+            # the existing owner and any uncertain mode transition are safe.
+            self._closing = False
+            self._workflow_restore_state = restore_state
+            self._telemetry_age_timer.start()
+            self._restore_workflow_display_state()
+            self._refresh_controls()
+            return False
+
+        self._closing = True
+        if self._workflow_intent is not None:
+            intent = self._workflow_intent
+            self._workflow_intent = None
+            self._workflow_intent_token += 1
+            self._workflow_waiting_drain = self._pending_work_snapshot().pending
+            self._finalize_workflow_intent(intent, error="workflow handoff cancelled during shutdown")
+        # Prevent late terminal callbacks from restoring a prior connection.
+        self._workflow_restore_state = None
         self._temperature_monitor_timer.stop()
+        self._telemetry_age_timer.stop()
+        self._telemetry_cycle = None
+        self._ramp_auto_pending = False
+        self._ramp_tables_shutdown_token += 1
+        polling = getattr(self.controller, "set_polling_enabled", None)
+        if callable(polling):
+            polling(False)
         if self.worker is not None:
             self.worker.request_cancel()
         thread = self.thread
         if thread is not None and thread.isRunning():
             if not thread.wait(int(timeout_ms)):
-                return False
+                return refused()
+        if self._ramp_tables_handle is not None:
+            cancel = getattr(self.controller, "cancel_ramp_tables", None)
+            if callable(cancel):
+                cancel()
+            self._show_error("Ramp-table read is still draining")
+            return refused()
+        if bool(getattr(self.controller, "mode_recovery_required", False)):
+            self._show_error("Magnet mode recovery is required; use Prepare magnet before shutdown")
+            return refused()
+        if bool(getattr(self.controller, "has_pending_work", False)):
+            self._show_error("attoDRY2100 owner work is still draining")
+            return refused()
         return True

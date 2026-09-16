@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.engine.mcd2100_worker import DiscreteMCD2100Worker as MCD2100Worker, MCD2100Worker as ContinuousWorker
+from ui.mcd2100_panel import _LazyOpticalService
 
 
 class _ContinuousHandle:
@@ -57,6 +58,15 @@ class _ContinuousFakeController:
         self.sample_temperatures = []
     def _handle(self, name, value=True):
         self.events.append(name); return _ContinuousHandle(self.events, name, value)
+    def _preparation_snapshot(self, target):
+        return _safe_snapshot(float(target), driven=True, persistent=False, field_control=True)
+    def preflight_magnet_async(self, targets=()):
+        target = tuple(targets)[0] if targets else self.target
+        return self._handle("preflight", self._preparation_snapshot(target))
+    def prepare_driven_mode_async(self):
+        return self._handle("prepare_driven", SimpleNamespace(mode_requested=False))
+    def cancel_magnet_preparation(self):
+        self.events.append("cancel_prepare")
     def set_h_setpoint_async(self, value):
         self.target = float(value)
         return self._handle(f"set:{float(value):g}")
@@ -104,6 +114,21 @@ class _ContinuousFakeOptical:
 
 
 class ContinuousContractTests(unittest.TestCase):
+    def test_start_uses_position_budget_independently_and_publishes_preparation(self):
+        from utils.config import AttoDRY2100Config
+        controller = _ContinuousFakeController([_safe_snapshot(.01)] * 20)
+        controller.config = AttoDRY2100Config(mode_prepare_timeout_s=.001, position_timeout_s=1.)
+        clock = _ContinuousClock()
+        progress = []
+        with tempfile.TemporaryDirectory() as td:
+            worker = ContinuousWorker(controller, _ContinuousFakeOptical(), 0., .01, [0.], td,
+                poll_interval_s=.01, gate_timeout_s=.3, sleep=clock.sleep, clock=clock)
+            worker.set_callbacks(preparation_progress=progress.append)
+            result = worker.run()
+        self.assertEqual(result["status"], "COMPLETED", result.get("error"))
+        self.assertEqual(progress[-1]["stage"], "ready")
+        self.assertEqual(progress[-1]["stable_count"], 5)
+
     def _run_scripted(self, fields, *, start=0.0, stop=.01, angles=(0.0,), bidirectional=False,
                       optical=None, fsync=None):
         controller = _ContinuousFakeController(fields)
@@ -120,6 +145,43 @@ class ContinuousContractTests(unittest.TestCase):
                     sleep=clock.sleep, clock=clock,
                 ).run()
         return result, controller, optical, tempdir
+
+    def test_early_magnet_api_failure_does_not_construct_lazy_optics(self):
+        constructed = []
+        service = _LazyOpticalService(
+            lambda: constructed.append("constructed") or object()
+        )
+        with tempfile.TemporaryDirectory() as td:
+            result = ContinuousWorker(
+                object(), service, 0.0, .01, [0.0], td,
+                poll_interval_s=.01, gate_timeout_s=.1,
+                operation_timeout_s=.2, cleanup_timeout_s=.2,
+            ).run()
+        self.assertEqual(result["status"], "FAILED")
+        self.assertIn("preparation API", result["error"])
+        self.assertEqual(constructed, [])
+
+    def test_magnet_preparation_failure_is_terminal_in_metadata(self):
+        class ErrorHandle:
+            def result(self, timeout=None):
+                raise RuntimeError("unsafe preflight")
+            def wait_drained(self, timeout=None):
+                raise RuntimeError("unsafe preflight")
+        class FailingController(_ContinuousFakeController):
+            def preflight_magnet_async(self, targets=()):
+                return ErrorHandle()
+        controller = FailingController([_safe_snapshot(0.0)])
+        with tempfile.TemporaryDirectory() as td:
+            result = ContinuousWorker(
+                controller, _ContinuousFakeOptical(), 0.0, .01, [0.0], td,
+                poll_interval_s=.01, gate_timeout_s=.1,
+                operation_timeout_s=.2, cleanup_timeout_s=.2,
+            ).run()
+            self.assertEqual(result["status"], "FAILED")
+            with open(result["metadata_path"], encoding="utf-8") as stream:
+                metadata = json.load(stream)
+        self.assertEqual(metadata["magnet_preparation"]["status"], "FAILED")
+        self.assertIn("unsafe preflight", metadata["magnet_preparation"]["error"])
 
     def test_continuous_reverse_executes_two_legs_without_stop(self):
         fields = ([_safe_snapshot(0.0)] * 5 +
@@ -246,6 +308,26 @@ class ContinuousContractTests(unittest.TestCase):
         self.assertEqual(metadata["temperature_requested"]["vti_coordination"], "cryostat automatic")
         self.assertIsNone(metadata["temperature_requested"]["ramp_rate_k_per_min"])
         self.assertEqual(metadata["temperature_requested"]["ramp_control"], "unchanged")
+
+    def test_scan_accepts_1_67_k_temperature_target(self):
+        fields = ([_safe_snapshot(0.0)] * 5 + [
+            _safe_snapshot(.002), _safe_snapshot(.003), _safe_snapshot(.008),
+            _safe_snapshot(.01),
+        ])
+        controller = _ContinuousFakeController(fields)
+        controller.temperature_snapshots = [_temperature_snapshot(1.67)]
+        clock = _ContinuousClock()
+        with tempfile.TemporaryDirectory() as td:
+            result = ContinuousWorker(
+                controller, _ContinuousFakeOptical(), 0.0, .01, [0.0], td,
+                temperature_control_enabled=True, sample_target_k=1.67,
+                temperature_stable_s=0.0, temperature_timeout_s=1.0,
+                poll_interval_s=.01, gate_timeout_s=.3,
+                operation_timeout_s=2.0, cleanup_timeout_s=1.0,
+                sleep=clock.sleep, clock=clock,
+            ).run()
+        self.assertEqual(result["status"], "COMPLETED", result)
+        self.assertIn("temperature.configure:1.67:1", controller.events)
 
     def test_temperature_timeout_is_bounded_and_prevents_field_and_optical_start(self):
         controller = _ContinuousFakeController([_safe_snapshot(0.0)] * 20)
@@ -545,7 +627,21 @@ class ContinuousContractTests(unittest.TestCase):
         class Controller:
             def __init__(self):
                 self.events, self.fields = [], [0.0] * 5 + [0.0, 0.005, 0.01]
+                self.mode_recovery_required = False
             def _h(self, name, value=True): self.events.append(name); return Handle(self.events, name, value)
+            def preflight_magnet_async(self, targets=()):
+                target = tuple(targets)[0] if targets else 0.0
+                self.events.append("preflight")
+                status = SimpleNamespace(quench=False, driven_mode=True,
+                                         persistent_mode=False,
+                                         backend_details={"field_control": True,
+                                                          "h_state": "RAMPING"})
+                return self._h("preflight", SimpleNamespace(
+                    field_t=float(target), temperature_k=4.0,
+                    setpoint_t=float(target), status=status))
+            def prepare_driven_mode_async(self):
+                return self._h("prepare_driven", SimpleNamespace(mode_requested=False))
+            def cancel_magnet_preparation(self): self.events.append("cancel_prepare")
             def set_h_setpoint_async(self, value): return self._h("set:" + str(value))
             def start_field_control_async(self): return self._h("start")
             def read_snapshot_async(self):

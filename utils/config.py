@@ -297,6 +297,11 @@ class AttoDRY2100Config:
     minimum_temperature_k: Optional[float] = None
     maximum_temperature_k: Optional[float] = 7.0
     poll_interval_s: float = 0.5
+    mode_prepare_timeout_s: float = 300.0
+    # Software wait limit for reaching Start, independent of mode readiness
+    # and individual SDK requests. This does not set or estimate a ramp rate.
+    position_timeout_s: float = 1800.0
+    mode_lead_tolerance_t: float = 0.001
 
 
 @dataclass

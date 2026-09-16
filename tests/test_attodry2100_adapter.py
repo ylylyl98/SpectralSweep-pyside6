@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from app.devices.attodry2100_adapter import (
     AttoDRY2100SafetyError, AttoDRY2100StoppedError,
     AttoDRY2100VerificationError,
     HARD_MAX_FIELD_T, HARD_MAX_TEMPERATURE_K,
+    AttoDRY2100Snapshot, AttoDRY2100Status,
 )
 
 
@@ -74,8 +76,346 @@ class FakeDevice:
 
 
 class AdapterTests(unittest.TestCase):
+    def test_rpc_diagnostics_emit_bounded_debug_without_arguments(self):
+        adapter = AttoDRY2100Adapter("unused", device_factory=lambda _: FakeDevice("host"))
+        clock_values = iter((10.0, 10.25, 11.0, 11.5))
+        adapter._clock = lambda: next(clock_values)
+        with patch("app.devices.attodry2100_adapter.logger") as logger:
+            self.assertEqual(adapter._rpc_call("sample.getTemperature", lambda value: value, 3), 3)
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                adapter._rpc_call("vti.getTemperature", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        logger.debug.assert_any_call(
+            "attoDRY2100 RPC method=%s started_at=%s finished_at=%s outcome=succeeded",
+            "sample.getTemperature", 10.0, 10.25,
+        )
+        logger.debug.assert_any_call(
+            "attoDRY2100 RPC method=%s started_at=%s finished_at=%s outcome=%s",
+            "vti.getTemperature", 11.0, 11.5, "RuntimeError",
+        )
+        self.assertEqual(adapter.telemetry_diagnostics()[0].method, "sample.getTemperature")
+
+    def test_read_ramp_tables_preserves_raw_rows_and_default_argument_order(self):
+        device = FakeDevice("host")
+        device.magnet.getNumRampRates = lambda channel: (device.magnet.calls.append(("getNumRampRates", (channel,))) or 2)
+        device.magnet.getRampRate = lambda channel, index: (
+            device.magnet.calls.append(("getRampRate", (channel, index)))
+            or (("current-range", index), 0.000000123456789 + index)
+        )
+        device.magnet.getNumDefaultRampRates = lambda channel: (device.magnet.calls.append(("getNumDefaultRampRates", (channel,))) or 1)
+        device.magnet.getDefaultRampRate = lambda index, channel: (
+            device.magnet.calls.append(("getDefaultRampRate", (index, channel)))
+            or (("default-range", index), "raw-default-rate")
+        )
+        adapter = AttoDRY2100Adapter(
+            "unused", channel=2, maximum_field_t=6.0,
+            maximum_temperature_k=7.0, device_factory=lambda _: device,
+        )
+        adapter.connect()
+        device.magnet.calls.clear()
+        report = adapter.read_ramp_tables()
+        self.assertEqual(report.channel, 2)
+        self.assertEqual(report.current.reported_count, 2)
+        self.assertEqual(report.default.reported_count, 1)
+        self.assertEqual(report.current.rows[0].raw_rate, 0.000000123456789)
+        self.assertEqual(report.default.rows[0].raw_rate, "raw-default-rate")
+        self.assertIn(("getRampRate", (2, 0)), device.magnet.calls)
+        self.assertIn(("getDefaultRampRate", (0, 2)), device.magnet.calls)
+        self.assertFalse(any(name.startswith(("set", "start", "stop"))
+                             for name, _ in device.magnet.calls))
+        adapter.close()
+
+    def test_read_ramp_tables_is_bounded_and_preserves_partial_row_errors(self):
+        device = FakeDevice("host")
+        device.magnet.getNumRampRates = lambda channel: 33
+        device.magnet.getNumDefaultRampRates = lambda channel: 2
+        def default_rate(index, channel):
+            device.magnet.calls.append(("getDefaultRampRate", (index, channel)))
+            if index == 0:
+                return ("range", index), index + 0.5
+            raise OSError("row failed")
+        device.magnet.getDefaultRampRate = default_rate
+        adapter = AttoDRY2100Adapter(
+            "unused", channel=2, maximum_field_t=6.0,
+            maximum_temperature_k=7.0, device_factory=lambda _: device,
+        )
+        adapter.connect()
+        report = adapter.read_ramp_tables()
+        self.assertEqual(report.current.rows, ())
+        self.assertIn("getNumRampRates", report.current.errors[0])
+        self.assertEqual(report.default.rows[0].raw_rate, 0.5)
+        self.assertIn("getDefaultRampRate", report.default.rows[1].error)
+        self.assertEqual(
+            [args for name, args in device.magnet.calls if name == "getDefaultRampRate"],
+            [(0, 2), (1, 2)],
+        )
+        adapter.close()
+
+    def test_read_ramp_tables_zero_and_invalid_counts_do_not_probe_rows(self):
+        for reported in (None, True, -1, 1.0, "2", 33):
+            with self.subTest(reported=reported):
+                device = FakeDevice("host")
+                device.magnet.getNumRampRates = lambda channel, value=reported: value
+                device.magnet.getNumDefaultRampRates = lambda channel: 0
+                device.magnet.getRampRate = lambda *args: (_ for _ in ()).throw(
+                    AssertionError("invalid count must not request rows")
+                )
+                adapter = AttoDRY2100Adapter(
+                    "unused", channel=2, maximum_field_t=6.0,
+                    maximum_temperature_k=7.0, device_factory=lambda _: device,
+                )
+                adapter.connect()
+                report = adapter.read_ramp_tables()
+                self.assertEqual(report.current.rows, ())
+                self.assertEqual(report.default.reported_count, 0)
+                adapter.close()
+
+    def test_read_ramp_tables_records_missing_count_and_malformed_raw_rows(self):
+        for mode in ("missing", "exception"):
+            with self.subTest(mode=mode):
+                device = FakeDevice("host")
+                if mode == "missing":
+                    device.magnet.getNumRampRates = None
+                else:
+                    def count(_channel):
+                        raise OSError("count failed")
+                    device.magnet.getNumRampRates = count
+                device.magnet.getNumDefaultRampRates = lambda _channel: 2
+                unusual = object()
+                device.magnet.getDefaultRampRate = lambda index, channel: (
+                    (unusual, "raw") if index == 0 else ("only-one-value",)
+                )
+                adapter = AttoDRY2100Adapter(
+                    "unused", channel=2, maximum_field_t=6.0,
+                    maximum_temperature_k=7.0, device_factory=lambda _: device,
+                )
+                adapter.connect()
+                report = adapter.read_ramp_tables()
+                self.assertEqual(report.current.rows, ())
+                self.assertTrue(report.current.errors)
+                self.assertIs(report.default.rows[0].raw_range, unusual)
+                self.assertIn("malformed", report.default.rows[1].error)
+                adapter.close()
+
+    def test_read_ramp_tables_cancellation_preserves_inflight_row_and_stops_following_getters(self):
+        device = FakeDevice("host")
+        device.magnet.getNumRampRates = lambda channel: 2
+        device.magnet.getNumDefaultRampRates = lambda channel: 1
+        entered = threading.Event()
+        release = threading.Event()
+        cancel = threading.Event()
+        def current_rate(channel, index):
+            device.magnet.calls.append(("getRampRate", (channel, index)))
+            entered.set()
+            release.wait(1.0)
+            cancel.set()
+            return ("raw-range", "raw-rate")
+        device.magnet.getRampRate = current_rate
+        device.magnet.getDefaultRampRate = lambda index, channel: (
+            (_ for _ in ()).throw(AssertionError("default table must not start after cancellation"))
+        )
+        adapter = AttoDRY2100Adapter(
+            "unused", channel=2, maximum_field_t=6.0,
+            maximum_temperature_k=7.0, device_factory=lambda _: device,
+        )
+        adapter.connect()
+        result_box = []
+        reader = threading.Thread(
+            target=lambda: result_box.append(adapter.read_ramp_tables(cancel_event=cancel))
+        )
+        reader.start()
+        self.assertTrue(entered.wait(1.0))
+        release.set()
+        reader.join(1.0)
+        self.assertFalse(reader.is_alive())
+        report = result_box[0]
+        self.assertTrue(report.interrupted)
+        self.assertEqual(report.current.rows[0].raw_rate, "raw-rate")
+        self.assertEqual(report.default.rows, ())
+        adapter.close()
+
+    def test_read_ramp_tables_cancelled_before_first_getter_reports_both_tables_unread(self):
+        device = FakeDevice("host")
+        adapter = AttoDRY2100Adapter(
+            "unused", channel=2, maximum_field_t=6.0,
+            maximum_temperature_k=7.0, device_factory=lambda _: device,
+        )
+        adapter.connect()
+        cancel = threading.Event(); cancel.set()
+        report = adapter.read_ramp_tables(cancel_event=cancel)
+        self.assertTrue(report.interrupted)
+        self.assertEqual(report.current.rows, ())
+        self.assertEqual(report.default.rows, ())
+        self.assertFalse(any(name.startswith("getNumRamp") for name, _ in device.magnet.calls))
+        adapter.close()
+
+    def test_telemetry_rpc_diagnostics_time_actual_getters_once_without_arguments(self):
+        device = FakeDevice("host")
+        adapter = AttoDRY2100Adapter(
+            "unused", channel=2, maximum_field_t=6.0,
+            maximum_temperature_k=7.0, device_factory=lambda _: device,
+        )
+        adapter.connect()
+        adapter._clock = iter([10.0, 10.1] * 32).__next__
+        adapter.read_snapshot()
+        diagnostics = adapter.telemetry_diagnostics()
+        methods = [item.method for item in diagnostics]
+        self.assertIn("getH", methods)
+        self.assertIn("getHState", methods)
+        self.assertEqual(len(diagnostics), len(methods))
+        self.assertTrue(all(item.finished_at >= item.started_at for item in diagnostics))
+        adapter.close()
+    def test_preflight_accepts_persistent_inactive_without_writes(self):
+        device = FakeDevice("host")
+        device.magnet.driven_mode = False
+        device.magnet.persistent_mode = True
+        adapter, device = self._motion_adapter(device)
+        device.magnet.calls.clear()
+        snapshot = adapter.preflight_magnet((0.01, 0.02))
+        self.assertFalse(snapshot.status.driven_mode)
+        self.assertFalse(any(name.startswith(("set", "start", "stop"))
+                             for name, _ in device.magnet.calls))
+        adapter.close()
+
+    def test_preflight_rejects_contradictory_modes_and_unsafe_readbacks(self):
+        for driven, persistent, quench in ((True, True, False), (False, False, False),
+                                            (True, False, True)):
+            device = FakeDevice("host")
+            device.magnet.driven_mode = driven
+            device.magnet.persistent_mode = persistent
+            device.magnet.quench = quench
+            adapter, device = self._motion_adapter(device)
+            device.magnet.calls.clear()
+            with self.assertRaises(AttoDRY2100SafetyError):
+                adapter.preflight_magnet((0.01, 0.02))
+            self.assertFalse(any(name.startswith(("set", "start", "stop"))
+                                 for name, _ in device.magnet.calls))
+            adapter.close()
+
+    def test_prepare_requires_three_strict_snapshots_after_mode_request(self):
+        device = FakeDevice("host")
+        device.magnet.driven_mode = False
+        device.magnet.persistent_mode = True
+        device.magnet.field_control = True
+        device.magnet.field_state = "IDLE"
+        device.magnet.getFieldsInLeads = lambda channel: device.magnet.field
+        def set_mode(channel, value):
+            device.magnet.calls.append(("setDrivenMode", (channel, value)))
+            device.magnet.driven_mode = True
+            device.magnet.persistent_mode = False
+        device.magnet.setDrivenMode = set_mode
+        adapter, device = self._motion_adapter(device)
+        adapter._sleep = lambda _: None
+        snapshots = []
+        original = adapter.read_snapshot
+        def scripted():
+            snap = original()
+            snapshots.append(snap)
+            return snap
+        adapter.read_snapshot = scripted
+        result = adapter.prepare_driven_mode(timeout_s=1.0, poll_interval_s=.001)
+        self.assertTrue(result.mode_requested)
+        self.assertEqual([n for n, _ in device.magnet.calls].count("setDrivenMode"), 1)
+        self.assertGreaterEqual(len(snapshots), 3)
+        adapter.close()
+
+    def test_prepare_observe_only_never_repeats_mode_request_and_leads_hot_is_informational(self):
+        device = FakeDevice("host")
+        device.magnet.field_control = True
+        device.magnet.field_state = "idle"
+        device.magnet.getFieldsInLeads = lambda channel: device.magnet.field
+        device.magnet.getLeadsHot = lambda: True
+        adapter, device = self._motion_adapter(device)
+        adapter._sleep = lambda _: None
+        result = adapter.prepare_driven_mode(timeout_s=1.0, poll_interval_s=.001,
+                                             observe_only=True)
+        self.assertFalse(result.mode_requested)
+        self.assertEqual([n for n, _ in device.magnet.calls].count("setDrivenMode"), 0)
+        adapter.close()
+
+    def test_already_driven_active_field_with_optional_mode_telemetry_is_ready_without_write(self):
+        device = FakeDevice("host")
+        device.magnet.field_control = True
+        device.magnet.getPersistentSwitchHeaterStatus = None
+        device.magnet.getFieldsInLeads = None
+        adapter, device = self._motion_adapter(device)
+        device.magnet.calls.clear()
+        result = adapter.prepare_driven_mode(timeout_s=1.0, poll_interval_s=.001,
+                                             allow_mode_request=False)
+        self.assertFalse(result.mode_requested)
+        self.assertEqual(device.magnet.calls.count(("setDrivenMode", (0, True))), 0)
+        adapter.close()
+
+    def test_mode_ack_is_not_readiness_until_heater_and_three_samples_are_verified(self):
+        device = FakeDevice("host")
+        device.magnet.driven_mode = False
+        device.magnet.persistent_mode = True
+        device.magnet.field_state = "IDLE"
+        device.magnet.field_control = False
+        device.magnet.getFieldsInLeads = lambda channel: device.magnet.field
+        heater_reads = [0]
+        def heater(*_args):
+            heater_reads[0] += 1
+            device.magnet.calls.append(("getPersistentSwitchHeaterStatus", (0,)))
+            return heater_reads[0] == 1 or heater_reads[0] >= 4
+        device.magnet.getPersistentSwitchHeaterStatus = heater
+        def set_mode(channel, value):
+            device.magnet.calls.append(("setDrivenMode", (channel, value)))
+            device.magnet.driven_mode, device.magnet.persistent_mode = True, False
+        device.magnet.setDrivenMode = set_mode
+        adapter, device = self._motion_adapter(device)
+        now = [0.0]
+        adapter._clock = lambda: now[0]
+        adapter._sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+        result = adapter.prepare_driven_mode(timeout_s=1.0, poll_interval_s=.01)
+        self.assertTrue(result.mode_requested)
+        self.assertGreaterEqual(heater_reads[0], 5)
+        self.assertEqual([name for name, _ in device.magnet.calls].count("setDrivenMode"), 1)
+        adapter.close()
+
+    def test_prepare_cancellation_during_polling_never_issues_field_commands(self):
+        device = FakeDevice("host")
+        device.magnet.driven_mode = False
+        device.magnet.persistent_mode = True
+        device.magnet.field_state = "IDLE"
+        device.magnet.getFieldsInLeads = lambda channel: device.magnet.field
+        device.magnet.setDrivenMode = lambda channel, value: device.magnet.calls.append(("setDrivenMode", (channel, value)))
+        adapter, device = self._motion_adapter(device)
+        stop = threading.Event()
+        adapter._sleep = lambda _: stop.set()
+        with self.assertRaises(AttoDRY2100StoppedError):
+            adapter.prepare_driven_mode(timeout_s=1.0, poll_interval_s=.01, stop_event=stop)
+        self.assertNotIn("setHSetPoint", [name for name, _ in device.magnet.calls])
+        self.assertNotIn("startFieldControl", [name for name, _ in device.magnet.calls])
+        adapter.close()
+
+    def test_persistent_auxiliary_transition_values_do_not_block_mode_request(self):
+        device = FakeDevice("host")
+        device.magnet.driven_mode = False
+        device.magnet.persistent_mode = True
+        device.magnet.heater_on = False if hasattr(device.magnet, "heater_on") else None
+        device.magnet.field_state = "IDLE"
+        device.magnet.getPersistentSwitchHeaterStatus = lambda *_: False
+        device.magnet.getFieldsInLeads = lambda *_: device.magnet.field + 0.1
+        device.magnet.setDrivenMode = lambda channel, value: device.magnet.calls.append(("setDrivenMode", (channel, value)))
+        adapter, device = self._motion_adapter(device)
+        stop = threading.Event(); adapter._sleep = lambda _: stop.set()
+        with self.assertRaises(AttoDRY2100StoppedError):
+            adapter.prepare_driven_mode(timeout_s=1.0, poll_interval_s=.01, stop_event=stop)
+        self.assertEqual([name for name, _ in device.magnet.calls].count("setDrivenMode"), 1)
+        adapter.close()
+
+    def test_already_driven_without_auxiliary_contradiction_is_compatible_no_write(self):
+        device = FakeDevice("host")
+        device.magnet.field_state = "RAMPING"
+        device.magnet.getPersistentSwitchHeaterStatus = lambda *_: None
+        device.magnet.getFieldsInLeads = lambda *_: None
+        adapter, device = self._motion_adapter(device)
+        result = adapter.prepare_driven_mode(timeout_s=1.0, poll_interval_s=.01)
+        self.assertFalse(result.mode_requested)
+        self.assertNotIn("setDrivenMode", [name for name, _ in device.magnet.calls])
+        adapter.close()
     def test_high_level_sample_temperature_control_never_mutates_vti(self):
-        for target in (8.0, 20.0):
+        for target in (1.67, 1.7, 8.0, 20.0):
             with self.subTest(target=target):
                 device = FakeDevice("host")
                 adapter = AttoDRY2100Adapter(
@@ -152,7 +492,7 @@ class AdapterTests(unittest.TestCase):
             device_factory=lambda _: device,
         )
         adapter.connect()
-        for target, rate in ((1.7, 1.0), (301.0, 1.0), (4.0, 0.09), (4.0, 101.0)):
+        for target, rate in ((1.669, 1.0), (301.0, 1.0), (4.0, 0.09), (4.0, 101.0)):
             with self.subTest(target=target, rate=rate), self.assertRaises(AttoDRY2100SafetyError):
                 adapter.configure_sample_temperature(target, rate)
         original = device.sample.setSetPoint

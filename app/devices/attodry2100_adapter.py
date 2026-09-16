@@ -8,15 +8,20 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import logging
 import math
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 HARD_MAX_FIELD_T = 6.0
 HARD_MAX_TEMPERATURE_K = 7.0
+MAX_RAMP_TABLE_ROWS = 32  # software diagnostic bound; not a firmware limit
+
+logger = logging.getLogger(__name__)
 
 
 class AttoDRY2100Error(RuntimeError): pass
@@ -81,6 +86,45 @@ class AttoDRY2100Snapshot:
     status: AttoDRY2100Status = field(default_factory=AttoDRY2100Status)
     lead_field_t: Optional[float] = None
     capabilities: AttoDRY2100Capabilities = field(default_factory=AttoDRY2100Capabilities)
+
+
+@dataclass(frozen=True)
+class DrivenPreparationResult:
+    snapshot: AttoDRY2100Snapshot
+    mode_requested: bool
+
+
+@dataclass(frozen=True)
+class AttoDRY2100RampRow:
+    index: int
+    raw_range: Any = None
+    raw_rate: Any = None
+    error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class AttoDRY2100RampTable:
+    kind: str
+    reported_count: Any
+    rows: tuple[AttoDRY2100RampRow, ...] = ()
+    errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AttoDRY2100RampTables:
+    channel: int
+    monotonic_s: float
+    current: AttoDRY2100RampTable
+    default: AttoDRY2100RampTable
+    interrupted: bool = False
+
+
+@dataclass(frozen=True)
+class AttoDRY2100RPCDiagnostic:
+    method: str
+    started_at: float
+    finished_at: float
+    outcome: str
 
 
 @dataclass(frozen=True)
@@ -154,6 +198,9 @@ class AttoDRY2100Adapter:
         self._sample = None
         self._vti = None
         self._identity = None
+        self._clock = time.monotonic
+        self._sleep = time.sleep
+        self._rpc_diagnostics = deque(maxlen=256)
 
     @property
     def connected(self): return self._device is not None
@@ -232,7 +279,7 @@ class AttoDRY2100Adapter:
     def _optional(self, name, *args):
         fn = getattr(self._magnet, name, None)
         if not callable(fn): return None
-        try: return fn(*args)
+        try: return self._rpc_call(name, fn, *args)
         except (TimeoutError, TimeoutError) as exc: raise AttoDRY2100TimeoutError(f"{name} channel={self.channel}: {exc}") from exc
         except Exception as exc: raise AttoDRY2100CommunicationError(f"{name} channel={self.channel}: {exc}") from exc
 
@@ -247,7 +294,8 @@ class AttoDRY2100Adapter:
                 raise AttoDRY2100StateError(f"temperature API {name} is unavailable")
             return None
         try:
-            return fn(*args)
+            prefix = "sample" if component is self._sample else "vti" if component is self._vti else "temperature"
+            return self._rpc_call(f"{prefix}.{name}", fn, *args)
         except TimeoutError as exc:
             raise AttoDRY2100TimeoutError(f"temperature {name}: {exc}") from exc
         except Exception as exc:
@@ -256,10 +304,261 @@ class AttoDRY2100Adapter:
     @staticmethod
     def _finite_optional(value, name):
         if value is None: return None
+        if isinstance(value, bool):
+            raise AttoDRY2100TelemetryError(f"{name} must not be boolean")
         try: value = float(value)
         except Exception as exc: raise AttoDRY2100TelemetryError(f"{name} is not numeric") from exc
         if not math.isfinite(value): raise AttoDRY2100TelemetryError(f"{name} is non-finite")
         return value
+
+    @staticmethod
+    def _strict_bool(value, name, *, required=True):
+        if value is None and not required:
+            return None
+        if type(value) is not bool:
+            raise AttoDRY2100TelemetryError(f"{name} must be a boolean")
+        return value
+
+    def _rpc_call(self, method, fn, *args):
+        started = self._clock()
+        try:
+            result = fn(*args)
+        except BaseException as exc:
+            finished = self._clock()
+            self._rpc_diagnostics.append(
+                AttoDRY2100RPCDiagnostic(method, started, finished, type(exc).__name__)
+            )
+            logger.debug("attoDRY2100 RPC method=%s started_at=%s finished_at=%s outcome=%s",
+                         method, started, finished, type(exc).__name__)
+            raise
+        finished = self._clock()
+        self._rpc_diagnostics.append(AttoDRY2100RPCDiagnostic(
+            method, started, finished, "succeeded"
+        ))
+        logger.debug("attoDRY2100 RPC method=%s started_at=%s finished_at=%s outcome=succeeded",
+                     method, started, finished)
+        return result
+
+    def telemetry_diagnostics(self):
+        """Return a copy of bounded actual SDK RPC timings."""
+        return tuple(self._rpc_diagnostics)
+
+    @staticmethod
+    def _valid_mode_pair(snapshot):
+        driven = snapshot.status.driven_mode
+        persistent = snapshot.status.persistent_mode
+        if type(driven) is not bool or type(persistent) is not bool:
+            raise AttoDRY2100SafetyError("attoDRY2100 operating mode telemetry is unavailable or invalid")
+        if driven == persistent:
+            raise AttoDRY2100SafetyError("attoDRY2100 reports contradictory Driven and Persistent modes")
+
+    def _validate_safety_snapshot(self, snap, targets=(), *, require_driven=False):
+        """Validate telemetry before any mutation; this method is read-only."""
+        maximum, maximum_temperature = self._motion_limits()
+        status = snap.status
+        if type(status.quench) is not bool or status.quench is not False:
+            raise AttoDRY2100SafetyError("quench telemetry is not explicitly safe")
+        if isinstance(snap.field_t, bool) or not math.isfinite(float(snap.field_t)):
+            raise AttoDRY2100SafetyError("field telemetry is unavailable or invalid")
+        if abs(float(snap.field_t)) > min(maximum, HARD_MAX_FIELD_T):
+            raise AttoDRY2100SafetyError("current field exceeds configured safety range")
+        if (snap.temperature_k is None or isinstance(snap.temperature_k, bool)
+                or not math.isfinite(float(snap.temperature_k))
+                or float(snap.temperature_k) > maximum_temperature):
+            raise AttoDRY2100SafetyError("temperature telemetry is unavailable or unsafe")
+        details = status.backend_details if isinstance(status.backend_details, Mapping) else {}
+        if type(details.get("field_control")) is not bool:
+            raise AttoDRY2100SafetyError("field-control telemetry is unavailable or invalid")
+        self._valid_mode_pair(snap)
+        if require_driven and (status.driven_mode is not True or status.persistent_mode is not False):
+            raise AttoDRY2100SafetyError("attoDRY2100 is not in Driven mode")
+        for target in tuple(targets or ()):
+            try:
+                target_value = float(target)
+            except (TypeError, ValueError) as exc:
+                raise AttoDRY2100SafetyError("target field must be numeric") from exc
+            if isinstance(target, bool) or not math.isfinite(target_value):
+                raise AttoDRY2100SafetyError("target field must be finite")
+            if abs(target_value) > maximum:
+                raise AttoDRY2100SafetyError("target exceeds configured field limit")
+        return snap
+
+    def preflight_magnet(self, targets_t=(), stop_event=None):
+        """Read and validate magnet safety telemetry without SDK writes."""
+        if stop_event is not None and stop_event.is_set():
+            raise AttoDRY2100StoppedError("stop requested")
+        if not self.connected:
+            raise AttoDRY2100StateError("2100 is not connected")
+        try:
+            snapshot = self.read_snapshot()
+            self._validate_safety_snapshot(snapshot, targets_t, require_driven=False)
+        except AttoDRY2100TelemetryError as exc:
+            raise AttoDRY2100SafetyError("required safety telemetry is unavailable or invalid") from exc
+        if stop_event is not None and stop_event.is_set():
+            raise AttoDRY2100StoppedError("stop requested")
+        return snapshot
+
+    def read_ramp_tables(self, *, cancel_event=None):
+        """Read the SDK's raw current/default ramp tables without mutation.
+
+        This diagnostic path intentionally does not run magnet safety
+        preflight: it only invokes the four documented ramp-table getters,
+        preserving their raw payloads and argument ordering.
+        """
+        if not self.connected:
+            raise AttoDRY2100StateError("2100 is not connected")
+        interrupted = bool(cancel_event is not None and cancel_event.is_set())
+
+        def cancelled():
+            return bool(cancel_event is not None and cancel_event.is_set())
+
+        def unread(kind):
+            return AttoDRY2100RampTable(
+                kind, None, (), (f"{kind} table not read: cancelled",)
+            )
+
+        if interrupted:
+            return AttoDRY2100RampTables(
+                self.channel, self._clock(), unread("current"), unread("default"), True
+            )
+
+        def read_table(kind, count_name, row_name, reverse=False):
+            nonlocal interrupted
+            try:
+                count_fn = getattr(self._magnet, count_name, None)
+                if not callable(count_fn):
+                    raise AttoDRY2100StateError(f"{count_name} API is unavailable")
+                reported = count_fn(self.channel)
+            except Exception as exc:
+                if cancelled():
+                    interrupted = True
+                return AttoDRY2100RampTable(
+                    kind, None, (), (f"{count_name}(channel={self.channel}): {exc}",)
+                )
+            if cancelled():
+                interrupted = True
+                return AttoDRY2100RampTable(
+                    kind, reported, (), (f"{kind} table not read: cancelled",)
+                )
+            if type(reported) is not int or not 0 <= reported <= MAX_RAMP_TABLE_ROWS:
+                return AttoDRY2100RampTable(
+                    kind, reported, (),
+                    (f"{count_name}(channel={self.channel}) reported invalid count {reported!r}; "
+                     f"expected integer 0..{MAX_RAMP_TABLE_ROWS}",),
+                )
+            rows = []
+            errors = []
+            for index in range(reported):
+                if cancelled():
+                    interrupted = True
+                    break
+                try:
+                    getter = getattr(self._magnet, row_name, None)
+                    if not callable(getter):
+                        raise AttoDRY2100StateError(f"{row_name} API is unavailable")
+                    payload = (
+                        getter(index, self.channel)
+                        if reverse else getter(self.channel, index)
+                    )
+                    if not isinstance(payload, (tuple, list)) or len(payload) != 2:
+                        raise ValueError(f"malformed payload {payload!r}")
+                    row = AttoDRY2100RampRow(index, payload[0], payload[1])
+                except Exception as exc:
+                    message = f"{row_name}(channel={self.channel}, index={index}): {exc}"
+                    row = AttoDRY2100RampRow(index, error=message)
+                    errors.append(message)
+                rows.append(row)
+                # Preserve a value returned by the in-flight call, but do not
+                # schedule any further SDK getters after cancellation wins.
+                if cancelled():
+                    interrupted = True
+                    break
+            return AttoDRY2100RampTable(kind, reported, tuple(rows), tuple(errors))
+
+        current = read_table(
+            "current", "getNumRampRates", "getRampRate", reverse=False
+        )
+        if interrupted:
+            default = unread("default")
+        else:
+            default = read_table(
+                "default", "getNumDefaultRampRates", "getDefaultRampRate", reverse=True
+            )
+        return AttoDRY2100RampTables(
+            self.channel, self._clock(), current, default, interrupted
+        )
+
+    @staticmethod
+    def _mode_ready(snapshot, lead_tolerance):
+        status = snapshot.status
+        if (status.driven_mode is not True or status.persistent_mode is not False
+                or status.heater_on is not True):
+            return False
+        hstate = status.field_control_state
+        if not isinstance(hstate, str) or hstate.strip().upper() != "IDLE":
+            return False
+        lead = snapshot.lead_field_t
+        if lead is None or not math.isfinite(lead):
+            return False
+        return abs(lead - snapshot.field_t) <= lead_tolerance
+
+    def prepare_driven_mode(self, *, timeout_s=300.0, poll_interval_s=0.5,
+                            lead_tolerance_t=0.001, stop_event=None,
+                            observe_only=False, allow_mode_request=True,
+                            on_mode_requested=None,
+                            on_snapshot=None):
+        """Request Driven mode once, then require three fresh safe snapshots."""
+        for value, name in ((timeout_s, "timeout_s"), (poll_interval_s, "poll_interval_s"),
+                            (lead_tolerance_t, "lead_tolerance_t")):
+            if isinstance(value, bool):
+                raise ValueError(f"{name} must be positive and finite")
+            try: value = float(value)
+            except (TypeError, ValueError) as exc: raise ValueError(f"{name} must be positive and finite") from exc
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        deadline = self._clock() + float(timeout_s)
+        snapshot = self.preflight_magnet(stop_event=stop_event)
+        if callable(on_snapshot): on_snapshot(snapshot)
+        mode_requested = False
+        # Auxiliary transition evidence is only meaningful once the device is
+        # already Driven. Persistent startup must still get its one high-level
+        # request even when heater/lead telemetry reflects the old mode.
+        contradictory = (snapshot.status.heater_on is False or
+                         (snapshot.lead_field_t is not None and
+                          abs(snapshot.lead_field_t - snapshot.field_t) > float(lead_tolerance_t)))
+        already_driven = (snapshot.status.driven_mode is True and
+                          snapshot.status.persistent_mode is False)
+        if already_driven and not observe_only and not contradictory:
+            return DrivenPreparationResult(snapshot, False)
+        if not observe_only and allow_mode_request and not already_driven:
+            if stop_event is not None and stop_event.is_set():
+                raise AttoDRY2100StoppedError("stop requested")
+            if callable(on_mode_requested): on_mode_requested()
+            try:
+                self._magnet.setDrivenMode(self.channel, True)
+            except Exception as exc:
+                raise AttoDRY2100CommunicationError(
+                    f"setDrivenMode channel={self.channel}: {exc}"
+                ) from exc
+            mode_requested = True
+        stable = 0
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                raise AttoDRY2100StoppedError("stop requested")
+            if self._clock() >= deadline:
+                raise AttoDRY2100TimeoutError("Driven mode readiness timed out")
+            self._sleep(float(poll_interval_s))
+            snapshot = self.read_snapshot()
+            if callable(on_snapshot): on_snapshot(snapshot)
+            # Unsafe essential telemetry fails immediately. Missing transition
+            # evidence remains unknown and therefore waits until the deadline.
+            self._validate_safety_snapshot(snapshot, require_driven=False)
+            if self._mode_ready(snapshot, float(lead_tolerance_t)):
+                stable += 1
+                if stable >= 3:
+                    return DrivenPreparationResult(snapshot, mode_requested)
+            else:
+                stable = 0
 
     def read_snapshot(self):
         if not self.connected: raise AttoDRY2100ConnectionError("attoDRY2100 is not connected")
@@ -290,11 +589,13 @@ class AttoDRY2100Adapter:
     def read_field(self) -> float:
         """Read only magnet field for timing-critical continuous acquisition."""
         if not self.connected: raise AttoDRY2100ConnectionError("attoDRY2100 is not connected")
-        try: raw_field = self._magnet.getH(self.channel)
+        try: raw_field = self._rpc_call("getH", self._magnet.getH, self.channel)
         except TimeoutError as exc: raise AttoDRY2100TimeoutError(f"getH channel={self.channel}: {exc}") from exc
         except Exception as exc: raise AttoDRY2100CommunicationError(f"getH channel={self.channel}: {exc}") from exc
         try: field_t = float(raw_field)
         except Exception as exc: raise AttoDRY2100TelemetryError(f"getH returned non-numeric field: {raw_field!r}") from exc
+        if isinstance(raw_field, bool):
+            raise AttoDRY2100TelemetryError("getH returned boolean field telemetry")
         if not math.isfinite(field_t): raise AttoDRY2100TelemetryError("getH returned a non-finite field")
         return field_t
 
@@ -355,8 +656,8 @@ class AttoDRY2100Adapter:
             ramp_rate = float(ramp_rate_k_per_min)
         except (TypeError, ValueError) as exc:
             raise AttoDRY2100SafetyError("sample target and ramp rate must be numeric") from exc
-        if not math.isfinite(target) or not 1.8 <= target <= 300.0:
-            raise AttoDRY2100SafetyError("sample target must be within 1.8 to 300 K")
+        if not math.isfinite(target) or not 1.67 <= target <= 300.0:
+            raise AttoDRY2100SafetyError("sample target must be within 1.67 to 300 K")
         if not math.isfinite(ramp_rate) or not 0.1 <= ramp_rate <= 100.0:
             raise AttoDRY2100SafetyError("sample ramp rate must be within 0.1 to 100 K/min")
         return target, ramp_rate
@@ -429,36 +730,15 @@ class AttoDRY2100Adapter:
     def _preflight(self, target=None, stop_event=None):
         if stop_event is not None and stop_event.is_set(): raise AttoDRY2100StoppedError("stop requested")
         if not self.connected: raise AttoDRY2100StateError("2100 is not connected")
-        maximum, maximum_temperature = self._motion_limits()
         try:
             snap = self.read_snapshot()
+            self._validate_safety_snapshot(
+                snap, () if target is None else (target,), require_driven=True
+            )
         except AttoDRY2100TelemetryError as exc:
             raise AttoDRY2100SafetyError(
                 "required safety telemetry is unavailable or invalid"
             ) from exc
-        if snap.status.quench is not False: raise AttoDRY2100SafetyError("quench telemetry is not explicitly safe")
-        if abs(snap.field_t) > HARD_MAX_FIELD_T or abs(snap.field_t) > maximum:
-            raise AttoDRY2100SafetyError("current field exceeds configured safety range")
-        if snap.temperature_k is None:
-            raise AttoDRY2100SafetyError("temperature telemetry is unavailable")
-        if snap.temperature_k > maximum_temperature: raise AttoDRY2100SafetyError("temperature above configured maximum")
-        driven_mode = snap.status.driven_mode
-        persistent_mode = snap.status.persistent_mode
-        if type(driven_mode) is not bool or type(persistent_mode) is not bool:
-            raise AttoDRY2100SafetyError(
-                "attoDRY2100 operating mode telemetry is unavailable or invalid; "
-                "set the magnet to Driven mode manually before starting MCD"
-            )
-        if driven_mode is not True or persistent_mode is not False:
-            raise AttoDRY2100SafetyError(
-                "attoDRY2100 is not in Driven mode. Set the magnet to Driven mode "
-                "manually before starting MCD."
-            )
-        if target is not None:
-            try: target_value = float(target)
-            except (TypeError, ValueError) as exc: raise AttoDRY2100SafetyError("target field must be numeric") from exc
-            if not math.isfinite(target_value): raise AttoDRY2100SafetyError("target field must be finite")
-            if abs(target_value) > maximum: raise AttoDRY2100SafetyError("target exceeds configured field limit")
         if stop_event is not None and stop_event.is_set(): raise AttoDRY2100StoppedError("stop requested")
         return snap
 

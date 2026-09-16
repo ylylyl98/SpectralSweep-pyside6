@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from utils.mcd_common import build_mcd2100_filename, resolve_gate_conditions
+from app.engine.magnet_preparation import MagnetPreparation, MagnetPreparationCancelled
 
 
 def _optical_acquire(optical: Any, angle: float, label: str, stop_event: Any,
@@ -481,6 +482,8 @@ class MCD2100Worker:
         self.stop_event = threading.Event()
         self._active_handle = None
         self._stop_handle = None
+        self._magnet_preparation = None
+        self._optics_entered = False
         self._magnet_command_issued = False
         self._metadata_path: Optional[Path] = None
         self._metadata: Optional[dict[str, Any]] = None
@@ -490,6 +493,7 @@ class MCD2100Worker:
         self._spectrum_event_cb: Optional[Callable[[Mapping[str, Any]], None]] = None
         self._log_cb: Optional[Callable[..., None]] = None
         self._phase_cb: Optional[Callable[[str], None]] = None
+        self._preparation_progress_cb = None
         self._validate_inputs()
 
     @staticmethod
@@ -524,11 +528,12 @@ class MCD2100Worker:
             return result
 
     def set_callbacks(self, *, progress=None, spectrum=None, spectrum_event=None,
-                      log=None, phase=None) -> None:
+                      log=None, phase=None, preparation_progress=None) -> None:
         """Attach GUI-safe callbacks without changing the worker contract."""
         self._progress_cb, self._spectrum_cb = progress, spectrum
         self._spectrum_event_cb, self._log_cb = spectrum_event, log
         self._phase_cb = phase
+        self._preparation_progress_cb = preparation_progress
 
     def _emit_log(self, message: str) -> None:
         if callable(self._log_cb):
@@ -581,8 +586,8 @@ class MCD2100Worker:
         )
         if any(not math.isfinite(value) for value in temperature_values):
             raise ValueError("sample temperature settings must be finite")
-        if not 1.8 <= self.sample_target_k <= 300.0:
-            raise ValueError("sample target must be within 1.8 to 300 K")
+        if not 1.67 <= self.sample_target_k <= 300.0:
+            raise ValueError("sample target must be within 1.67 to 300 K")
         if not 0.1 <= self.sample_ramp_rate_k_per_min <= 100.0:
             raise ValueError("sample ramp rate must be within 0.1 to 100 K/min")
         if self.temperature_tolerance_k <= 0 or self.temperature_stable_s < 0 or self.temperature_timeout_s <= 0:
@@ -602,6 +607,8 @@ class MCD2100Worker:
 
     def request_cancel(self) -> None:
         self.stop_event.set()
+        if self._magnet_preparation is not None:
+            self._magnet_preparation.request_cancel()
         if self._magnet_command_issued:
             self._submit_stop()
 
@@ -948,6 +955,10 @@ class MCD2100Worker:
             self.vbias_v = float(condition.get("vbias_v", 0.0))
         configure_fn = getattr(self.optical, "configure", None)
         if configure and callable(configure_fn):
+            ensure_optical = getattr(self.optical, "ensure_ready", None)
+            if callable(ensure_optical):
+                self._emit_phase("LightField: Initializing")
+                ensure_optical()
             # Complete optical readiness/configuration before any magnet or SMU
             # mutation can begin. This is the MCD2100 preflight boundary.
             self._emit_phase("Configuring LightField")
@@ -1327,7 +1338,45 @@ class MCD2100Worker:
             self._emit_phase(
                 f"Starting MCD 2100 run: {len(self.conditions) or 1} gate condition(s), "
                 f"field {self.start_field_t:+g} T to {self.stop_field_t:+g} T"
+                )
+            # Magnet safety and positioning own the first hardware boundary.
+            if not callable(getattr(self.controller, "preflight_magnet_async", None)):
+                raise MCD2100StabilizationError(
+                    "shared attoDRY2100 controller has no magnet preparation API"
+                )
+            self._emit_phase("Preparing magnet")
+            preparation = MagnetPreparation(
+                self.controller, self.start_field_t,
+                targets_t=(self.start_field_t, self.stop_field_t),
+                gate_t=self._gate(), poll_interval_s=self.poll_interval_s,
+                # Mode readiness, reaching Start, and individual owner requests
+                # each have their own budget.
+                timeout_s=float(getattr(
+                    getattr(self.controller, "config", None),
+                    "mode_prepare_timeout_s", self.operation_timeout_s,
+                )),
+                position_timeout_s=float(getattr(
+                    getattr(self.controller, "config", None), "position_timeout_s", 1800.,
+                )),
+                operation_timeout_s=self.operation_timeout_s,
+                cleanup_timeout_s=self.cleanup_timeout_s,
+                stop_event=self.stop_event, phase=self._emit_phase,
+                log=self._emit_log, clock=self.clock, sleep=self.sleep,
+                preparation_progress=self._preparation_progress_cb,
             )
+            self._magnet_preparation = preparation
+            metadata["magnet_preparation"] = {
+                "status": "RUNNING", "start_field_t": self.start_field_t,
+                "stop_field_t": self.stop_field_t,
+            }
+            prepared_snapshot = preparation.prepare()
+            self._magnet_command_issued = bool(preparation.field_command_issued)
+            metadata["magnet_preparation"].update({
+                "status": "COMPLETED", "mode_requested": preparation.mode_requested,
+                "snapshot": _jsonable(prepared_snapshot),
+            })
+            self._magnet_preparation = None
+            self._write_metadata(metadata_path, metadata)
             if self.filename_temperature_k is not None:
                 self._emit_log(
                     f"Filename sample temperature: {self.filename_temperature_k:g} K "
@@ -1336,6 +1385,24 @@ class MCD2100Worker:
             if self.temperature_control_enabled:
                 self._stabilize_sample_temperature(metadata)
                 self._write_metadata(metadata_path, metadata)
+            # Temperature settling can take a long time; revalidate mode,
+            # quench, limits and field ownership before optical/gate setup.
+            post_temperature = self._execute_handle(
+                self.controller.preflight_magnet_async(
+                    (self.start_field_t, self.stop_field_t)
+                )
+            )
+            status = getattr(post_temperature, "status", None)
+            details = getattr(status, "backend_details", {})
+            if (getattr(status, "driven_mode", None) is not True
+                    or getattr(status, "persistent_mode", None) is not False
+                    or getattr(status, "quench", None) is not False
+                    or not isinstance(details, Mapping)
+                    or details.get("field_control") is not True):
+                raise MCD2100StabilizationError(
+                    "magnet readiness was lost after temperature stabilization"
+                )
+            self._optics_entered = True
             metadata["setup_applied"] = self._apply_setup(
                 configure=True, apply_gate=False
             )
@@ -1494,7 +1561,7 @@ class MCD2100Worker:
                         f"{detail['spectra_written']} spectra written"
                     )
                     self._write_metadata(metadata_path, metadata)
-        except MCD2100Cancelled as exc:
+        except (MCD2100Cancelled, MagnetPreparationCancelled) as exc:
             failure_exception = exc
             outcome, error = WorkflowOutcome.CANCELLED, str(exc)
             self._emit_phase(f"Cancellation: {exc}")
@@ -1503,10 +1570,26 @@ class MCD2100Worker:
             outcome, error = WorkflowOutcome.FAILED, str(exc)
             self._emit_phase(f"Run failed: {exc}")
         finally:
+            if self._magnet_preparation is not None:
+                self._magnet_command_issued = bool(
+                    self._magnet_command_issued or self._magnet_preparation.field_command_issued
+                )
+                prep = self._magnet_preparation
+                metadata.setdefault("magnet_preparation", {})
+                metadata["magnet_preparation"].update({
+                    "status": outcome.value,
+                    "mode_requested": bool(prep.mode_requested),
+                    "recovery_required": bool(getattr(
+                        self.controller, "mode_recovery_required", False
+                    )),
+                    "snapshot": _jsonable(prep.last_snapshot),
+                    "error": error,
+                })
             try:
-                cleanup = getattr(self.optical, "cleanup", None)
-                if callable(cleanup):
-                    cleanup()
+                if self._optics_entered:
+                    cleanup = getattr(self.optical, "cleanup", None)
+                    if callable(cleanup):
+                        cleanup()
             except BaseException as exc:
                 cleanup_error = f"optical cleanup: {exc}"
                 outcome = WorkflowOutcome.FAILED
@@ -1547,31 +1630,20 @@ class MCD2100Worker:
                 and not self.stop_event.is_set()
                 and self._stop_handle is None
             )
-            prefield_temperature_failure = (
-                isinstance(failure_exception, MCD2100TemperatureStabilizationError)
-                and not self._magnet_command_issued
-                and self._stop_handle is None
-            )
-            prefield_cancel = (
-                isinstance(failure_exception, MCD2100Cancelled)
-                and not self._magnet_command_issued
-                and self._stop_handle is None
-            )
             stop_required = (
                 not detached_success
                 and (outcome is not WorkflowOutcome.COMPLETED
                      or self._stop_handle is not None
                      or self.stop_event.is_set())
                 and not endpoint_timeout_only
-                and not prefield_temperature_failure
-                and not prefield_cancel
+                and self._magnet_command_issued
             )
             if endpoint_timeout_only:
                 metadata["stop_ack"] = None
                 metadata["stop_error"] = None
                 metadata["magnet_stop_requested"] = False
                 metadata["magnet_stop_reason"] = "endpoint timing failure; field control left active"
-            if prefield_temperature_failure or prefield_cancel:
+            if not self._magnet_command_issued:
                 metadata["stop_ack"] = None
                 metadata["stop_error"] = None
                 metadata["magnet_stop_requested"] = False

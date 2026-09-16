@@ -158,6 +158,61 @@ horizontal/vertical binning. **Apply + verify** writes the displayed operating
 controls and reads them back before reporting success. The Instruments sidebar
 remains focused on connection, detector temperature, and safe warm disconnect.
 
+### MCD 2100 magnet preparation
+
+`Start MCD 2100` performs a read-only magnet safety preflight, requests Driven
+mode when required, and verifies three consecutive safe readbacks before it
+positions the field at Start. The `Prepare magnet` action runs that magnet-only
+operation independently; it does not require LightField, an SMU, a sample ID,
+or an output directory, and leaves the controller connected at the verified
+Start field.
+
+The attoDRY2100 configuration keys `mode_prepare_timeout_s` (default 300 s)
+and `mode_lead_tolerance_t` (default 0.001 T) bound the operation. Readiness is
+an observed software condition: Driven=true, Persistent=false, heater on,
+finite lead/current telemetry within tolerance, and HState=`IDLE`; it is not a
+vendor guarantee that a physical transition has completed. Firmware states that
+are unknown or missing remain unready. `getLeadsHot` reports current presence in
+the leads and is informational, not an overtemperature alarm.
+
+Cancellation cooperatively stops new requests while an in-flight SDK call is
+allowed to drain. If a mode request may have reached the instrument, the panel
+keeps device mutations and shutdown blocked until a strict `Prepare magnet`
+retry confirms recovery. No physical commissioning or hardware validation is
+performed by the application tests.
+
+The MCD 2100 sidebar provides a read-only **Refresh ramp tables** action and a
+local **View ramp tables** action. After a complete display telemetry cycle,
+one automatic read is arranged for the current connection generation; it does
+not repeat until reconnect. The automatic read opens no dialog. Refresh reads
+current and default raw ramp rows through the existing attoDRY2100 connection,
+while View never communicates with the device. Counts are bounded to 32 rows and
+requested indices are shown as reported; the application does not infer units,
+index bases, or preset meanings. Count and row failures remain visible beside
+successful rows. A client timeout keeps shared controls locked until the owner
+thread drains and then displays any partial report; the diagnostic read does not
+issue field, mode, Stop, reconnect, or close commands. Ramp tables are not read
+automatically more than once per connection, or during preparation/acquisition.
+Disconnects retain the previous report as historical/stale data; a failed new
+read does not make that old report current.
+
+### MCD 2100 display telemetry
+
+The connection panel shares display-only magnet and temperature reads between
+the manual refresh, background display polling, and applied-temperature monitor.
+Repeated requests join the current owner operation; a successful result may be
+reused for 0.5 seconds in the same connection generation. The background cycle
+reads magnet then temperature and schedules its next cycle one second after
+both requests drain. Safety preflight and acquisition verification continue to
+use fresh reads and never consume this cache.
+
+The panel shows magnet and temperature values as soon as each group arrives,
+with separate last-success ages. A client timeout keeps the display request
+reserved until the owner drains; partial data and errors remain visible. The
+controller exposes bounded queue/request diagnostics and the adapter records
+actual SDK RPC durations for troubleshooting. These timings identify queue and
+device bottlenecks; they are not a real-device speed benchmark.
+
 The Spectrum tab supports one-shot **Acquire 1D/2D** and continuous **Run 1D/2D**.
 Continuous capture is sequential: the next request starts only after the prior
 frame arrives. The one-dimensional InGaAs array exposes only the 1D actions;

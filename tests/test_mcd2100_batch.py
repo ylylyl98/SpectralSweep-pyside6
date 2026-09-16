@@ -36,6 +36,19 @@ class _Controller:
         self.events = []
         self.detach_calls = 0
         self.stop_calls = 0
+        self.mode_recovery_required = False
+
+    def preflight_magnet_async(self, targets=()):
+        target = tuple(targets)[0] if targets else self.target
+        self.events.append(("preflight", float(target)))
+        return _Handle(_snapshot(float(target)))
+
+    def prepare_driven_mode_async(self):
+        self.events.append("prepare_driven")
+        return _Handle(SimpleNamespace(mode_requested=False))
+
+    def cancel_magnet_preparation(self):
+        self.events.append("cancel_prepare")
 
     def set_h_setpoint_async(self, value):
         self.target = float(value); self.ramp_seen = False
