@@ -49,10 +49,12 @@ class AndorControlsWidget(QWidget):
     def __init__(self, controller=None, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._ctrl = controller
+        self.optics_managed_externally = False
         self._identity: dict[str, Any] = {}
         self._snapshot: dict[str, Any] = {}
         self._locked = False
         self._available = False
+        self._shamrock_connected = True
         self._slit_present = False
         self._shutter_present = False
         self._output_flipper_present = False
@@ -196,12 +198,16 @@ class AndorControlsWidget(QWidget):
         actions.addWidget(self.refresh_button)
         actions.addWidget(self.diagnostics_button)
         layout.addLayout(actions)
+        self.shamrock_button = QPushButton("Disconnect spectrograph only")
+        self.shamrock_button.setToolTip("Disconnect or reconnect Shamrock while keeping the Andor camera connected and its cooling unchanged.")
+        layout.addWidget(self.shamrock_button)
         return group
 
     def _wire(self) -> None:
         self.apply_button.clicked.connect(self.apply)
         self.refresh_button.clicked.connect(self.refresh)
         self.diagnostics_button.clicked.connect(self.show_diagnostics)
+        self.shamrock_button.clicked.connect(self._toggle_shamrock_connection)
         if self._ctrl is None:
             return
         status_signal = getattr(self._ctrl, "andor_status_ready", None)
@@ -211,12 +217,35 @@ class AndorControlsWidget(QWidget):
         if applied_signal is not None:
             applied_signal.connect(self._on_applied)
         self._ctrl.error.connect(self._on_error)
+        connection_signal = getattr(self._ctrl, "shamrock_connection_changed", None)
+        if connection_signal is not None:
+            connection_signal.connect(self._on_shamrock_connection)
+        lock_signal = getattr(self._ctrl, "switching_lock_changed", None)
+        if lock_signal is not None:
+            lock_signal.connect(lambda _locked: self._update_enabled())
         temperature_signal = getattr(self._ctrl, "temperature_snapshot_ready", None)
         if temperature_signal is not None:
             temperature_signal.connect(self._on_temperature_snapshot)
         monitor_signal = getattr(self._ctrl, "temperature_monitor_state", None)
         if monitor_signal is not None:
             monitor_signal.connect(self._on_temperature_monitor_state)
+
+    @Slot()
+    def _toggle_shamrock_connection(self) -> None:
+        method = getattr(self._ctrl, "set_shamrock_connected", None)
+        if self._available and not self._locked and not getattr(self._ctrl, "switching_locked", False) and callable(method):
+            self.shamrock_button.setEnabled(False)
+            self.status_changed.emit("Changing Shamrock connection…")
+            method(not self._shamrock_connected)
+
+    @Slot(bool)
+    def _on_shamrock_connection(self, connected: bool) -> None:
+        self._shamrock_connected = connected
+        self.shamrock_button.setText("Disconnect spectrograph only" if connected else "Reconnect spectrograph")
+        self._snapshot = {}
+        self.calibration.setText("Refresh calibration after reconnect" if connected else "Spectrograph disconnected")
+        self._update_enabled()
+        self.status_changed.emit("Shamrock connected" if connected else "Shamrock disconnected · Camera remains connected; cooling unchanged")
 
     @Slot(str)
     def _on_temperature_monitor_state(self, state: str) -> None:
@@ -239,6 +268,8 @@ class AndorControlsWidget(QWidget):
         self._temperature_stable = stable
 
     def set_backend_identity(self, identity: dict[str, Any]) -> None:
+        self._shamrock_connected = bool(identity.get("shamrock_connected", True))
+        self.shamrock_button.setText("Disconnect spectrograph only" if self._shamrock_connected else "Reconnect spectrograph")
         self._identity = dict(identity or {})
         self._available = self._identity.get("backend") == "andor_sdk2"
         self.setVisible(self._available)
@@ -349,7 +380,9 @@ class AndorControlsWidget(QWidget):
                 widget.blockSignals(False)
 
     def _update_enabled(self) -> None:
-        enabled = self._available and not self._locked
+        available = self._available and not self._locked and not getattr(self._ctrl, "switching_locked", False)
+        self.shamrock_button.setEnabled(available and callable(getattr(self._ctrl, "set_shamrock_connected", None)))
+        enabled = available and self._shamrock_connected
         for widget in (
             self.center,
             self.grating,
@@ -387,7 +420,7 @@ class AndorControlsWidget(QWidget):
     @Slot()
     def refresh(self) -> None:
         method = getattr(self._ctrl, "refresh_andor_status", None)
-        if self._available and callable(method):
+        if self._available and self._shamrock_connected and callable(method):
             self.refresh_button.setEnabled(False)
             self.status_changed.emit("Reading Andor status…")
             method()
@@ -424,14 +457,19 @@ class AndorControlsWidget(QWidget):
                     "vertical_binning": int(self.vbin.value()),
                 }
             )
+        if self.optics_managed_externally:
+            for key in ("wavelength_nm", "grating", "output_port"):
+                settings.pop(key, None)
         self._persist_requested(role, settings)
         self.apply_button.setEnabled(False)
         self.status_changed.emit("Applying and verifying Andor controls…")
         method(settings)
 
     def _persist_requested(self, role: str, settings: dict[str, Any]) -> None:
-        cfg.lf6.center_nm = float(settings["wavelength_nm"])
-        cfg.lf6.andor_grating = int(settings["grating"])
+        if "wavelength_nm" in settings:
+            cfg.lf6.center_nm = float(settings["wavelength_nm"])
+        if "grating" in settings:
+            cfg.lf6.andor_grating = int(settings["grating"])
         if "input_slit_width_um" in settings:
             cfg.lf6.andor_slit_width_um = float(settings["input_slit_width_um"])
         if "shutter_mode" in settings:
@@ -596,8 +634,7 @@ class AndorControlsWidget(QWidget):
 
     @Slot(str)
     def _on_error(self, _message: str) -> None:
-        self.refresh_button.setEnabled(self._available and not self._locked)
-        self.apply_button.setEnabled(self._available and not self._locked)
+        self._update_enabled()
 
     @Slot()
     def show_diagnostics(self) -> None:

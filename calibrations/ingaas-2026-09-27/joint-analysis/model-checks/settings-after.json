@@ -1,0 +1,37 @@
+{
+  "optics": {
+    "backend": "lightfield",
+    "grating_infos": [
+      {
+        "index": "[500nm,1200][0][0]",
+        "label": "[500nm,1200][0][0]"
+      },
+      {
+        "index": "[750nm,300][1][0]",
+        "label": "[750nm,300][1][0]"
+      },
+      {
+        "index": "[750nm,600][2][0]",
+        "label": "[750nm,600][2][0]"
+      }
+    ],
+    "output_ports": [
+      "FrontExit",
+      "SideExit"
+    ],
+    "readback_errors": {},
+    "grating": "[750nm,300][1][0]",
+    "output_port": "SideExit",
+    "wavelength_nm": 1700.0,
+    "output_flipper_present": true,
+    "output_port_capability": "switchable"
+  },
+  "calibration": {
+    "CalibrationInformationFocalLength": "300.0",
+    "CalibrationInformationInclusionAngle": "30.400000000002002",
+    "CalibrationInformationDetectorAngle": "1.380000000000091",
+    "WavelengthCalibrationFocalLength": "None",
+    "WavelengthCalibrationInclusionAngle": "None",
+    "WavelengthCalibrationDetectorAngle": "None"
+  }
+}

@@ -1,0 +1,9 @@
+LIBRARY batch_probe.dll
+
+EXPORTS
+_BatchControl@4
+_BatchEventHandle@4
+_BatchFaultAddress@4
+_BatchGateAddress@4
+_BatchMultiple@16
+_BatchOutput@12

@@ -1,0 +1,273 @@
+{
+  "status": "EXPERIMENTAL_NOT_ACTIVATED",
+  "method": "Multi-center polynomial wavelength map, Gaussian-broadened full reference spectrum, variable-projection nonnegative species amplitudes and linear background",
+  "reference": "VISNIR PI Neon",
+  "reference_sha256": "879cf2bdc8e474739a1afa873c08fe78ba6340b58d55b86140653745ba68c5e8",
+  "parameters": [
+    -14.046196244302886,
+    -0.16471845718782382,
+    0.6563113465194136,
+    -126.08623379120355,
+    4.371359483283799,
+    -0.7550602860045467,
+    3.425625270584441
+  ],
+  "parameter_names": [
+    "center_offset_nm",
+    "center_linear_nm",
+    "center_quadratic_nm",
+    "pixel_linear_nm",
+    "pixel_center_cross_nm",
+    "pixel_quadratic_nm",
+    "gaussian_sigma_nm"
+  ],
+  "formula": "lambda_nm = center + a + b*t + c*t^2 + (d+e*t)*q + f*q^2; t=(center-1200)/400; q=(pixel-256.5)/256",
+  "training_centers": [
+    900,
+    1000,
+    1100,
+    1200,
+    1300,
+    1400
+  ],
+  "check_centers": [
+    950,
+    1050,
+    1150,
+    1250,
+    1350
+  ],
+  "check_spectral_registration_rms_nm": 0.3386577667036484,
+  "accepted_as_calibration": false,
+  "acceptance_target_nm": 0.2,
+  "note": "Registration RMS is the shift needed to best align held-out spectra, NOT independent atomic-line wavelength RMS or IntelliCal reported error. No held-out correction applied. No global extrapolation allowed. Full-template mismatch, line blending and reference intensity variations can bias the model. Air/vacuum convention unverified.",
+  "optimizer_success": true,
+  "multistart_costs": [
+    29.77125114415019,
+    29.77125121492378,
+    29.771251294422306
+  ],
+  "frames": [
+    {
+      "center_nm": 900.0,
+      "role": "train",
+      "normalized_intensity_rmse": 0.1393590381045606,
+      "strong_peak_count": 7,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        1204830.2286741843,
+        519778.0461172358
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210501294963Z.json",
+      "sha256": "9cc5930a4bafb74c46ce59009e43182857a1e732da2823bd93b7b2d1c5a5635a"
+    },
+    {
+      "center_nm": 950.0,
+      "role": "check",
+      "normalized_intensity_rmse": 0.1487629800348223,
+      "strong_peak_count": 7,
+      "check_registration_shift_nm": 0.19714748712728283,
+      "species_amplitudes": [
+        1234136.3686181055,
+        441190.3013787637
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210515578768Z.json",
+      "sha256": "c6027019cc75eb579867e9b98f6f2c1d95f6bb6124ddb2bc1babca5de3a14988"
+    },
+    {
+      "center_nm": 1000.0,
+      "role": "train",
+      "normalized_intensity_rmse": 0.1761978136419255,
+      "strong_peak_count": 5,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        1346721.4384760556,
+        201840.50653735737
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210529692268Z.json",
+      "sha256": "94bfcce36b2d6b9f124de42bb6b2736139364a5eca768106bf041f4885bfcfeb"
+    },
+    {
+      "center_nm": 1050.0,
+      "role": "check",
+      "normalized_intensity_rmse": 0.1829358476782463,
+      "strong_peak_count": 6,
+      "check_registration_shift_nm": 0.47787546013786425,
+      "species_amplitudes": [
+        1163444.0729479152,
+        259275.04693568993
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210543926205Z.json",
+      "sha256": "0fb242877788b373e4e2173fd33438084a4c01d403b2c982ceb2d0e4f2675566"
+    },
+    {
+      "center_nm": 1100.0,
+      "role": "train",
+      "normalized_intensity_rmse": 0.15383594404610032,
+      "strong_peak_count": 4,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        449226.4416054364,
+        471169.9020322103
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210558145904Z.json",
+      "sha256": "b718115066a80105b39891ebc920e812a352bcab7011bde899e181089c11ffea"
+    },
+    {
+      "center_nm": 1150.0,
+      "role": "check",
+      "normalized_intensity_rmse": 0.11400360834785553,
+      "strong_peak_count": 5,
+      "check_registration_shift_nm": 0.051429766505689326,
+      "species_amplitudes": [
+        545627.927646414,
+        440366.29224870936
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210612275261Z.json",
+      "sha256": "750f0f3de37f144efe1ef1b8feabf43badeee34526ec45eecafaa40b47fc6964"
+    },
+    {
+      "center_nm": 1200.0,
+      "role": "train",
+      "normalized_intensity_rmse": 0.16526929867462217,
+      "strong_peak_count": 6,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        573877.4862394657,
+        393394.8796174308
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210626428826Z.json",
+      "sha256": "06b389121541553fc4e2449f83df00c3c7b966e0827ba2f987030435a37f65a0"
+    },
+    {
+      "center_nm": 1250.0,
+      "role": "check",
+      "normalized_intensity_rmse": 0.1903342062748094,
+      "strong_peak_count": 7,
+      "check_registration_shift_nm": 0.3321622832720512,
+      "species_amplitudes": [
+        626693.0775450477,
+        416372.06493294606
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210640595999Z.json",
+      "sha256": "277e35ba4436c757c592e1d6f3d77381de076dcdc8ad98f65ba38b042ba61498"
+    },
+    {
+      "center_nm": 1300.0,
+      "role": "train",
+      "normalized_intensity_rmse": 0.23175174753570404,
+      "strong_peak_count": 7,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        758920.3324407714,
+        4.0829635035617446e-21
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210654786492Z.json",
+      "sha256": "9156e0c09bef47bd55912606b0aebd6032a465e54a706129e2c3bbf04fe31c56"
+    },
+    {
+      "center_nm": 1350.0,
+      "role": "check",
+      "normalized_intensity_rmse": 0.24175740069025228,
+      "strong_peak_count": 5,
+      "check_registration_shift_nm": 0.43958676543954783,
+      "species_amplitudes": [
+        711282.1897825424,
+        1.4144788474656773e-22
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210708943111Z.json",
+      "sha256": "043c9114287dc4993fa67ee2d816a32c3ab7af4d666b2d9ba65d574b4906cacd"
+    },
+    {
+      "center_nm": 1400.0,
+      "role": "train",
+      "normalized_intensity_rmse": 0.21656881193241928,
+      "strong_peak_count": 4,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        1527976.1415870187,
+        1.550963648536927e-25
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210723058337Z.json",
+      "sha256": "ce9786bd0bb7a63a634d60817bfa9fcb81226ba43d066374fd9170b7974d0560"
+    },
+    {
+      "center_nm": 1450.0,
+      "role": "outside_fitted_centers",
+      "normalized_intensity_rmse": 0.1913336518577894,
+      "strong_peak_count": 3,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        998954.6348923764,
+        6.979336418416171e-25
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210736998721Z.json",
+      "sha256": "fedeb9c01b3ae2ffc0993865c8c8ab23f2a37182a31af6cfb94809c02f6d5031"
+    },
+    {
+      "center_nm": 1500.0,
+      "role": "outside_fitted_centers",
+      "normalized_intensity_rmse": 0.24906304377779867,
+      "strong_peak_count": 1,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        731707.9868384246,
+        5.945360652724886e-25
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210750797300Z.json",
+      "sha256": "0d58c9ad75357579a32837e5198f8e08a147958f52b244bb2b32ea321bcfa45f"
+    },
+    {
+      "center_nm": 1550.0,
+      "role": "outside_fitted_centers",
+      "normalized_intensity_rmse": 0.29810931381213324,
+      "strong_peak_count": 0,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        470544.9415723509,
+        2.714186384939622e-25
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210804444245Z.json",
+      "sha256": "14c4f8bf82181eb26194c4a840d1626f976f830e4be8b4b317532f70e8c12ad2"
+    },
+    {
+      "center_nm": 1600.0,
+      "role": "outside_fitted_centers",
+      "normalized_intensity_rmse": 0.29633681186606314,
+      "strong_peak_count": 0,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        329726.40875388094,
+        7.201271751220567e-12
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210818062937Z.json",
+      "sha256": "8742c71433b484176b17039104a254db0a6b77f3b907ec0205dde359426afa27"
+    },
+    {
+      "center_nm": 1650.0,
+      "role": "outside_fitted_centers",
+      "normalized_intensity_rmse": 0.3337083260946316,
+      "strong_peak_count": 0,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        88158.79196430926,
+        8496.121136656673
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210831794958Z.json",
+      "sha256": "a55627629f97fe037e3833284c21c47b1d210f0247f14c92c1a95992b8694b5e"
+    },
+    {
+      "center_nm": 1700.0,
+      "role": "outside_fitted_centers",
+      "normalized_intensity_rmse": 0.3467387662496518,
+      "strong_peak_count": 0,
+      "check_registration_shift_nm": null,
+      "species_amplitudes": [
+        102627.24692255585,
+        146542.70180428412
+      ],
+      "file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210845517379Z.json",
+      "sha256": "ae1f90431fa631372918c1bd1bb07601f584985ef9a12b2c6c40407ec71b3a74"
+    }
+  ]
+}

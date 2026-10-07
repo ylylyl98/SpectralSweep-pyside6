@@ -1731,6 +1731,9 @@ class BFPPanel(QWidget):
 
     @Slot()
     def _on_acquire(self):
+        if bool(getattr(self._ctrl, "switching_locked", False)):
+            self._status_lbl.setText("Wait for the current device operation to finish")
+            return
         self._persist_ui_config()
         self._acquire_error = None
         self._acquire_result_received = False
@@ -1776,6 +1779,9 @@ class BFPPanel(QWidget):
         self._worker.status.connect(self._status_lbl.setText)
         self._worker.error.connect(self._on_acquire_error)
         self._worker.finished.connect(self._on_acquire_done)
+        pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("bfp", True)
         self._thread.start()
 
     @Slot(object)
@@ -1847,6 +1853,9 @@ class BFPPanel(QWidget):
             self._thread.wait()
             self._thread = None
             self._worker = None
+        pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("bfp", False)
 
     @Slot(str)
     def _on_acquire_error(self, message: str):

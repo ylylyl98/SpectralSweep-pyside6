@@ -594,6 +594,8 @@ class MainWindow(QMainWindow):
             self._inst_panel.capture_spectrum_readbacks
         )
         self._tabs.addTab(self._spectrum, "Spectrum")
+        self._calibration = self._spectrum.create_calibration_page()
+        self._tabs.addTab(self._calibration, "Calibration")
 
         # Settings
         self._settings = SettingsPanel(lf6_ctrl=self._lf6)
@@ -620,6 +622,7 @@ class MainWindow(QMainWindow):
             self._mcd2100: "mcd2100",
             self._bfp: "bfp",
             self._spectrum: "spectrum",
+            self._calibration: "calibration",
             self._settings: "settings",
         }
 
@@ -671,6 +674,15 @@ class MainWindow(QMainWindow):
         widget = self._tabs.currentWidget()
         return self._tab_ids.get(widget, "dual_gate")
 
+    @staticmethod
+    def _saved_sample_id(session) -> str:
+        """Prefer the last committed sample; legacy widget defaults are a last resort."""
+        current = str(getattr(session, 'sample_id', '') or '').strip()
+        if current:
+            return current
+        store = SampleSettingsStore({'sample_profiles': getattr(session, 'sample_profiles', {})})
+        return next((key for key in store.ids() if store.load(key) is not None), '')
+
     def _initialize_shared_sample_id(self) -> None:
         edits_by_panel = {
             self._presets: self._presets._sample_edit,
@@ -680,9 +692,8 @@ class MainWindow(QMainWindow):
             self._mcd: self._mcd._sample_id,
             self._mcd2100: self._mcd2100._sample_id,
         }
-        if cfg.session.schema_version >= 2:
-            initial = cfg.session.sample_id
-        else:
+        initial = self._saved_sample_id(cfg.session)
+        if not initial and cfg.session.schema_version < 2:
             # Legacy sessions kept Sample ID inside panel metadata rather than
             # on SessionConfig.  Read those harmless fields before widgets are
             # restored so migration selects the right profile.
@@ -720,11 +731,12 @@ class MainWindow(QMainWindow):
             commit_on_edit=True,
         )
         for edit in edits_by_panel.values():
-            edit.returnPressed.connect(lambda edit=edit: self._commit_sample_id_edit(edit))
+            edit.editingFinished.connect(lambda edit=edit: self._commit_sample_id_edit(edit))
 
     def _commit_sample_id_edit(self, edit) -> None:
-        """Commit a Sample ID only after the user confirms the field."""
-        self._commit_sample_selection(edit.text())
+        """Commit on Enter or focus loss, never while restoring controls."""
+        if not getattr(self, '_sample_restore_in_progress', False):
+            self._commit_sample_selection(edit.text())
 
     def _initialize_history_ui(self) -> None:
         """Compact, explicit history browser shared by all experiment tabs."""
@@ -827,8 +839,8 @@ class MainWindow(QMainWindow):
         sample_layout.addWidget(self._run_history_btn)
         self._sample_settings_panel = sample_panel
         self._refresh_sample_selector()
-        self._sample_selector.lineEdit().returnPressed.connect(
-            lambda: self._commit_sample_selection(self._sample_selector.currentText())
+        self._sample_selector.lineEdit().editingFinished.connect(
+            lambda: self._commit_sample_id_edit(self._sample_selector.lineEdit())
         )
         self._sample_selector.activated.connect(self._sample_selector_activated)
         self._sample_filter.textChanged.connect(lambda _text: self._refresh_sample_selector())
@@ -836,8 +848,12 @@ class MainWindow(QMainWindow):
         self._sample_duplicate_btn.clicked.connect(
             lambda _checked=False: self._duplicate_current_sample()
         )
-        self._sample_save_btn.clicked.connect(lambda _checked=False: self._persist_session())
+        self._sample_save_btn.clicked.connect(lambda _checked=False: self._save_current_sample())
         self._run_history_btn.clicked.connect(lambda _checked=False: self._show_run_history())
+
+    def _save_current_sample(self) -> None:
+        if self._commit_sample_selection(self._sample_selector.currentText()):
+            self._persist_session()
 
     def _refresh_sample_selector(self) -> None:
         if not hasattr(self, "_sample_selector"):
@@ -848,7 +864,11 @@ class MainWindow(QMainWindow):
         combo.blockSignals(True)
         try:
             combo.clear()
-            combo.addItems(self._sample_store.ids(query))
+            ids = self._sample_store.ids(query)
+            history = getattr(self, "_history", None)
+            if history is not None:
+                ids = list(dict.fromkeys(ids + history.sample_ids(query)))
+            combo.addItems(ids)
             combo.setEditText(current)
         finally:
             combo.blockSignals(False)
@@ -1064,12 +1084,19 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_history_device"):
             return
         device = self._sample_id_binder.value.strip()
+        if device != getattr(self, "_history_sample", None):
+            self._history_sample = device
+            self._history_page = 0
+            self._event_offset = 0
         self._history_device.setText(f"Device: {device}")
         self._history_list.clear()
         self._history_preview.clear()
         self._history_load.setEnabled(False)
         self._history_preview_btn.setEnabled(False)
         if not device:
+            self._history_page_label.setText("Page 1")
+            self._history_prev.setEnabled(False)
+            self._history_next.setEnabled(False)
             return
         rows = self._history.query(device, self._history_type.currentText(), limit=500)
         query = self._history_filter.text().strip().lower()
@@ -1077,6 +1104,7 @@ class MainWindow(QMainWindow):
             rows = [row for row in rows if query in json.dumps(row, default=str).lower()]
         page_size = 20
         total_rows = len(rows)
+        self._history_page = min(max(0, self._history_page), max(0, (total_rows - 1) // page_size))
         start = self._history_page * page_size
         rows = rows[start:start + page_size]
         for row in rows:

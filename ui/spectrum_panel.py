@@ -34,9 +34,9 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Slot
+from PySide6.QtCore import Qt, QTimer, Slot, QSignalBlocker
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel,
     QTabWidget, QComboBox, QCheckBox, QSizePolicy, QDoubleSpinBox,
     QSpinBox,
     QToolButton,
@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QColorDialog,
     QSplitter,
+    QApplication, QPlainTextEdit, QGroupBox,
 )
 from PySide6.QtGui import QColor
 
@@ -65,6 +66,7 @@ pg.setConfigOption("foreground", "k")
 
 LIVE_SPECTRUM_COLOR = "#1565C0"
 LIVE_SPECTRUM_WIDTH = 2.4
+PHOTON_EV_NM = 1239.8419843320026
 REFERENCE_SPECTRUM_WIDTH = 1.8
 REFERENCE_COLORS = (
     "#D13438", "#107C10", "#8764B8", "#CA5010", "#038387",
@@ -74,6 +76,29 @@ REFERENCE_COLORS = (
 
 # ── 1D plot widget ────────────────────────────────────────────────────────────
 
+def _wavelength_energy_text(value) -> str:
+    try:
+        wavelength = float(value)
+    except (TypeError, ValueError):
+        return "Not read"
+    if not np.isfinite(wavelength) or wavelength <= 0:
+        return "Not read"
+    return f"{wavelength:g} nm / {PHOTON_EV_NM / wavelength:.4f} eV"
+
+
+class _EnergyAxis(pg.AxisItem):
+    """Label the shared wavelength coordinates with reciprocal photon energy."""
+
+    def __init__(self):
+        super().__init__(orientation="top")
+        self.setLabel("Energy", units="eV")
+        self.enableAutoSIPrefix(False)
+
+    def tickStrings(self, values, scale, spacing):
+        return [f"{PHOTON_EV_NM / value:.6g}" if np.isfinite(value) and value > 0
+                else "" for value in values]
+
+
 class _SpectrumPlot(QWidget):
     """Single spectrum line plot."""
 
@@ -82,8 +107,10 @@ class _SpectrumPlot(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        self._plot = pg.PlotWidget()
+        self._plot = pg.PlotWidget(axisItems={"top": _EnergyAxis()})
+        self._plot.showAxis("top")
         self._plot.setLabel("bottom", "Wavelength", units="nm")
+        self._plot.getAxis("bottom").enableAutoSIPrefix(False)
         self._plot.setLabel("left",   "Intensity",  units="counts")
         self._plot.showGrid(x=True, y=True, alpha=0.3)
 
@@ -96,6 +123,9 @@ class _SpectrumPlot(QWidget):
         )
         self._curve.setZValue(10)
         self._reference_curves: dict[str, object] = {}
+        self._reference_units = {}
+        self._reference_visible = {}
+        self.axis_unit = "nm"
         lay.addWidget(self._plot)
 
         # info bar
@@ -113,8 +143,19 @@ class _SpectrumPlot(QWidget):
         self._wl:  np.ndarray = np.array([])
         self._cts: np.ndarray = np.array([])
 
+    def set_axis_unit(self, unit, reverse_pixels=False):
+        self.axis_unit = "pixel" if unit == "pixel" else "nm"
+        reverse_pixels = bool(reverse_pixels and self.axis_unit == "pixel")
+        self._plot.getViewBox().invertX(reverse_pixels)
+        pixel_label = "Pixel (reversed; uncalibrated)" if reverse_pixels else "Pixel (uncalibrated)"
+        self._plot.setLabel("bottom", pixel_label if self.axis_unit == "pixel" else "Wavelength",
+                            units="" if self.axis_unit == "pixel" else "nm")
+        self._plot.showAxis("top", self.axis_unit == "nm")
+        for key, curve in self._reference_curves.items():
+            curve.setVisible(self._reference_visible.get(key, True) and self._reference_units.get(key, "nm") == self.axis_unit)
+
     def set_reference(self, reference_id: str, wl: np.ndarray, cts: np.ndarray,
-                      color: str, visible: bool = True) -> None:
+                      color: str, visible: bool = True, axis_unit: str = "nm") -> None:
         curve = self._reference_curves.get(str(reference_id))
         if curve is None:
             curve = self._plot.plot(
@@ -132,12 +173,15 @@ class _SpectrumPlot(QWidget):
             style=Qt.PenStyle.SolidLine,
         ))
         curve.setData(np.asarray(wl, dtype=float), np.asarray(cts, dtype=float))
-        curve.setVisible(bool(visible))
+        self._reference_units[str(reference_id)] = axis_unit
+        self._reference_visible[str(reference_id)] = bool(visible)
+        curve.setVisible(bool(visible) and axis_unit == self.axis_unit)
 
     def set_reference_visible(self, reference_id: str, visible: bool) -> None:
         curve = self._reference_curves.get(str(reference_id))
         if curve is not None:
-            curve.setVisible(bool(visible))
+            self._reference_visible[str(reference_id)] = bool(visible)
+            curve.setVisible(bool(visible) and self._reference_units.get(str(reference_id), "nm") == self.axis_unit)
 
     def remove_reference(self, reference_id: str) -> None:
         curve = self._reference_curves.pop(str(reference_id), None)
@@ -155,11 +199,11 @@ class _SpectrumPlot(QWidget):
         if self._cts.size:
             peak_idx = int(np.argmax(self._cts))
             self._peak_lbl.setText(
-                f"Peak: {self._cts[peak_idx]:.0f} cts @ {self._wl[peak_idx]:.2f} nm"
+                f"Peak: {self._cts[peak_idx]:.0f} cts @ " + (f"pixel {self._wl[peak_idx]:g}" if self.axis_unit == "pixel" else _wavelength_energy_text(self._wl[peak_idx]))
             )
         if self._wl.size >= 2:
             self._range_lbl.setText(
-                f"Range: {self._wl[0]:.1f} – {self._wl[-1]:.1f} nm"
+                f"Range: {self._wl[0]:.1f} – {self._wl[-1]:.1f} {self.axis_unit}"
             )
 
 
@@ -236,7 +280,10 @@ class SpectrumPanel(QWidget):
     def __init__(self, lf6_ctrl=None, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._ctrl = lf6_ctrl
+        self._display_backend = None
+        self._backend_profiles = {}
         self._connected = False
+        self._action_controls_requested = False
         self._supports_2d = True
         self._pending_acquisition: Optional[str] = None
         self._continuous_mode: Optional[str] = None
@@ -259,20 +306,78 @@ class SpectrumPanel(QWidget):
 
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(4)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        self._device_status = QLabel("Acquisition device: disconnected")
+        self._device_status.setWordWrap(True)
+        self._device_status.setTextFormat(Qt.TextFormat.PlainText)
+        self._device_status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._device_status_row = QHBoxLayout()
+        self._device_status_row.addWidget(self._device_status, 1)
+        root.addLayout(self._device_status_row)
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(8)
+        root.addLayout(controls_row)
+        self._acquisition_group = QGroupBox("Acquisition")
+        acquisition_layout = QGridLayout(self._acquisition_group)
+        acquisition_layout.setContentsMargins(8, 6, 8, 6)
+        acquisition_layout.setHorizontalSpacing(16)
+        acquisition_layout.setColumnStretch(0, 1)
+        controls_row.addWidget(self._acquisition_group, 1)
+        self._spectrograph_group = QGroupBox("Spectrograph")
+        optics_layout = QVBoxLayout(self._spectrograph_group)
+        optics_layout.setContentsMargins(8, 6, 8, 6)
+        optics_row = QGridLayout()
+        optics_layout.addLayout(optics_row)
+        controls_row.addWidget(self._spectrograph_group, 1)
 
         # Acquisition settings.  These intentionally mirror the shared
         # Settings tab so a single spectrum can be configured where it is run.
         settings_row = QHBoxLayout()
-        settings_row.addWidget(QLabel("Center wavelength:"))
+        optics_row.addWidget(QLabel("Requested center:"), 0, 0)
         self._center = QDoubleSpinBox()
         self._center.setRange(200.0, 2000.0)
         self._center.setDecimals(1)
         self._center.setSingleStep(1.0)
         self._center.setSuffix(" nm")
         self._center.setValue(float(cfg.lf6.center_nm))
-        settings_row.addWidget(self._center)
+        self._center.setMaximumWidth(125)
+        optics_row.addWidget(self._center, 0, 1)
+        optics_row.addWidget(QLabel("Requested energy:"), 1, 0)
+        self._energy = QDoubleSpinBox()
+        self._energy.setDecimals(6)
+        self._energy.setRange(PHOTON_EV_NM / self._center.maximum(),
+                              PHOTON_EV_NM / self._center.minimum())
+        self._energy.setSingleStep(0.01)
+        self._energy.setKeyboardTracking(False)
+        self._energy.setSuffix(" eV")
+        self._energy.setMaximumWidth(125)
+        self._energy.setAccessibleName("Requested photon energy")
+        self._energy.setToolTip("Linked to wavelength: E (eV) = 1239.841984 / wavelength (nm).")
+        self._energy.setValue(PHOTON_EV_NM / self._center.value())
+        optics_row.addWidget(self._energy, 1, 1)
+        optics_row.addWidget(QLabel("Grating:"), 2, 0)
+        self._grating = QComboBox()
+        self._grating.addItem("Not available")
+        self._grating.setEnabled(False)
+        self._grating.setMinimumWidth(160)
+        self._grating.setMaximumWidth(300)
+        optics_row.addWidget(self._grating, 2, 1, 1, 2)
+        optics_row.addWidget(QLabel("Output port:"), 3, 0)
+        self._output_port = QComboBox()
+        self._output_port.addItem("Not available")
+        self._output_port.setEnabled(False)
+        self._output_port.setMinimumWidth(125)
+        self._output_port.setMaximumWidth(180)
+        optics_row.addWidget(self._output_port, 3, 1, 1, 2)
+        self._apply_optics_btn = QPushButton("Apply spectrograph")
+        self._apply_optics_btn.setEnabled(False)
+        optics_row.addWidget(self._apply_optics_btn, 0, 2)
+        self._optics_readback = QLabel("Actual: not read")
+        self._optics_readback.setWordWrap(True)
+        self._optics_readback.setTextFormat(Qt.TextFormat.PlainText)
+        optics_layout.addWidget(self._optics_readback)
+        self._optics_snapshot = {}
 
         settings_row.addWidget(QLabel("Exposure:"))
         self._exposure = QDoubleSpinBox()
@@ -283,20 +388,48 @@ class SpectrumPanel(QWidget):
         self._exposure.setValue(float(cfg.lf6.exposure_ms))
         settings_row.addWidget(self._exposure)
 
-        settings_row.addWidget(QLabel("Accumulations:"))
+        self._frames_label = QLabel("Frames to combine:")
+        settings_row.addWidget(self._frames_label)
         self._accumulations = QSpinBox()
         self._accumulations.setRange(1, 1000)
         self._accumulations.setSuffix(" frame(s)")
         self._accumulations.setValue(int(cfg.lf6.accumulations))
+        self._accumulations.setAccessibleName("Acquisition frame count")
         settings_row.addWidget(self._accumulations)
 
         self._apply_btn = QPushButton("Apply")
         self._apply_btn.setToolTip(
-            "Apply center wavelength, exposure, and accumulations without acquiring."
+            "Apply center wavelength, exposure per frame, and frame count without acquiring."
         )
         settings_row.addWidget(self._apply_btn)
         settings_row.addStretch()
-        root.addLayout(settings_row)
+        acquisition_layout.addLayout(settings_row, 0, 0)
+        self._frame_help = QLabel("Frame processing follows the connected device settings.")
+        self._frame_help.setWordWrap(True)
+        acquisition_layout.addWidget(self._frame_help, 3, 0)
+        self._error_panel = QWidget()
+        error_layout = QVBoxLayout(self._error_panel)
+        error_layout.setContentsMargins(0, 0, 0, 0)
+        error_actions = QHBoxLayout()
+        error_actions.addWidget(QLabel("Error details"))
+        error_actions.addStretch()
+        self._copy_error_btn = QPushButton("Copy error")
+        self._dismiss_error_btn = QPushButton("Dismiss")
+        error_actions.addWidget(self._copy_error_btn)
+        error_actions.addWidget(self._dismiss_error_btn)
+        error_layout.addLayout(error_actions)
+        self._error_details = QPlainTextEdit()
+        self._error_details.setReadOnly(True)
+        self._error_details.setAccessibleName("Full acquisition error")
+        self._error_details.setMaximumHeight(110)
+        error_layout.addWidget(self._error_details)
+        self._error_panel.hide()
+        root.addWidget(self._error_panel)
+        self._source_label = QLabel("Displayed data: no acquisition yet")
+        self._source_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._source_label.setWordWrap(True)
+        self._source_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        root.addWidget(self._source_label)
 
         # Button row
         btn_row = QHBoxLayout()
@@ -316,27 +449,60 @@ class SpectrumPanel(QWidget):
         )
         self._load_spectra_btn = QPushButton("Load spectra…")
         self._status_lbl     = QLabel("Ready")
-        self._status_lbl.setStyleSheet("color: gray;")
+        self._status_lbl.setWordWrap(True)
+        self._status_lbl.setMaximumWidth(260)
+        self._status_lbl.setStyleSheet("")
         btn_row.addWidget(self._acquire_btn)
         btn_row.addWidget(self._acquire_2d_btn)
         btn_row.addWidget(self._abort_btn)
-        btn_row.addSpacing(10)
-        btn_row.addWidget(self._run_1d_btn)
-        btn_row.addWidget(self._run_2d_btn)
-        btn_row.addWidget(self._stop_btn)
-        btn_row.addWidget(self._save_btn)
-        btn_row.addWidget(self._add_spectrum_btn)
-        btn_row.addWidget(self._load_spectra_btn)
-        btn_row.addStretch()
+        run_row = QHBoxLayout()
+        run_row.addWidget(self._run_1d_btn)
+        run_row.addWidget(self._run_2d_btn)
+        run_row.addWidget(self._stop_btn)
         self._rate_lbl = QLabel("0 frames · 0.0 fps")
-        btn_row.addWidget(self._rate_lbl)
-        btn_row.addWidget(self._status_lbl)
-        root.addLayout(btn_row)
+        self._device_status_row.addWidget(self._rate_lbl)
+        self._device_status_row.addWidget(self._status_lbl)
+        acquisition_layout.addLayout(btn_row, 1, 0)
+        acquisition_layout.addLayout(run_row, 2, 0)
+
+        calibration_row = QHBoxLayout()
+        self._wavelength_calibration_btn = QPushButton('WinSpec wavelength calibration…')
+        self._wavelength_calibration_btn.setEnabled(False)
+        self._wavelength_calibration_btn.clicked.connect(self._open_wavelength_calibration)
+        self._use_winspec_nm = QCheckBox('Apply saved WinSpec nm calibration (same detector / mounting)')
+        self._use_winspec_nm.setChecked(False)
+        self._use_winspec_nm.setToolTip('Confirm the physical WinSpec detector and mounting for this session. Does not affect PIXIS.')
+        # These controls belong to the dedicated Calibration page. Keep their
+        # identities/signals for existing acquisition and session handling.
+        self._wavelength_calibration_btn.setParent(self); self._wavelength_calibration_btn.hide()
+        self._use_winspec_nm.setParent(self); self._use_winspec_nm.hide()
+        self._reverse_winspec_pixels = QCheckBox('WinSpec: reverse pixel display (short wavelength on left)')
+        self._reverse_winspec_pixels.setToolTip('Display only: keeps original pixel/count pairs and exports. Calibrated nm axes always increase to the right. Applies only to WinSpec data.')
+        self._reverse_winspec_pixels.setChecked(cfg.lf6.winspec_reverse_pixel_display)
+        self._reverse_winspec_pixels.toggled.connect(self._on_reverse_winspec_pixels)
+        self._reverse_winspec_pixels.setParent(self); self._reverse_winspec_pixels.hide()
+        self._calibration_status = QLabel('Wavelength calibration: see Calibration tab')
+        self._calibration_status.setWordWrap(True)
+        acquisition_layout.addWidget(self._calibration_status, 4, 0)
+        self._winspec_temperature_label = QLabel('InGaAs interlock: requires fresh temperature and (Locked or <= -100 C); checked at acquisition')
+        self._winspec_temperature_label.setWordWrap(True)
+        acquisition_layout.addWidget(self._winspec_temperature_label, 5, 0)
+        self._winspec_frame_context = None
+        self._winspec_temperature_guard = None
+        self._latest_winspec_frame = None
+        self._wavelength_dialog = None
+        self._calibration_capture_pending = False
+        self._calibration_previous_nm = None
+        self._winspec_frame_datatype = None
 
         save_row = QHBoxLayout()
-        save_row.addWidget(QLabel("Spectrum save folder:"))
+        save_row.addWidget(self._save_btn)
+        save_row.addWidget(self._add_spectrum_btn)
+        save_row.addWidget(self._load_spectra_btn)
+        save_row.addWidget(QLabel("Folder:"))
         self._save_root_lbl = QLabel()
         self._save_root_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._save_root_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         save_row.addWidget(self._save_root_lbl, 1)
         self._change_save_root_btn = QPushButton("Change…")
         self._open_save_root_btn = QPushButton("Open")
@@ -400,6 +566,11 @@ class SpectrumPanel(QWidget):
         self._andor_toggle.setVisible(False)
         root.addWidget(self._andor_toggle)
         self._andor_controls = AndorControlsWidget(self._ctrl)
+        self._andor_controls.optics_managed_externally = True
+        optics_form = self._andor_controls.center.parentWidget().layout()
+        for field in (self._andor_controls.center, self._andor_controls.grating,
+                      self._andor_controls.grating_info, self._andor_controls.output_port):
+            optics_form.setRowVisible(field, False)
         self._andor_controls.setVisible(False)
         root.addWidget(self._andor_controls)
 
@@ -416,6 +587,9 @@ class SpectrumPanel(QWidget):
         self._save_root_lbl.setText(str(self._spectrum_output_root()))
 
     def _wire(self):
+        self._apply_optics_btn.clicked.connect(self._apply_optics)
+        self._copy_error_btn.clicked.connect(lambda: QApplication.clipboard().setText(self._error_details.toPlainText()))
+        self._dismiss_error_btn.clicked.connect(self._error_panel.hide)
         self._acquire_btn.clicked.connect(self._on_acquire)
         self._acquire_2d_btn.clicked.connect(self._on_acquire_2d)
         self._apply_btn.clicked.connect(self._on_apply)
@@ -442,7 +616,8 @@ class SpectrumPanel(QWidget):
             lambda value: setattr(cfg.lf6, "center_nm", float(value))
         )
         self._center.valueChanged.connect(self._andor_controls.center.setValue)
-        self._andor_controls.center.valueChanged.connect(self._center.setValue)
+        self._center.valueChanged.connect(self._sync_energy_from_wavelength)
+        self._energy.valueChanged.connect(self._sync_wavelength_from_energy)
         self._exposure.valueChanged.connect(
             lambda value: setattr(cfg.lf6, "exposure_ms", float(value))
         )
@@ -451,6 +626,21 @@ class SpectrumPanel(QWidget):
         )
 
         if self._ctrl is not None:
+            spectrograph_signal = getattr(self._ctrl, "spectrograph_status_ready", None)
+            if spectrograph_signal is not None:
+                spectrograph_signal.connect(self._on_optics_status)
+            readback_signal = getattr(self._ctrl, "acquisition_settings_readback", None)
+            if readback_signal is not None:
+                readback_signal.connect(self._on_acquisition_readback)
+            optics_signal = getattr(self._ctrl, "andor_status_ready", None)
+            if optics_signal is not None:
+                optics_signal.connect(self._on_optics_status)
+            lock_signal = getattr(self._ctrl, "switching_lock_changed", None)
+            if lock_signal is not None:
+                lock_signal.connect(lambda _locked: self._refresh_action_controls())
+            shamrock_signal = getattr(self._ctrl, "shamrock_connection_changed", None)
+            if shamrock_signal is not None:
+                shamrock_signal.connect(self._update_device_status)
             self._ctrl.connected.connect(self._on_lf6_connected)
             self._ctrl.disconnected.connect(self._on_lf6_disconnected)
             self._ctrl.spectrum_ready.connect(self._on_spectrum_ready)
@@ -467,9 +657,21 @@ class SpectrumPanel(QWidget):
 
     # ── slots ─────────────────────────────────────────────────────────────────
 
+    def _sync_energy_from_wavelength(self, wavelength):
+        with QSignalBlocker(self._energy):
+            self._energy.setValue(PHOTON_EV_NM / wavelength)
+
+    def _sync_wavelength_from_energy(self, energy):
+        self._center.setValue(PHOTON_EV_NM / energy)
+        # Show the energy of the rounded, canonical wavelength sent to hardware.
+        self._sync_energy_from_wavelength(self._center.value())
+
     def capture_session_state(self) -> dict:
         """Return display preferences only; acquired data is intentionally omitted."""
+        if self._display_backend:
+            self._backend_profiles[self._display_backend] = self._capture_device_controls()
         return {
+            "backend_profiles": copy.deepcopy(self._backend_profiles),
             "view_tab": int(self._tabs.currentIndex()),
             "auto_y": bool(self._spec_plot._autoscale_chk.isChecked()),
             "colormap": self._frame_plot._cmap_combo.currentText(),
@@ -479,9 +681,148 @@ class SpectrumPanel(QWidget):
             "andor": self._andor_controls.capture_session_state(),
         }
 
+    def _on_acquisition_readback(self, data):
+        if 'winspec_frame_context' in data:
+            self._winspec_frame_datatype = data.get('winspec_frame_datatype')
+            self._winspec_frame_context = copy.deepcopy(data['winspec_frame_context'])
+            self._winspec_temperature_guard = copy.deepcopy(data.get('winspec_temperature_guard'))
+            self._winspec_intensity_processing = copy.deepcopy(data.get('winspec_intensity_processing'))
+            self._winspec_raw_accumulated_counts = copy.deepcopy(data.get('winspec_raw_accumulated_counts'))
+            self._winspec_start_acceleration = copy.deepcopy(data.get('winspec_start_acceleration'))
+            self._winspec_capture_timing = copy.deepcopy(data.get('winspec_capture_timing'))
+            return
+        data = dict(data or {})
+        center = (data.get("center_wavelength") or {}).get("readback")
+        self._optics_readback.setText(
+            f"Actual center: {_wavelength_energy_text(center)} | Grating: {data.get('grating', 'Not available')} | Output port: {data.get('output_port') or 'Not read'}"
+        )
+
+    def _enable_optics(self):
+        enabled = (self._connected and self._apply_btn.isEnabled()
+                   and not getattr(self._ctrl, "switching_locked", False))
+        identity = getattr(self._ctrl, "identity", {}) or {}
+        enabled = enabled and identity.get("shamrock_connected", True)
+        self._apply_optics_btn.setEnabled(enabled)
+        self._grating.setEnabled(enabled and self._grating.currentData() is not None)
+        self._output_port.setEnabled(enabled and self._output_port.currentData() is not None)
+
+    def _apply_optics(self):
+        if not self._apply_optics_btn.isEnabled():
+            return
+        identity = getattr(self._ctrl, "identity", {}) or {}
+        requested = {"wavelength_nm": self._center.value()}
+        if self._grating.currentData() is not None:
+            requested["grating"] = self._grating.currentData()
+        if self._output_port.currentData() is not None:
+            requested["output_port"] = self._output_port.currentData()
+        method = getattr(self._ctrl, "apply_andor_controls" if identity.get("backend") == "andor_sdk2" else "lightfield_optics", None)
+        if callable(method):
+            self._apply_optics_btn.setEnabled(False)
+            self._status_lbl.setText("Applying spectrograph settings...")
+            method(requested)
+
+    def _on_optics_status(self, data):
+        self._optics_snapshot = dict(data or {})
+        pending=getattr(self,'_calibration_grating_pending',None)
+        if pending is not None:
+            self._calibration_grating_pending=None
+            dialog=self._wavelength_dialog.broad_dialog
+            if str((data or {}).get('grating'))!=pending or (data or {}).get('readback_errors'):
+                dialog.stop_collection('Grating switch readback failed')
+            else:QTimer.singleShot(50,lambda:self._calibration_grating_ready(pending))
+        data = self._optics_snapshot
+        self._grating.clear()
+        for item in data.get("grating_infos", []):
+            index = item.get("index")
+            if index is not None:
+                self._grating.addItem(item.get("label", f"Grating {index}"), index)
+        if not self._grating.count():
+            if data.get("grating") is not None:
+                self._grating.addItem(f"Grating {data['grating']}", data["grating"])
+            else:
+                self._grating.addItem("Not available")
+        index = self._grating.findData(data.get("grating"))
+        if index >= 0:
+            self._grating.setCurrentIndex(index)
+        self._output_port.clear()
+        if data.get("output_flipper_present"):
+            for port in data.get("output_ports", ("unchanged", "direct", "side")):
+                label = "direct (InGaAs)" if port == "direct" else port
+                self._output_port.addItem(label, port)
+            self._output_port.setCurrentIndex(max(0, self._output_port.findData(data.get("output_port"))))
+        else:
+            self._output_port.addItem(str(data.get('output_port') or 'Fixed / not reported'))
+        self._output_port.setVisible(bool(data.get('output_flipper_present')))
+        self._optics_readback.setText(
+            f"Actual center: {_wavelength_energy_text(data.get('wavelength_nm'))} | Grating: {data.get('grating', 'Not read')} | Output port: {data.get('output_port', 'Not read')}"
+        )
+        self._enable_optics()
+
+    @staticmethod
+    def _device_name(identity):
+        backend = str(identity.get("backend", ""))
+        if backend in {"andor_sdk2", "mock_andor_si", "mock_andor_ingaas"}:
+            role = str(identity.get("camera_role", ""))
+            name = "Andor Si" if role == "si" or backend == "mock_andor_si" else "Andor InGaAs"
+        elif backend in {"lightfield", "mock_lightfield"}:
+            name = "LightField"
+        elif backend == "winspec_ingaas":
+            axis = 'nm' if identity.get('axis_unit') == 'nm' else 'raw pixels'
+            name = f"WinSpec InGaAs + LightField spectrograph ({axis})"
+        else:
+            name = backend or "Unknown device"
+        return name + (" (mock)" if backend.startswith("mock_") else "")
+
+    def _update_device_status(self, shamrock_connected=None):
+        identity = getattr(self._ctrl, "identity", {}) or {}
+        name = self._device_name(identity)
+        serial = identity.get("camera_serial")
+        text = f"Acquisition device: {name} | Camera: connected"
+        if identity.get('output_route'):
+            text += f" | Exit: {identity['output_route']} | Setup: {identity.get('optical_profile', '')}"
+        if serial:
+            text += f" | Serial: {serial}"
+        andor = "andor" in str(identity.get("backend", ""))
+        if andor:
+            connected = identity.get("shamrock_connected", True) if shamrock_connected is None else shamrock_connected
+            text += " | Shamrock: " + ("connected" if connected else "disconnected")
+        self._device_status.setText(text)
+        self._enable_optics()
+        self._frames_label.setText("Frames to average:" if andor else "Frames to combine:")
+        explanation = ("Andor captures N frames and returns their arithmetic mean. Individual frames are not saved."
+                       if andor else "LightField combines frames using the experiment settings. Exposure is per frame.")
+        self._frame_help.setText("Andor: mean of N frames; individual frames are not saved." if andor else "LightField: frame combination follows the experiment settings.")
+        self._accumulations.setToolTip(explanation)
+        if identity.get('backend') == 'winspec_ingaas':
+            self._frames_label.setText('WinSpec accumulations:')
+            self._frame_help.setText('WinSpec accumulations; exposure is per accumulation. Saved wavelength calibration is applied to matching frames.')
+            self._accumulations.setToolTip(self._frame_help.text())
+
+    def _update_source_label(self):
+        snapshot = self._last_acquisition_snapshot or {}
+        identity = snapshot.get("instrument_identity", snapshot.get("identity", {})) or {}
+        name = self._device_name(identity)
+        sample = snapshot.get("sample_id") or "Unknown sample"
+        exposure = snapshot.get("exposure_ms", "Unknown")
+        frames = snapshot.get("accumulations", "Unknown")
+        stamp = snapshot.get("completed_utc") or "Unknown time"
+        self._source_label.setText(
+            f"Displayed data: {name} | Sample ID: {sample} | Exposure: {exposure} ms/frame | Frames: {frames} | Acquired: {stamp}"
+        )
+
+    def _capture_device_controls(self):
+        return {
+            "center_nm": float(self._center.value()),
+            "exposure_ms": float(self._exposure.value()),
+            "accumulations": int(self._accumulations.value()),
+            "andor": self._andor_controls.capture_session_state(),
+        }
+
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
             return
+        if isinstance(state.get("backend_profiles"), dict):
+            self._backend_profiles = copy.deepcopy(state["backend_profiles"])
         self._spec_plot._autoscale_chk.setChecked(bool(state.get("auto_y", True)))
         try:
             self._center.setValue(float(state.get("center_nm", self._center.value())))
@@ -625,6 +966,23 @@ class SpectrumPanel(QWidget):
         peak = float(np.nanmax(np.abs(counts))) if counts.size else 0.0
         return counts / peak if peak > 0 else counts
 
+    def _set_spectrum_axis(self, snapshot):
+        identity = (snapshot or {}).get('instrument_identity', {})
+        self._calibration_status.setText('Displayed wavelength axis: ' +
+            ('pixels — not calibrated' if identity.get('axis_unit') == 'pixel' else 'nm') +
+            ' · Calibration settings are in the Calibration tab')
+        self._spec_plot.set_axis_unit(identity.get('axis_unit', 'nm'),
+            reverse_pixels=(identity.get('backend') == 'winspec_ingaas'
+                            and self._reverse_winspec_pixels.isChecked()))
+
+    def _on_reverse_winspec_pixels(self, checked):
+        cfg.lf6.winspec_reverse_pixel_display = bool(checked)
+        cfg.save()
+        snapshot = self._last_acquisition_snapshot
+        if self._last_data is None and self._references:
+            snapshot = self._references[-1]['settings_snapshot']
+        self._set_spectrum_axis(snapshot)
+
     def _spectrum_output_root(self) -> Path:
         return Path(getattr(cfg.filename, "base_out", "" ) or Path.cwd()).expanduser().resolve()
 
@@ -759,7 +1117,7 @@ class SpectrumPanel(QWidget):
             return False
         ref["color"] = QColor(str(color)).name()
         self._spec_plot.set_reference(reference_id, ref["wavelength"],
-                                      self._display_counts(ref), ref["color"], ref["visible"])
+                                      self._display_counts(ref), ref["color"], ref["visible"], ref.get("axis_unit", "nm"))
         self._refresh_reference_item(ref)
         return True
 
@@ -786,7 +1144,8 @@ class SpectrumPanel(QWidget):
             "path": ref.get("path"), "metadata_path": ref.get("metadata_path"),
             "saved": bool(ref["saved"]), "save_error": ref.get("save_error"),
             "points": int(np.asarray(ref["counts"]).size),
-            "wavelength_range_nm": [float(ref["wavelength"][0]), float(ref["wavelength"][-1])],
+            "axis_unit": ref.get("axis_unit", "nm"),
+            ("pixel_range" if ref.get("axis_unit") == "pixel" else "wavelength_range_nm"): [float(ref["wavelength"][0]), float(ref["wavelength"][-1])],
             "settings_snapshot": dict(ref.get("settings_snapshot") or {}),
             "metadata": dict(ref.get("metadata") or {}),
         }
@@ -806,6 +1165,14 @@ class SpectrumPanel(QWidget):
     def _apply_settings_then(self, acquisition: Optional[str]) -> None:
         if self._ctrl is None or not self._connected:
             return
+        if acquisition and not self._calibration_capture_pending:
+            from ui.detector_wavelength_advice import confirm_detector_wavelength
+            if not confirm_detector_wavelength(self, getattr(self._ctrl, 'identity', {}), [self._center.value()]):
+                self._continuous_mode = None
+                self._add_pending = False
+                self._stop_btn.setEnabled(False)
+                self._andor_controls.set_controls_locked(False)
+                return
         self._pending_acquisition = acquisition
         # Freeze the request at dispatch time.  The controls remain editable
         # while the asynchronous controller applies settings; reading them in
@@ -813,6 +1180,8 @@ class SpectrumPanel(QWidget):
         # the spectrum that was acquired with the old request.
         requested_at = datetime.now(timezone.utc).isoformat()
         self._pending_acquisition_snapshot = {
+            "sample_id": str(getattr(cfg.session, "sample_id", "") or ""),
+            "instrument_identity": copy.deepcopy(getattr(self._ctrl, "identity", {}) or {}),
             "center_nm": float(self._center.value()),
             "exposure_ms": float(self._exposure.value()),
             "accumulations": int(self._accumulations.value()),
@@ -835,6 +1204,9 @@ class SpectrumPanel(QWidget):
 
     @Slot()
     def _on_settings_applied(self) -> None:
+        stats = getattr(self._ctrl, "center_wavelength_write_stats", {}) or {}
+        if stats.get("result") == "succeeded" and stats.get("readback") is not None:
+            self._optics_readback.setText(f"Actual center: {_wavelength_energy_text(stats['readback'])} | Grating: Not available | Output port: Not available")
         pending = self._pending_acquisition
         self._pending_acquisition = None
         snapshot = dict(self._pending_acquisition_snapshot or {})
@@ -867,13 +1239,23 @@ class SpectrumPanel(QWidget):
 
     @Slot(str)
     def _on_error(self, message: str) -> None:
+        self._calibration_capture_pending = False
+        if self._wavelength_dialog is not None and self._wavelength_dialog.broad_dialog is not None:
+            self._wavelength_dialog.broad_dialog.stop_collection(f'Collection stopped: {message}')
         self._pending_acquisition = None
         self._pending_acquisition_snapshot = None
         self._continuous_mode = None
         self._add_pending = False
         full = str(message)
-        self._status_lbl.setText(f"Error: {full.splitlines()[0][:80]}")
+        if self._wavelength_dialog is not None and self._wavelength_dialog.isVisible():
+            self._wavelength_dialog.result.setText(full)
+            self._wavelength_dialog.steps.setCurrentIndex(2)
+        if 'temperature interlock' in full:
+            self._winspec_temperature_label.setText('InGaAs measurement BLOCKED — see error details')
+        self._status_lbl.setText("Error - see details above")
         self._status_lbl.setToolTip(full)
+        self._error_details.setPlainText(full)
+        self._error_panel.show()
         self._abort_btn.setEnabled(False)
         self._stop_btn.setEnabled(False)
         self._andor_controls.set_controls_locked(False)
@@ -882,8 +1264,11 @@ class SpectrumPanel(QWidget):
     @Slot()
     def _on_abort(self) -> None:
         method = getattr(self._ctrl, "abort_acquisition", None)
-        if callable(method) and method():
-            self._status_lbl.setText("Cancelling acquisition…")
+        try:
+            if callable(method) and method():
+                self._status_lbl.setText("Cancelling acquisition…")
+        except Exception as exc:
+            self._status_lbl.setText(f"Stop not confirmed: {exc}")
         self._abort_btn.setEnabled(False)
 
     def _start_continuous(self, mode: str) -> None:
@@ -942,27 +1327,59 @@ class SpectrumPanel(QWidget):
         self._set_action_controls_enabled(self._connected)
 
     def _set_action_controls_enabled(self, enabled: bool) -> None:
+        self._action_controls_requested = bool(enabled)
         pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
         if callable(pause):
             pause("spectrum", self._connected and not enabled)
+        self._refresh_action_controls()
+
+    def _refresh_action_controls(self) -> None:
+        # External locks affect presentation without claiming Spectrum ownership
+        # or emitting the lock signal again. Keep our own acquisition state.
+        blocked = bool(getattr(self._ctrl, 'spectrum_actions_blocked', False))
+        enabled = self._connected and self._action_controls_requested and not blocked
+        winspec = (getattr(self._ctrl, 'identity', {}) or {}).get('backend') == 'winspec_ingaas'
+        self._wavelength_calibration_btn.setEnabled(bool(enabled and winspec))
+        self._use_winspec_nm.setEnabled(bool(enabled and winspec))
+        if self._wavelength_dialog is not None:
+            self._wavelength_dialog.capture_button.setEnabled(bool(enabled and winspec))
+            for editor in getattr(self._wavelength_dialog, 'capture_editors', []):
+                editor.setEnabled(bool(enabled and winspec))
         self._apply_btn.setEnabled(enabled)
         self._acquire_btn.setEnabled(enabled)
         self._acquire_2d_btn.setEnabled(enabled and self._supports_2d)
         self._run_1d_btn.setEnabled(enabled)
         self._run_2d_btn.setEnabled(enabled and self._supports_2d)
         self._center.setEnabled(enabled)
+        self._energy.setEnabled(enabled)
+        self._enable_optics()
         self._exposure.setEnabled(enabled)
         self._accumulations.setEnabled(enabled)
         self._add_spectrum_btn.setEnabled(
-            bool(enabled) or (self._continuous_mode is not None and self._continuous_frames > 0)
+            not blocked and (bool(enabled) or (self._continuous_mode is not None and self._continuous_frames > 0))
         )
 
     @Slot(list)
     def _on_lf6_connected(self, _experiments):
+        if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') == 'winspec_ingaas':
+            self._use_winspec_nm.setChecked(any(
+                r.get('kind') == 'physical_grating_model' and
+                r.get('context', {}).get('profile') == cfg.lf6.optical_profile
+                for r in cfg.lf6.winspec_wavelength_calibrations))
+        if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') != 'winspec_ingaas' and self._wavelength_dialog is not None:
+            if not self._wavelength_dialog.embedded:
+                self._wavelength_dialog.hide()
+        self._on_optics_status({})
+        backend = str(getattr(self._ctrl, "backend", "lightfield"))
+        if self._display_backend and self._display_backend != backend:
+            self._backend_profiles[self._display_backend] = self._capture_device_controls()
+        changed = self._display_backend != backend
+        self._display_backend = backend
         self._connected = True
+        self._update_device_status()
         identity = getattr(self._ctrl, "identity", {}) or {}
         self._supports_2d = not (
-            str(identity.get("backend", "")) == "andor_sdk2"
+            str(identity.get("backend", "")) in {"andor_sdk2", "winspec_ingaas"}
             and str(identity.get("camera_role", "")) == "ingaas"
         )
         self._acquire_2d_btn.setToolTip(
@@ -973,14 +1390,35 @@ class SpectrumPanel(QWidget):
         self._set_action_controls_enabled(True)
         is_andor = str(identity.get("backend", "")) == "andor_sdk2"
         self._andor_controls.set_backend_identity(identity)
+        if changed and isinstance(self._backend_profiles.get(backend), dict):
+            self.restore_session_state(self._backend_profiles[backend])
         self._andor_toggle.setVisible(is_andor)
         self._andor_controls.setVisible(is_andor and self._andor_toggle.isChecked())
-        self._status_lbl.setText("Connected")
-        self._status_lbl.setStyleSheet("color: green;")
+        self._status_lbl.setText("Ready")
+        if changed and self._last_data is not None:
+            self._source_label.setToolTip("This acquisition was captured before the device switch. Its source information remains unchanged.")
+        self._status_lbl.setStyleSheet("")
+        if identity.get("backend") in {"lightfield", "winspec_ingaas"}:
+            refresh = getattr(self._ctrl, "lightfield_optics", None)
+            if callable(refresh):
+                QTimer.singleShot(0, refresh)
 
     @Slot()
     def _on_lf6_disconnected(self):
+        self._calibration_previous_nm = None
+        self._calibration_capture_pending = False
+        self._use_winspec_nm.setChecked(False)
+        self._latest_winspec_frame = None
+        self._winspec_frame_context = None
+        if self._wavelength_dialog is not None:
+            if self._wavelength_dialog.broad_dialog is not None:
+                self._wavelength_dialog.broad_dialog.stop_collection()
+            if not self._wavelength_dialog.embedded:
+                self._wavelength_dialog.hide()
+            self._wavelength_dialog.frame = None
+            self._wavelength_dialog.invalidate()
         self._connected = False
+        self._device_status.setText("Acquisition device: disconnected")
         self._pending_acquisition = None
         self._continuous_mode = None
         self._add_pending = False
@@ -991,7 +1429,7 @@ class SpectrumPanel(QWidget):
         self._andor_controls.set_backend_identity({})
         self._set_action_controls_enabled(False)
         self._status_lbl.setText("Disconnected")
-        self._status_lbl.setStyleSheet("color: gray;")
+        self._status_lbl.setStyleSheet("")
 
     @Slot(object, object)
     def _on_spectrum_ready(self, wl: np.ndarray, cts: np.ndarray):
@@ -1002,17 +1440,54 @@ class SpectrumPanel(QWidget):
         )
         self._pending_acquisition_snapshot = None
         self._last_acquisition_snapshot["actual_readback"] = self._capture_readbacks()
-        self._last_acquisition_snapshot.update(self._capture_frame_provenance())
+        provenance = self._capture_frame_provenance()
+        provenance["instrument_identity"] = self._last_acquisition_snapshot.get("instrument_identity", provenance["instrument_identity"])
+        self._last_acquisition_snapshot.update(provenance)
         frame_time = datetime.now(timezone.utc)
         self._last_acquisition_snapshot["completed_utc"] = frame_time.isoformat()
         self._last_acquisition_snapshot["metadata_context"] = copy.deepcopy(
             self._available_metadata_context()
         )
-        self._last_acquisition_snapshot["sample_id"] = str(getattr(cfg.session, "sample_id", "") or "")
+        self._last_acquisition_snapshot.setdefault("sample_id", str(getattr(cfg.session, "sample_id", "") or ""))
         self._last_acquisition_snapshot["save_root"] = str(self._spectrum_output_root())
+        if self._last_acquisition_snapshot.get('instrument_identity', {}).get('backend') == 'winspec_ingaas':
+            self._last_acquisition_snapshot['intensity_processing'] = copy.deepcopy(getattr(self, '_winspec_intensity_processing', None))
+            self._last_acquisition_snapshot['raw_accumulated_counts'] = copy.deepcopy(getattr(self, '_winspec_raw_accumulated_counts', None))
+            self._last_acquisition_snapshot['start_acceleration'] = copy.deepcopy(getattr(self, '_winspec_start_acceleration', None))
+            self._last_acquisition_snapshot['capture_timing'] = copy.deepcopy(getattr(self, '_winspec_capture_timing', None))
+            self._winspec_start_acceleration = self._winspec_capture_timing = None
+            if self._winspec_temperature_guard is not None:
+                self._last_acquisition_snapshot['temperature_guard'] = self._winspec_temperature_guard
+                self._winspec_temperature_label.setText(
+                    f"InGaAs last exposure: temperature check passed · maximum {self._winspec_temperature_guard.get('maximum_c')} °C · Locked or <= -100 C required")
+            self._winspec_temperature_guard = None
+            frame = {'counts': np.asarray(cts, dtype=float).tolist(), 'context': self._winspec_frame_context,
+                     'captured_utc': frame_time.isoformat(), 'winspec_datatype':self._winspec_frame_datatype,
+                     'exposure_ms':self._last_acquisition_snapshot.get('exposure_ms'),
+                     'temperature_guard':copy.deepcopy(self._last_acquisition_snapshot.get('temperature_guard'))}
+            self._winspec_frame_context = None  # Never reuse another frame's optics readback.
+            frame['intensity_processing'] = self._last_acquisition_snapshot['intensity_processing']
+            frame['raw_accumulated_counts'] = self._last_acquisition_snapshot['raw_accumulated_counts']
+            self._winspec_intensity_processing = self._winspec_raw_accumulated_counts = None
+            self._latest_winspec_frame = copy.deepcopy(frame)
+            requested_calibration = self._calibration_capture_pending
+            self._calibration_capture_pending = False
+            if self._wavelength_dialog is not None and (requested_calibration or self._wavelength_dialog.isVisible()):
+                self._wavelength_dialog.set_frame(frame)
+                try:
+                    self._wavelength_dialog.save_raw_frame()
+                    if self._wavelength_dialog.broad_dialog is not None:
+                        self._wavelength_dialog.broad_dialog.frame_collected(frame)
+                except Exception as exc:
+                    if self._wavelength_dialog.broad_dialog is not None:
+                        self._wavelength_dialog.broad_dialog.stop_collection(f'Save failed: {exc}')
+                    self._wavelength_dialog.result.setText(f'Raw capture could not be saved: {exc}')
+            wl, cts = self._apply_winspec_calibration(frame, wl, cts)
         self._last_data_kind = "spectrum_1d"
         self._last_wavelength = np.asarray(wl, dtype=float).copy()
         self._last_data = np.asarray(cts, dtype=float).copy()
+        self._set_spectrum_axis(self._last_acquisition_snapshot)
+        self._update_source_label()
         self._save_btn.setEnabled(True)
         self._spec_plot.update_spectrum(wl, self._display_live_counts())
         self._tabs.setCurrentIndex(0)
@@ -1027,9 +1502,13 @@ class SpectrumPanel(QWidget):
 
     @Slot(object)
     def _on_frame_ready(self, img: np.ndarray):
-        self._last_acquisition_snapshot = dict(
+        self._last_acquisition_snapshot = copy.deepcopy(dict(
             self._pending_acquisition_snapshot or self._acquisition_settings_snapshot or {}
-        )
+        ))
+        self._last_acquisition_snapshot.setdefault("instrument_identity", copy.deepcopy(getattr(self._ctrl, "identity", {}) or {}))
+        self._last_acquisition_snapshot.setdefault("sample_id", str(getattr(cfg.session, "sample_id", "") or ""))
+        self._last_acquisition_snapshot["completed_utc"] = datetime.now(timezone.utc).isoformat()
+        self._update_source_label()
         self._pending_acquisition_snapshot = None
         self._last_data_kind = "frame_2d"
         self._last_wavelength = None
@@ -1042,16 +1521,162 @@ class SpectrumPanel(QWidget):
 
     # ── direct update (called by sweep loop without going through controller) ─
 
+    def create_calibration_page(self):
+        from ui.wavelength_calibration_dialog import WavelengthCalibrationDialog
+        if self._wavelength_dialog is None:
+            page = WavelengthCalibrationDialog()
+            page.setWindowFlags(Qt.WindowType.Widget)
+            page.embedded = True
+            page.capture_requested.connect(self._capture_calibration_lamp)
+            page.broad_capture_requested.connect(self._capture_broad_center)
+            page.broad_settings_requested.connect(self._capture_broad_settings)
+            page.automatic_started.connect(self._automatic_calibration_started)
+            page.automatic_finished.connect(self._automatic_calibration_finished)
+            page.gratings_provider = self._calibration_gratings
+            page.grating_requested.connect(self._calibration_switch_grating)
+            page.exposure_provider = self._exposure.value
+            page.save_callback = self._save_winspec_calibration
+            page.calibration_saved.connect(self._save_winspec_calibration)
+            page.capture_editors = []
+            for control in (self._use_winspec_nm, self._reverse_winspec_pixels):
+                page.display_settings_layout.addWidget(control); control.show()
+            for label, source in [('Center (nm)', self._center), ('Exposure (ms)', self._exposure), ('Frames to combine', self._accumulations)]:
+                row = QHBoxLayout(); row.addWidget(QLabel(label))
+                editor = type(source)(); editor.setRange(source.minimum(), source.maximum())
+                if isinstance(editor, QDoubleSpinBox): editor.setDecimals(source.decimals())
+                editor.setValue(source.value()); editor.valueChanged.connect(source.setValue)
+                page.capture_editors.append(editor)
+                source.valueChanged.connect(editor.setValue)
+                row.addWidget(editor); page.capture_settings_layout.addLayout(row)
+            self._wavelength_dialog = page
+            page.capture_button.setEnabled(self._wavelength_calibration_btn.isEnabled())
+            for editor in page.capture_editors:
+                editor.setEnabled(self._wavelength_calibration_btn.isEnabled())
+        return self._wavelength_dialog
+
+    def _automatic_calibration_started(self):
+        self._calibration_previous_nm = self._use_winspec_nm.isChecked()
+        self._calibration_previous_capture = (self._exposure.value(), self._accumulations.value())
+        self._accumulations.setValue(1)
+
+    def _automatic_calibration_finished(self, success):
+        previous = getattr(self, "_calibration_previous_capture", None)
+        if previous is not None:
+            self._exposure.setValue(previous[0]); self._accumulations.setValue(previous[1])
+            self._calibration_previous_capture = None
+        if self._calibration_previous_nm is not None:
+            self._use_winspec_nm.setChecked(bool(success or self._calibration_previous_nm))
+        self._calibration_previous_nm = None
+
+    def _calibration_gratings(self):
+        return [item['index'] for item in getattr(self,'_optics_snapshot',{}).get('grating_infos',[]) if item.get('index') is not None]
+
+    def _calibration_switch_grating(self, grating):
+        dialog=self._wavelength_dialog.broad_dialog
+        if (getattr(self._ctrl,'identity',{}) or {}).get('backend')!='winspec_ingaas':
+            dialog.stop_collection('Select connected WinSpec first');return
+        self._calibration_grating_pending=str(grating)
+        self._ctrl.lightfield_optics({'grating':str(grating)})
+
+    def _calibration_grating_ready(self, grating, attempts=0):
+        dialog=self._wavelength_dialog.broad_dialog
+        if not dialog.batch_active or dialog.batch_expected!=str(grating):return
+        if getattr(self._ctrl,'switching_locked',False):
+            if attempts>=100:
+                dialog.stop_collection('Spectrograph did not become idle');return
+            QTimer.singleShot(50,lambda:self._calibration_grating_ready(grating,attempts+1));return
+        dialog.grating_ready(grating)
+
+    def _capture_broad_settings(self, center, exposure):
+        self._exposure.setValue(exposure)
+        self._capture_broad_center(center)
+
+    def _open_wavelength_calibration(self):
+        if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') != 'winspec_ingaas':
+            return
+        from ui.wavelength_calibration_dialog import WavelengthCalibrationDialog
+        if self._wavelength_dialog is None:
+            self._wavelength_dialog = WavelengthCalibrationDialog(self)
+            self._wavelength_dialog.gratings_provider = self._calibration_gratings
+            self._wavelength_dialog.grating_requested.connect(self._calibration_switch_grating)
+            self._wavelength_dialog.exposure_provider = self._exposure.value
+            self._wavelength_dialog.save_callback = self._save_winspec_calibration
+            self._wavelength_dialog.broad_settings_requested.connect(self._capture_broad_settings)
+            self._wavelength_dialog.automatic_started.connect(self._automatic_calibration_started)
+            self._wavelength_dialog.automatic_finished.connect(self._automatic_calibration_finished)
+            self._wavelength_dialog.capture_requested.connect(self._capture_calibration_lamp)
+            self._wavelength_dialog.broad_capture_requested.connect(self._capture_broad_center)
+            self._wavelength_dialog.calibration_saved.connect(self._save_winspec_calibration)
+        if self._latest_winspec_frame is not None:
+            self._wavelength_dialog.set_frame(self._latest_winspec_frame)
+        self._wavelength_dialog.show(); self._wavelength_dialog.raise_()
+
+    def _capture_broad_center(self, center):
+        if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') != 'winspec_ingaas' or not self._acquire_btn.isEnabled():
+            self._wavelength_dialog.result.setText('Select idle WinSpec first; no center change was sent.')
+            if self._wavelength_dialog.broad_dialog is not None:
+                self._wavelength_dialog.broad_dialog.stop_collection('Collection stopped: select idle WinSpec first')
+            return
+        self._center.setValue(float(center))
+        self._capture_calibration_lamp()
+
+    def _capture_calibration_lamp(self):
+        if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') != 'winspec_ingaas' or not self._acquire_btn.isEnabled():
+            self._wavelength_dialog.result.setText('Select idle WinSpec first; PIXIS will not be acquired by this action.')
+            return
+        self._use_winspec_nm.setChecked(False)
+        self._calibration_capture_pending = True
+        self._on_acquire()
+
+    def _save_winspec_calibration(self, record):
+        previous = copy.deepcopy(cfg.lf6.winspec_wavelength_calibrations)
+        try:
+            cfg.lf6.winspec_wavelength_calibrations = previous + [copy.deepcopy(record)]
+            cfg.save()
+            self._use_winspec_nm.setChecked(True)
+            message = ('Saved for WinSpec: full 512-pixel model, center settings 900–1700 nm. PIXIS unchanged.'
+                       if record.get('kind') == 'physical_grating_model' else
+                       'Saved separately for WinSpec. Next matching acquisition uses nm within the fitted interval. PIXIS unchanged.')
+            self._wavelength_dialog.result.setText(message)
+            if self._wavelength_dialog.broad_dialog is not None:
+                self._wavelength_dialog.broad_dialog.result.setText('Saved WinSpec calibration. Acquire a matching frame to use it; uncovered intervals stay pixels.')
+            return True
+        except Exception as exc:
+            cfg.lf6.winspec_wavelength_calibrations = previous
+            self._wavelength_dialog.result.setText(f'Save failed: {exc}')
+            return False
+
+    def _apply_winspec_calibration(self, frame, wl, cts):
+        from app.wavelength_calibration import calibrated_axis
+        self._last_acquisition_snapshot['raw_detector'] = copy.deepcopy(frame)
+        identity = self._last_acquisition_snapshot['instrument_identity']
+        identity.update(axis_unit='pixel', calibration_status='uncalibrated')
+        if self._use_winspec_nm.isChecked():
+            for record in reversed(cfg.lf6.winspec_wavelength_calibrations):
+                try:
+                    result = calibrated_axis(record, frame['context'])
+                    if result is None: continue
+                    axis, mask = result
+                    identity.update(axis_unit='nm', calibration_status=record.get('kind','fixed_position_calibration'))
+                    self._last_acquisition_snapshot['wavelength_calibration'] = copy.deepcopy(record)
+                    return axis, np.asarray(cts)[mask]
+                except (ValueError, TypeError, KeyError):
+                    continue
+        return wl, cts
+
     def push_spectrum(self, wl: np.ndarray, cts: np.ndarray,
                       settings_snapshot: Optional[dict] = None) -> None:
         """Update 1D plot directly (e.g. from a sweep step callback)."""
         self._last_data_kind = "spectrum_1d"
         self._last_wavelength = np.asarray(wl, dtype=float).copy()
         self._last_data = np.asarray(cts, dtype=float).copy()
-        self._spec_plot.update_spectrum(wl, self._display_live_counts())
         self._last_acquisition_snapshot = dict(settings_snapshot or {
             "available": False, "source": "external_push",
+            "instrument_identity": {"axis_unit": "nm"},
         })
+        self._set_spectrum_axis(self._last_acquisition_snapshot)
+        self._spec_plot.update_spectrum(wl, self._display_live_counts())
+        self._update_source_label()
         self._save_btn.setEnabled(True)
 
     def push_frame(self, img: np.ndarray,
@@ -1064,6 +1689,7 @@ class SpectrumPanel(QWidget):
         self._last_acquisition_snapshot = dict(settings_snapshot or {
             "available": False, "source": "external_push",
         })
+        self._update_source_label()
         self._save_btn.setEnabled(True)
 
     def _display_counts(self, ref: dict) -> np.ndarray:
@@ -1151,6 +1777,7 @@ class SpectrumPanel(QWidget):
             "path": str(Path(path).resolve()) if path is not None else None,
             "metadata": dict(metadata or (settings_snapshot or {}).get("metadata_context", {})),
             "settings_snapshot": copy.deepcopy(frozen_settings),
+            "axis_unit": frozen_settings.get("instrument_identity", {}).get("axis_unit", "nm"),
             "sample_id": str((settings_snapshot or {}).get("sample_id") or getattr(cfg.session, "sample_id", "") or ""),
             "save_root": str((settings_snapshot or {}).get("save_root") or self._spectrum_output_root()),
             "observed_readback": (dict(frozen_settings.get("actual_readback", {}))
@@ -1160,7 +1787,9 @@ class SpectrumPanel(QWidget):
             "save_error": None,
         }
         self._references.append(ref)
-        self._spec_plot.set_reference(reference_id, wl, self._display_counts(ref), ref["color"], True)
+        if self._last_data is None:
+            self._set_spectrum_axis(ref['settings_snapshot'])
+        self._spec_plot.set_reference(reference_id, wl, self._display_counts(ref), ref["color"], True, ref["axis_unit"])
         self._add_reference_item(ref)
         if auto_save and source == "acquired":
             self._auto_save_reference(ref)
@@ -1224,8 +1853,12 @@ class SpectrumPanel(QWidget):
         for source_path in paths:
             path = Path(source_path).expanduser().resolve()
             wavelengths, counts = self._read_spectrum_csv(path)
+            with path.open(newline="", encoding="utf-8-sig") as stream:
+                header = next(csv.reader(stream))
+            axis_unit = "pixel" if "pixel" in [item.strip().lower() for item in header] else "nm"
             loaded.append(self.add_reference(
                 wavelengths, counts, source="loaded", path=path,
+                settings_snapshot={"instrument_identity": {"axis_unit": axis_unit}},
                 metadata=self._load_adjacent_metadata(path),
                 auto_save=False,
             ))
@@ -1244,7 +1877,7 @@ class SpectrumPanel(QWidget):
         if any(value in {"point_index", "y_pixel"} for value in header):
             raise ValueError(f"Matrix/sweep CSV is not a 1D spectrum: {path.name}")
         wl_idx = next((index for index, value in enumerate(header)
-                       if "wavelength" in value or value in {"wl", "x"}), None)
+                       if "wavelength" in value or value in {"wl", "x", "pixel"}), None)
         count_idx = next((index for index, value in enumerate(header)
                           if "intensity" in value or "count" in value or value in {"cts", "y"}), None)
         if wl_idx is None or count_idx is None:
@@ -1278,7 +1911,7 @@ class SpectrumPanel(QWidget):
         for ref in self._references:
             self._spec_plot.set_reference(
                 ref["id"], ref["wavelength"], self._display_counts(ref),
-                ref["color"], ref["visible"],
+                ref["color"], ref["visible"], ref.get("axis_unit", "nm"),
             )
 
     def _save_spectrum_data(self, wavelength: np.ndarray, counts: np.ndarray,
@@ -1289,9 +1922,11 @@ class SpectrumPanel(QWidget):
                             observed_readback: Optional[dict] = None) -> Path:
         output = Path(output).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
+        axis_identity = (settings_snapshot or {}).get("instrument_identity", getattr(self._ctrl, "identity", {}) or {})
+        axis_unit = axis_identity.get("axis_unit", "nm")
         with output.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)
-            writer.writerow(("wavelength_nm", "intensity_counts"))
+            writer.writerow(("pixel" if axis_unit == "pixel" else "wavelength_nm", "intensity_counts"))
             writer.writerows(zip(np.asarray(wavelength, dtype=float).tolist(),
                                  np.asarray(counts, dtype=float).tolist()))
         from app.experiment_metadata import ExperimentMetadataService
@@ -1320,8 +1955,11 @@ class SpectrumPanel(QWidget):
             "observed": readback,
             "actual_readback": readback,
             "power_correction_factor": power_factor,
-            "calibration": {"wavelength_axis_nm": np.asarray(wavelength, dtype=float).tolist(),
-                            "source": "acquired_data_axis"},
+            "raw_detector": copy.deepcopy(snapshot.get('raw_detector')),
+            "wavelength_calibration": copy.deepcopy(snapshot.get('wavelength_calibration')),
+            "calibration": {("pixel_axis" if axis_unit == "pixel" else "wavelength_axis_nm"): np.asarray(wavelength, dtype=float).tolist(),
+                            "axis_unit": axis_unit,
+                            "source": "uncalibrated_detector_pixels" if axis_unit == "pixel" else "acquired_data_axis"},
         }
         controllers = self._instrument_controllers()
         inventory = (copy.deepcopy(snapshot.get("instrument_inventory", []))
@@ -1388,6 +2026,10 @@ class SpectrumPanel(QWidget):
             "value": payload,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         }
+        if source == 'detector_temperature_snapshot' and (getattr(self._ctrl, 'identity', {}) or {}).get('backend') == 'winspec_ingaas':
+            self._winspec_temperature_label.setText(
+                f"InGaAs idle readback: {payload.get('temperature_c', 'unavailable')} °C · "
+                f"{payload.get('temperature_status', 'unknown')} · Locked or <= -100 C required (rechecked at acquisition)")
 
     def _save_current_dialog(self) -> None:
         if self._last_data is None:

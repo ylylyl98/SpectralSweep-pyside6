@@ -1,7 +1,9 @@
 # Import the .NET class library
 import clr, ctypes
+import builtins
 import time
 from app.lightfield_metadata import LightFieldRecorder, capture_with_metadata, read_snapshot
+from app.lightfield_diagnostics import center_context, diagnostic_path, trace_center_write
 
 # Import python sys module
 import sys, os
@@ -39,10 +41,12 @@ from PrincetonInstruments.LightField.AddIns import CameraSettings
 LIGHTFIELD_SETTING_TIMEOUT_S = 15.0
 LIGHTFIELD_POLL_INTERVAL_S = 0.05
 LIGHTFIELD_ACQUISITION_ABORT_TIMEOUT_S = 5.0
+# Acceptance tolerance for SDK setting readback, not wavelength calibration accuracy.
+LIGHTFIELD_CENTER_TOLERANCE_NM = 0.01
 
 
 class LightFieldSettingTimeoutError(TimeoutError):
-    """A LightField setting never became writable within the bounded wait."""
+    """A LightField setting could not be written and verified within the bounded wait."""
 
 
 class LF6Setup:
@@ -55,11 +59,22 @@ class LF6Setup:
 
     def __init__(self):
         self.auto = Automation(True, List[String]())
-        self.application = self.auto.LightFieldApplication
-        self.experiment = self.application.Experiment
-        self.exp_settings = ExperimentSettings
-        self.spectrometer_settings = SpectrometerSettings
-        self._center_wavelength_write_stats = None
+        try:
+            self.application = self.auto.LightFieldApplication
+            self.experiment = self.application.Experiment
+            self.exp_settings = ExperimentSettings
+            self.spectrometer_settings = SpectrometerSettings
+            self._center_wavelength_write_stats = None
+        except Exception:
+            self.close()
+            raise
+
+    def close(self):
+        """Dispose only this setup's owned Automation instance, once."""
+        auto = getattr(self, 'auto', None)
+        if auto is not None:
+            auto.Dispose()
+            self.auto = None
 
     def print_saved_experiments(self):
         # Print a list (of type string) of saved experiments
@@ -200,11 +215,13 @@ class LF6Setup:
         return SpectraSweep(sample_name, exp_name, self)
     # added by Lei
     def change_expose_time(self, value):
-        if self.experiment.Exists(CameraSettings.ShutterTimingExposureTime):
-            self.experiment.SetValue(CameraSettings.ShutterTimingExposureTime, value)
-            print(String.Format("{0} {1}", "Exposetime(ms):",
-                                str(self.experiment.GetValue(
-                                    CameraSettings.ShutterTimingExposureTime))))
+        value = float(value)
+        resume = self._begin_recipe_change('exposure_ms', value)
+        setting = CameraSettings.ShutterTimingExposureTime
+        if not self.experiment.Exists(setting):
+            raise RuntimeError('LightField exposure setting is unavailable')
+        self.experiment.SetValue(setting, value)
+        self._finish_recipe_change(resume)
 
     def change_spectra_center(self, value):
         """Legacy center setter routed through the guarded shared path."""
@@ -380,16 +397,15 @@ class LF6Setup:
 
     @property
     def is_busy(self):
-        """Best-effort acquisition/load state; absent APIs are treated as idle."""
-        values = []
+        """Read SDK acquisition/update state as well as legacy wrapper flags."""
         for obj in (self.application, self.experiment):
-            value = self._flag(
-                obj,
-                ("IsBusy", "Busy", "IsAcquiring", "Acquiring", "IsLoading", "Loading"),
-            )
-            if value is not None:
-                values.append(value)
-        return any(values)
+            for name in ("IsRunning", "IsUpdating", "IsBusy", "Busy",
+                         "IsAcquiring", "Acquiring", "IsLoading", "Loading"):
+                # These flags describe independent states. A false IsRunning
+                # must not hide IsUpdating during an exit/grating transition.
+                if self._flag(obj, (name,)) is True:
+                    return True
+        return False
 
     def setting_is_available(self, setting) -> bool:
         """Return whether a setting exists and any explicit availability API allows it."""
@@ -451,18 +467,25 @@ class LF6Setup:
                 )
             time.sleep(min(poll_interval_s, remaining))
 
+    @trace_center_write
     def set_center_wavelength_when_ready(
         self,
         value,
         *,
         timeout_s: float = LIGHTFIELD_SETTING_TIMEOUT_S,
         poll_interval_s: float = LIGHTFIELD_POLL_INTERVAL_S,
+        update_acquisition_recipe: bool = True,
     ) -> None:
-        """Write center wavelength after readiness, retrying transient frozen states."""
+        """Write once writable, then wait for stable matching SDK readback."""
+        value = float(value)
         setting = SpectrometerSettings.GratingCenterWavelength
         timeout_s = float(timeout_s)
-        if timeout_s <= 0:
-            raise ValueError("LightField readiness timeout must be positive")
+        poll_interval_s = float(poll_interval_s)
+        if (not np.isfinite(value) or not np.isfinite(timeout_s) or timeout_s <= 0
+                or not np.isfinite(poll_interval_s) or poll_interval_s <= 0):
+            raise ValueError("LightField center must be finite and readiness timings must be positive")
+        # WinSpec borrows this spectrograph but must not replace PIXIS's recipe.
+        resume = self._begin_recipe_change('center_nm', value) if update_acquisition_recipe else False
         started = time.monotonic()
         deadline = started + timeout_s
         last_error = None
@@ -474,7 +497,9 @@ class LF6Setup:
             "result": "pending",
             "elapsed_s": 0.0,
             "last_exception": None,
+            "readback": None,
             "state": {},
+            "readback_changes": [],
         }
         self._center_wavelength_write_stats = stats
         while True:
@@ -499,16 +524,40 @@ class LF6Setup:
                 self.wait_until_setting_writable(
                     setting, timeout_s=remaining, poll_interval_s=poll_interval_s
                 )
+                try:
+                    if diagnostic_path(self) is not None:
+                        stats['before_write'] = center_context(self, value)
+                except builtins.Exception as exc:
+                    stats['diagnostic_error'] = str(exc)
                 attempts += 1
                 stats["attempts"] = attempts
                 readback = self._set_center_wavelength_raw(value)
-                stats.update({
-                    "result": "succeeded",
-                    "elapsed_s": time.monotonic() - started,
-                    "readback": readback,
-                    "state": self._center_wavelength_state(setting),
-                })
-                return
+                stable = 0
+                while True:
+                    state = self._center_wavelength_state(setting)
+                    stats.update(readback=readback, state=state,
+                                 elapsed_s=time.monotonic() - started)
+                    changes = stats['readback_changes']
+                    if len(changes) < 32 and (not changes or str(changes[-1]['value']) != str(readback)):
+                        changes.append({'elapsed_s': stats['elapsed_s'], 'value': readback})
+                    if (state['ready'] and not state['busy']
+                            and self._numeric_readback_matches(readback, value, LIGHTFIELD_CENTER_TOLERANCE_NM)):
+                        stable += 1
+                        if stable >= 3:
+                            self._finish_recipe_change(resume)
+                            stats['result'] = 'succeeded'
+                            return
+                    else:
+                        stable = 0
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise LightFieldSettingTimeoutError(
+                            f"Center wavelength readback did not settle: requested={value:g} nm, "
+                            f"readback={readback!r} nm (tolerance={LIGHTFIELD_CENTER_TOLERANCE_NM:g} nm). "
+                            "Acquisition blocked; check LightField and apply settings again."
+                        )
+                    time.sleep(min(poll_interval_s, remaining))
+                    readback = self._read_center_wavelength(setting)
             except LightFieldSettingTimeoutError as exc:
                 # Preserve the bounded state/attempt diagnostics from the wait.
                 stats.update({
@@ -519,13 +568,16 @@ class LF6Setup:
                 })
                 raise LightFieldSettingTimeoutError(
                     f"LightField setting GratingCenterWavelength requested={value!r} "
-                    f"remained frozen/unavailable for {stats['elapsed_s']:.3f}s; "
+                    f"could not be verified within {stats['elapsed_s']:.3f}s; "
+                    f"readback={stats['readback']!r}; "
                     f"SetValue attempts={attempts}; state={stats['state']}; "
                     f"last exception: {self._exception_description(exc)}"
                 ) from exc
             except BaseException as exc:
                 frozen = self._frozen_exception(exc)
                 if frozen is None:
+                    stats.update(result='failed', elapsed_s=time.monotonic() - started,
+                                 last_exception=self._exception_description(exc))
                     raise
                 last_error = frozen
                 stats["last_exception"] = self._exception_description(frozen)
@@ -533,19 +585,113 @@ class LF6Setup:
 
     def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
         """Apply the complete mutable run recipe immediately before acquisition."""
-        self.set_center_wavelength_when_ready(float(center_nm))
-        self.change_expose_time(float(exposure_ms))
-        self.change_frame_to_combine(int(frames))
+        self._acquisition_prepared = False
+        self._acquisition_recipe = dict(center_nm=float(center_nm), exposure_ms=float(exposure_ms), frames=int(frames))
+        self._configuring_acquisition = True
+        try:
+            self._ensure_detector_output()
+            grating = getattr(SpectrometerSettings, 'GratingSelected', None)
+            if grating is not None and self.experiment.Exists(grating):
+                value = self.experiment.GetValue(grating)
+                if value is None:
+                    raise RuntimeError('LightField grating readback unavailable; acquisition blocked.')
+                self._acquisition_recipe['grating'] = str(value)
+            self.set_center_wavelength_when_ready(float(center_nm))
+            self.change_expose_time(float(exposure_ms))
+            self.change_frame_to_combine(int(frames))
+            actual = self._verify_acquisition_recipe()
+            self._acquisition_prepared = True
+        finally:
+            self._configuring_acquisition = False
         return {
             "center_wavelength": self.center_wavelength_write_stats,
-            "exposure_ms": float(exposure_ms),
-            "frames": int(frames),
+            "exposure_ms": actual['exposure_ms'],
+            "frames": int(actual['frames']),
+            "output_route": getattr(self, 'last_output_route', {}),
         }
+
+    @staticmethod
+    def _numeric_readback_matches(actual, expected, tolerance):
+        try:
+            return (actual is not None and not isinstance(actual, (bool, np.bool_))
+                    and np.isfinite(float(actual)) and abs(float(actual) - expected) <= tolerance)
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    def _begin_recipe_change(self, name, value):
+        """Track explicit PIXIS setters as well as complete acquisition recipes."""
+        resume = not getattr(self, '_configuring_acquisition', False)
+        self._acquisition_prepared = False
+        recipe = dict(getattr(self, '_acquisition_recipe', {}))
+        recipe[name] = value
+        self._acquisition_recipe = recipe
+        return resume
+
+    def _finish_recipe_change(self, resume):
+        if resume:
+            self._verify_acquisition_recipe()
+            self._acquisition_prepared = True
+
+    def _verify_acquisition_recipe(self):
+        actual = {}
+        for name, setting, tolerance in (
+            ('center_nm', SpectrometerSettings.GratingCenterWavelength, LIGHTFIELD_CENTER_TOLERANCE_NM),
+            ('exposure_ms', CameraSettings.ShutterTimingExposureTime, max(.001, abs(self._acquisition_recipe.get('exposure_ms', 0.)) * 1e-6)),
+            ('frames', ExperimentSettings.OnlineProcessingFrameCombinationFramesCombined, 0.),
+        ):
+            if name not in self._acquisition_recipe:
+                continue
+            expected = self._acquisition_recipe[name]
+            try:
+                value = self.experiment.GetValue(setting)
+            except builtins.Exception as exc:
+                raise RuntimeError(f'LightField {name} readback unavailable; requested={expected:g}. Acquisition blocked.') from exc
+            if not self._numeric_readback_matches(value, expected, tolerance):
+                raise RuntimeError(
+                    f'LightField {name} readback mismatch: requested={expected:g}, readback={value}. '
+                    'Acquisition blocked; apply settings again.'
+                )
+            actual[name] = float(value)
+        if 'grating' in self._acquisition_recipe:
+            expected = self._acquisition_recipe['grating']
+            try:
+                value = self.experiment.GetValue(SpectrometerSettings.GratingSelected)
+            except builtins.Exception as exc:
+                raise RuntimeError('LightField grating readback unavailable; acquisition blocked.') from exc
+            if value is None or str(value) != expected:
+                raise RuntimeError(
+                    f'LightField grating readback mismatch: prepared={expected}, readback={value}. '
+                    'Acquisition blocked; apply settings again.'
+                )
+        return actual
+
+    def verify_acquisition_settings(self):
+        """Read-only checks before/after Capture; never move optics mid-measurement."""
+        try:
+            if not getattr(self, '_acquisition_prepared', True):
+                raise RuntimeError('LightField acquisition setup was not verified; apply settings again.')
+            self._ensure_detector_output(apply=False)
+            if getattr(self, '_acquisition_recipe', None) is not None:
+                self._verify_acquisition_recipe()
+        except builtins.Exception:
+            self._acquisition_prepared = False
+            raise
+
+    def _ensure_detector_output(self, *, apply=True):
+        route = getattr(self, 'detector_output_route', None)
+        if route is not None:
+            from app.devices.lightfield_optics import ensure_output_route
+            self.last_output_route = ensure_output_route(self, route, apply=apply)
 
     def _center_wavelength_state(self, setting) -> dict:
         return {
             "ready": self.is_ready,
             "busy": self.is_busy,
+            "IsRunning": self._flag(self.experiment, ("IsRunning",)),
+            "IsUpdating": self._flag(self.experiment, ("IsUpdating",)),
+            # Acquisition readiness is diagnostic only: WinSpec borrows the
+            # spectrograph without acquiring through LightField's camera.
+            "IsReadyToRun": self._flag(self.experiment, ("IsReadyToRun",)),
             "available": self.setting_is_available(setting),
             "writable": self.setting_is_writable(setting),
         }
@@ -580,20 +726,13 @@ class LF6Setup:
         Sets Online Processes -> Exposures per Frame.
         Crucial: Must use .NET Int64 (Long) for LightField integer settings.
         """
-        try:
-            # FIX: Use 'Int64' directly because you used 'from System import *'
-            val = Int64(int(frames))
-
-            if self.experiment.Exists(ExperimentSettings.OnlineProcessingFrameCombinationFramesCombined):
-                self.experiment.SetValue(
-                    ExperimentSettings.OnlineProcessingFrameCombinationFramesCombined,
-                    val
-                )
-                print(f"Frame_to_combine sets to: {frames}")
-            else:
-                print("Setting OnlineProcessingFrameCombinationFramesCombined not found.")
-        except Exception as e:
-            print(f"change_frame_to_combine failed: {e}")
+        frames = int(frames)
+        resume = self._begin_recipe_change('frames', frames)
+        setting = ExperimentSettings.OnlineProcessingFrameCombinationFramesCombined
+        if not self.experiment.Exists(setting):
+            raise RuntimeError('LightField exposures-per-frame setting is unavailable')
+        self.experiment.SetValue(setting, Int64(frames))
+        self._finish_recipe_change(resume)
 
     def readback_online_process(self) -> dict:
         def _get(key):

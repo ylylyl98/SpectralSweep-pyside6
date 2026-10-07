@@ -1,0 +1,51 @@
+{
+  "captured_at": "2026-09-26T20:38:58.997966+00:00",
+  "source": "USB-Hg_NeAr, Ne/Ar on confirmed by user",
+  "optics_status": "awaiting current grating, center and output confirmation",
+  "response": {
+    "watchdog_timeout_s": 30.0,
+    "width": 512,
+    "ok": true,
+    "winspec_datatype": 3,
+    "settings": {
+      "temperature_locked": true,
+      "output_height": 1,
+      "winspec_reported_running": false,
+      "roi_count": 0,
+      "roi_y_start": 1,
+      "roi_enabled": false,
+      "roi_x_end": 512,
+      "adc_type": 8,
+      "actual_temperature_c": -100.0,
+      "exposure_ms": 500.0,
+      "running": true,
+      "detector_height": 1,
+      "controller_gain": 2,
+      "adc_rate": 11,
+      "roi_x_group": 1,
+      "shutter_control": 1,
+      "temperature_setpoint_c": -100.0,
+      "roi_x_start": 1,
+      "controller_running": false,
+      "roi_y_end": 1,
+      "accumulations": 1,
+      "detector_width": 512,
+      "timing_mode": 1,
+      "output_width": 512,
+      "sequential_frames": 1,
+      "readout_time_s": 0.5170999999999999,
+      "roi_y_group": 1
+    },
+    "hardware_settings": {
+      "controller_type": 22,
+      "adc_type": 8,
+      "analog_gain": 0,
+      "controller_gain": 2,
+      "adc_rate": 11,
+      "readout_time_s": 0.5170999765396118
+    },
+    "elapsed_s": 1.2190001010894775,
+    "frame_count": 1,
+    "height": 1
+  }
+}

@@ -3,6 +3,8 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
+from datetime import timedelta
+from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
@@ -59,6 +61,17 @@ class TemperatureMonitorTests(unittest.TestCase):
         self.controller._temperature_timer.setInterval(10)
         self.wait_for(lambda: len(self.results) >= 2)
         self.assertEqual(self.results[-1]["temperature_c"], -65)
+
+    def test_winspec_idle_monitor_refreshes_and_respects_pause(self):
+        self.controller._worker._identity = {"backend": "winspec_ingaas"}
+        self.controller._temperature_timer.setInterval(10)
+        self.wait_for(lambda: len(self.results) >= 2)
+        self.controller.set_temperature_monitor_paused("acquisition", True)
+        self.wait_for(lambda: not self.controller._temperature_pending)
+        before = self.reads
+        self.controller.poll_temperature()
+        self.app.processEvents()
+        self.assertEqual(self.reads, before)
 
     def test_slow_reads_do_not_accumulate_and_pause_sources_are_independent(self):
         self.assertTrue(hasattr(self.controller, "poll_temperature"))
@@ -148,3 +161,93 @@ class TemperatureMonitorTests(unittest.TestCase):
         self.controller._temperature_generation += 1
         self.controller._on_temperature_snapshot((old, self.read()))
         self.assertEqual(self.results, [])
+
+    def test_manual_and_queued_manual_reads_blocked_during_sweep(self):
+        read = Mock(return_value=-100.)
+        self.controller._worker._setup.get_temperature = read
+        self.controller.set_temperature_monitor_paused('sweep', True)
+        requested = []
+        self.controller._temperature_requested.connect(lambda: requested.append(True))
+        self.controller.read_temperature()
+        self.controller._worker.read_temperature()  # Already queued before pause.
+        self.assertFalse(requested)
+        read.assert_not_called()
+
+    def test_manual_warmup_read_remains_available_but_not_during_sweep(self):
+        read = Mock(return_value=-10.)
+        self.controller._worker._setup.get_temperature = read
+        self.controller.set_temperature_monitor_paused('warmup', True)
+        self.controller._worker.read_temperature()
+        read.assert_called_once()
+        self.controller.set_temperature_monitor_paused('sweep', True)
+        self.controller._worker.read_temperature()
+        self.assertEqual(read.call_count, 1)
+
+    def test_unchanged_monitor_state_emitted_only_once(self):
+        states = []
+        self.controller.temperature_monitor_state.connect(states.append)
+        self.controller.set_temperature_monitor_paused('sweep', True)
+        for _ in range(5):
+            self.controller.poll_temperature()
+        self.assertEqual(states, ['Paused during measurement'])
+
+    def test_read_started_before_sweep_not_accepted_as_fresh_after_resume(self):
+        generation = self.controller._temperature_generation
+        self.controller.set_temperature_monitor_paused('sweep', True)
+        self.controller.set_temperature_monitor_paused('sweep', False)
+        self.controller._on_temperature_snapshot((generation, self.read()))
+        self.assertEqual(self.results, [])
+
+    def test_pause_during_read_prevents_followup_query_to_parked_camera(self):
+        worker = self.controller._worker
+        parked_read = Mock()
+        worker._parked['andor_si'] = (SimpleNamespace(get_temperature_snapshot=parked_read), None, {}, [])
+        def read_and_pause():
+            worker.temperature_monitor_paused.set()
+            return self.read()
+        worker._setup.get_temperature_snapshot = read_and_pause
+        worker.read_temperature_snapshot(0)
+        parked_read.assert_not_called()
+        worker._parked.clear()
+
+    def test_winspec_display_stays_paused_between_frames_and_after_readback_expires(self):
+        self.controller._worker._backend = 'winspec_ingaas'
+        self.controller._worker._identity = {'backend': 'winspec_ingaas'}
+        section = _LF6Section(self.controller)
+        try:
+            section._backend.setCurrentIndex(section._backend.findData('winspec_ingaas'))
+            section._on_temperature_snapshot(dict(temperature_c=-100., temperature_status='Locked', temperature_setpoint_c=-100.))
+            before = section._temperature.text()
+            self.controller.set_temperature_monitor_paused('sweep', True)
+            self.assertEqual(section._temperature.text(), before)
+            self.assertIn('paused', section._temperature_monitor.text().lower())
+            self.assertFalse(section._temperature_refresh.isEnabled())
+            section._winspec_readback_time -= timedelta(seconds=60)
+            paused = (section._temperature.text(), section._temperature_detail.text(), section._temperature_monitor.text(), section._acquisition_condition.text())
+            for busy in (True, False, True, False):
+                self.controller._worker._setup.is_busy = busy
+                section._status_refresh_timer.timeout.emit()
+                self.assertEqual(paused, (section._temperature.text(), section._temperature_detail.text(), section._temperature_monitor.text(), section._acquisition_condition.text()))
+            self.controller.set_temperature_monitor_paused('sweep', False)
+            self.assertIn('no fresh readback', section._temperature.text())
+            section._on_temperature_snapshot(dict(temperature_c=-100., temperature_status='Locked', temperature_setpoint_c=-100.))
+            self.assertEqual(section._temperature.text(), before)
+            self.assertTrue(section._temperature_refresh.isEnabled())
+        finally:
+            section.close()
+
+    def test_sidebar_timer_does_not_rewrite_connection_or_unchanged_temperature(self):
+        self.controller._worker._backend = 'winspec_ingaas'
+        self.controller._worker._identity = {'backend': 'winspec_ingaas'}
+        section = _LF6Section(self.controller)
+        try:
+            section._backend.setCurrentIndex(section._backend.findData('winspec_ingaas'))
+            section._on_temperature_snapshot(dict(temperature_c=-100., temperature_status='Locked', temperature_setpoint_c=-100.))
+            section._connections_status.setText = Mock(wraps=section._connections_status.setText)
+            section._temperature.setText = Mock(wraps=section._temperature.setText)
+            for _ in range(4):
+                section._status_refresh_timer.timeout.emit()
+            section._connections_status.setText.assert_not_called()
+            section._temperature.setText.assert_not_called()
+        finally:
+            section.close()

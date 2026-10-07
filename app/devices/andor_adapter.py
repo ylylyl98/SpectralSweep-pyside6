@@ -959,6 +959,29 @@ class AndorSDK2Setup:
 
         return self._call(read)
 
+    def disconnect_spectrograph(self) -> None:
+        """Release only Shamrock; keep the camera and its cooler running."""
+        def disconnect():
+            if self._spectrograph is not None:
+                self._spectrograph.close()
+                self._spectrograph = None
+            self._stored_calibration_cache.clear()
+        self._call(disconnect)
+
+    def reconnect_spectrograph(self) -> None:
+        """Reopen Shamrock without changing camera or optical settings."""
+        def reconnect():
+            self._require_camera()
+            if self._spectrograph is None:
+                spec, warning = self._open_shamrock(
+                    self._load_andor_module(), int(self.options.spectrograph_index)
+                )
+                self._spectrograph = spec
+                self._stored_calibration_cache.clear()
+                if warning:
+                    self._identity.setdefault("connection_warnings", []).append(warning)
+        self._call(reconnect)
+
     def get_disconnect_safety_snapshot(self) -> dict[str, Any]:
         def read() -> dict[str, Any]:
             camera = self._require_camera()

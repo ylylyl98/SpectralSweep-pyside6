@@ -1,0 +1,30 @@
+{
+  "status": "FAIL_0.2_NM_TARGET_NOT_ACTIVATED",
+  "line_checks": [
+    {
+      "center_nm": 950,
+      "pixel": 196.01471258546465,
+      "reference_nm": 965.7786,
+      "trial_nm": 966.7069659511982,
+      "residual_nm": 0.9283659511982023
+    },
+    {
+      "center_nm": 950,
+      "pixel": 302.1829432421144,
+      "reference_nm": 912.2967,
+      "trial_nm": 913.3015778300812,
+      "residual_nm": 1.0048778300812273
+    },
+    {
+      "center_nm": 1050,
+      "pixel": 394.22776922513015,
+      "reference_nm": 965.7786,
+      "trial_nm": 967.1731196077711,
+      "residual_nm": 1.3945196077711444
+    }
+  ],
+  "inga_as_950_two_candidate_line_rms_nm": 0.9673786209992701,
+  "pixis_950_same_two_candidate_line_rms_nm": 0.2762630676304375,
+  "all_three_candidate_observations_rms_nm": 1.127878204002407,
+  "note": "Provisional line identities; InGaAs maxima smoothed across 11 pixels because of broad/noisy features; PIXIS maxima interpolated across 3 pixels. Blend/line-shape and wavelength-convention biases remain. Not IntelliCal certification. Checks hold out centers, not reference line identities."
+}

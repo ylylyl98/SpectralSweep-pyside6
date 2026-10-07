@@ -21,6 +21,7 @@ import logging
 import weakref
 import copy
 from functools import lru_cache
+from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol
@@ -72,6 +73,10 @@ def _jsonable(value: Any) -> Any:
     string.  The function intentionally avoids importing NumPy so metadata
     remains usable in catalog-only installations.
     """
+    # Enum internals include their class and callables; persist the declared
+    # value, as settings snapshots do, instead of walking their __dict__.
+    if isinstance(value, Enum):
+        return _jsonable(value.value)
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -355,6 +360,22 @@ class ExperimentHistory:
             db.commit()
         except (OSError, sqlite3.Error):
             return
+        finally:
+            if db is not None:
+                db.close()
+
+    def sample_ids(self, query: str = "") -> list[str]:
+        """Include samples with runs even if they have no editable setup profile."""
+        db = None
+        try:
+            db = self._connect()
+            rows = db.execute(
+                "SELECT device_id FROM experiments GROUP BY device_id ORDER BY MAX(started_utc) DESC, device_id"
+            ).fetchall()
+            needle = str(query).strip().casefold()
+            return [row[0] for row in rows if row[0] and needle in row[0].casefold()]
+        except (OSError, sqlite3.Error):
+            return []
         finally:
             if db is not None:
                 db.close()

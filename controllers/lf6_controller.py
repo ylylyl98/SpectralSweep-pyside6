@@ -50,6 +50,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from utils.config import cfg
 
 _LOG = logging.getLogger(__name__)
+_SPECTRUM_OWNERSHIP_ERROR = "Spectrum controls are unavailable while another measurement owns the spectrometer."
 
 
 class LightFieldLifecycleState(str, Enum):
@@ -74,6 +75,8 @@ class _LF6Worker(QObject):
     spectrum_ready = Signal(object, object)   # wl ndarray, cts ndarray
     frame_ready    = Signal(object)           # 2-D ndarray
     settings_applied   = Signal()
+    acquisition_settings_readback = Signal(object)
+    spectrograph_status_ready = Signal(object)
     wavelengths_updated = Signal(object)      # wl ndarray
     state_changed      = Signal(object)
     temperature_ready  = Signal(object)
@@ -82,6 +85,8 @@ class _LF6Worker(QObject):
     cooler_changed     = Signal(bool)
     andor_status_ready = Signal(object)
     andor_controls_applied = Signal(object)
+    shamrock_connection_changed = Signal(bool)
+    backend_temperature_snapshot = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -91,6 +96,97 @@ class _LF6Worker(QObject):
         self._backend = "lightfield"
         self._identity = {}
         self.temperature_monitor_paused = threading.Event()
+        self.manual_temperature_paused = threading.Event()
+        self.external_measurement_active = threading.Event()
+        self._scan_adapter = None
+        self._scan_selected = False
+        self._parked = {}
+        self._experiments = []
+
+    @property
+    def connected_backends(self):
+        return tuple(self._parked) + ((self._backend,) if self._setup is not None else ())
+
+    def _park_active(self):
+        if self._setup is not None:
+            self._parked[self._backend] = (self._setup, self._adapter, self._identity, self._experiments)
+        self._setup = self._adapter = None
+        self._identity = {}
+
+    @staticmethod
+    def _route_selected_detector(setup, adapter, identity):
+        route = identity.get('output_route')
+        backend = identity.get('backend')
+        if not route or backend not in {'lightfield', 'winspec_ingaas'}:
+            return None
+        from app.devices.lightfield_optics import ensure_output_route
+        optics = setup.lightfield if backend == 'winspec_ingaas' else setup
+        # Invalidate even on readback failure: the physical mirror may have moved.
+        if adapter is not None:
+            adapter.invalidate_wavelengths()
+        return ensure_output_route(optics, route)
+
+    def _activate(self, backend, *, route_output=True, notify=True):
+        setup, adapter, identity, _ = self._parked[backend]
+        snapshot = self._route_selected_detector(setup, adapter, identity) if route_output else None
+        self._setup, self._adapter, self._identity, self._experiments = self._parked.pop(backend)
+        self._backend = backend
+        self._transition(LightFieldLifecycleState.READY)
+        if notify:
+            self.connected.emit(self._experiments)
+        if snapshot is not None and notify:
+            self.spectrograph_status_ready.emit(snapshot)
+
+    @Slot(object)
+    def prepare_scan_condition(self, request):
+        """Scan-owned, serialized setup change; measurement locks stay held."""
+        try:
+            if request['stop'].is_set():
+                raise RuntimeError('Optical sequence stopped')
+            if not self.temperature_monitor_paused.is_set() or self.is_busy:
+                raise RuntimeError('Setup selection requires an idle detector under measurement ownership')
+            backend = request['backend']
+            if backend not in self.connected_backends:
+                raise RuntimeError(f'Please connect {backend} before starting the optical sequence')
+            self._scan_adapter = None
+            if backend != self._backend:
+                previous = self._backend
+                self._park_active()
+                try:
+                    self._activate(backend, notify=False)
+                except Exception:
+                    self._activate(previous, route_output=False, notify=False)
+                    raise
+            self._scan_selected = True
+            adapter = self._adapter
+            if backend == 'winspec_ingaas':
+                from app.devices.winspec_scan_adapter import WinSpecScanAdapter
+                adapter = WinSpecScanAdapter(self._setup)
+            frames = 1 if request['reduction'] == 'average' else request['frames']
+            from app.lightfield_diagnostics import center_write_context
+            with center_write_context(self._setup, source='scan recipe', backend=backend):
+                if backend == 'winspec_ingaas':
+                    adapter.configure_for_acquisition(center_nm=request['center'], exposure_ms=request['exposure'], frames=frames)
+                else:
+                    self.configure_for_acquisition(center_nm=request['center'], exposure_ms=request['exposure'], frames=frames)
+            if request['reduction'] == 'average':
+                if backend == 'lightfield':
+                    readback = self._setup.readback_online_process()
+                    if int(readback.get('exposures_per_frame') or 0) != 1:
+                        raise RuntimeError('PIXIS averaging requires verified single-exposure frames; check LightField online processing')
+                from app.devices.scan_average import AveragedScanAdapter
+                adapter = AveragedScanAdapter(adapter, request['frames'], request['stop'])
+            self._scan_adapter = adapter
+            request['result'] = adapter
+        except Exception as exc:
+            error = RuntimeError(
+                f"Setup preparation failed (requested_setup={request.get('backend')}, "
+                f"active_setup={self._backend}, "
+                f"configured_exit={self._identity.get('output_route', 'unreported')}): {exc}")
+            error.__cause__ = exc
+            request['error'] = error
+        finally:
+            request['done'].set()
 
     def _transition(self, state: LightFieldLifecycleState) -> None:
         self._state = state
@@ -101,17 +197,57 @@ class _LF6Worker(QObject):
 
     @Slot(bool, str)
     def connect_instrument(self, use_mock: bool, backend: str = "lightfield") -> None:
-        if self._setup is not None:
-            self.disconnect_instrument()
         backend = str(backend or "lightfield").strip().lower()
-        if backend not in {"lightfield", "andor_si", "andor_ingaas"}:
+        if backend not in {"lightfield", "andor_si", "andor_ingaas", "winspec_ingaas"}:
             self.error.emit(f"Unknown spectrum backend: {backend}")
+            return
+        if self.is_busy or self.temperature_monitor_paused.is_set():
+            self.error.emit("Cannot switch spectrum devices during a measurement")
+            return
+        if backend == "winspec_ingaas":
+            if use_mock:
+                self.error.emit("WinSpec uses the XP bridge; uncheck Use mock and connect LightField first")
+                return
+            if "lightfield" not in self.connected_backends:
+                self.error.emit("Connect LightField first, load its spectrograph experiment, then select WinSpec InGaAs")
+                return
+            lf_identity = self._identity if self._backend == 'lightfield' else self._parked['lightfield'][2]
+            if lf_identity.get('backend', '').startswith('mock_'):
+                self.error.emit('WinSpec requires a real LightField connection; reconnect LightField with Use mock unchecked')
+                return
+        if backend.startswith("andor_") and any(
+            key.startswith("andor_") and key != backend for key in self.connected_backends
+        ):
+            self.error.emit("The Si and InGaAs roles share Shamrock. Disconnect the existing Andor camera before changing its role; LightField can remain online.")
+            return
+        previous = self._backend
+        self._park_active()
+        if backend in self._parked:
+            try:
+                self._activate(backend)
+            except Exception as exc:
+                if previous in self._parked:
+                    self._activate(previous, route_output=False)
+                self.error.emit(f'Device switch failed: {exc}. Verify the physical output before acquiring.')
             return
         self._backend = backend
         self._identity = {}
         self._transition(LightFieldLifecycleState.STARTING)
         try:
-            if use_mock:
+            if backend == "winspec_ingaas":
+                from app.devices.winspec_adapter import WinSpecSetup
+                lightfield = self._parked["lightfield"][0]
+                self._setup = WinSpecSetup(
+                    lightfield, host=cfg.lf6.winspec_host, port=cfg.lf6.winspec_port,
+                    pixel_pitch_um=cfg.lf6.winspec_pixel_pitch_um,
+                    acquisition_backend=cfg.lf6.winspec_acquisition_backend,
+                    start_acceleration=(cfg.lf6.winspec_start_acceleration
+                                        and cfg.lf6.winspec_acquisition_backend == 'winspec'),
+                    output_route=cfg.lf6.optical_profiles[cfg.lf6.optical_profile]['winspec_ingaas'],
+                )
+                self._adapter = self._setup
+                self._identity = self._setup.identity
+            elif use_mock:
                 # MockAdapter never imports lf6_automation / clr
                 from utils.mock_lf6 import MockLF6Setup, MockAdapter
                 self._setup = MockLF6Setup(
@@ -128,10 +264,14 @@ class _LF6Worker(QObject):
                 # Real path: lazy-import so clr is only touched on real hardware
                 import lf6_automation
                 self._setup = lf6_automation.LF6Setup()
+                self._setup.detector_output_route = cfg.lf6.optical_profiles[cfg.lf6.optical_profile]['lightfield']
                 from app.devices.lf6_adapter import SpectrometerLF6
                 self._adapter = SpectrometerLF6(self._setup)
                 self._identity = {"backend": "lightfield"}
-            else:
+            if backend in {'lightfield', 'winspec_ingaas'} and not use_mock:
+                self._identity.update({'optical_profile': cfg.lf6.optical_profile,
+                                       'output_route': cfg.lf6.optical_profiles[cfg.lf6.optical_profile][backend]})
+            elif not use_mock and backend.startswith('andor_'):
                 from app.devices.andor_adapter import (
                     AndorConnectionOptions,
                     AndorSDK2Setup,
@@ -167,6 +307,8 @@ class _LF6Worker(QObject):
                     f"andor_{role}_output_port",
                     "unchanged",
                 )
+                if role == "ingaas" and output_port == "unchanged":
+                    output_port = "direct"
                 options = AndorConnectionOptions(
                     camera_role=role,
                     camera_index=int(index),
@@ -192,7 +334,16 @@ class _LF6Worker(QObject):
             self._transition(LightFieldLifecycleState.INITIALIZING)
             # Startup is connection-only. Mutable experiment settings are deferred
             # to the shared acquisition preflight immediately before a run.
-            self.wait_until_ready()
+            # An empty LightField experiment is a valid automation connection:
+            # the user loads the instrument experiment in that same window.
+            # Acquisition readiness is checked by explicit acquisition preflight.
+            # Treating it as a connection failure used to orphan the window and
+            # spawn another Automation instance on each Connect retry.
+            if backend != 'lightfield' or use_mock:
+                self.wait_until_ready()
+            route_snapshot = None
+            if backend == 'winspec_ingaas':
+                route_snapshot = self._route_selected_detector(self._setup, self._adapter, self._identity)
 
             experiments: list = []
             try:
@@ -201,7 +352,10 @@ class _LF6Worker(QObject):
                 pass
 
             self._transition(LightFieldLifecycleState.READY)
+            self._experiments = experiments
             self.connected.emit(experiments)
+            if route_snapshot is not None:
+                self.spectrograph_status_ready.emit(route_snapshot)
 
         except Exception as exc:
             failed_setup = self._setup
@@ -214,6 +368,8 @@ class _LF6Worker(QObject):
                 except Exception:
                     _LOG.exception("Failed to close spectrum backend after connect error")
             self._transition(LightFieldLifecycleState.DISCONNECTED)
+            if previous in self._parked:
+                self._activate(previous, route_output=False)
             self.error.emit(
                 f"{backend.replace('_', ' ').title()} connect failed: {exc}\n"
                 f"{traceback.format_exc()}"
@@ -221,6 +377,10 @@ class _LF6Worker(QObject):
 
     @Slot()
     def disconnect_instrument(self) -> None:
+        if self._backend == "lightfield":
+            dependent = self._parked.pop("winspec_ingaas", None)
+            if dependent is not None:
+                dependent[0].close()
         setup = self._setup
         self._setup = None
         self._adapter = None
@@ -234,7 +394,29 @@ class _LF6Worker(QObject):
         self._transition(LightFieldLifecycleState.DISCONNECTED)
         self.disconnected.emit()
 
+    @Slot()
+    def disconnect_all(self):
+        self.disconnect_instrument()
+        for backend in list(self._parked):
+            parked = self._parked.pop(backend, None)
+            if parked is None:  # Closing LightField also closes its dependent WinSpec wrapper.
+                continue
+            self._setup, self._adapter, self._identity, self._experiments = parked
+            self._backend = backend
+            self.disconnect_instrument()
+
+    def andor_setups(self):
+        result = {key: value[0] for key, value in self._parked.items() if key.startswith("andor_")}
+        if self._backend.startswith("andor_") and self._setup is not None:
+            result[self._backend] = self._setup
+        return result
+
     # ── settings ─────────────────────────────────────────────────────────────
+
+    def _require_spectrum_access(self):
+        # Recheck queued requests: a scan may have acquired ownership after dispatch.
+        if self.external_measurement_active.is_set():
+            raise RuntimeError(_SPECTRUM_OWNERSHIP_ERROR)
 
     @Slot(float, float, int)
     def apply_settings(self, exposure_ms: float, center_nm: float, accumulations: int) -> None:
@@ -242,9 +424,13 @@ class _LF6Worker(QObject):
             self.error.emit("Spectrometer not connected.")
             return
         try:
-            self.configure_for_acquisition(
-                center_nm=center_nm, exposure_ms=exposure_ms, frames=accumulations
-            )
+            self._require_spectrum_access()
+            from app.lightfield_diagnostics import center_write_context
+            with center_write_context(self._setup, source='Spectrum Apply', backend=self._backend):
+                readback = self.configure_for_acquisition(
+                    center_nm=center_nm, exposure_ms=exposure_ms, frames=accumulations
+                )
+            self.acquisition_settings_readback.emit(readback or {})
             # emit fresh calibration after centre change
             wl = self._get_wavelengths()
             self.wavelengths_updated.emit(wl)
@@ -260,6 +446,8 @@ class _LF6Worker(QObject):
             raise RuntimeError(f"LightField is not ready for settings (state={self._state.value})")
         method = getattr(self._setup, "set_center_wavelength_when_ready", None)
         if callable(method):
+            if self._adapter is not None:
+                self._adapter.invalidate_wavelengths()
             method(float(center_nm), **kwargs)
             return
         raise RuntimeError("LF6 guarded center-wavelength setter is unavailable")
@@ -385,7 +573,21 @@ class _LF6Worker(QObject):
             self.acquisition_finished.emit()
             return
         try:
+            self._require_spectrum_access()
             wl, cts = self._adapter.acquire()
+            if self._backend == 'winspec_ingaas':
+                frame = self._setup.read_metadata_snapshot()['observed']['last_frame']
+                self.acquisition_settings_readback.emit({
+                    'winspec_frame_context': self._setup.last_calibration_context,
+                    'winspec_intensity_processing': frame.get('intensity_processing'),
+                    'winspec_raw_accumulated_counts': frame.get('raw_accumulated_counts'),
+                    'winspec_frame_datatype': frame.get('winspec_datatype'),
+                    'winspec_temperature_guard': frame.get('temperature_guard'),
+                    'winspec_start_acceleration': frame.get('start_acceleration'),
+                    'winspec_capture_timing': {
+                        'bridge': frame.get('bridge_timing_s'), 'client': frame.get('client_timing_s'),
+                        'host': frame.get('host_timing_s'),
+                        'signal_emitted_unix': time.time()}})
             self.spectrum_ready.emit(wl, cts)
         except Exception as exc:
             self.error.emit(f"Spectrometer acquire failed: {exc}")
@@ -399,7 +601,8 @@ class _LF6Worker(QObject):
             self.acquisition_finished.emit()
             return
         try:
-            if self._backend == "andor_ingaas":
+            self._require_spectrum_access()
+            if self._backend in {"andor_ingaas", "winspec_ingaas"}:
                 raise RuntimeError(
                     "The connected InGaAs detector is a one-dimensional array; "
                     "use Acquire 1D"
@@ -417,6 +620,8 @@ class _LF6Worker(QObject):
 
     @Slot()
     def read_temperature(self) -> None:
+        if self.manual_temperature_paused.is_set() or self.is_busy:
+            return
         method = getattr(self._setup, "get_temperature", None)
         if not callable(method):
             self.error.emit(
@@ -437,6 +642,17 @@ class _LF6Worker(QObject):
                 method = getattr(self._setup, "get_temperature_snapshot", None)
                 if callable(method):
                     result = method()
+                for backend, session in self._parked.items():
+                    if self.temperature_monitor_paused.is_set() or self.is_busy:
+                        break
+                    if not backend.startswith("andor_"):
+                        continue
+                    read = getattr(session[0], "get_temperature_snapshot", None)
+                    if callable(read):
+                        try:
+                            self.backend_temperature_snapshot.emit((backend, read()))
+                        except Exception as exc:
+                            self.backend_temperature_snapshot.emit((backend, {"error": str(exc)}))
         except Exception as exc:
             # A monitor failure must never abort a measurement via error.
             result = {"error": str(exc)}
@@ -465,6 +681,42 @@ class _LF6Worker(QObject):
             self.andor_status_ready.emit(method(include_calibration=True))
         except Exception as exc:
             self.error.emit(f"Andor status refresh failed: {exc}")
+
+    @Slot(object)
+    def lightfield_optics(self, requested):
+        if self._backend not in {"lightfield", "winspec_ingaas"} or self._setup is None:
+            self.error.emit("LightField is not the active device")
+            return
+        try:
+            from app.devices.lightfield_optics import read_optics, apply_optics
+            optics_setup = self._setup.lightfield if self._backend == "winspec_ingaas" else self._setup
+            snapshot = read_optics(optics_setup) if requested is None else apply_optics(optics_setup, dict(requested))
+            if requested is not None and self._adapter is not None:
+                self._adapter.invalidate_wavelengths()
+            self.spectrograph_status_ready.emit(snapshot)
+        except Exception as exc:
+            self.error.emit(f"LightField spectrograph control failed: {exc}")
+
+    @Slot(bool)
+    def set_shamrock_connected(self, connected: bool) -> None:
+        if self.is_busy or self.temperature_monitor_paused.is_set():
+            self.error.emit("Cannot change Shamrock connection during a measurement")
+            return
+        method = getattr(self._setup, "reconnect_spectrograph" if connected else "disconnect_spectrograph", None)
+        if not callable(method):
+            self.error.emit("Separate Shamrock connection controls are unavailable")
+            return
+        try:
+            method()
+            self._identity["shamrock_connected"] = connected
+            invalidate = getattr(self._adapter, "invalidate_wavelengths", None)
+            if callable(invalidate):
+                invalidate()
+            self.shamrock_connection_changed.emit(connected)
+            if connected:
+                self.refresh_andor_status()
+        except Exception as exc:
+            self.error.emit(f"Shamrock connection change failed: {exc}")
 
     @Slot(object)
     def apply_andor_controls(self, settings: object) -> None:
@@ -532,6 +784,8 @@ class LF6Controller(QObject):
     spectrum_ready      = Signal(object, object)
     frame_ready         = Signal(object)
     settings_applied    = Signal()
+    acquisition_settings_readback = Signal(object)
+    spectrograph_status_ready = Signal(object)
     wavelengths_updated = Signal(object)
     state_changed       = Signal(object)
     temperature_ready   = Signal(object)
@@ -540,6 +794,9 @@ class LF6Controller(QObject):
     cooler_changed      = Signal(bool)
     andor_status_ready  = Signal(object)
     andor_controls_applied = Signal(object)
+    shamrock_connection_changed = Signal(bool)
+    backend_temperature_snapshot = Signal(object)
+    switching_lock_changed = Signal(bool)
 
     _connect_requested = Signal(bool, str)
     _disconnect_requested = Signal()
@@ -548,9 +805,12 @@ class LF6Controller(QObject):
     _acquire_2d_requested = Signal()
     _temperature_requested = Signal()
     _temperature_snapshot_requested = Signal(int)
+    _scan_prepare_requested = Signal(object)
     _cooler_requested = Signal(bool)
     _andor_status_requested = Signal()
     _andor_controls_requested = Signal(object)
+    _shamrock_connection_requested = Signal(bool)
+    _lightfield_optics_requested = Signal(object)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -560,20 +820,28 @@ class LF6Controller(QObject):
         self._worker.moveToThread(self._thread)
         self._temperature_pending = False
         self._temperature_generation = 0
+        self._connection_pending = False
+        self._settings_pending = False
         self._acquisition_requests = 0
         self._temperature_pause_sources: set[str] = set()
+        self._last_temperature_monitor_state = None
         self._temperature_timer = QTimer(self)
         self._temperature_timer.setInterval(2000)
         self._temperature_timer.timeout.connect(self.poll_temperature)
         self._temperature_timer.start()
 
         # wire worker → controller signals (queued across thread boundary)
-        self._worker.connected.connect(self.connected)
+        self._worker.connected.connect(self._on_backend_connected)
         self._worker.disconnected.connect(self.disconnected)
         self._worker.error.connect(self.error)
+        self._worker.error.connect(self._clear_pending_operations)
+        self._worker.settings_applied.connect(self._clear_pending_operations)
         self._worker.spectrum_ready.connect(self.spectrum_ready)
         self._worker.frame_ready.connect(self.frame_ready)
         self._worker.settings_applied.connect(self.settings_applied)
+        self._worker.acquisition_settings_readback.connect(self.acquisition_settings_readback)
+        self._worker.spectrograph_status_ready.connect(self._clear_pending_operations)
+        self._worker.spectrograph_status_ready.connect(self.spectrograph_status_ready)
         self._worker.wavelengths_updated.connect(self.wavelengths_updated)
         self._worker.state_changed.connect(self.state_changed)
         self._worker.temperature_ready.connect(self.temperature_ready)
@@ -582,6 +850,9 @@ class LF6Controller(QObject):
         self._worker.cooler_changed.connect(self.cooler_changed)
         self._worker.andor_status_ready.connect(self.andor_status_ready)
         self._worker.andor_controls_applied.connect(self.andor_controls_applied)
+        self._worker.andor_controls_applied.connect(self._clear_pending_operations)
+        self._worker.shamrock_connection_changed.connect(self.shamrock_connection_changed)
+        self._worker.backend_temperature_snapshot.connect(self.backend_temperature_snapshot)
 
         self._connect_requested.connect(self._worker.connect_instrument)
         self._disconnect_requested.connect(self._worker.disconnect_instrument)
@@ -590,29 +861,64 @@ class LF6Controller(QObject):
         self._acquire_2d_requested.connect(self._worker.acquire_2d)
         self._temperature_requested.connect(self._worker.read_temperature)
         self._temperature_snapshot_requested.connect(self._worker.read_temperature_snapshot)
+        self._scan_prepare_requested.connect(self._worker.prepare_scan_condition)
         self._cooler_requested.connect(self._worker.set_cooler)
         self._andor_status_requested.connect(self._worker.refresh_andor_status)
         self._andor_controls_requested.connect(self._worker.apply_andor_controls)
+        self._shamrock_connection_requested.connect(self._worker.set_shamrock_connected)
+        self._lightfield_optics_requested.connect(self._worker.lightfield_optics)
 
         self._thread.start()
 
     # ── public API (called from main thread) ──────────────────────────────────
 
+    @Slot()
+    def _clear_pending_operations(self, *args):
+        self._connection_pending = self._settings_pending = False
+        self.switching_lock_changed.emit(self.switching_locked)
+
+    @Slot(list)
+    def _on_backend_connected(self, experiments):
+        self._connection_pending = False
+        cfg.lf6.backend = self.backend
+        self.connected.emit(experiments)
+        self.switching_lock_changed.emit(self.switching_locked)
+
     def connect_instrument(
         self, use_mock: bool = False, backend: Optional[str] = None
     ) -> None:
         """Connect the selected LightField or Andor spectrum backend."""
+        if self.switching_locked:
+            self.error.emit("Cannot switch spectrum devices during a measurement or connection change")
+            return
         selected = str(backend or cfg.lf6.backend or "lightfield")
         cfg.lf6.backend = selected
         self._temperature_generation += 1
         self._temperature_timer.start()
         self.set_temperature_monitor_paused("disconnect", False)
+        self._connection_pending = True
+        self.switching_lock_changed.emit(True)
         self._connect_requested.emit(bool(use_mock), selected)
 
+    def lightfield_optics(self, requested=None):
+        if self.switching_locked:
+            self.error.emit("Cannot change optics during a measurement or connection change")
+            return
+        self._settings_pending = True
+        self.switching_lock_changed.emit(True)
+        self._lightfield_optics_requested.emit(requested)
+
+    def set_shamrock_connected(self, connected: bool) -> None:
+        if self.switching_locked:
+            self.error.emit("Cannot change Shamrock connection during a measurement or connection change")
+            return
+        self._shamrock_connection_requested.emit(bool(connected))
+
     def disconnect_instrument(self) -> None:
+        if self.switching_locked:
+            self.error.emit("Cannot disconnect during a measurement or connection change")
+            return
         self._temperature_generation += 1
-        self.set_temperature_monitor_paused("disconnect", True)
-        self._temperature_timer.stop()
         self._disconnect_requested.emit()
 
     def apply_settings(
@@ -621,6 +927,14 @@ class LF6Controller(QObject):
         center_nm: float,
         accumulations: int,
     ) -> None:
+        if self.spectrum_actions_blocked:
+            self.error.emit(_SPECTRUM_OWNERSHIP_ERROR)
+            return
+        if self._connection_pending:
+            self.error.emit("Wait for the spectrum device connection change to finish")
+            return
+        self._settings_pending = True
+        self.switching_lock_changed.emit(True)
         self._apply_requested.emit(
             float(exposure_ms), float(center_nm), int(accumulations)
         )
@@ -645,18 +959,49 @@ class LF6Controller(QObject):
 
     def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
         """Shared LightField preflight used by every acquisition tab."""
+        if self.backend == "winspec_ingaas":
+            return self.adapter.configure_for_acquisition(
+                center_nm=center_nm, exposure_ms=exposure_ms, frames=frames)
         return self._worker.configure_for_acquisition.__func__(
             self._worker, center_nm=center_nm, exposure_ms=exposure_ms, frames=frames
         )
 
     prepare_acquisition = configure_for_acquisition
 
+    def prepare_scan_condition(self, backend, center_nm, exposure_ms, frames, reduction, stop_event):
+        if not self._temperature_pause_sources.intersection({'megasweep', 'presets'}):
+            raise RuntimeError('Setup selection requires 2D or Dual Gate measurement ownership')
+        if reduction not in {'average', 'device'}:
+            raise ValueError('Unknown scan combination mode')
+        request = dict(backend=backend, center=float(center_nm), exposure=float(exposure_ms),
+                       frames=int(frames), reduction=reduction, stop=stop_event, done=threading.Event())
+        self._scan_prepare_requested.emit(request)
+        # Do not abandon a queued hardware operation: its setters have their own
+        # bounded waits. The worker checks Stop before starting the operation.
+        request['done'].wait()
+        if 'error' in request:
+            raise request['error']
+        if stop_event.is_set():
+            raise RuntimeError('Optical sequence stopped')
+        return request['result']
+
+    def validate_scan_centers(self, centers):
+        """Check WinSpec calibration coverage before a scan commands the SMUs."""
+        if self.backend == 'winspec_ingaas':
+            self.adapter.validate_scan_centers(centers)
+
     def acquire_single(self) -> None:
+        if self.spectrum_actions_blocked:
+            self.error.emit(_SPECTRUM_OWNERSHIP_ERROR)
+            return
         self._acquisition_requests += 1
         self.set_temperature_monitor_paused("acquisition", True)
         self._acquire_requested.emit()
 
     def acquire_2d(self) -> None:
+        if self.spectrum_actions_blocked:
+            self.error.emit(_SPECTRUM_OWNERSHIP_ERROR)
+            return
         self._acquisition_requests += 1
         self.set_temperature_monitor_paused("acquisition", True)
         self._acquire_2d_requested.emit()
@@ -667,29 +1012,59 @@ class LF6Controller(QObject):
         self.set_temperature_monitor_paused("acquisition", self._acquisition_requests > 0)
 
     def read_temperature(self) -> None:
+        if self._worker.manual_temperature_paused.is_set() or self.is_busy:
+            return
         self._temperature_requested.emit()
 
+    @property
+    def temperature_monitor_paused(self) -> bool:
+        return bool(self._temperature_pause_sources) or self.is_busy
+
+    def _emit_temperature_monitor_state(self) -> None:
+        state = ('Paused during measurement' if self.temperature_monitor_paused else
+                 'Auto refresh: 10 s' if self.backend == 'winspec_ingaas' else 'Auto refresh: 2 s')
+        if state != self._last_temperature_monitor_state:
+            self._last_temperature_monitor_state = state
+            self.temperature_monitor_state.emit(state)
+
     def set_temperature_monitor_paused(self, source: str, paused: bool) -> None:
+        was_paused = bool(self._temperature_pause_sources)
         if paused:
             self._temperature_pause_sources.add(source)
         else:
             self._temperature_pause_sources.discard(source)
+        if self._temperature_pause_sources - {'spectrum', 'acquisition', 'disconnect'}:
+            self._worker.external_measurement_active.set()
+        else:
+            self._worker.external_measurement_active.clear()
         if self._temperature_pause_sources:
             self._worker.temperature_monitor_paused.set()
+            if not was_paused:
+                # A pre-measurement read must not appear fresh after resuming.
+                self._temperature_generation += 1
         else:
             self._worker.temperature_monitor_paused.clear()
-        self.temperature_monitor_state.emit(
-            "Paused during measurement" if self._temperature_pause_sources else "Auto refresh: 2 s"
-        )
+        # Warm-up needs explicit readings to determine when disconnect is safe.
+        if self._temperature_pause_sources - {'warmup', 'disconnect'}:
+            self._worker.manual_temperature_paused.set()
+        else:
+            self._worker.manual_temperature_paused.clear()
+        self._emit_temperature_monitor_state()
+        if not self._temperature_pause_sources and self._worker._scan_selected:
+            self._worker._scan_adapter = None
+            self._worker._scan_selected = False
+            self._worker.connected.emit(self._worker._experiments)
+        self.switching_lock_changed.emit(self.switching_locked)
 
     @Slot()
     def poll_temperature(self) -> None:
-        if not self.is_connected or self.identity.get("backend") != "andor_sdk2":
+        active_detector = self.is_connected and self.identity.get("backend") in {"andor_sdk2", "winspec_ingaas"}
+        parked_andor = any(key != self.backend for key in self._worker.andor_setups())
+        if not active_detector and not parked_andor:
             return
-        if self._temperature_pause_sources or self.is_busy:
-            self.temperature_monitor_state.emit("Paused during measurement")
+        self._emit_temperature_monitor_state()
+        if self.temperature_monitor_paused:
             return
-        self.temperature_monitor_state.emit("Auto refresh: 2 s")
         if self._temperature_pending:
             return
         self._temperature_pending = True
@@ -710,6 +1085,11 @@ class LF6Controller(QObject):
         self._andor_status_requested.emit()
 
     def apply_andor_controls(self, settings: dict) -> None:
+        if self.switching_locked:
+            self.error.emit("Cannot apply Andor controls during a measurement or connection change")
+            return
+        self._settings_pending = True
+        self.switching_lock_changed.emit(True)
         self._andor_controls_requested.emit(dict(settings or {}))
 
     def abort_acquisition(self) -> bool:
@@ -718,17 +1098,33 @@ class LF6Controller(QObject):
         return bool(method()) if callable(method) else False
 
     def andor_disconnect_safety_snapshot(self) -> Optional[dict]:
-        if self.backend not in {"andor_si", "andor_ingaas"} or not self.is_connected:
-            return None
-        setup = self._worker.setup
-        method = getattr(setup, "get_disconnect_safety_snapshot", None)
-        return dict(method()) if callable(method) else None
+        for setup in self._worker.andor_setups().values():
+            method = getattr(setup, "get_disconnect_safety_snapshot", None)
+            if callable(method):
+                return dict(method())
+        return None
+
+    @property
+    def connected_backends(self):
+        return self._worker.connected_backends
+
+    @property
+    def spectrum_actions_blocked(self):
+        """Other measurement owners block Spectrum, including queued requests."""
+        return self._worker.external_measurement_active.is_set()
+
+    @property
+    def switching_locked(self):
+        return (self._connection_pending or self._settings_pending or self.is_busy or self._acquisition_requests > 0
+                or bool(self._temperature_pause_sources - {"disconnect"})
+                or self.state in {LightFieldLifecycleState.STARTING, LightFieldLifecycleState.INITIALIZING})
 
     # ── state accessors (read from main thread — be aware of races) ───────────
 
     @property
     def is_connected(self) -> bool:
-        return self._worker.adapter is not None and self.state is LightFieldLifecycleState.READY
+        return (not self._connection_pending and self._worker.adapter is not None
+                and self.state is LightFieldLifecycleState.READY)
 
     @property
     def state(self):
@@ -744,7 +1140,7 @@ class LF6Controller(QObject):
 
     @property
     def is_ready(self) -> bool:
-        return self.state is LightFieldLifecycleState.READY and bool(self._worker.is_ready)
+        return self.is_connected and bool(self._worker.is_ready)
 
     @property
     def is_busy(self) -> bool:
@@ -764,6 +1160,14 @@ class LF6Controller(QObject):
     @property
     def adapter(self):
         """SpectrometerLF6 instance; None if not connected."""
+        if self._worker._scan_adapter is not None:
+            return self._worker._scan_adapter
+        if self.backend == 'winspec_ingaas' and self._worker.adapter is not None:
+            from app.devices.winspec_scan_adapter import WinSpecScanAdapter
+            cached = getattr(self, '_winspec_scan_adapter', None)
+            if cached is None or cached.setup is not self._worker.setup:
+                cached = self._winspec_scan_adapter = WinSpecScanAdapter(self._worker.setup)
+            return cached
         return self._worker.adapter
 
     @property
@@ -777,10 +1181,11 @@ class LF6Controller(QObject):
         """Call from main.py on application exit."""
         self._temperature_timer.stop()
         self._worker.temperature_monitor_paused.set()
+        self._worker.manual_temperature_paused.set()
         if self._thread.isRunning():
             QMetaObject.invokeMethod(
                 self._worker,
-                "disconnect_instrument",
+                "disconnect_all",
                 Qt.ConnectionType.BlockingQueuedConnection,
             )
         self._thread.quit()

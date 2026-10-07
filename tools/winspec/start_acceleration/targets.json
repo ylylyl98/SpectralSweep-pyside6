@@ -1,0 +1,85 @@
+[
+  {
+    "name": "program_entry",
+    "module": "contrman.dll",
+    "rva": 812538,
+    "first_bytes": [
+      85,
+      139,
+      236,
+      131,
+      236,
+      100,
+      199,
+      69
+    ],
+    "step_length": 1,
+    "stack_delta": -4
+  },
+  {
+    "name": "body_entry",
+    "module": "contrman.dll",
+    "rva": 812808,
+    "first_bytes": [
+      139,
+      85,
+      8,
+      139,
+      130,
+      88,
+      110,
+      0
+    ],
+    "step_length": 3,
+    "stack_delta": 0,
+    "redirect_to": {
+      "rva": 814473,
+      "first_bytes": [
+        131,
+        125,
+        236,
+        0,
+        116,
+        47,
+        139,
+        69
+      ],
+      "step_length": 4,
+      "stack_delta": 0
+    }
+  },
+  {
+    "name": "program_exit",
+    "module": "contrman.dll",
+    "rva": 814531,
+    "first_bytes": [
+      93,
+      194,
+      4,
+      0,
+      85,
+      139,
+      236,
+      131
+    ],
+    "step_length": 1,
+    "stack_delta": 4
+  },
+  {
+    "name": "output_entry",
+    "module": "pipp32.dll",
+    "rva": 72093,
+    "first_bytes": [
+      85,
+      139,
+      236,
+      81,
+      139,
+      69,
+      8,
+      137
+    ],
+    "step_length": 1,
+    "stack_delta": -4
+  }
+]

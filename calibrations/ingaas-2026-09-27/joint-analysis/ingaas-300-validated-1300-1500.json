@@ -1,0 +1,518 @@
+{
+  "kind": "broad_piecewise",
+  "id": "5f70be66-6e8b-4320-983a-ff450ba2f6fd",
+  "created_utc": "2026-09-27T21:08:05.208664+00:00",
+  "context": {
+    "profile": "PIXIS front + WinSpec side",
+    "grating": "[750nm,300][1][0]",
+    "center_nm": 1300.0,
+    "output_port": "SideExit",
+    "spectrometer": [
+      {
+        "type": "Spectrometer",
+        "model": "SP-2-300i",
+        "serial": "23580208"
+      }
+    ],
+    "detector": {
+      "host": "192.168.170.128",
+      "port": 5000,
+      "model": "OMA V 512 (provisional)",
+      "serial_verified": false
+    },
+    "geometry": [
+      512,
+      1
+    ]
+  },
+  "target_nm": [
+    900.0,
+    1700.0
+  ],
+  "anchors": [
+    {
+      "id": "b08cd197-be93-4c30-9cd7-9483fec647d0",
+      "created_utc": "2026-09-27T21:08:05.200498+00:00",
+      "context": {
+        "profile": "PIXIS front + WinSpec side",
+        "grating": "[750nm,300][1][0]",
+        "center_nm": 1300.0,
+        "output_port": "SideExit",
+        "spectrometer": [
+          {
+            "type": "Spectrometer",
+            "model": "SP-2-300i",
+            "serial": "23580208"
+          }
+        ],
+        "detector": {
+          "host": "192.168.170.128",
+          "port": 5000,
+          "model": "OMA V 512 (provisional)",
+          "serial_verified": false
+        },
+        "geometry": [
+          512,
+          1
+        ]
+      },
+      "degree": 2,
+      "coefficients": [
+        -1.5211792310797134e-05,
+        -0.4908509828840648,
+        1407.3844740266418
+      ],
+      "pixel_range": [
+        72.28172588832487,
+        463.3622147083685
+      ],
+      "fit_pixels": [
+        72.28172588832487,
+        143.29182879377433,
+        162.27790432801822,
+        226.08304297328687,
+        277.20691547749726,
+        336.8050847457627,
+        463.3622147083685
+      ],
+      "fit_nm": [
+        1371.8577,
+        1336.7111,
+        1327.264,
+        1295.6659,
+        1270.2281,
+        1240.2827,
+        1176.67929
+      ],
+      "check_pixels": [
+        115.47583333333333,
+        174.15,
+        329.5992822966507
+      ],
+      "check_nm": [
+        1350.4191,
+        1321.399,
+        1243.9321
+      ],
+      "fit_residual_nm": [
+        -0.03225842891129105,
+        0.026102165146994594,
+        0.06561604961802914,
+        -0.03203842025823178,
+        -0.0798429068599944,
+        0.055076936949262745,
+        -0.002655395682722883
+      ],
+      "check_residual_nm": [
+        0.08110353419101557,
+        0.04242873555631377,
+        0.015698846929808496
+      ],
+      "rms_nm": 0.048505177171548494,
+      "tolerance_nm": 0.2,
+      "source": "Joint Ne/Ar assignment; local quadratic; separate center validation in broad model"
+    },
+    {
+      "id": "8ed579ae-60f5-4e61-8f2c-71117ade58d7",
+      "created_utc": "2026-09-27T21:08:05.202992+00:00",
+      "context": {
+        "profile": "PIXIS front + WinSpec side",
+        "grating": "[750nm,300][1][0]",
+        "center_nm": 1400.0,
+        "output_port": "SideExit",
+        "spectrometer": [
+          {
+            "type": "Spectrometer",
+            "model": "SP-2-300i",
+            "serial": "23580208"
+          }
+        ],
+        "detector": {
+          "host": "192.168.170.128",
+          "port": 5000,
+          "model": "OMA V 512 (provisional)",
+          "serial_verified": false
+        },
+        "geometry": [
+          512,
+          1
+        ]
+      },
+      "degree": 2,
+      "coefficients": [
+        -1.6474287541060513e-05,
+        -0.4856732109794902,
+        1506.3481018655407
+      ],
+      "pixel_range": [
+        198.3685208596713,
+        478.3797972483707
+      ],
+      "fit_pixels": [
+        198.3685208596713,
+        317.57191011235955,
+        345.25533428165005,
+        376.028801843318,
+        417.30916030534354,
+        478.3797972483707
+      ],
+      "fit_nm": [
+        1409.364,
+        1350.4191,
+        1336.7111,
+        1321.399,
+        1300.8264,
+        1270.2281
+      ],
+      "check_pixels": [
+        274.31558935361215,
+        364.02593266606004,
+        427.6168091168091
+      ],
+      "check_nm": [
+        1371.8577,
+        1327.264,
+        1295.6659
+      ],
+      "fit_residual_nm": [
+        -0.006438986689772719,
+        0.03136906665895367,
+        -0.008020542210033454,
+        -0.007439451911068318,
+        -0.023124677220948797,
+        0.013654591368549518
+      ],
+      "check_residual_nm": [
+        0.022994398077798905,
+        0.10337003693280167,
+        -0.012251440896761778
+      ],
+      "rms_nm": 0.017636855335443215,
+      "tolerance_nm": 0.2,
+      "source": "Joint Ne/Ar assignment; local quadratic; separate center validation in broad model"
+    },
+    {
+      "id": "3d114e77-dbbc-47af-8582-508c7797ee84",
+      "created_utc": "2026-09-27T21:08:05.205764+00:00",
+      "context": {
+        "profile": "PIXIS front + WinSpec side",
+        "grating": "[750nm,300][1][0]",
+        "center_nm": 1500.0,
+        "output_port": "SideExit",
+        "spectrometer": [
+          {
+            "type": "Spectrometer",
+            "model": "SP-2-300i",
+            "serial": "23580208"
+          }
+        ],
+        "detector": {
+          "host": "192.168.170.128",
+          "port": 5000,
+          "model": "OMA V 512 (provisional)",
+          "serial_verified": false
+        },
+        "geometry": [
+          512,
+          1
+        ]
+      },
+      "degree": 2,
+      "coefficients": [
+        -1.9252851454354842e-05,
+        -0.48009570822832914,
+        1605.391045299091
+      ],
+      "pixel_range": [
+        170.3034528552457,
+        496.4642857142857
+      ],
+      "fit_pixels": [
+        170.3034528552457,
+        401.8118756936737,
+        477.373576309795,
+        496.4642857142857
+      ],
+      "fit_nm": [
+        1523.07144,
+        1409.364,
+        1371.8577,
+        1362.2659
+      ],
+      "check_pixels": [
+        208.17363245236632,
+        485.32395833333334
+      ],
+      "check_nm": [
+        1504.65,
+        1367.855
+      ],
+      "fit_residual_nm": [
+        -0.0007470862149148161,
+        0.010461806758030434,
+        -0.039106192698000086,
+        0.029391472158295073
+      ],
+      "check_residual_nm": [
+        -0.036568807994626695,
+        -0.0007082090639869421
+      ],
+      "rms_nm": 0.02501579741593218,
+      "tolerance_nm": 0.2,
+      "source": "Joint Ne/Ar assignment; local quadratic; separate center validation in broad model"
+    }
+  ],
+  "checks": [
+    {
+      "id": "65330d15-e230-4e86-ad69-919065cae4ba",
+      "created_utc": "2026-09-27T21:08:05.201845+00:00",
+      "context": {
+        "profile": "PIXIS front + WinSpec side",
+        "grating": "[750nm,300][1][0]",
+        "center_nm": 1350.0,
+        "output_port": "SideExit",
+        "spectrometer": [
+          {
+            "type": "Spectrometer",
+            "model": "SP-2-300i",
+            "serial": "23580208"
+          }
+        ],
+        "detector": {
+          "host": "192.168.170.128",
+          "port": 5000,
+          "model": "OMA V 512 (provisional)",
+          "serial_verified": false
+        },
+        "geometry": [
+          512,
+          1
+        ]
+      },
+      "degree": 2,
+      "coefficients": [
+        -1.1609646013289416e-05,
+        -0.49093375353444707,
+        1457.2145429206887
+      ],
+      "pixel_range": [
+        97.26550387596899,
+        489.69893899204243
+      ],
+      "fit_pixels": [
+        97.26550387596899,
+        216.39626556016597,
+        254.86060100166944,
+        274.9340175953079,
+        326.44487278334617,
+        430.236815920398,
+        489.69893899204243
+      ],
+      "fit_nm": [
+        1409.364,
+        1350.4191,
+        1331.321,
+        1321.399,
+        1295.6659,
+        1243.9321,
+        1213.9738
+      ],
+      "check_pixels": [
+        173.24513274336283,
+        263.18640350877195,
+        377.4668820678514
+      ],
+      "check_nm": [
+        1371.8577,
+        1327.264,
+        1270.2281
+      ],
+      "fit_residual_nm": [
+        -0.01020995105682232,
+        0.015563133737941826,
+        0.01977935552326926,
+        -0.036404524182216846,
+        0.048639705962159496,
+        -0.08432066691329965,
+        0.04695294692260177
+      ],
+      "check_residual_nm": [
+        -0.04349085465446478,
+        -0.06071234701312278,
+        0.02105283029823113
+      ],
+      "rms_nm": 0.044309530751106684,
+      "tolerance_nm": 0.2,
+      "source": "Joint Ne/Ar assignment; local quadratic; separate center validation in broad model"
+    },
+    {
+      "id": "f4ced8ba-7d1a-4da5-917d-9b02a6f319a5",
+      "created_utc": "2026-09-27T21:08:05.204623+00:00",
+      "context": {
+        "profile": "PIXIS front + WinSpec side",
+        "grating": "[750nm,300][1][0]",
+        "center_nm": 1450.0,
+        "output_port": "SideExit",
+        "spectrometer": [
+          {
+            "type": "Spectrometer",
+            "model": "SP-2-300i",
+            "serial": "23580208"
+          }
+        ],
+        "detector": {
+          "host": "192.168.170.128",
+          "port": 5000,
+          "model": "OMA V 512 (provisional)",
+          "serial_verified": false
+        },
+        "geometry": [
+          512,
+          1
+        ]
+      },
+      "degree": 2,
+      "coefficients": [
+        -1.700029240967291e-05,
+        -0.48380145984815437,
+        1556.1794169578366
+      ],
+      "pixel_range": [
+        106.11466458658346,
+        477.33807829181495
+      ],
+      "fit_pixels": [
+        106.11466458658346,
+        375.9833174451859,
+        419.19744160177976,
+        457.44736842105266,
+        465.4212916246216,
+        477.33807829181495
+      ],
+      "fit_nm": [
+        1504.65,
+        1371.8577,
+        1350.4191,
+        1331.321,
+        1327.264,
+        1321.399
+      ],
+      "check_pixels": [
+        300.3095975232198,
+        446.47642679900747
+      ],
+      "check_nm": [
+        1409.364,
+        1336.7111
+      ],
+      "fit_residual_nm": [
+        -0.0004414477623413404,
+        0.01721902831150146,
+        -0.035419053616124074,
+        -0.012736489937196893,
+        0.06136464667315522,
+        -0.029986683664219527
+      ],
+      "check_residual_nm": [
+        -0.007990625722641198,
+        0.07351120071166406
+      ],
+      "rms_nm": 0.03260429012057694,
+      "tolerance_nm": 0.2,
+      "source": "Joint Ne/Ar assignment; local quadratic; separate center validation in broad model"
+    }
+  ],
+  "segments": [
+    {
+      "center_range": [
+        1300.0,
+        1400.0
+      ],
+      "pixel_range": [
+        198.3685208596713,
+        463.3622147083685
+      ],
+      "left_coefficients": [
+        -1.5211792310797134e-05,
+        -0.4908509828840648,
+        1407.3844740266418
+      ],
+      "right_coefficients": [
+        -1.6474287541060513e-05,
+        -0.4856732109794902,
+        1506.3481018655407
+      ],
+      "max_check_error_nm": 0.12139639607585195,
+      "check_residual_nm": [
+        0.04720607884792116,
+        0.07744883366353861,
+        0.02987298278367234,
+        0.12139639607585195,
+        -0.0667475635741539,
+        0.0009415235724645754,
+        0.07808049950585882
+      ]
+    },
+    {
+      "center_range": [
+        1400.0,
+        1500.0
+      ],
+      "pixel_range": [
+        198.3685208596713,
+        477.33807829181495
+      ],
+      "left_coefficients": [
+        -1.6474287541060513e-05,
+        -0.4856732109794902,
+        1506.3481018655407
+      ],
+      "right_coefficients": [
+        -1.9252851454354842e-05,
+        -0.48009570822832914,
+        1605.391045299091
+      ],
+      "max_check_error_nm": 0.12030540870318873,
+      "check_residual_nm": [
+        -0.06988338506448599,
+        -0.11255892973463233,
+        -0.08374823567828571,
+        -0.008687765340027909,
+        -0.09881002593965604,
+        -0.12030540870318873,
+        0.001000127223733216
+      ]
+    }
+  ],
+  "tolerance_nm": 0.2,
+  "rms_nm": 0.07713122453244933,
+  "source": "Joint Ne/Ar matching; centers 1350 and 1450 withheld from hypothesis search; other intervals not enabled",
+  "joint_analysis": {
+    "evidence": [
+      {
+        "file": "g0-center1300-try1.json",
+        "sha256": "a5acea25a9c57bcfd9450705dfef6ae99993d92403744529f8258390c806dd14"
+      },
+      {
+        "file": "g0-center1350-try1.json",
+        "sha256": "edef5dfcd0ed93b0bb9c9943cbbe039e039f0dacd6e67a3bc103ab961fe84e9e"
+      },
+      {
+        "file": "g0-center1400-try1.json",
+        "sha256": "0d96def6595140aad455a3ffdd1eb616b2cdab72e1043637b5a8557e89aa39d9"
+      },
+      {
+        "file": "g0-center1450-try1.json",
+        "sha256": "bd1aea8a7392486150e2892aacaff3698a281407cd76f732464a0fa0a405eca6"
+      },
+      {
+        "file": "g0-center1500-try2.json",
+        "sha256": "5da297452fa67176fe9e9b4d92115589e0869281fb366537d595876c220920f5"
+      }
+    ],
+    "training_score": 49,
+    "runner_up_score": 35,
+    "reference_sha256": "879cf2bdc8e474739a1afa873c08fe78ba6340b58d55b86140653745ba68c5e8",
+    "hypotheses_sha256": "7c3ffe0d20e5cd2a20ee1eba92b7f4ab36281f652694231d579dbc6c67adc3db"
+  }
+}

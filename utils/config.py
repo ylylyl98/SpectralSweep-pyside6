@@ -63,6 +63,18 @@ _CONFIG_FILE = _default_config_file()
 class LF6Config:
     """Shared spectrometer defaults (legacy name retained for compatibility)."""
     backend: str = "lightfield"         # lightfield | andor_si | andor_ingaas
+    winspec_host: str = "192.168.170.128"
+    winspec_port: int = 5000
+    winspec_acquisition_backend: str = 'winspec'  # winspec | pvcam (same physical detector)
+    winspec_start_acceleration: bool = False
+    winspec_reverse_pixel_display: bool = True
+    winspec_pixel_pitch_um: float = 50.0  # Provisional OMA V value, not a wavelength calibration.
+    winspec_wavelength_calibrations: List[Dict[str, Any]] = field(default_factory=list)
+    optical_profile: str = 'PIXIS front + WinSpec side'
+    optical_profiles: Dict[str, Dict[str, str]] = field(default_factory=lambda: {
+        'PIXIS front + WinSpec side': {'lightfield': 'front', 'winspec_ingaas': 'side'},
+        'Fixed front exit': {'lightfield': 'fixed_front', 'winspec_ingaas': 'disabled'},
+    })
     exposure_ms: float = 2000.0       # ms  — matches main_ui.py sidebar default
     center_nm: float = 860.0          # nm  — matches main_ui.py sidebar default
     accumulations: int = 1            # frames to combine (EPF)
@@ -92,7 +104,7 @@ class LF6Config:
     andor_ingaas_temperature_c: float = -75.0
     andor_ingaas_cooler_on_connect: bool = False
     andor_ingaas_fan_mode: str = "full"
-    andor_ingaas_output_port: str = "unchanged"
+    andor_ingaas_output_port: str = "direct"
     andor_safe_disconnect_temperature_c: float = 5.0
     andor_shutter_mode: str = "auto"
     andor_shamrock_shutter_mode: str = "unchanged"

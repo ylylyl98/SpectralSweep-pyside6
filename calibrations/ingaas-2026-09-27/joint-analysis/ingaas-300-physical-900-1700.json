@@ -1,0 +1,1286 @@
+{
+  "kind": "physical_grating_model",
+  "id": "48e8fbaf-00c4-4b2b-9092-54a786969cc7",
+  "created_utc": "2026-09-27T21:31:12.573735+00:00",
+  "context": {
+    "profile": "PIXIS front + WinSpec side",
+    "grating": "[750nm,300][1][0]",
+    "center_nm": 925.0,
+    "output_port": "SideExit",
+    "spectrometer": [
+      {
+        "type": "Spectrometer",
+        "model": "SP-2-300i",
+        "serial": "23580208"
+      }
+    ],
+    "detector": {
+      "host": "192.168.170.128",
+      "port": 5000,
+      "model": "OMA V 512 (provisional)",
+      "serial_verified": false
+    },
+    "geometry": [
+      512,
+      1
+    ]
+  },
+  "parameters": [
+    5971.134152332835,
+    174.55791606508754,
+    0.26473261284460087,
+    -0.06020974819272709,
+    0.0033714431897116206
+  ],
+  "grooves_per_mm": 300.0,
+  "parameter_names": [
+    "effective_focal_length_pixels",
+    "reference_pixel",
+    "half_inclusion_rad",
+    "detector_tilt_rad",
+    "rotation_offset_rad"
+  ],
+  "training": [
+    {
+      "center_nm": 1000.0,
+      "pixel": 52.041935483870965,
+      "wavelength_nm": 1083.7116,
+      "order": 2,
+      "source_wavelength_nm": 541.8558,
+      "file": "g0-center1000-try1.json",
+      "initial_error_nm": -0.3117133157695662,
+      "error_nm": -0.13779192268475526
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 124.16746411483254,
+      "wavelength_nm": 1047.0054,
+      "order": 1,
+      "source_wavelength_nm": 1047.0054,
+      "file": "g0-center1000-try1.json",
+      "initial_error_nm": -0.07857813493319554,
+      "error_nm": -0.04178643855448172
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 284.12214611872145,
+      "wavelength_nm": 965.5174,
+      "order": 2,
+      "source_wavelength_nm": 482.7587,
+      "file": "g0-center1000-try1.json",
+      "initial_error_nm": 0.07019214515969452,
+      "error_nm": 0.10195039143377471
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 308.1186186186186,
+      "wavelength_nm": 953.4164,
+      "order": 1,
+      "source_wavelength_nm": 953.4164,
+      "file": "g0-center1000-try1.json",
+      "initial_error_nm": -0.085096729116799,
+      "error_nm": -0.038789769593904566
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 354.05696202531647,
+      "wavelength_nm": 930.08532,
+      "order": 1,
+      "source_wavelength_nm": 930.08532,
+      "file": "g0-center1000-try1.json",
+      "initial_error_nm": -0.25631261752926093,
+      "error_nm": -0.18425301447973652
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 372.80128205128204,
+      "wavelength_nm": 920.17588,
+      "order": 1,
+      "source_wavelength_nm": 920.17588,
+      "file": "g0-center1000-try1.json",
+      "initial_error_nm": 0.048674524328134794,
+      "error_nm": 0.12852279834419278
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 388.4590700720367,
+      "wavelength_nm": 912.2967,
+      "order": 1,
+      "source_wavelength_nm": 912.2967,
+      "file": "g0-center1000-try1.json",
+      "initial_error_nm": -0.10163990371233922,
+      "error_nm": -0.017269232898229347
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 440.88766519823787,
+      "wavelength_nm": 885.2002,
+      "order": 2,
+      "source_wavelength_nm": 442.6001,
+      "file": "g0-center1000-try1.json",
+      "initial_error_nm": 0.06541151436636028,
+      "error_nm": 0.1462233607054486
+    },
+    {
+      "center_nm": 1100.0,
+      "pixel": 64.48175965665236,
+      "wavelength_nm": 1176.67929,
+      "order": 1,
+      "source_wavelength_nm": 1176.67929,
+      "file": "g0-center1100-try1.json",
+      "initial_error_nm": -0.04458430941303959,
+      "error_nm": 0.05541655209253804
+    },
+    {
+      "center_nm": 1100.0,
+      "pixel": 97.01190476190476,
+      "wavelength_nm": 1160.15369,
+      "order": 1,
+      "source_wavelength_nm": 1160.15369,
+      "file": "g0-center1100-try1.json",
+      "initial_error_nm": 0.15733628445013892,
+      "error_nm": 0.19690318217135427
+    },
+    {
+      "center_nm": 1100.0,
+      "pixel": 113.20430622009569,
+      "wavelength_nm": 1152.2745,
+      "order": 1,
+      "source_wavelength_nm": 1152.2745,
+      "file": "g0-center1100-try1.json",
+      "initial_error_nm": -0.09845202378483009,
+      "error_nm": -0.08052850699027658
+    },
+    {
+      "center_nm": 1100.0,
+      "pixel": 138.33589743589744,
+      "wavelength_nm": 1139.04333,
+      "order": 1,
+      "source_wavelength_nm": 1139.04333,
+      "file": "g0-center1100-try1.json",
+      "initial_error_nm": 0.4940932836802858,
+      "error_nm": 0.4881586336421151
+    },
+    {
+      "center_nm": 1100.0,
+      "pixel": 188.233407079646,
+      "wavelength_nm": 1114.302,
+      "order": 1,
+      "source_wavelength_nm": 1114.302,
+      "file": "g0-center1100-try1.json",
+      "initial_error_nm": 0.09649061543586868,
+      "error_nm": 0.0721541675966364
+    },
+    {
+      "center_nm": 1100.0,
+      "pixel": 247.48907103825135,
+      "wavelength_nm": 1084.44774,
+      "order": 1,
+      "source_wavelength_nm": 1084.44774,
+      "file": "g0-center1100-try1.json",
+      "initial_error_nm": 0.01832788083129344,
+      "error_nm": 0.0066170358729777945
+    },
+    {
+      "center_nm": 1100.0,
+      "pixel": 321.32207578253707,
+      "wavelength_nm": 1047.0054,
+      "order": 1,
+      "source_wavelength_nm": 1047.0054,
+      "file": "g0-center1100-try1.json",
+      "initial_error_nm": 0.045010051214603664,
+      "error_nm": 0.06918458149311846
+    },
+    {
+      "center_nm": 1100.0,
+      "pixel": 480.90352811466374,
+      "wavelength_nm": 965.7786,
+      "order": 1,
+      "source_wavelength_nm": 965.7786,
+      "file": "g0-center1100-try1.json",
+      "initial_error_nm": -0.05127476958693933,
+      "error_nm": -0.06853203496359583
+    },
+    {
+      "center_nm": 1100.0,
+      "pixel": 504.8448275862069,
+      "wavelength_nm": 953.4164,
+      "order": 1,
+      "source_wavelength_nm": 953.4164,
+      "file": "g0-center1100-try1.json",
+      "initial_error_nm": 0.056889463349307334,
+      "error_nm": -0.0008867824432172711
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 26.284352399737013,
+      "wavelength_nm": 1295.6659,
+      "order": 1,
+      "source_wavelength_nm": 1295.6659,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": -0.5080890417407318,
+      "error_nm": -0.34743595418080986
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 76.35497630331754,
+      "wavelength_nm": 1270.2281,
+      "order": 1,
+      "source_wavelength_nm": 1270.2281,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": 0.025726371768541867,
+      "error_nm": 0.07243215201833664
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 129.25372689326178,
+      "wavelength_nm": 1243.9321,
+      "order": 1,
+      "source_wavelength_nm": 1243.9321,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": -0.05521903473186285,
+      "error_nm": -0.07020168564235973
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 136.23498452012385,
+      "wavelength_nm": 1240.2827,
+      "order": 1,
+      "source_wavelength_nm": 1240.2827,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": 0.10802151056623188,
+      "error_nm": 0.08857844695376116
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 189.35099337748343,
+      "wavelength_nm": 1213.9738,
+      "order": 1,
+      "source_wavelength_nm": 1213.9738,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": -0.14594168305325184,
+      "error_nm": -0.17767916141724527
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 263.399814471243,
+      "wavelength_nm": 1176.67929,
+      "order": 1,
+      "source_wavelength_nm": 1176.67929,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": 0.0027419059397288947,
+      "error_nm": -0.004933672445076809
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 293.88693467336685,
+      "wavelength_nm": 1161.40805,
+      "order": 1,
+      "source_wavelength_nm": 1161.40805,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": -0.058367997405184724,
+      "error_nm": -0.05119743978093538
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 312.035192563081,
+      "wavelength_nm": 1152.2745,
+      "order": 1,
+      "source_wavelength_nm": 1152.2745,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": -0.06254740198642139,
+      "error_nm": -0.04711214429676147
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 337.7279411764706,
+      "wavelength_nm": 1139.04333,
+      "order": 1,
+      "source_wavelength_nm": 1139.04333,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": 0.21849463319631468,
+      "error_nm": 0.2433987157107822
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 387.0185714285714,
+      "wavelength_nm": 1114.302,
+      "order": 1,
+      "source_wavelength_nm": 1114.302,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": 0.07046421441168604,
+      "error_nm": 0.10004200193270663
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 446.1802218114603,
+      "wavelength_nm": 1084.44774,
+      "order": 1,
+      "source_wavelength_nm": 1084.44774,
+      "file": "g0-center1200-try1.json",
+      "initial_error_nm": -0.027134920603884893,
+      "error_nm": -0.03079594506448302
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 72.28172588832487,
+      "wavelength_nm": 1371.8577,
+      "order": 1,
+      "source_wavelength_nm": 1371.8577,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.002969245910207974,
+      "error_nm": 0.02289302046665398
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 115.47583333333333,
+      "wavelength_nm": 1350.4191,
+      "order": 1,
+      "source_wavelength_nm": 1350.4191,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": 0.06726709127406139,
+      "error_nm": 0.04848794981990068
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 143.29182879377433,
+      "wavelength_nm": 1336.7111,
+      "order": 1,
+      "source_wavelength_nm": 1336.7111,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.009507333599003687,
+      "error_nm": -0.04061866957181337
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 154.0784543325527,
+      "wavelength_nm": 1331.321,
+      "order": 1,
+      "source_wavelength_nm": 1331.321,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": 0.02999458133490407,
+      "error_nm": -0.003048856951181733
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 162.27790432801822,
+      "wavelength_nm": 1327.264,
+      "order": 1,
+      "source_wavelength_nm": 1327.264,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": 0.0178438303682924,
+      "error_nm": -0.01573330857650035
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 174.15,
+      "wavelength_nm": 1321.399,
+      "order": 1,
+      "source_wavelength_nm": 1321.399,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.011836270439744112,
+      "error_nm": -0.044886777640385844
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 226.08304297328687,
+      "wavelength_nm": 1295.6659,
+      "order": 1,
+      "source_wavelength_nm": 1295.6659,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.10464176871755626,
+      "error_nm": -0.12159617533666278
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 277.20691547749726,
+      "wavelength_nm": 1270.2281,
+      "order": 1,
+      "source_wavelength_nm": 1270.2281,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.15449763812694073,
+      "error_nm": -0.1445294798966188
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 329.5992822966507,
+      "wavelength_nm": 1243.9321,
+      "order": 1,
+      "source_wavelength_nm": 1243.9321,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.044586824931911906,
+      "error_nm": -0.010735944411862874
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 336.8050847457627,
+      "wavelength_nm": 1240.2827,
+      "order": 1,
+      "source_wavelength_nm": 1240.2827,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.0019282106156879308,
+      "error_nm": 0.03406153999003436
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 389.674672489083,
+      "wavelength_nm": 1213.9738,
+      "order": 1,
+      "source_wavelength_nm": 1213.9738,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.19466660374314415,
+      "error_nm": -0.15786073107460652
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 420.19844357976655,
+      "wavelength_nm": 1198.49139,
+      "order": 1,
+      "source_wavelength_nm": 1198.49139,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.04372477108313433,
+      "error_nm": -0.022504009421254523
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 463.3622147083685,
+      "wavelength_nm": 1176.67929,
+      "order": 1,
+      "source_wavelength_nm": 1176.67929,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": 0.049369270393526676,
+      "error_nm": 0.02127373775851993
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 478.28494623655916,
+      "wavelength_nm": 1168.80028,
+      "order": 1,
+      "source_wavelength_nm": 1168.80028,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": 0.40905458242946224,
+      "error_nm": 0.35509877863455586
+    },
+    {
+      "center_nm": 1300.0,
+      "pixel": 494.0232876712329,
+      "wavelength_nm": 1161.40805,
+      "order": 1,
+      "source_wavelength_nm": 1161.40805,
+      "file": "g0-center1300-try1.json",
+      "initial_error_nm": -0.134887809015936,
+      "error_nm": -0.22166060024164835
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 198.3685208596713,
+      "wavelength_nm": 1409.364,
+      "order": 1,
+      "source_wavelength_nm": 1409.364,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": 0.04150281435522629,
+      "error_nm": 0.017147530449619808
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 274.31558935361215,
+      "wavelength_nm": 1371.8577,
+      "order": 1,
+      "source_wavelength_nm": 1371.8577,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": -0.005479055472960681,
+      "error_nm": 0.019004497969717704
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 317.57191011235955,
+      "wavelength_nm": 1350.4191,
+      "order": 1,
+      "source_wavelength_nm": 1350.4191,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": -0.01845760298942878,
+      "error_nm": 0.03071169250370076
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 345.25533428165005,
+      "wavelength_nm": 1336.7111,
+      "order": 1,
+      "source_wavelength_nm": 1336.7111,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": -0.0630692727324913,
+      "error_nm": -0.004464088501435981
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 356.07676348547716,
+      "wavelength_nm": 1331.321,
+      "order": 1,
+      "source_wavelength_nm": 1331.321,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": -0.05392753123351213,
+      "error_nm": 0.0064055463894874265
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 364.02593266606004,
+      "wavelength_nm": 1327.264,
+      "order": 1,
+      "source_wavelength_nm": 1327.264,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": 0.048529592632348795,
+      "error_nm": 0.10930562770545293
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 376.028801843318,
+      "wavelength_nm": 1321.399,
+      "order": 1,
+      "source_wavelength_nm": 1321.399,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": -0.060558583505098795,
+      "error_nm": -0.0005720159044813045
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 417.30916030534354,
+      "wavelength_nm": 1300.8264,
+      "order": 1,
+      "source_wavelength_nm": 1300.8264,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": -0.06086678118276723,
+      "error_nm": -0.01940337583710061
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 427.6168091168091,
+      "wavelength_nm": 1295.6659,
+      "order": 1,
+      "source_wavelength_nm": 1295.6659,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": -0.04386763248498937,
+      "error_nm": -0.011457157431095766
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 478.3797972483707,
+      "wavelength_nm": 1270.2281,
+      "order": 1,
+      "source_wavelength_nm": 1270.2281,
+      "file": "g0-center1400-try1.json",
+      "initial_error_nm": 0.025536373297200043,
+      "error_nm": -0.018137745573540087
+    },
+    {
+      "center_nm": 1500.0,
+      "pixel": 170.31117021276594,
+      "wavelength_nm": 1523.07144,
+      "order": 1,
+      "source_wavelength_nm": 1523.07144,
+      "file": "211712-center1500.json",
+      "initial_error_nm": 0.13542528795028375,
+      "error_nm": 0.08640105269228116
+    },
+    {
+      "center_nm": 1500.0,
+      "pixel": 208.20216606498195,
+      "wavelength_nm": 1504.65,
+      "order": 1,
+      "source_wavelength_nm": 1504.65,
+      "file": "211712-center1500.json",
+      "initial_error_nm": 0.004975925941835158,
+      "error_nm": -0.01550053890377967
+    },
+    {
+      "center_nm": 1500.0,
+      "pixel": 401.8772582359192,
+      "wavelength_nm": 1409.364,
+      "order": 1,
+      "source_wavelength_nm": 1409.364,
+      "file": "211712-center1500.json",
+      "initial_error_nm": -0.08070893326794248,
+      "error_nm": -0.005408294806102276
+    },
+    {
+      "center_nm": 1500.0,
+      "pixel": 477.39227373068434,
+      "wavelength_nm": 1371.8577,
+      "order": 1,
+      "source_wavelength_nm": 1371.8577,
+      "file": "211712-center1500.json",
+      "initial_error_nm": -0.007855895854845585,
+      "error_nm": -0.029820178021054744
+    },
+    {
+      "center_nm": 1500.0,
+      "pixel": 485.32706766917295,
+      "wavelength_nm": 1367.855,
+      "order": 1,
+      "source_wavelength_nm": 1367.855,
+      "file": "211712-center1500.json",
+      "initial_error_nm": 0.05343646331948548,
+      "error_nm": 0.013578365435932938
+    },
+    {
+      "center_nm": 1500.0,
+      "pixel": 496.4938176197836,
+      "wavelength_nm": 1362.2659,
+      "order": 1,
+      "source_wavelength_nm": 1362.2659,
+      "file": "211712-center1500.json",
+      "initial_error_nm": 0.09313974663200497,
+      "error_nm": 0.025265773951105075
+    },
+    {
+      "center_nm": 1600.0,
+      "pixel": 375.44293125810634,
+      "wavelength_nm": 1523.07144,
+      "order": 1,
+      "source_wavelength_nm": 1523.07144,
+      "file": "g0-center1600-try2.json",
+      "initial_error_nm": 0.02049831436988825,
+      "error_nm": 0.12167291194623431
+    },
+    {
+      "center_nm": 1600.0,
+      "pixel": 413.22088835534214,
+      "wavelength_nm": 1504.65,
+      "order": 1,
+      "source_wavelength_nm": 1504.65,
+      "file": "g0-center1600-try2.json",
+      "initial_error_nm": -0.10317142706139748,
+      "error_nm": -0.014654739715979304
+    },
+    {
+      "center_nm": 1700.0,
+      "pixel": 101.30851063829788,
+      "wavelength_nm": 1756.12446,
+      "order": 2,
+      "source_wavelength_nm": 878.06223,
+      "file": "211816-center1700.json",
+      "initial_error_nm": 0.23331902959398576,
+      "error_nm": 0.01358239251840132
+    },
+    {
+      "center_nm": 1700.0,
+      "pixel": 220.17207792207793,
+      "wavelength_nm": 1699.073182,
+      "order": 2,
+      "source_wavelength_nm": 849.536591,
+      "file": "211816-center1700.json",
+      "initial_error_nm": 0.05156631119325539,
+      "error_nm": -0.009042479464369535
+    },
+    {
+      "center_nm": 1700.0,
+      "pixel": 269.15588914549653,
+      "wavelength_nm": 1675.5214,
+      "order": 2,
+      "source_wavelength_nm": 837.7607,
+      "file": "211816-center1700.json",
+      "initial_error_nm": -0.08254703934630925,
+      "error_nm": -0.07011613490021773
+    },
+    {
+      "center_nm": 1700.0,
+      "pixel": 377.2692307692308,
+      "wavelength_nm": 1623.0622,
+      "order": 2,
+      "source_wavelength_nm": 811.5311,
+      "file": "211816-center1700.json",
+      "initial_error_nm": -0.10783271207696998,
+      "error_nm": -0.0027834621905640233
+    },
+    {
+      "center_nm": 900.0,
+      "pixel": 87.85036496350365,
+      "wavelength_nm": 965.7786,
+      "order": 1,
+      "source_wavelength_nm": 965.7786,
+      "file": "g0-center900-try1.json",
+      "initial_error_nm": -0.06025479068364348,
+      "error_nm": 0.08671534842108031
+    },
+    {
+      "center_nm": 900.0,
+      "pixel": 159.80061349693253,
+      "wavelength_nm": 929.0836,
+      "order": 2,
+      "source_wavelength_nm": 464.5418,
+      "file": "g0-center900-try1.json",
+      "initial_error_nm": -0.07904950940144317,
+      "error_nm": -0.019982293758630476
+    },
+    {
+      "center_nm": 900.0,
+      "pixel": 177.76351351351352,
+      "wavelength_nm": 919.4638,
+      "order": 1,
+      "source_wavelength_nm": 919.4638,
+      "file": "g0-center900-try1.json",
+      "initial_error_nm": 0.35522262930112447,
+      "error_nm": 0.40747798146503555
+    },
+    {
+      "center_nm": 900.0,
+      "pixel": 192.78070175438597,
+      "wavelength_nm": 912.2967,
+      "order": 1,
+      "source_wavelength_nm": 912.2967,
+      "file": "g0-center900-try1.json",
+      "initial_error_nm": -0.16291265275651767,
+      "error_nm": -0.11264280251907621
+    },
+    {
+      "center_nm": 900.0,
+      "pixel": 245.70422535211267,
+      "wavelength_nm": 885.2002,
+      "order": 2,
+      "source_wavelength_nm": 442.6001,
+      "file": "g0-center900-try1.json",
+      "initial_error_nm": -0.19446887461253937,
+      "error_nm": -0.1298028634739694
+    },
+    {
+      "center_nm": 900.0,
+      "pixel": 337.7656,
+      "wavelength_nm": 838.1426,
+      "order": 2,
+      "source_wavelength_nm": 419.0713,
+      "file": "g0-center900-try1.json",
+      "initial_error_nm": -0.48908917949620445,
+      "error_nm": -0.35824310365126166
+    },
+    {
+      "center_nm": 900.0,
+      "pixel": 359.790625,
+      "wavelength_nm": 826.3448,
+      "order": 2,
+      "source_wavelength_nm": 413.1724,
+      "file": "g0-center900-try1.json",
+      "initial_error_nm": -0.050561132142320275,
+      "error_nm": 0.09634093368129015
+    }
+  ],
+  "checks": [
+    {
+      "center_nm": 1175.0,
+      "pixel": 27.405905905905907,
+      "wavelength_nm": 1270.2281,
+      "order": 1,
+      "source_wavelength_nm": 1270.2281,
+      "file": "g300-center1175.json",
+      "error_nm": -0.48855425113401907
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 79.2239263803681,
+      "wavelength_nm": 1243.9321,
+      "order": 1,
+      "source_wavelength_nm": 1243.9321,
+      "file": "g300-center1175.json",
+      "error_nm": 0.03841066284326189
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 86.23433166943983,
+      "wavelength_nm": 1240.2827,
+      "order": 1,
+      "source_wavelength_nm": 1240.2827,
+      "file": "g300-center1175.json",
+      "error_nm": 0.19424613383330325
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 139.25068744271312,
+      "wavelength_nm": 1213.9738,
+      "order": 1,
+      "source_wavelength_nm": 1213.9738,
+      "file": "g300-center1175.json",
+      "error_nm": 0.029247636377931485
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 170.20380818053596,
+      "wavelength_nm": 1198.49139,
+      "order": 1,
+      "source_wavelength_nm": 1198.49139,
+      "file": "g300-center1175.json",
+      "error_nm": 0.012954455431327005
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 213.45056755767118,
+      "wavelength_nm": 1176.67929,
+      "order": 1,
+      "source_wavelength_nm": 1176.67929,
+      "file": "g300-center1175.json",
+      "error_nm": 0.12168841699394761
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 244.0929203539823,
+      "wavelength_nm": 1161.40805,
+      "order": 1,
+      "source_wavelength_nm": 1161.40805,
+      "file": "g300-center1175.json",
+      "error_nm": -0.017778888421844385
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 262.2080707460866,
+      "wavelength_nm": 1152.2745,
+      "order": 1,
+      "source_wavelength_nm": 1152.2745,
+      "file": "g300-center1175.json",
+      "error_nm": -0.00694924722279211
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 287.8941326530612,
+      "wavelength_nm": 1139.04333,
+      "order": 1,
+      "source_wavelength_nm": 1139.04333,
+      "file": "g300-center1175.json",
+      "error_nm": 0.2738786492445797
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 330.44590294351633,
+      "wavelength_nm": 1117.75246,
+      "order": 1,
+      "source_wavelength_nm": 1117.75246,
+      "file": "g300-center1175.json",
+      "error_nm": 0.07439810317987394
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 337.2848244620612,
+      "wavelength_nm": 1114.302,
+      "order": 1,
+      "source_wavelength_nm": 1114.302,
+      "file": "g300-center1175.json",
+      "error_nm": 0.06684881048090574
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 396.31754032258067,
+      "wavelength_nm": 1084.44774,
+      "order": 1,
+      "source_wavelength_nm": 1084.44774,
+      "file": "g300-center1175.json",
+      "error_nm": 0.028182994498820335
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 430.01706036745406,
+      "wavelength_nm": 1067.387,
+      "order": 1,
+      "source_wavelength_nm": 1067.387,
+      "file": "g300-center1175.json",
+      "error_nm": -0.008699133888512733
+    },
+    {
+      "center_nm": 1175.0,
+      "pixel": 470.13542642924085,
+      "wavelength_nm": 1047.0054,
+      "order": 1,
+      "source_wavelength_nm": 1047.0054,
+      "file": "g300-center1175.json",
+      "error_nm": -0.009588111795892473
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 55.29561316051844,
+      "wavelength_nm": 1504.65,
+      "order": 1,
+      "source_wavelength_nm": 1504.65,
+      "file": "g300-center1425.json",
+      "error_nm": -0.16574501013406007
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 249.23754494093478,
+      "wavelength_nm": 1409.364,
+      "order": 1,
+      "source_wavelength_nm": 1409.364,
+      "file": "g300-center1425.json",
+      "error_nm": 0.0012429234823230217
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 325.18328373015873,
+      "wavelength_nm": 1371.8577,
+      "order": 1,
+      "source_wavelength_nm": 1371.8577,
+      "file": "g300-center1425.json",
+      "error_nm": -0.07322278824494788
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 332.9021592442645,
+      "wavelength_nm": 1367.855,
+      "order": 1,
+      "source_wavelength_nm": 1367.855,
+      "file": "g300-center1425.json",
+      "error_nm": 0.10070734284136051
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 368.30984274898077,
+      "wavelength_nm": 1350.4191,
+      "order": 1,
+      "source_wavelength_nm": 1350.4191,
+      "file": "g300-center1425.json",
+      "error_nm": -0.04693310256288896
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 395.8621236133122,
+      "wavelength_nm": 1336.7111,
+      "order": 1,
+      "source_wavelength_nm": 1336.7111,
+      "file": "g300-center1425.json",
+      "error_nm": -0.0437048595606484
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 406.5991253644315,
+      "wavelength_nm": 1331.321,
+      "order": 1,
+      "source_wavelength_nm": 1331.321,
+      "file": "g300-center1425.json",
+      "error_nm": 0.0006587922669041291
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 414.8002028397566,
+      "wavelength_nm": 1327.264,
+      "order": 1,
+      "source_wavelength_nm": 1327.264,
+      "file": "g300-center1425.json",
+      "error_nm": -0.02734553729783329
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 426.44954248366014,
+      "wavelength_nm": 1321.399,
+      "order": 1,
+      "source_wavelength_nm": 1321.399,
+      "file": "g300-center1425.json",
+      "error_nm": 0.03234345549617501
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 467.8474295190713,
+      "wavelength_nm": 1300.8264,
+      "order": 1,
+      "source_wavelength_nm": 1300.8264,
+      "file": "g300-center1425.json",
+      "error_nm": -0.049919007333301124
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 478.2010506208214,
+      "wavelength_nm": 1295.6659,
+      "order": 1,
+      "source_wavelength_nm": 1295.6659,
+      "file": "g300-center1425.json",
+      "error_nm": -0.06098313743837025
+    },
+    {
+      "center_nm": 1425.0,
+      "pixel": 509.05945945945945,
+      "wavelength_nm": 1280.2739,
+      "order": 1,
+      "source_wavelength_nm": 1280.2739,
+      "file": "g300-center1425.json",
+      "error_nm": -0.09548682133276998
+    },
+    {
+      "center_nm": 1675.0,
+      "pixel": 49.38721804511278,
+      "wavelength_nm": 1755.74644,
+      "order": 2,
+      "source_wavelength_nm": 877.87322,
+      "file": "g300-center1675.json",
+      "error_nm": 0.009804480774164404
+    },
+    {
+      "center_nm": 1675.0,
+      "pixel": 168.09649122807016,
+      "wavelength_nm": 1699.0718,
+      "order": 2,
+      "source_wavelength_nm": 849.5359,
+      "file": "g300-center1675.json",
+      "error_nm": -0.03291913816951819
+    },
+    {
+      "center_nm": 1675.0,
+      "pixel": 217.1694214876033,
+      "wavelength_nm": 1675.5214,
+      "order": 2,
+      "source_wavelength_nm": 837.7607,
+      "file": "g300-center1675.json",
+      "error_nm": -0.08845748303042456
+    },
+    {
+      "center_nm": 1675.0,
+      "pixel": 375.11516853932585,
+      "wavelength_nm": 1598.949,
+      "order": 1,
+      "source_wavelength_nm": 1598.949,
+      "file": "g300-center1675.json",
+      "error_nm": -0.05179803667897431
+    },
+    {
+      "center_nm": 1675.0,
+      "pixel": 410.0325443786982,
+      "wavelength_nm": 1581.2181,
+      "order": 1,
+      "source_wavelength_nm": 1581.2181,
+      "file": "g300-center1675.json",
+      "error_nm": 0.6561125224002353
+    },
+    {
+      "center_nm": 1675.0,
+      "pixel": 509.90161725067384,
+      "wavelength_nm": 1532.934,
+      "order": 1,
+      "source_wavelength_nm": 1532.934,
+      "file": "g300-center1675.json",
+      "error_nm": 0.0745646250052232
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 136.455706585423,
+      "wavelength_nm": 965.7786,
+      "order": 1,
+      "source_wavelength_nm": 965.7786,
+      "file": "g300-center925.json",
+      "error_nm": 0.11597126198125807
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 160.44228634850165,
+      "wavelength_nm": 953.4164,
+      "order": 1,
+      "source_wavelength_nm": 953.4164,
+      "file": "g300-center925.json",
+      "error_nm": 0.24984938712771054
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 207.55490196078432,
+      "wavelength_nm": 929.1531,
+      "order": 1,
+      "source_wavelength_nm": 929.1531,
+      "file": "g300-center925.json",
+      "error_nm": 0.44943729401541077
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 225.95263157894738,
+      "wavelength_nm": 920.17588,
+      "order": 1,
+      "source_wavelength_nm": 920.17588,
+      "file": "g300-center925.json",
+      "error_nm": 0.013984050538738302
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 241.39397232071371,
+      "wavelength_nm": 912.2967,
+      "order": 1,
+      "source_wavelength_nm": 912.2967,
+      "file": "g300-center925.json",
+      "error_nm": -0.013431973957835908
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 293.71410579345087,
+      "wavelength_nm": 885.3867,
+      "order": 1,
+      "source_wavelength_nm": 885.3867,
+      "file": "g300-center925.json",
+      "error_nm": 0.06488515152216223
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 308.3882681564246,
+      "wavelength_nm": 877.87322,
+      "order": 1,
+      "source_wavelength_nm": 877.87322,
+      "file": "g300-center925.json",
+      "error_nm": 0.04197811258779893
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 336.12628865979383,
+      "wavelength_nm": 863.46472,
+      "order": 1,
+      "source_wavelength_nm": 863.46472,
+      "file": "g300-center925.json",
+      "error_nm": 0.19247527123275177
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 363.6397260273973,
+      "wavelength_nm": 849.5359,
+      "order": 1,
+      "source_wavelength_nm": 849.5359,
+      "file": "g300-center925.json",
+      "error_nm": -0.03629873762793068
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 380.30010982976387,
+      "wavelength_nm": 840.821,
+      "order": 1,
+      "source_wavelength_nm": 840.821,
+      "file": "g300-center925.json",
+      "error_nm": 0.09878563570532606
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 386.3443194600675,
+      "wavelength_nm": 837.7607,
+      "order": 1,
+      "source_wavelength_nm": 837.7607,
+      "file": "g300-center925.json",
+      "error_nm": 0.04518913709023309
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 408.00516986706054,
+      "wavelength_nm": 826.6077,
+      "order": 1,
+      "source_wavelength_nm": 826.6077,
+      "file": "g300-center925.json",
+      "error_nm": 0.03362470922161265
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 439.00155569383946,
+      "wavelength_nm": 810.3693,
+      "order": 1,
+      "source_wavelength_nm": 810.3693,
+      "file": "g300-center925.json",
+      "error_nm": 0.28231030871006624
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 458.1991150442478,
+      "wavelength_nm": 800.6157,
+      "order": 1,
+      "source_wavelength_nm": 800.6157,
+      "file": "g300-center925.json",
+      "error_nm": 0.12533389956331575
+    },
+    {
+      "center_nm": 925.0,
+      "pixel": 470.14978902953584,
+      "wavelength_nm": 794.8176,
+      "order": 1,
+      "source_wavelength_nm": 794.8176,
+      "file": "g300-center925.json",
+      "error_nm": -0.24867412815399348
+    }
+  ],
+  "center_range": [
+    900.0,
+    1700.0
+  ],
+  "pixel_range": [
+    1,
+    512
+  ],
+  "measured_training_center_range": [
+    900.0,
+    1700.0
+  ],
+  "checked_centers_nm": [
+    925.0,
+    1175.0,
+    1425.0,
+    1675.0
+  ],
+  "rms_nm": 0.171648125943555,
+  "max_check_error_nm": 0.6561125224002353,
+  "check_residual_nm": [
+    -0.48855425113401907,
+    0.03841066284326189,
+    0.19424613383330325,
+    0.029247636377931485,
+    0.012954455431327005,
+    0.12168841699394761,
+    -0.017778888421844385,
+    -0.00694924722279211,
+    0.2738786492445797,
+    0.07439810317987394,
+    0.06684881048090574,
+    0.028182994498820335,
+    -0.008699133888512733,
+    -0.009588111795892473,
+    -0.16574501013406007,
+    0.0012429234823230217,
+    -0.07322278824494788,
+    0.10070734284136051,
+    -0.04693310256288896,
+    -0.0437048595606484,
+    0.0006587922669041291,
+    -0.02734553729783329,
+    0.03234345549617501,
+    -0.049919007333301124,
+    -0.06098313743837025,
+    -0.09548682133276998,
+    0.009804480774164404,
+    -0.03291913816951819,
+    -0.08845748303042456,
+    -0.05179803667897431,
+    0.6561125224002353,
+    0.0745646250052232,
+    0.11597126198125807,
+    0.24984938712771054,
+    0.44943729401541077,
+    0.013984050538738302,
+    -0.013431973957835908,
+    0.06488515152216223,
+    0.04197811258779893,
+    0.19247527123275177,
+    -0.03629873762793068,
+    0.09878563570532606,
+    0.04518913709023309,
+    0.03362470922161265,
+    0.28231030871006624,
+    0.12533389956331575,
+    -0.24867412815399348
+  ],
+  "fit_rms_nm": 0.15624977162399223,
+  "tolerance_nm": 0.2,
+  "source": "WinSpec InGaAs SideExit; application-only physical model; first-order equivalent wavelength axis; mixed-order reference evidence",
+  "accuracy_scope": "RMS describes check peaks only; other centers/pixels use physical-model prediction",
+  "provenance": {
+    "assignment": "Mixed first/second-order Ne/Ar reference assignment, model-assisted; 0.75 nm check identification window; all 47 detected check peaks included",
+    "reference_file": "LightField-SourceSpectra.xml",
+    "reference_sha256": "879cf2bdc8e474739a1afa873c08fe78ba6340b58d55b86140653745ba68c5e8",
+    "check_files": [
+      {
+        "file": "g300-center1175.json",
+        "sha256": "0e67c57331e50b968e0179486fd04bb47d6ec45a1ed9d72716f9ed97efe967a9"
+      },
+      {
+        "file": "g300-center1425.json",
+        "sha256": "4858354309202bad90674dd129800d8718c9ce9afbc355e0be57c939f0bead22"
+      },
+      {
+        "file": "g300-center1675.json",
+        "sha256": "181cbc516c974e86c301f1f0816d9020dbb7ab11bb81ba68dc33e62d0b76cc4d"
+      },
+      {
+        "file": "g300-center925.json",
+        "sha256": "7ec7fa2c11c46f53df823b4dcbcb4c786ae9bcf8574e652fc77e52d8ef5cb0ad"
+      }
+    ]
+  }
+}

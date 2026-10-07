@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import Qt, QThread, QObject, Signal, Slot, QTimer
-from PySide6.QtGui import QAction, QColor, QKeySequence
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPalette
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QSplitter,
     QGroupBox, QLabel, QPushButton, QLineEdit,
@@ -92,6 +92,7 @@ def resolve_mcd_gate_condition(condition, ratio):
     return _resolve_mcd_condition_line(condition, ratio)
 from ui.preview_widget import RunPlanTree
 from ui.dual_gate_spectrum_viewer import DualGateSpectrumViewer
+from ui.setup_sequence_editor import SetupSequenceDialog
 from utils.dual_gate_preview import load_last_dual_gate_acquisition
 
 # ── Schema constants ───────────────────────────────────────────────────────────
@@ -104,7 +105,53 @@ LOOP_PARAMS = [
     "Rotation1 Angle (deg)",
     "Rotation2 Angle (deg)",
     "Stage Position",
+    "Measurement setup",
 ]
+_SETUP_PARAM = "Measurement setup"
+_SETUP_LABELS = {"lightfield": "PIXIS", "winspec_ingaas": "WinSpec"}
+_SPECTROMETER_PARAMS = ("Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)")
+_RECIPE_PARAMS = (_SETUP_PARAM, *_SPECTROMETER_PARAMS)
+
+
+def _setup_backend(value: Any) -> str:
+    aliases = {"pixis": "lightfield", "lightfield": "lightfield",
+               "lightfield + pixis": "lightfield", "winspec": "winspec_ingaas",
+               "winspec_ingaas": "winspec_ingaas", "lightfield + winspec": "winspec_ingaas"}
+    backend = aliases.get(str(value).strip().lower())
+    if backend is None:
+        raise ValueError(f"Unknown measurement setup '{value}'. Use PIXIS or WinSpec.")
+    return backend
+
+
+def _validate_setup_group(active: pd.DataFrame) -> None:
+    """Validate optical values; ordinary loop groups determine pairing/products."""
+    if active.empty:
+        return
+    setup_rows = active[active["Parameter"] == _SETUP_PARAM]
+    if setup_rows.empty:
+        return
+    if len(setup_rows) != 1:
+        raise ValueError("Use one Measurement setup row with comma-separated setups.")
+    optics = active[active["Parameter"].isin(_RECIPE_PARAMS)]
+    if optics["Parameter"].duplicated().any():
+        raise ValueError("Each optical parameter must appear once in the setup recipe.")
+    for _, row in optics.iterrows():
+        values = _parse_values(str(row["Values"]), str(row["Parameter"]))
+        if not values:
+            raise ValueError(f"Enter values for {row['Parameter']} in the setup recipe.")
+        if row["Parameter"] != _SETUP_PARAM:
+            if any(not np.isfinite(v) or v <= 0 for v in values):
+                raise ValueError(f"{row['Parameter']} requires finite positive values.")
+            if row["Parameter"] == "Accumulations (EPF)" and any(not float(v).is_integer() for v in values):
+                raise ValueError("Accumulations (EPF) requires positive integers.")
+
+
+def _setup_readiness_issues(controller, schedule) -> List[str]:
+    requested = {_setup_backend(task['ctx'][_SETUP_PARAM]) for task in schedule if _SETUP_PARAM in task['ctx']}
+    missing = requested - set(getattr(controller, 'connected_backends', ()))
+    return (["Connect all requested setups before running: " + ", ".join(_SETUP_LABELS[b] for b in sorted(missing))]
+            if missing else [])
+
 _LOOP_PARAM_DISPLAY = {
     "Rotation1 Angle (deg)": "RotIn Angle (deg)",
     "Rotation2 Angle (deg)": "RotOut Angle (deg)",
@@ -229,10 +276,12 @@ def _experiment_output_files(root: Path) -> List[Path]:
     return files
 
 
-def _parse_values(s: str, param: str = "") -> Optional[List[float]]:
+def _parse_values(s: str, param: str = "") -> Optional[List[Any]]:
     if not s or not str(s).strip():
         return None
     raw = str(s).strip()
+    if param == _SETUP_PARAM:
+        return [_setup_backend(value) for value in raw.replace(';', ',').split(',')]
     raw_lower = raw.lower()
     paren_linspace = raw.startswith("(") and raw.endswith(")")
     linspace_mode = paren_linspace
@@ -315,6 +364,7 @@ def _build_plan(
     mode: str = "Synchronize",
     *,
     acquisition_grouping: str = "loop_first",
+    parameter_order: Optional[Sequence[str]] = None,
 ):
     """
     Return (final_sequence, enabled_df_batch, total_acq).
@@ -328,12 +378,19 @@ def _build_plan(
     loop = _normalize_loop(loop_df)
     active = loop[loop["Enable"]].reset_index(drop=True).copy()
 
+    if mode == "Synchronize" and parameter_order:
+        priority = {parameter: index for index, parameter in enumerate(parameter_order)}
+        positions = sorted(range(len(active)), key=lambda i: priority.get(str(active.iloc[i]['Parameter']), len(priority)))
+        active = active.iloc[positions].reset_index(drop=True)
+
     if mode == "Zip":
         active["Level"] = 1
     elif mode == "Synchronize":
         active["Level"] = range(1, len(active) + 1)
     else:  # Customized
         active["Level"] = active["Group"].fillna(1).astype(int)
+
+    _validate_setup_group(active)
 
     levels: Dict[int, List[dict]] = {}
     for _, row in active.iterrows():
@@ -439,6 +496,8 @@ def _loop_group_combinations(
         active["Level"] = range(1, len(active) + 1)
     else:
         active["Level"] = active["Group"].fillna(1).astype(int)
+
+    _validate_setup_group(active)
 
     grouped: List[Dict[str, Any]] = []
     for level in sorted({int(v) for v in active["Level"].tolist()}):
@@ -1307,6 +1366,10 @@ def _build_run_filename_base(
     )
     tokens = build_filename_tokens(fname_ctx, parts)
     base = build_base_filename(fname_ctx, parts)
+    if _SETUP_PARAM in ctx:
+        setup_label = _SETUP_LABELS[_setup_backend(ctx[_SETUP_PARAM])]
+        base += f"_{setup_label}"
+        tokens.append(("setup", setup_label))
     return base, fname_ctx, tokens
 
 
@@ -2420,6 +2483,7 @@ class _RunWorker(QObject):
         stop_event: threading.Event,
         preview_event: Optional[threading.Event] = None,
         acquisition_schedule: Optional[Sequence[Dict[str, Any]]] = None,
+        metadata_run=None,
     ) -> None:
         super().__init__()
         self._seq      = final_sequence
@@ -2445,6 +2509,9 @@ class _RunWorker(QObject):
             _build_acquisition_schedule(self._seq, self._batch)
         )
         self._active_run_context: Dict[str, Any] = {}
+        self._metadata_run = metadata_run
+        self._setup_sequence = any(_SETUP_PARAM in task['ctx'] for task in self._schedule)
+        self._active_recipe = None
         self._required_smu_roles = _required_smu_roles(
             self._seq, self._batch, self._schedule
         )
@@ -2478,6 +2545,48 @@ class _RunWorker(QObject):
         if issues:
             raise _RunFlowError("SMU safety", issues[0])
         return self._smu.device
+
+    def _recipe(self, ctx):
+        return (_setup_backend(ctx[_SETUP_PARAM]),
+                float(ctx.get(_SPECTROMETER_PARAMS[0], self._spectrometer_defaults[_SPECTROMETER_PARAMS[0]])),
+                float(ctx.get(_SPECTROMETER_PARAMS[1], self._spectrometer_defaults[_SPECTROMETER_PARAMS[1]])),
+                int(ctx.get(_SPECTROMETER_PARAMS[2], self._spectrometer_defaults[_SPECTROMETER_PARAMS[2]])))
+
+    def _prepare_setup(self, recipe) -> None:
+        if self._stop.is_set():
+            raise _StopRequested()
+        prepare = getattr(self._lf6, 'prepare_scan_condition', None)
+        if not callable(prepare):
+            raise _RunFlowError('acquisition', 'Multi-setup scan preparation is unavailable.')
+        try:
+            prepare(*recipe, 'device', self._stop)
+            if self._metadata_run is not None:
+                bind_lightfield_metadata(self._lf6, self._metadata_run)
+        except Exception as exc:
+            if self._stop.is_set():
+                raise _StopRequested() from exc
+            raise _RunFlowError('acquisition', str(exc)) from exc
+
+    def _zero_before_setup_switch(self) -> None:
+        """A failed return to zero must block all later detector/gate commands."""
+        self.log.emit('Returning gates to zero before switching measurement setup...')
+        device = self._require_smu_ready()
+        settings = dict(ramp_step=max(float(cfg.ramp.step_V) * .5, 1e-6),
+                        delay_s=float(cfg.ramp.delay_s) * 2.)
+        try:
+            if hasattr(device, 'ramp_all_to_zero_report'):
+                report = device.ramp_all_to_zero_report(**settings)
+                errors = [f"{role}: {result.get('error', result.get('status'))}"
+                          for role, result in report.items() if result.get('status') != 'reached_zero']
+                errors.extend(f'{role}: no zero-return report' for role in self._required_smu_roles if role not in report)
+            else:
+                errors = device.ramp_all_to_zero(**settings)
+            if errors:
+                raise RuntimeError('; '.join(str(error) for error in errors))
+        except Exception as exc:
+            raise _RunFlowError('hardware', f'Return-to-zero failed before setup switch: {exc}') from exc
+        if self._stop.is_set():
+            raise _StopRequested()
 
     def _require_optical_ready(self) -> None:
         issues = _optical_readiness_issues(
@@ -2540,6 +2649,24 @@ class _RunWorker(QObject):
         try:
             self._require_smu_ready()
             self._require_optical_ready()
+            if self._setup_sequence:
+                issues = _setup_readiness_issues(self._lf6, self._schedule)
+                if issues:
+                    raise _RunFlowError('acquisition', issues[0])
+                # Configure every distinct complete recipe before any gate write.
+                recipes = dict.fromkeys(self._recipe(task['ctx']) for task in self._schedule)
+                for recipe in recipes:
+                    self._prepare_setup(recipe)
+                self._active_recipe = None
+            validate_centers = getattr(self._lf6, 'validate_scan_centers', None)
+            if not self._setup_sequence and callable(validate_centers):
+                try:
+                    validate_centers([
+                        task['ctx'].get('Center Wavelength (nm)', self._spectrometer_defaults['Center Wavelength (nm)'])
+                        for task in self._schedule
+                    ])
+                except Exception as exc:
+                    raise _RunFlowError('acquisition', str(exc)) from exc
             self.log.emit(
                 f"Resolved run plan: {len(self._schedule)} ordered step(s), "
                 f"{len(self._seq)} loop context(s), "
@@ -2547,7 +2674,8 @@ class _RunWorker(QObject):
             )
             self.log.emit(
                 f"Direct-jump mode active. Safe jump limit={float(cfg.ramp.safe_jump_V):g} V. "
-                f"Ramp-to-zero runs after measurement only and at 2x slower speed."
+                + ("Ramp-to-zero runs after measurement and before outer setup switches, at 2x slower speed."
+                   if self._setup_sequence else "Ramp-to-zero runs after measurement only and at 2x slower speed.")
             )
             initial_settle_s = max(
                 0.0,
@@ -2593,10 +2721,20 @@ class _RunWorker(QObject):
                     if (level_i < point_level) != bool(before_point):
                         continue
                     values = dict(values_by_group.get(str(item.get("id")), {}))
+                    if self._setup_sequence and _SETUP_PARAM in values:
+                        recipe = self._recipe(ctx)
+                        if recipe != self._active_recipe:
+                            if (before_point and self._active_recipe is not None
+                                    and recipe[0] != self._active_recipe[0]):
+                                self._zero_before_setup_switch()
+                            self._prepare_setup(recipe)
+                            self._active_recipe = recipe
                     for param, value in values.items():
                         if self._stop.is_set():
                             raise _StopRequested()
                         if param in ("Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)"):
+                            if self._setup_sequence:
+                                continue
                             # A group owns only the parameters it contains.  Do
                             # not configure a later spectrometer parameter while
                             # applying an earlier group (CW/Exposure order is
@@ -2643,7 +2781,7 @@ class _RunWorker(QObject):
                 val_rot2  = ctx.get("Rotation2 Angle (deg)")
                 val_stage = ctx.get("Stage Position")
                 ctx_bits = []
-                for key in ("Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)", "Rotation1 Angle (deg)", "Rotation2 Angle (deg)", "Stage Position"):
+                for key in (_SETUP_PARAM, "Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)", "Rotation1 Angle (deg)", "Rotation2 Angle (deg)", "Stage Position"):
                     if key in ctx and ctx.get(key) is not None:
                         ctx_bits.append(f"{key}={ctx.get(key)}")
                 self.log.emit(
@@ -2653,7 +2791,7 @@ class _RunWorker(QObject):
 
                 if task.get("nested"):
                     apply_nested_groups(task, ctx, before_point=True)
-                    if self._lf6 and self._lf6.is_connected and not any(
+                    if not self._setup_sequence and self._lf6 and self._lf6.is_connected and not any(
                         param in ("Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)")
                         for values in task.get("group_values", {}).values()
                         for param in values
@@ -2672,7 +2810,14 @@ class _RunWorker(QObject):
                         })
                     previous_ctx = dict(ctx)
                 elif previous_ctx != ctx:
-                    if self._lf6 and self._lf6.is_connected and (
+                    if self._setup_sequence:
+                        recipe = self._recipe(ctx)
+                        if recipe != self._active_recipe:
+                            if self._active_recipe is not None and recipe[0] != self._active_recipe[0]:
+                                self._zero_before_setup_switch()
+                            self._prepare_setup(recipe)
+                            self._active_recipe = recipe
+                    elif self._lf6 and self._lf6.is_connected and (
                         previous_ctx is None
                         or any(previous_ctx.get(key) != ctx.get(key) for key in (
                             "Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)"
@@ -2792,7 +2937,8 @@ class _RunWorker(QObject):
                         + f"frames={n_points}, points={point_count}, "
                         + f"step(Vbg)={float(vbg_step):g} V, step(Vtg)={float(vtg_step):g} V, "
                         + (f"step(Vbias)={float(vbias_step):g} V, " if vbias_step is not None else "")
-                        + "mode=direct-jump, zero-ramp=post-run only, "
+                        + ("mode=direct-jump, zero-ramp=post-run and outer setup switches, "
+                           if self._setup_sequence else "mode=direct-jump, zero-ramp=post-run only, ")
                         + f"repeat={n_rep}"
                     )
 
@@ -2999,7 +3145,10 @@ class _RunWorker(QObject):
                                 wl = np.array([]); cts = np.array([])
                                 if self._lf6 and self._lf6.is_connected:
                                     try:
-                                        set_lightfield_context(self._lf6, output_file=csv_path, point_index=original_point_number, Vbg_set=float(vbg_set), Vtg_set=float(vtg_set))
+                                        set_lightfield_context(self._lf6, output_file=csv_path, point_index=original_point_number,
+                                            Vbg_set=float(vbg_set), Vtg_set=float(vtg_set),
+                                            measurement_setup=getattr(self._lf6, 'backend', None),
+                                            center_nm=center, exposure_ms=exp_ms, accumulations=accum)
                                         wl, cts = self._lf6.adapter.acquire()
                                     except Exception as e:
                                         raise _RunFlowError("acquisition", f"Acquire error: {e}") from e
@@ -3080,6 +3229,10 @@ class _RunWorker(QObject):
                                     writer.write_row(row_data, acquired.tolist())
                                 preview_payload = {
                                     "csv_path": str(csv_path),
+                                    "measurement_setup": getattr(self._lf6, 'backend', None),
+                                    "center_nm": center,
+                                    "exposure_ms": exp_ms,
+                                    "accumulations": accum,
                                     "mode": "full_sensor" if is_full_sensor else "spectrum",
                                     "point_index": original_point_number - 1,
                                     "point_number": original_point_number,
@@ -3419,6 +3572,10 @@ class PresetsPanel(QWidget):
         # resolved point-level schedule is used by preview and worker alike.
         self._execution_order: Optional[List[Dict[str, Any]]] = None
         self._nested_schedule_enabled = False
+        # Table layout may change without converting a legacy sweep to the
+        # point scheduler (which has different batch repetition nesting).
+        self._legacy_loop_order: List[str] = []
+        self._applied_legacy_loop_order: List[str] = []
         self._tables_dirty = False
         self._last_power_uw: Optional[float] = None
         self._batch_row_clipboard: List[Dict[str, Any]] = []
@@ -3676,8 +3833,18 @@ class PresetsPanel(QWidget):
         self._loop_add_btn.setToolTip("Append a new empty row to the loop table.")
         self._loop_del_btn = QPushButton("− Row"); self._loop_del_btn.setFixedWidth(64)
         self._loop_del_btn.setToolTip("Delete the selected row(s) from the loop table.")
+        self._loop_up_btn = QPushButton("↑ Up")
+        self._loop_down_btn = QPushButton("↓ Down")
+        self._loop_top_btn = QPushButton("Top")
+        self._loop_bottom_btn = QPushButton("Bottom")
         loop_btn_row.addWidget(self._loop_add_btn)
         loop_btn_row.addWidget(self._loop_del_btn)
+        for button, label in ((self._loop_up_btn, 'up'), (self._loop_down_btn, 'down'),
+                              (self._loop_top_btn, 'to the top'), (self._loop_bottom_btn, 'to the bottom')):
+            button.setAccessibleName(f"Move selected loop row {label}")
+            button.setToolTip(f"Move the selected row {label}. Keep values, groups and the current execution order.")
+            button.setEnabled(False)
+            loop_btn_row.addWidget(button)
         for button in (self._loop_add_btn, self._loop_del_btn):
             button.setStyleSheet(
                 "QPushButton { color: #5B21B6; background: #F5F3FF;"
@@ -3687,6 +3854,31 @@ class PresetsPanel(QWidget):
         loop_btn_row.addStretch()
         loop_lay.addWidget(self._loop_table)
         loop_lay.addLayout(loop_btn_row)
+        self._dual_setup_btn = QPushButton("Load PIXIS + WinSpec recipe")
+        self._dual_setup_btn.setToolTip(
+            "Replace optical loop rows with an editable paired recipe. "
+            "Center, exposure and EPF can all be changed. Gate rows and motion values are kept."
+        )
+        self._dual_setup_btn.clicked.connect(self._load_dual_setup_recipe)
+        loop_lay.addWidget(self._dual_setup_btn)
+        setup_help = QLabel(
+            "Click setup Values to select detectors. Same Group: pair values by position (equal counts). "
+            "Different Groups: measure all combinations. Use Execution order to change loop nesting."
+        )
+        setup_help.setWordWrap(True)
+        loop_lay.addWidget(setup_help)
+        self._detector_warning_lbl = QLabel()
+        self._detector_warning_lbl.setObjectName("DualGateDetectorWavelengthReminder")
+        self._detector_warning_lbl.setAccessibleName("Detector wavelength reminder")
+        self._detector_warning_lbl.setWordWrap(True)
+        self._detector_warning_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        self._detector_warning_lbl.setBackgroundRole(QPalette.ColorRole.Base)
+        self._detector_warning_lbl.setForegroundRole(QPalette.ColorRole.Text)
+        self._detector_warning_lbl.setAutoFillBackground(True)
+        self._detector_warning_lbl.setMargin(4)
+        self._detector_warning_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._detector_warning_lbl.hide()
+        loop_lay.addWidget(self._detector_warning_lbl)
         lay_left.addWidget(loop_grp)
 
         # Batch table group
@@ -3910,7 +4102,9 @@ class PresetsPanel(QWidget):
 
         self._summary_lbl = QLabel("Apply tables to update the Dual Gate plan.")
         self._summary_lbl.setWordWrap(True)
-        lay_right.addWidget(self._summary_lbl)
+        self._summary_lbl.setAccessibleName("Applied plan summary")
+        self._summary_lbl.hide()
+        self._applied_plan_details = ""
 
         # Explicit nested execution order.  The rows are derived from the
         # loop table and therefore never duplicate parameter values or gate
@@ -4131,6 +4325,7 @@ class PresetsPanel(QWidget):
         sequence_lay.setContentsMargins(0, 0, 0, 0)
         sequence_lay.setSpacing(4)
         sequence_lay.addLayout(sequence_header)
+        sequence_lay.addWidget(self._summary_lbl)
         self._tree = RunPlanTree()
         self._full_sequence_btn.clicked.connect(self._tree.show_full_sequence)
         self._tree.setMinimumHeight(140)
@@ -4282,6 +4477,10 @@ class PresetsPanel(QWidget):
         self._discard_btn.clicked.connect(self._on_discard)
         self._loop_add_btn.clicked.connect(self._add_loop_row)
         self._loop_del_btn.clicked.connect(self._del_loop_row)
+        self._loop_up_btn.clicked.connect(lambda: self._move_loop_row(-1))
+        self._loop_down_btn.clicked.connect(lambda: self._move_loop_row(1))
+        self._loop_top_btn.clicked.connect(lambda: self._move_loop_row(-self._loop_table.rowCount()))
+        self._loop_bottom_btn.clicked.connect(lambda: self._move_loop_row(self._loop_table.rowCount()))
         self._batch_add_btn.clicked.connect(self._add_batch_row)
         self._batch_duplicate_btn.clicked.connect(self._duplicate_batch_row)
         self._batch_rev_btn.clicked.connect(self._create_rev_batch_row)
@@ -4300,6 +4499,7 @@ class PresetsPanel(QWidget):
         self._batch_table.itemSelectionChanged.connect(self._update_filename_preview)
         self._batch_table.itemSelectionChanged.connect(self._update_batch_row_buttons)
         self._loop_table.itemSelectionChanged.connect(self._update_filename_preview)
+        self._loop_table.itemSelectionChanged.connect(self._update_loop_row_buttons)
         self._mode_combo.currentTextChanged.connect(lambda _mode: self._update_filename_preview())
         self._mode_combo_name.currentTextChanged.connect(self._update_filename_preview)
         self._safe_jump_spin.valueChanged.connect(self._on_safety_changed)
@@ -4341,10 +4541,18 @@ class PresetsPanel(QWidget):
         if self._lf6 is not None:
             self._lf6.connected.connect(self._refresh_readiness)
             self._lf6.disconnected.connect(self._refresh_readiness)
+            if hasattr(self._lf6, 'settings_applied'):
+                self._lf6.settings_applied.connect(self._refresh_detector_wavelength_advice)
         if self._pm is not None:
             self._pm.connected.connect(self._refresh_readiness)
             self._pm.disconnected.connect(self._refresh_readiness)
             self._pm.power_ready.connect(self._cache_preview_power)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Other pages edit the shared defaults even without applying hardware
+        # settings. Recheck those defaults whenever this page becomes visible.
+        self._refresh_detector_wavelength_advice()
 
     @staticmethod
     def _session_records(df: pd.DataFrame) -> List[dict]:
@@ -4374,6 +4582,8 @@ class PresetsPanel(QWidget):
             "applied_execution_order": [dict(item) for item in (self._applied_execution_order or [])],
             "execution_order": [dict(item) for item in (self._execution_order or [])],
             "nested_schedule_enabled": bool(self._nested_schedule_enabled),
+            "legacy_loop_order": list(self._legacy_loop_order),
+            "applied_legacy_loop_order": list(self._applied_legacy_loop_order),
             "draft_loop": _read_loop_table_raw(self._loop_table),
             "draft_batch": self._session_records(_read_batch_table(self._batch_table)),
             "applied_loop": self._session_records(self._loop_src),
@@ -4486,6 +4696,8 @@ class PresetsPanel(QWidget):
             self._execution_order = None
             self._nested_schedule_enabled = False
         applied_order = state.get("applied_execution_order", saved_order)
+        self._legacy_loop_order = [str(value) for value in state.get('legacy_loop_order', [])]
+        self._applied_legacy_loop_order = [str(value) for value in state.get('applied_legacy_loop_order', [])]
         self._applied_execution_order = (
             [dict(item) for item in applied_order if isinstance(item, dict)]
             if isinstance(applied_order, list) and applied_order else None
@@ -4660,6 +4872,11 @@ class PresetsPanel(QWidget):
         try:
             loop_df = _normalize_loop(_read_loop_table(self._loop_table))
             default = _default_execution_order(loop_df, self._mode_combo.currentText())
+            if not self._nested_schedule_enabled and self._mode_combo.currentText() == 'Synchronize' and self._legacy_loop_order:
+                priority = {parameter: index for index, parameter in enumerate(self._legacy_loop_order)}
+                groups = [item for item in default if item['kind'] == 'group']
+                groups.sort(key=lambda item: priority.get(item['parameters'][0], len(priority)))
+                default = groups + [item for item in default if item['kind'] != 'group']
             if not self._execution_order and self._current_acquisition_grouping() == "batch_first":
                 default = [item for item in default if item["kind"] == "conditions"] + [item for item in default if item["kind"] != "conditions"]
             order = self._execution_order or default
@@ -5183,9 +5400,14 @@ class PresetsPanel(QWidget):
                         self._mark_draft_error(item, "")
                 if not row["Enable"]:
                     continue
-                values = _parse_values(str(row["Values"]), str(row["Parameter"]))
-                if not values or not all(np.isfinite(v) for v in values):
-                    message = f"Loop row {row_index + 1}: enter valid numeric values."
+                try:
+                    values = _parse_values(str(row["Values"]), str(row["Parameter"]))
+                    valid_values = bool(values) and (row['Parameter'] == _SETUP_PARAM or all(np.isfinite(v) for v in values))
+                    value_error = 'enter valid numeric values.'
+                except ValueError as exc:
+                    valid_values, value_error = False, str(exc)
+                if not valid_values:
+                    message = f"Loop row {row_index + 1}: {value_error}"
                     issues.append(message)
                     self._mark_draft_error(table.item(int(row_index), 2), message)
                 if self._mode_combo.currentText() == "Customized":
@@ -5225,6 +5447,8 @@ class PresetsPanel(QWidget):
 
     @Slot()
     def _on_draft_edited(self, *_args):
+        self._sync_setup_value_editors()
+        self._update_loop_row_buttons()
         self._refresh_execution_order_table()
         self._refresh_draft_state()
         self._update_filename_preview()
@@ -5253,6 +5477,7 @@ class PresetsPanel(QWidget):
         self._refresh_tables()
         self._execution_order = [dict(item) for item in (self._applied_execution_order or [])] or None
         self._nested_schedule_enabled = bool(self._applied_execution_order)
+        self._legacy_loop_order = list(self._applied_legacy_loop_order)
         self._refresh_execution_order_table()
         self._on_mode_changed(self._applied_mode)
         self._on_acquisition_order_changed()
@@ -5311,20 +5536,24 @@ class PresetsPanel(QWidget):
         if not hasattr(self, "_tree"):
             return
         if self._run_thread and self._run_thread.isRunning():
+            self._refresh_detector_wavelength_advice()
             return
         if not self._tables_dirty:
             self._draft_preview_key = None
             if (self._tree._last_plan or {}).get("preview_state") != "Applied sequence":
                 self._show_applied_sequence()
+            self._refresh_detector_wavelength_advice()
             return
         key = repr((
             _read_loop_table(self._loop_table).to_dict("records"),
             _read_batch_table(self._batch_table).to_dict("records"),
             self._mode_combo.currentText(), self._current_acquisition_grouping(),
             self._nested_schedule_enabled, self._execution_order,
+            self._legacy_loop_order,
             getattr(self, "_draft_issues", []),
         ))
         if key == getattr(self, "_draft_preview_key", None):
+            self._refresh_detector_wavelength_advice()
             return
         self._draft_preview_key = key
         unavailable = "Applied sequence · draft unavailable"
@@ -5349,6 +5578,7 @@ class PresetsPanel(QWidget):
                 batch_df,
                 mode=mode,
                 acquisition_grouping=grouping,
+                parameter_order=self._legacy_loop_order if not self._nested_schedule_enabled else None,
             )
             if self._nested_schedule_enabled:
                 schedule = _build_nested_execution_schedule(
@@ -5388,6 +5618,23 @@ class PresetsPanel(QWidget):
             self._tree.setToolTip(str(exc))
         else:
             self._tree.setToolTip("")
+        self._refresh_detector_wavelength_advice()
+
+    def _refresh_detector_wavelength_advice(self):
+        from ui.detector_wavelength_advice import sequence_wavelength_warning
+        preview = getattr(self._tree, '_last_plan', None) or {}
+        state = preview.get('preview_state', '')
+        if 'draft unavailable' in state or 'apply to preview large draft' in state:
+            message = 'Detector wavelength check pending: resolve the draft and Apply to check its measurement combinations.'
+        else:
+            message = sequence_wavelength_warning(
+                (task['ctx'] for task in preview.get('acquisition_schedule', [])),
+                getattr(self._lf6, 'identity', {}), cfg.lf6.center_nm)
+            if message:
+                message = 'Detector wavelength reminder\n' + message
+        self._detector_warning_lbl.setText(message)
+        self._detector_warning_lbl.setToolTip(message)
+        self._detector_warning_lbl.setVisible(bool(message))
 
     def _show_applied_sequence(self, preview_state="Applied sequence") -> None:
         self._tree.update_plan(
@@ -5439,6 +5686,7 @@ class PresetsPanel(QWidget):
             issues.append("At least one filename part is required.")
         if not self._lf6 or not self._lf6.is_connected:
             issues.append("LF6 is not connected or in mock mode.")
+        issues.extend(_setup_readiness_issues(self._lf6, self._acquisition_schedule))
         required_smu_roles = _required_smu_roles(
             self._final_seq, self._df_batch, self._acquisition_schedule
         )
@@ -5478,6 +5726,8 @@ class PresetsPanel(QWidget):
     def _refresh_readiness(self, *_args, when_errors=None, validation_issues=None):
         if not hasattr(self, "_readiness_lbl"):
             return
+        self._update_loop_row_buttons()
+        self._refresh_detector_wavelength_advice()
         running = bool(self._run_thread and self._run_thread.isRunning())
         if running:
             self._readiness_lbl.setText("Running the applied plan.")
@@ -5514,10 +5764,13 @@ class PresetsPanel(QWidget):
             if "Vbias" not in required_roles:
                 role_status = f"{role_status}; Vbias optional"
             self._readiness_lbl.setText(
-                f"Ready to run · {self._total_acq} file(s) · "
-                f"{self._total_points} sweep point(s) · Keithley {role_status}"
+                f"Ready to run · {self._total_points} sweep point(s) · "
+                f"{self._total_acq} file(s)"
             )
-            self._readiness_lbl.setToolTip("")
+            self._readiness_lbl.setToolTip(
+                f"{self._applied_plan_details}\n"
+                f"Keithley safety check passed: {role_status}."
+            )
             self._run_btn.setToolTip(
                 "Start the applied sweep plan.\n"
                 f"Keithley safety check passed: {role_status}."
@@ -5539,6 +5792,66 @@ class PresetsPanel(QWidget):
             if combo is not None and not combo.property("draft_connected"):
                 combo.currentTextChanged.connect(self._on_draft_edited)
                 combo.setProperty("draft_connected", True)
+        self._sync_setup_value_editors()
+
+    def _sync_setup_value_editors(self):
+        """Keep the saved Values item authoritative; only setup rows use a picker."""
+        table = self._loop_table
+        blocked = table.blockSignals(True)
+        try:
+            for row in range(table.rowCount()):
+                parameter = table.cellWidget(row, 1)
+                item = table.item(row, 2)
+                if parameter is None or item is None:
+                    continue
+                if parameter.currentData() != _SETUP_PARAM:
+                    # cellWidget() also returns Qt's transient line editor
+                    # during commit. Removing it here strands EditingState.
+                    if isinstance(table.cellWidget(row, 2), QPushButton):
+                        table.removeCellWidget(row, 2)
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                    continue
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                button = table.cellWidget(row, 2)
+                if button is None:
+                    button = QPushButton()
+                    button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                    button.setAccessibleName("Select measurement setups")
+                    button.clicked.connect(lambda _checked=False, target=item: self._edit_setup_values(target))
+                    table.setCellWidget(row, 2, button)
+                try:
+                    labels = [_SETUP_LABELS[value] for value in (_parse_values(item.text(), _SETUP_PARAM) or [])]
+                    summary = ', '.join(labels[:3])
+                    if len(labels) > 3:
+                        summary += f' (+{len(labels) - 3})'
+                    button.setText(f"{summary}  |  Edit..." if summary else "Select setups...")
+                    detail = ', '.join(labels) or 'No setups selected'
+                except ValueError as exc:
+                    button.setText("Fix setup selection...")
+                    detail = str(exc)
+                button.setToolTip(detail + "\nClick to select, add, remove or reorder setups.")
+                button.setAccessibleDescription(button.toolTip())
+                button.ensurePolished()
+                table.setRowHeight(row, max(table.rowHeight(row), button.sizeHint().height() + 1))
+        finally:
+            table.blockSignals(blocked)
+
+    def _edit_setup_values(self, item):
+        # Retain each unrecognized old value as an unselected position so
+        # opening/cancelling cannot silently substitute another detector.
+        values = []
+        for token in item.text().replace(';', ',').split(',') if item.text().strip() else []:
+            try:
+                values.append(_setup_backend(token))
+            except ValueError:
+                values.append(token.strip())
+        dialog = SetupSequenceDialog(values, _SETUP_LABELS, self)
+        if dialog.exec() == SetupSequenceDialog.DialogCode.Accepted:
+            item.setText(', '.join(_SETUP_LABELS[value] for value in dialog.selected_backends()))
+        dialog.deleteLater()
+        button = self._loop_table.cellWidget(item.row(), 2)
+        if button is not None:
+            button.setFocus()
 
     def _populate_filename_parts(self):
         enabled = set(self._manual_filename_parts)
@@ -5622,6 +5935,7 @@ class PresetsPanel(QWidget):
             batch_df,
             mode=self._mode_combo.currentText(),
             acquisition_grouping=self._current_acquisition_grouping(),
+            parameter_order=self._legacy_loop_order if not self._nested_schedule_enabled else None,
         )
         return loop_df, batch_df, seq, batch
 
@@ -5663,6 +5977,7 @@ class PresetsPanel(QWidget):
                 "acquisition_grouping": getattr(self, "_applied_acquisition_grouping", "loop_first"),
                 "execution_order": [dict(item) for item in (getattr(self, "_applied_execution_order", None) or [])],
                 "nested_schedule_enabled": bool(getattr(self, "_applied_execution_order", None)),
+                "legacy_loop_order": list(self._applied_legacy_loop_order),
             }
         return meta
 
@@ -5796,6 +6111,9 @@ class PresetsPanel(QWidget):
             return None, "Enable at least one filename part."
         if not self._lf6 or not self._lf6.is_connected:
             return None, "LF6 must be connected or running in mock mode before a sweep can start."
+        setup_issues = _setup_readiness_issues(self._lf6, self._acquisition_schedule)
+        if setup_issues:
+            return None, setup_issues[0]
         if self._df_batch.empty or not self._final_seq or not self._acquisition_schedule:
             return None, "No runnable plan is available."
         required_smu_roles = _required_smu_roles(
@@ -5842,6 +6160,54 @@ class PresetsPanel(QWidget):
         return run_meta, None
 
     @Slot()
+    def _load_dual_setup_recipe(self):
+        if self._run_thread and self._run_thread.isRunning():
+            return
+        current = _read_loop_table(self._loop_table)
+        previous_order = self._execution_order_entries()
+        # Preserve non-optical values and their old grouping, even when changing
+        # from Synchronize or Zip to Customized for the paired optical group.
+        mode = self._mode_combo.currentText()
+        remaining = current[~current['Parameter'].isin(_RECIPE_PARAMS)].copy()
+        row_groups = {}
+        for index in remaining.index:
+            key = index if mode == 'Synchronize' else 0 if mode == 'Zip' else int(remaining.at[index, 'Group'])
+            row_groups[index] = key
+        group_ids = {key: offset + 2 for offset, key in enumerate(sorted(set(row_groups.values())))}
+        for index, key in row_groups.items():
+            remaining.at[index, 'Group'] = group_ids[key]
+        recipe = pd.DataFrame([
+            dict(Enable=True, Parameter=parameter, Values=values, Group=1)
+            for parameter, values in zip(_RECIPE_PARAMS, ('PIXIS, WinSpec', '720, 1100',
+                f'{cfg.lf6.exposure_ms:g}, {cfg.lf6.exposure_ms:g}', f'{cfg.lf6.accumulations}, {cfg.lf6.accumulations}'))
+        ])
+        definition = pd.concat([recipe, remaining], ignore_index=True)
+        self._mode_combo.blockSignals(True)
+        self._mode_combo.setCurrentText('Customized')
+        self._mode_combo.blockSignals(False)
+        self._loop_table.blockSignals(True)
+        _populate_loop_table(self._loop_table, definition)
+        self._loop_table.blockSignals(False)
+        self._connect_loop_param_signals()
+        self._nested_schedule_enabled = True
+        default_order = _default_execution_order(definition, 'Customized')
+        # Only the new optical recipe becomes outermost. Existing motion groups
+        # retain their order and their position on either side of Gate points.
+        new_groups = {tuple(sorted(entry['parameters'])): entry
+                      for entry in default_order if entry['kind'] == 'group'}
+        restored_order = [default_order[0]]
+        for entry in previous_order:
+            if entry['kind'] != 'group':
+                restored_order.append(entry)
+                continue
+            motion_params = tuple(sorted(set(entry['parameters']) - set(_RECIPE_PARAMS)))
+            if motion_params in new_groups:
+                restored_order.append(new_groups[motion_params])
+        self._execution_order = (_normalize_execution_order(restored_order, definition, 'Customized')
+                                 if previous_order else default_order)
+        self._on_mode_changed('Customized')
+        self._on_draft_edited()
+
     def _add_loop_row(self):
         r = self._loop_table.rowCount()
         self._loop_table.insertRow(r)
@@ -5851,6 +6217,47 @@ class PresetsPanel(QWidget):
         self._loop_table.setItem(r, 3, QTableWidgetItem("1"))
         self._connect_loop_param_signals()
         self._on_draft_edited()
+
+    def _update_loop_row_buttons(self):
+        rows = {index.row() for index in self._loop_table.selectedIndexes()}
+        row = next(iter(rows)) if len(rows) == 1 else -1
+        running = bool(self._run_thread and self._run_thread.isRunning())
+        for button in (self._loop_up_btn, self._loop_top_btn):
+            button.setEnabled(not running and row > 0)
+        for button in (self._loop_down_btn, self._loop_bottom_btn):
+            button.setEnabled(not running and 0 <= row < self._loop_table.rowCount() - 1)
+
+    def _move_loop_row(self, offset):
+        table = self._loop_table
+        rows = {index.row() for index in table.selectedIndexes()}
+        if len(rows) != 1 or (self._run_thread and self._run_thread.isRunning()):
+            return
+        source = next(iter(rows))
+        target = min(max(source + int(offset), 0), table.rowCount() - 1)
+        if target == source:
+            return
+        values = _read_loop_table_raw(table)
+        # Capture topology without parsing unfinished Values or changing legacy
+        # repeat/frame semantics. Explicit nested orders already use membership.
+        if not self._nested_schedule_enabled and self._mode_combo.currentText() == 'Synchronize':
+            for row in values:
+                if row['Enable'] and row['Parameter'] not in self._legacy_loop_order:
+                    self._legacy_loop_order.append(row['Parameter'])
+        values.insert(target, values.pop(source))
+        column = max(table.currentColumn(), 0)
+        blocked = table.blockSignals(True)
+        updates = table.updatesEnabled()
+        table.setUpdatesEnabled(False)
+        try:
+            _populate_loop_table(table, pd.DataFrame(values, columns=LOOP_SCHEMA))
+            self._connect_loop_param_signals()
+            table.setCurrentCell(target, column)
+            table.selectRow(target)
+        finally:
+            table.setUpdatesEnabled(updates)
+            table.blockSignals(blocked)
+        self._on_draft_edited()
+        table.scrollTo(table.model().index(target, column), QAbstractItemView.ScrollHint.EnsureVisible)
 
     @Slot()
     def _del_loop_row(self):
@@ -6290,6 +6697,7 @@ class PresetsPanel(QWidget):
                 batch_df,
                 mode=self._mode_combo.currentText(),
                 acquisition_grouping=self._current_acquisition_grouping(),
+                parameter_order=self._legacy_loop_order if not self._nested_schedule_enabled else None,
             )
             schedule = _build_acquisition_schedule(
                 seq,
@@ -6426,6 +6834,7 @@ class PresetsPanel(QWidget):
                 f"Cannot apply: batch row {row + 1} has an invalid When condition."
             )
             self._summary_lbl.setStyleSheet("color: #b42318;")
+            self._summary_lbl.show()
             self._refresh_draft_state()
             QMessageBox.warning(
                 self,
@@ -6441,10 +6850,12 @@ class PresetsPanel(QWidget):
                 batch_draft,
                 mode=mode,
                 acquisition_grouping=acquisition_grouping,
+                parameter_order=self._legacy_loop_order if not self._nested_schedule_enabled else None,
             )
         except ValueError as exc:
             self._summary_lbl.setText(f"Cannot apply: {exc}")
             self._summary_lbl.setStyleSheet("color: #b42318;")
+            self._summary_lbl.show()
             QMessageBox.warning(self, "Invalid sweep plan", str(exc))
             return
         if self._nested_schedule_enabled:
@@ -6453,6 +6864,7 @@ class PresetsPanel(QWidget):
             except ValueError as exc:
                 self._summary_lbl.setText(f"Cannot apply: {exc}")
                 self._summary_lbl.setStyleSheet("color: #b42318;")
+                self._summary_lbl.show()
                 QMessageBox.warning(self, "Invalid execution order", str(exc))
                 return
 
@@ -6460,6 +6872,7 @@ class PresetsPanel(QWidget):
         self._batch_src = batch_draft
         self._applied_mode = mode
         self._applied_acquisition_grouping = acquisition_grouping
+        self._applied_legacy_loop_order = list(self._legacy_loop_order)
         if self._nested_schedule_enabled:
             self._execution_order = _normalize_execution_order(
                 self._execution_order,
@@ -6502,6 +6915,7 @@ class PresetsPanel(QWidget):
                 self._batch_src,
                 mode=mode,
                 acquisition_grouping=grouping,
+                parameter_order=self._applied_legacy_loop_order if not self._applied_execution_order else None,
             )
             if self._applied_execution_order:
                 schedule = _build_nested_execution_schedule(
@@ -6520,6 +6934,9 @@ class PresetsPanel(QWidget):
         except ValueError as exc:
             self._summary_lbl.setText(f"Plan error: {exc}")
             self._summary_lbl.setStyleSheet("color: red;")
+            self._summary_lbl.show()
+            self._applied_plan_details = ""
+            self._full_sequence_btn.setToolTip("")
             self._final_seq = []
             self._df_batch = _normalize_batch(pd.DataFrame())
             self._acquisition_schedule = []
@@ -6530,6 +6947,7 @@ class PresetsPanel(QWidget):
             self._refresh_readiness()
             return
         self._summary_lbl.setStyleSheet("")
+        self._summary_lbl.hide()
         self._final_seq    = seq
         self._df_batch     = batch
         self._acquisition_schedule = schedule
@@ -6554,7 +6972,7 @@ class PresetsPanel(QWidget):
         initial_point_count = min(total, total_points)
         later_point_count = max(total_points - initial_point_count, 0)
         if self._applied_execution_order:
-            order_label = "nested order below"
+            order_label = "custom nested order"
             initial_point_count = later_point_count = 0
             previous_state = None
             for task in schedule:
@@ -6566,10 +6984,17 @@ class PresetsPanel(QWidget):
             initial_point_count * initial_settle_s
             + later_point_count * point_settle_s
         )
-        self._summary_lbl.setText(
-            f"{len(schedule)} ordered step(s) -> {total} file(s), "
-            f"{total_points} sweep point(s)  [mode: {mode}; order: {order_label}; "
-            f"post-voltage settling: +{settle_overhead}]"
+        self._applied_plan_details = (
+            f"Applied plan: {len(schedule)} ordered step(s)\n"
+            f"Mode: {mode}\nExecution order: {order_label}\n"
+            f"Total voltage settling time: {settle_overhead}"
+        )
+        self._full_sequence_btn.setToolTip(self._applied_plan_details)
+        self._execution_order_group.setToolTip(
+            f"Applied mode: {mode}. Execution order: {order_label}."
+        )
+        self._voltage_timing_bar.setToolTip(
+            f"Estimated total voltage settling time for the applied plan: {settle_overhead}."
         )
         self._tree.update_plan(
             seq,
@@ -6628,6 +7053,13 @@ class PresetsPanel(QWidget):
             self._log(err)
             return
         out_dir = self._current_output_dir(run_meta)
+        from ui.detector_wavelength_advice import confirm_sequence_wavelength
+        if not confirm_sequence_wavelength(
+                self, (task['ctx'] for task in self._acquisition_schedule),
+                getattr(self._lf6, 'identity', {}),
+                run_meta.get('spectrometer_defaults', {}).get('Center Wavelength (nm)', cfg.lf6.center_nm)):
+            self._log('Run cancelled at detector wavelength reminder.')
+            return
         self._run_csv_before = {path for path in _experiment_output_files(out_dir) if path.suffix.lower() == ".csv"}
         self._run_files_before = set(_experiment_output_files(out_dir))
         try:
@@ -6668,6 +7100,7 @@ class PresetsPanel(QWidget):
             stop_event=self._stop_event,
             preview_event=self._preview_event,
             acquisition_schedule=self._acquisition_schedule,
+            metadata_run=self._experiment_run,
         )
         self._run_worker.moveToThread(self._run_thread)
         self._run_thread.started.connect(self._run_worker.run)
@@ -6686,6 +7119,7 @@ class PresetsPanel(QWidget):
         self._stop_btn.setEnabled(True)
         self._initial_voltage_settle_spin.setEnabled(False)
         self._voltage_settle_spin.setEnabled(False)
+        self._dual_setup_btn.setEnabled(False)
         self._status_lbl.setText("Running…")
         self._status_lbl.setStyleSheet("color: orange;")
         self._on_progress(0, self._total_acq)
@@ -6857,6 +7291,7 @@ class PresetsPanel(QWidget):
         self._stop_btn.setEnabled(False)
         self._initial_voltage_settle_spin.setEnabled(True)
         self._voltage_settle_spin.setEnabled(True)
+        self._dual_setup_btn.setEnabled(True)
         if self._hardware_incident_active:
             self._run_outcome = "failed"
             self._status_lbl.setText("Hardware fault - reconnect SMUs")

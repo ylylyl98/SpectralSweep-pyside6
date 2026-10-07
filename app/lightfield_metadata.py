@@ -136,6 +136,14 @@ class LightFieldRecorder:
                 return None
             snapshot = dict(snapshot)
             captured = snapshot.pop("captured_utc")
+            # WinSpec exposes the preceding frame's timing/guard diagnostics
+            # alongside settings. They change on every frame, and must not
+            # invalidate the settings identity or duplicate calibration data.
+            previous_frame = None
+            if snapshot.get("identity", {}).get("backend") == "winspec_ingaas":
+                observed = dict(snapshot.get("observed", {}))
+                previous_frame = observed.pop("last_frame", None)
+                snapshot["observed"] = observed
             camera = dict(snapshot.get("camera", {}))
             temperature = camera.pop("temperature_c", None)
             snapshot["camera"] = camera
@@ -179,6 +187,8 @@ class LightFieldRecorder:
                       "temperature_c": temperature, "capture_frames_requested": int(frames),
                       "purpose": self.context.get("purpose", purpose),
                       "context": dict(self.context)}
+            if previous_frame is not None:
+                record["previous_frame_observation"] = previous_frame
             appended = self._append(record)
             if appended is None:
                 marker = getattr(run, "mark_metadata_failure", None)
@@ -186,7 +196,7 @@ class LightFieldRecorder:
                     marker(RuntimeError("LightField acquisition event was not durably recorded"), event="capture_started")
             return appended
 
-    def finish(self, record, *, dimensions=None, error=None):
+    def finish(self, record, *, dimensions=None, error=None, frame_observation=None):
         if record is None:
             return
         run = self._run()
@@ -198,6 +208,7 @@ class LightFieldRecorder:
                               "acquisition_index": record["acquisition_index"],
                               "settings_id": record["settings_id"], "finished_utc": timestamp(),
                               "output_dimensions": dimensions, "error": error,
+                              **({'frame_observation': frame_observation} if frame_observation is not None else {}),
                               "acquisition_id": record.get("acquisition_id")})
 
     def _append(self, record):
@@ -226,6 +237,14 @@ class LightFieldRecorder:
 def bind_lightfield_metadata(controller, run):
     """Bind without reading hardware on the UI thread; other backends opt out."""
     setup = getattr(controller, "setup", None)
+    existing = getattr(setup, '_metadata_recorder', None)
+    if isinstance(existing, LightFieldRecorder) and existing._run() is run:
+        return
+    if getattr(controller, 'backend', None) == 'winspec_ingaas':
+        adapter = getattr(controller, 'adapter', None)
+        if adapter is not None:
+            adapter.bind_metadata_run(run)
+        return
     binder = getattr(setup, "bind_metadata_run", None)
     if callable(binder):
         binder(run)
@@ -248,7 +267,7 @@ def set_lightfield_context(controller, **context):
 
 
 def capture_with_metadata(setup, frames, *, purpose="measurement"):
-    """Optional readback/log failures never hide a capture result or its error."""
+    """Log capture outcomes; acquisition validation is mandatory when provided."""
     recorder = getattr(setup, "_metadata_recorder", None)
     record = None
     if recorder is not None and recorder.active:
@@ -261,7 +280,12 @@ def capture_with_metadata(setup, frames, *, purpose="measurement"):
                 marker(exc, event="capture_started")
             log.warning("LightField metadata snapshot could not be recorded", exc_info=True)
     try:
+        verify = getattr(setup, 'verify_acquisition_settings', None)
+        if callable(verify):
+            verify()
         dataset = setup.experiment.Capture(frames)
+        if callable(verify):
+            verify()
     except Exception as exc:
         if recorder is not None:
             try:

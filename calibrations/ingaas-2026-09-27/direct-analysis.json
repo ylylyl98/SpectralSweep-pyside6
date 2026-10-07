@@ -1,0 +1,92 @@
+[
+  {
+    "center": 900.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 6,
+    "error": "Reference assignment ambiguous; no calibration enabled"
+  },
+  {
+    "center": 950.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 10,
+    "error": "Reference assignment ambiguous; no calibration enabled"
+  },
+  {
+    "center": 1000.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 1,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1050.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 2,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1100.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 3,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1150.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 6,
+    "error": "Reference assignment ambiguous; no calibration enabled"
+  },
+  {
+    "center": 1200.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 3,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1250.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 3,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1300.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 3,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1350.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 1,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1400.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 0,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1450.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 0,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1500.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 0,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1550.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 0,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  },
+  {
+    "center": 1600.0,
+    "grating": "[500nm,1200][0][0]",
+    "peaks": 0,
+    "error": "Insufficient isolated peaks (need at least 6)"
+  }
+]

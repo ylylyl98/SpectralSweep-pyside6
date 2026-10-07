@@ -145,9 +145,10 @@ def _fmt_sweep_range(r: dict) -> str:
 
 
 def _fmt_ctx(ctx: dict, param_order: Optional[List[str]] = None) -> str:
-    default_keys = ["Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)", "Stage Position", "Rotation1 Angle (deg)", "Rotation2 Angle (deg)"]
+    default_keys = ["Measurement setup", "Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)", "Stage Position", "Rotation1 Angle (deg)", "Rotation2 Angle (deg)"]
     keys = param_order or default_keys
     aliases = {
+        "Measurement setup": "Setup",
         "Center Wavelength (nm)": "CW",
         "Exposure Time (ms)": "Exp",
         "Accumulations (EPF)": "EPF",
@@ -165,6 +166,8 @@ def _fmt_ctx(ctx: dict, param_order: Optional[List[str]] = None) -> str:
             value = f"{float(v):g}"
         except Exception:
             value = f"{v}"
+        if k == 'Measurement setup':
+            value = {'lightfield': 'PIXIS', 'winspec_ingaas': 'WinSpec'}.get(value, value)
         parts.append(f"{k0}={value}")
     return ", ".join(parts) if parts else "(no loop vars)"
 

@@ -1,0 +1,30 @@
+{
+  "type": "provisional_two_line_local_check_not_IntelliCal_report",
+  "nominal_center_nm": 950,
+  "grating": "[750nm,300][1][0]",
+  "source_csv": "pixis-front-950nm-80ms.csv",
+  "reference_source": "LightField NIR PI Neon, original numerical convention; air/vacuum compatibility not independently established",
+  "method": "Three-point quadratic interpolation of peak maximum; no refitting or offset correction of PIXIS axis",
+  "lines": [
+    {
+      "reference_nm": 912.2967,
+      "measured_nm": 912.0307808617843,
+      "error_nm": -0.265919138215736
+    },
+    {
+      "reference_nm": 965.7786,
+      "measured_nm": 965.4923665690319,
+      "error_nm": -0.28623343096808185
+    }
+  ],
+  "rms_nm": 0.2762630676304375,
+  "mean_error_nm": -0.2760762845919089,
+  "ingaas_rms_nm": null,
+  "ingaas_reason": "No validated wavelength mapping; broad/blended features and insufficient independent line assignments",
+  "limitations": [
+    "Only two provisionally identified strong lines in one exposure; not broadband calibration accuracy",
+    "No air/vacuum conversion applied; compare conventions before interpreting the systematic offset",
+    "Does not retrieve or reproduce the vendor IntelliCal optimization RMS",
+    "No camera calibration or application settings modified"
+  ]
+}

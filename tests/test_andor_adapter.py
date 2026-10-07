@@ -336,6 +336,46 @@ class AndorAdapterTests(unittest.TestCase):
             AndorConnectionOptions(**values), andor_module=module
         )
 
+    def test_spectrograph_disconnect_preserves_cold_camera_and_can_reconnect(self):
+        module, setup = self.make_setup()
+        try:
+            camera = setup._camera
+            module.calls.clear()
+            setup.disconnect_spectrograph()
+            self.assertIn("spectrograph_close", [name for name, *_ in module.calls])
+            self.assertIsNone(setup._spectrograph)
+            self.assertIs(setup._camera, camera)
+            self.assertFalse(camera.closed)
+            self.assertTrue(camera.cooler)
+            self.assertEqual(setup.get_temperature(), -70.0)
+            setup.disconnect_spectrograph()  # idempotent
+            setup.reconnect_spectrograph()
+            self.assertIsNotNone(setup._spectrograph)
+            self.assertIs(setup._camera, camera)
+            self.assertTrue(camera.cooler)
+            names = [name for name, *_ in module.calls]
+            self.assertNotIn("set_cooler", names)
+            self.assertNotIn("set_temperature", names)
+            self.assertNotIn("camera_close", names)
+            self.assertEqual({tid for _, tid, _ in module.calls},
+                             {setup.identity["owner_thread_id"]})
+        finally:
+            setup.close()
+
+    def test_spectrograph_reconnect_failure_preserves_camera(self):
+        _, setup = self.make_setup()
+        try:
+            setup.disconnect_spectrograph()
+            with mock.patch.object(setup, "_open_shamrock", side_effect=RuntimeError("USB unavailable")):
+                with self.assertRaisesRegex(RuntimeError, "USB unavailable"):
+                    setup.reconnect_spectrograph()
+            self.assertIsNone(setup._spectrograph)
+            self.assertFalse(setup._camera.closed)
+            self.assertTrue(setup._camera.cooler)
+            self.assertEqual(setup.get_temperature(), -70.0)
+        finally:
+            setup.close()
+
     def test_serial_selection_configuration_and_identity(self):
         module, setup = self.make_setup()
         try:

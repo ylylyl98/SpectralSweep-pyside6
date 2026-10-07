@@ -1,0 +1,6 @@
+[
+  {
+    "grating": "[750nm,300][1][0]",
+    "error": "Broad calibration needs \u22653 anchor centers, independent check centers and positive tolerance"
+  }
+]

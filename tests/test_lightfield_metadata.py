@@ -99,6 +99,29 @@ class LightFieldMetadataTests(unittest.TestCase):
         self.assertIs(caught.exception, error)
         self.assertEqual(self.records()[-1]["event"], "capture_failed")
 
+    def test_winspec_frame_diagnostics_do_not_create_settings_snapshots(self):
+        recorder = self.setup._metadata_recorder
+        for index in range(3):
+            snapshot = {"captured_utc": str(index),
+                        "identity": {"backend": "winspec_ingaas"},
+                        "observed": {"winspec": {"exposure_ms": 800},
+                                     "last_frame": {"elapsed_s": index + 1,
+                                                    "temperature_guard": {"last_checked_unix": index}}},
+                        "calibration": {"record": {"id": "cal-1"}}}
+            record = recorder.begin(snapshot, 1, "measurement")
+            recorder.finish(record)
+            self.assertEqual(len(self.run.metadata["settings"]["snapshots"]), 1)
+            self.assertIn("last_frame", snapshot["observed"])
+        snapshot["observed"]["winspec"]["exposure_ms"] = 250
+        recorder.finish(recorder.begin(snapshot, 1, "measurement"))
+        self.run.complete()
+        saved = json.loads(self.run.path.read_text())
+        self.assertEqual(len(saved["settings"]["snapshots"]), 2)
+        self.assertNotIn("last_frame", saved["settings"]["snapshots"][0]["values"]["observed"])
+        starts = self.records()[::2]
+        self.assertEqual([r["settings_id"] for r in starts], [1, 1, 1, 2])
+        self.assertEqual([r["previous_frame_observation"]["elapsed_s"] for r in starts], [1, 2, 3, 3])
+
     def test_context_uuid_is_the_durable_capture_id(self):
         set_lightfield_context(self.controller, acquisition_id="measurement-uuid-1", purpose="measurement")
         capture_with_metadata(self.setup, 1)

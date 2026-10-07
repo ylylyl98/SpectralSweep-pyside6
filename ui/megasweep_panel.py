@@ -163,8 +163,8 @@ class _OpticalSequenceWidget(QWidget):
         caption.setStyleSheet("color: #5f6b78; font-size: 10px;")
         layout.addWidget(caption)
 
-        self._table = QTableWidget(0, 5)
-        headers = ["Run", "Name", "Center λ", "Exposure", "Frames/EPF"]
+        self._table = QTableWidget(0, 7)
+        headers = ["Run", "Name", "Center λ", "Exposure", "Frames", "Setup", "Combine"]
         self._table.setHorizontalHeaderLabels(headers)
         for column, title in enumerate(headers):
             self._table.horizontalHeaderItem(column).setToolTip(title)
@@ -185,9 +185,9 @@ class _OpticalSequenceWidget(QWidget):
         self._table.setMaximumHeight(_OPTICAL_TABLE_MAX_HEIGHT)
         header = self._table.horizontalHeader()
         header.setMinimumSectionSize(24)
-        for column in range(5):
+        for column in range(7):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
-        for column, width in enumerate((26, 38, 60, 66, 60)):
+        for column, width in enumerate((26, 72, 96, 96, 58, 190, 102)):
             self._table.setColumnWidth(column, width)
         self._table.cellChanged.connect(self._on_cell_changed)
         layout.addWidget(self._table)
@@ -228,6 +228,10 @@ class _OpticalSequenceWidget(QWidget):
         self._remove_btn.clicked.connect(self._remove_selected)
         self._up_btn.clicked.connect(lambda: self._move_selected(-1))
         self._down_btn.clicked.connect(lambda: self._move_selected(1))
+        self._dual_setup_btn = QPushButton('Load PIXIS + WinSpec recipe')
+        self._dual_setup_btn.setToolTip('Load PIXIS 650 nm / 80 ms with Average 4 and WinSpec 1050 nm / 250 ms with Device EPF 4.')
+        self._dual_setup_btn.clicked.connect(self._load_dual_setup_recipe)
+        layout.addWidget(self._dual_setup_btn)
 
         self.set_conditions([
             OpticalCondition(
@@ -245,7 +249,7 @@ class _OpticalSequenceWidget(QWidget):
         spin.setDecimals(2)
         spin.setValue(float(value))
         spin.setSuffix(" nm")
-        _set_compact_editor(spin, minimum=56, maximum=74)
+        _set_compact_editor(spin, minimum=76, maximum=96)
         spin.valueChanged.connect(self.changed)
         return spin
 
@@ -255,7 +259,7 @@ class _OpticalSequenceWidget(QWidget):
         spin.setDecimals(1)
         spin.setValue(float(value))
         spin.setSuffix(" ms")
-        _set_compact_editor(spin, minimum=60, maximum=78)
+        _set_compact_editor(spin, minimum=80, maximum=96)
         spin.valueChanged.connect(self.changed)
         return spin
 
@@ -286,11 +290,24 @@ class _OpticalSequenceWidget(QWidget):
         self._table.setCellWidget(row, 2, self._make_center_spin(condition.center_nm))
         self._table.setCellWidget(row, 3, self._make_exposure_spin(condition.exposure_ms))
         self._table.setCellWidget(row, 4, self._make_frames_spin(condition.frames))
+        setup = _NoWheelComboBox()
+        for label, backend in [('Current setup', ''), ('LightField + PIXIS', 'lightfield'), ('LightField + WinSpec', 'winspec_ingaas')]:
+            setup.addItem(label, backend)
+        setup.setCurrentIndex(max(0, setup.findData(condition.backend)))
+        setup.currentIndexChanged.connect(self.changed)
+        self._table.setCellWidget(row, 5, setup)
+        combine = _NoWheelComboBox()
+        combine.addItem('Device EPF', 'device')
+        combine.addItem('Average', 'average')
+        combine.setCurrentIndex(max(0, combine.findData(condition.reduction)))
+        combine.setToolTip('Device EPF: combine N exposures in the detector; WinSpec returns mean counts per exposure. Average: acquire N independent frames and calculate their arithmetic mean.')
+        combine.currentIndexChanged.connect(self.changed)
+        self._table.setCellWidget(row, 6, combine)
         self._set_row_enabled(row, condition.enabled)
         self._table.setRowHeight(row, 28)
 
     def _set_row_enabled(self, row: int, enabled: bool) -> None:
-        for column in (1, 2, 3, 4):
+        for column in (1, 2, 3, 4, 5, 6):
             widget = self._table.cellWidget(row, column)
             if widget is not None:
                 widget.setEnabled(enabled)
@@ -335,6 +352,8 @@ class _OpticalSequenceWidget(QWidget):
                 center_nm=float(center.value()),
                 exposure_ms=float(exposure.value()),
                 frames=int(frames.value()),
+                backend=str(self._table.cellWidget(row, 5).currentData()),
+                reduction=str(self._table.cellWidget(row, 6).currentData()),
             )
             if condition.enabled or not enabled_only:
                 result.append(condition)
@@ -357,6 +376,8 @@ class _OpticalSequenceWidget(QWidget):
                 "center_nm": float(center.value()),
                 "exposure_ms": float(exposure.value()),
                 "frames": int(frames.value()),
+                "backend": str(self._table.cellWidget(row, 5).currentData()),
+                "reduction": str(self._table.cellWidget(row, 6).currentData()),
             })
         return rows
 
@@ -377,6 +398,8 @@ class _OpticalSequenceWidget(QWidget):
                         condition.get("exposure_ms", condition.get("exp_ms"))
                     ),
                     frames=int(condition["frames"]),
+                    backend=str(condition.get('backend', '')),
+                    reduction=str(condition.get('reduction', 'device')),
                 ))
             except (KeyError, TypeError, ValueError):
                 continue
@@ -410,6 +433,8 @@ class _OpticalSequenceWidget(QWidget):
             previous.center_nm,
             previous.exposure_ms,
             previous.frames,
+            previous.backend,
+            previous.reduction,
         ))
         self.set_conditions(conditions)
         self._table.selectRow(len(conditions) - 1)
@@ -424,6 +449,8 @@ class _OpticalSequenceWidget(QWidget):
             source.center_nm,
             source.exposure_ms,
             source.frames,
+            source.backend,
+            source.reduction,
         ))
         self.set_conditions(conditions)
         self._table.selectRow(row + 1)
@@ -436,6 +463,12 @@ class _OpticalSequenceWidget(QWidget):
         conditions.pop(row)
         self.set_conditions(conditions)
         self._table.selectRow(min(row, len(conditions) - 1))
+
+    def _load_dual_setup_recipe(self):
+        self.set_conditions([
+            OpticalCondition(True, 'PIXIS', 650., 80., 4, 'lightfield', 'average'),
+            OpticalCondition(True, 'WinSpec', 1050., 250., 4, 'winspec_ingaas', 'device'),
+        ])
 
     def _move_selected(self, delta: int) -> None:
         conditions = self.conditions()
@@ -549,6 +582,8 @@ class OpticalCondition:
     center_nm: float
     exposure_ms: float
     frames: int
+    backend: str = ''
+    reduction: str = 'device'
 
     def as_dict(self) -> dict:
         return {
@@ -557,6 +592,8 @@ class OpticalCondition:
             "center_nm": float(self.center_nm),
             "exposure_ms": float(self.exposure_ms),
             "frames": int(self.frames),
+            "backend": self.backend,
+            "reduction": self.reduction,
         }
 
 
@@ -633,6 +670,30 @@ def _fmt_uA(I: float) -> str:
         return "nan"
 
 
+def _read_point_electrical(iv):
+    """Measure each SMU once; voltage and current share the same sample."""
+    read_role = getattr(iv, "read_role_snapshot", None)
+    if not callable(read_role):
+        # Compatibility for legacy adapters without paired readback support.
+        return (*_read_gates(iv), _read_bias(iv), *_read_currents(iv))
+
+    def clean(value):
+        try:
+            value = float(value)
+            return value if math.isfinite(value) else NAN
+        except (TypeError, ValueError):
+            return NAN
+
+    samples = []
+    for role in ("Vbg", "Vtg", "Vbias"):
+        try:
+            voltage, current = read_role(role)
+            samples.append((clean(voltage), clean(current)))
+        except Exception:
+            samples.append((NAN, NAN))
+    return tuple(v for v, _ in samples) + tuple(i for _, i in samples)
+
+
 def _read_gates(iv) -> tuple[float, float]:
     if iv is None or not hasattr(iv, "read_current_gates"):
         return NAN, NAN
@@ -690,6 +751,11 @@ def _wait_lambda(lf6, target_nm: float, tol_nm: float = 1.0,
 
 
 def _get_wavelengths(spec, lf6, center_nm: float, tol_nm: float) -> np.ndarray:
+    from app.devices.winspec_scan_adapter import WinSpecScanAdapter
+    from app.devices.scan_average import AveragedScanAdapter
+    if isinstance(spec, (WinSpecScanAdapter, AveragedScanAdapter)):
+        # The raw setup exposes pixels; never fall back to it for scan headers.
+        return spec.calibration_wavelengths()
     if lf6 is not None:
         try:
             w = _wait_lambda(lf6, center_nm, tol_nm)
@@ -722,7 +788,30 @@ def _get_wavelengths(spec, lf6, center_nm: float, tol_nm: float) -> np.ndarray:
     return np.array([])
 
 
-def _read_intensity(spec, expected_len: int) -> np.ndarray:
+def _read_intensity(spec, expected_len: int, *, expected_wavelengths=None) -> np.ndarray:
+    from app.devices.winspec_scan_adapter import WinSpecScanAdapter
+    from app.devices.scan_average import AveragedScanAdapter
+    if expected_wavelengths is not None:
+        # A map has fixed CSV headers. Never discard an adapter's validation
+        # failure or attach its counts to a different wavelength axis.
+        spectrum = spec.acquire()
+        if not isinstance(spectrum, tuple) or len(spectrum) < 2:
+            raise RuntimeError('No wavelength axis returned for the scan frame')
+        axis = np.asarray(spectrum[0], dtype=float).ravel()
+        expected = np.asarray(expected_wavelengths, dtype=float).ravel()
+        if (axis.shape != expected.shape or axis.size != expected_len
+                or not np.all(np.isfinite(axis)) or not np.all(np.isfinite(expected))
+                or not np.allclose(axis, expected, rtol=0., atol=0.00005)):
+            raise RuntimeError('Wavelength calibration changed within the scan CSV; frame discarded')
+        counts = np.asarray(spectrum[1], dtype=float)
+        if counts.shape != (expected_len,):
+            raise RuntimeError('Acquired frame shape differs from scan wavelength headers')
+        return counts
+    if isinstance(spec, (WinSpecScanAdapter, AveragedScanAdapter)):
+        _, counts = spec.acquire()
+        if np.asarray(counts).shape != (expected_len,):
+            raise RuntimeError('Calibrated frame shape differs from scan wavelength headers')
+        return np.asarray(counts, dtype=float)
     try:
         sp = spec.acquire()
         if isinstance(sp, tuple) and len(sp) >= 2:
@@ -844,6 +933,10 @@ def build_megasweep_filename(params: dict) -> str:
             condition_token = f"{condition_token}_{condition_name}"
         parts.append(condition_token)
     parts.extend([optical_token, tag])
+    if params.get('backend'):
+        parts.append(sanitize_token(params['backend']))
+    if params.get('reduction') == 'average':
+        parts.append(f"Avg{int(params['frames'])}")
     return "~".join(parts)
 
 
@@ -864,6 +957,9 @@ def _build_csv_metadata_text(
 
     lines = [
         "# MegaSweep Data File",
+        f"# Setup: {params.get('backend') or 'current'}",
+        f"# Combination: {params.get('reduction', 'device')}",
+        f"# ExposuresPerPoint: {params['frames']}",
         f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"# Status: {status}",
         f"# CompletedPoints: {int(completed_points)}",
@@ -926,7 +1022,7 @@ def _build_csv_metadata_text(
         f"# Condition_Name: {params.get('condition_name', 'C1')}",
         f"# Center_nm: {params['center_nm']:.2f}",
         f"# Exposure_ms: {params['exp_ms']}",
-        f"# Frames_EPF: {params['frames']}",
+        f"# Frames_EPF: {1 if params.get('reduction') == 'average' else params['frames']}",
         f"# Wavelength_start_nm: {float(wls[0]):.2f}",
         f"# Wavelength_end_nm: {float(wls[-1]):.2f}",
         f"# Wavelength_pixels: {int(wls.size)}",
@@ -1075,6 +1171,7 @@ class _AxisSelectorWidget(QGroupBox):
         vlay.setContentsMargins(7, 5, 7, 6)
         vlay.setSpacing(5)
         self._available: list[str] = []
+        self._selected_axes = ("", "")
         self._outer = _NoWheelComboBox()
         self._inner = _NoWheelComboBox()
         for combo in (self._outer, self._inner):
@@ -1112,7 +1209,8 @@ class _AxisSelectorWidget(QGroupBox):
         inner_choices = [a for a in axes if a != outer]
         inner = prev_inner if prev_inner in inner_choices else (inner_choices[0] if inner_choices else "")
         self._set_items(self._outer, axes, outer)
-        self._set_items(self._inner, inner_choices, inner)
+        self._set_items(self._inner, axes, inner)
+        self._selected_axes = (outer, inner)
         self.changed.emit()
 
     def _set_items(self, combo: QComboBox, items: list[str], selected: str):
@@ -1126,14 +1224,20 @@ class _AxisSelectorWidget(QGroupBox):
     def _sync_inner(self):
         outer = self.outer()
         items = [a for a in self._available if a != outer]
-        selected = self.inner() if self.inner() in items else (items[0] if items else "")
-        self._set_items(self._inner, items, selected)
+        previous_outer = self._selected_axes[0]
+        fallback = previous_outer if previous_outer in items else (items[0] if items else "")
+        selected = self.inner() if self.inner() in items else fallback
+        self._set_items(self._inner, self._available, selected)
+        self._selected_axes = (outer, selected)
 
     def _sync_outer(self):
         inner = self.inner()
         items = [a for a in self._available if a != inner]
-        selected = self.outer() if self.outer() in items else (items[0] if items else "")
-        self._set_items(self._outer, items, selected)
+        previous_inner = self._selected_axes[1]
+        fallback = previous_inner if previous_inner in items else (items[0] if items else "")
+        selected = self.outer() if self.outer() in items else fallback
+        self._set_items(self._outer, self._available, selected)
+        self._selected_axes = (selected, inner)
 
     def outer(self) -> str:
         return self._outer.currentText()
@@ -1988,7 +2092,10 @@ class _MegaSweepWorker(QObject):
         try:
             self._run_sweep(self._p)
         except Exception as exc:
-            self.error.emit(str(exc))
+            if self._stop.is_set():
+                self._emit_log('Optical sequence stopped.')
+            else:
+                self.error.emit(str(exc))
         finally:
             self.finished.emit()
 
@@ -2017,6 +2124,35 @@ class _MegaSweepWorker(QObject):
             }]
 
         map_count = len(conditions)
+        multi_setup = any(c.get('backend') or c.get('reduction') == 'average' for c in conditions)
+        if multi_setup:
+            initial_backend = getattr(self._lf6, 'backend', '')
+            for condition in conditions:
+                condition['backend'] = condition.get('backend') or initial_backend
+            connected = getattr(self._lf6, 'connected_backends', ())
+            missing = sorted({c['backend'] for c in conditions} - set(connected))
+            if missing:
+                raise RuntimeError('Connect all requested setups before running: ' + ', '.join(missing))
+            # Check every recipe/calibration before the first gate write.
+            for condition in conditions:
+                if self._stop.is_set():
+                    return
+                prepared = self._prepare_condition(condition)
+                if self._metadata_run is not None:
+                    bind_lightfield_metadata(self._lf6, self._metadata_run)
+                    set_lightfield_context(self._lf6, purpose='validation', optical_condition=condition['name'])
+                if condition.get('reduction') == 'average':
+                    self._emit_log(f"Validating {condition['name']}: one single-exposure spectrum before gate writes (not part of the map).")
+                    axis = prepared.validate_spectrum()
+                    condition['_validated_axis'] = axis.tolist()
+                else:
+                    axis = np.asarray(prepared.calibration_wavelengths(), dtype=float)
+                if axis.size <= 2 or not np.all(np.isfinite(axis)):
+                    raise RuntimeError('No valid wavelength calibration for ' + condition['name'])
+        else:
+            validate_centers = getattr(self._lf6, 'validate_scan_centers', None)
+            if callable(validate_centers):
+                validate_centers([condition['center_nm'] for condition in conditions])
         total_acquisitions = len(points) * map_count
         self._emit_log(
             f"Starting optical sequence: {map_count} complete map(s), "
@@ -2037,17 +2173,27 @@ class _MegaSweepWorker(QObject):
                     condition.get("exposure_ms", condition.get("exp_ms"))
                 ),
                 "frames": int(condition["frames"]),
+                "backend": condition.get('backend', ''),
+                "reduction": condition.get('reduction', 'device'),
             })
             map_p["base_name"] = build_megasweep_filename(map_p)
             description = (
                 f"{condition_name}: {map_p['center_nm']:g} nm, "
-                f"{map_p['exp_ms']:g} ms, {map_p['frames']} EPF"
+                f"{map_p['exp_ms']:g} ms, {map_p['frames']} {map_p['reduction']} · {map_p['backend'] or 'current setup'}"
             )
             self.map_started.emit(map_index, map_count, description)
             self._emit_log(f"Map {map_index}/{map_count} - {description}")
             ramp_ok = True
             map_failed = False
             try:
+                if multi_setup:
+                    spec = self._prepare_condition(condition)
+                    if '_validated_axis' in condition:
+                        spec.set_validated_axis(condition['_validated_axis'])
+                    lf6 = self._lf6.setup
+                    map_p['_prepared_scan'] = True
+                    if self._metadata_run is not None:
+                        bind_lightfield_metadata(self._lf6, self._metadata_run)
                 self._run_map(
                     map_p,
                     iv=iv,
@@ -2059,6 +2205,8 @@ class _MegaSweepWorker(QObject):
             except _MegaSweepStopRequested:
                 break
             except Exception:
+                if self._stop.is_set():
+                    break
                 map_failed = True
                 raise
             finally:
@@ -2081,7 +2229,17 @@ class _MegaSweepWorker(QObject):
         else:
             self._emit_log("Optical sequence complete.")
 
+    def _prepare_condition(self, condition):
+        prepare = getattr(self._lf6, 'prepare_scan_condition', None)
+        if not callable(prepare):
+            raise RuntimeError('Multi-setup scan preparation is unavailable')
+        return prepare(condition['backend'], condition['center_nm'],
+                       condition.get('exposure_ms', condition.get('exp_ms')),
+                       condition['frames'], condition.get('reduction', 'device'), self._stop)
+
     def _apply_optical_settings(self, p: dict, spec, lf6) -> None:
+        if p.get('_prepared_scan'):
+            return
         target = spec if spec is not None else lf6
         if target is None:
             return
@@ -2208,11 +2366,9 @@ class _MegaSweepWorker(QObject):
                         prev = point["raw"]
                         time.sleep(p["settle"])
 
-                    vbg_m, vtg_m = _read_gates(iv)
-                    vbias_m = _read_bias(iv)
-                    Ibg, Itg, Ib = _read_currents(iv)
+                    vbg_m, vtg_m, vbias_m, Ibg, Itg, Ib = _read_point_electrical(iv)
                     set_lightfield_context(self._lf6, output_file=fp, point_index=done, Vtg_set=float(vtg), Vbg_set=float(vbg), Vbias_set=float(vbias))
-                    y = _read_intensity(spec, int(wls.size)) if spec is not None else np.full(wls.size, NAN, dtype=float)
+                    y = _read_intensity(spec, int(wls.size), expected_wavelengths=wls) if spec is not None else np.full(wls.size, NAN, dtype=float)
                     axis_vals = point["axis_values"]
                     prefix = np.array([
                         point["axis_a"], point["axis_b"],
@@ -2243,6 +2399,9 @@ class _MegaSweepWorker(QObject):
             self._emit_log("Stopped by user.")
             raise
         except Exception:
+            if self._stop.is_set():
+                status = 'Stopped'
+                raise _MegaSweepStopRequested()
             status = "Failed"
             raise
         else:
@@ -3352,6 +3511,8 @@ class MegaSweepPanel(QWidget):
             "center_nm": float(preview_condition.center_nm),
             "exp_ms": float(preview_condition.exposure_ms),
             "frames": int(preview_condition.frames),
+            "backend": preview_condition.backend,
+            "reduction": preview_condition.reduction,
             "condition_index": 1,
             "condition_count": len(conditions),
             "condition_name": preview_condition.name,
@@ -3365,7 +3526,7 @@ class MegaSweepPanel(QWidget):
         folder_preview = Path(cfg.filename.base_out) / sample / "megasweep"
         full_preview = folder_preview / f"{filename_preview}.csv"
         optical_txt = "; ".join(
-            f"{index}: {condition.center_nm:g} nm/{condition.exposure_ms:g} ms/{condition.frames} EPF"
+            f"{index}: {condition.backend or 'current'} {condition.center_nm:g} nm/{condition.exposure_ms:g} ms/{condition.frames} {condition.reduction}"
             for index, condition in enumerate(conditions, start=1)
         ) or "No enabled conditions"
         lines = [
@@ -3449,6 +3610,14 @@ class MegaSweepPanel(QWidget):
                 "Enable at least one optical condition before running.",
             )
             return False
+        if any(c.get('backend') or c.get('reduction') == 'average' for c in enabled_conditions):
+            active = getattr(self._lf6, 'backend', '')
+            connected = set(getattr(self._lf6, 'connected_backends', ()))
+            missing = {c.get('backend') or active for c in enabled_conditions} - connected
+            if missing:
+                QMessageBox.critical(self, 'Setup not connected',
+                    'Connect every selected setup before running. Connect LightField first, then WinSpec; keep both sessions open.\nMissing: ' + ', '.join(sorted(missing)))
+                return False
         if params["coord"] == CoordSystem.PHYSICAL and abs(params["ratio"]) < EPS:
             QMessageBox.critical(self, "Invalid ratio", "Ratio r = 0 is invalid - the doping/efield transform is undefined.")
             return False
@@ -3509,6 +3678,9 @@ class MegaSweepPanel(QWidget):
 
     @Slot()
     def _on_run(self):
+        if bool(getattr(self._lf6, "switching_locked", False)):
+            self._set_status("Wait for the current device operation to finish", "#707070")
+            return
         self._refresh_preview()
         params = self._collect_params()
         if not self._validate(params):
@@ -3551,6 +3723,9 @@ class MegaSweepPanel(QWidget):
         self._worker.map_started.connect(self._on_map_started)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
+        pause = getattr(self._lf6, "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("megasweep", True)
         self._thread.start()
 
     @Slot()
@@ -3574,6 +3749,21 @@ class MegaSweepPanel(QWidget):
     @Slot(int, int)
     def _on_progress(self, done: int, total: int):
         self._progress.setValue(int(100 * done / total) if total > 0 else 0)
+        samples = getattr(self, "_map_timing_samples", None)
+        if samples is None or total <= 0:
+            return
+        samples.append((done, time.monotonic()))
+        del samples[:-101]
+        point_span = samples[-1][0] - samples[0][0]
+        if point_span >= 10:
+            seconds_per_point = (samples[-1][1] - samples[0][1]) / point_span
+            map_end = total * self._current_map_index // self._map_count
+            remaining = max(0, map_end - done) * seconds_per_point
+            self._set_status(
+                f"Map {self._current_map_index}/{self._map_count} | Current map remaining: "
+                f"{self._format_duration(remaining)} ({seconds_per_point:.2f} s/point)",
+                "#b26a00",
+            )
 
     @Slot(int, int, str)
     def _on_map_started(
@@ -3584,6 +3774,7 @@ class MegaSweepPanel(QWidget):
     ) -> None:
         self._current_map_index = int(map_index)
         self._map_count = max(1, int(map_count))
+        self._map_timing_samples = []
         self._preview.clear_progress()
         self._set_status(
             f"Map {map_index}/{map_count}",
@@ -3604,6 +3795,9 @@ class MegaSweepPanel(QWidget):
             self._thread = None
         worker = self._worker
         self._worker = None
+        pause = getattr(self._lf6, "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("megasweep", False)
         self._run_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         if self._run_failed:

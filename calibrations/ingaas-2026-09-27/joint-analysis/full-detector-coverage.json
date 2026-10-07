@@ -1,0 +1,29 @@
+{
+  "training_gaps": [
+    "900-1000 nm center: pixels 1-32",
+    "1000-1100 nm center: pixels 1-32",
+    "1100-1200 nm center: pixels 1-32",
+    "1200-1300 nm center: pixels 481-512",
+    "1300-1400 nm center: pixels 1-32",
+    "1300-1400 nm center: pixels 481-512",
+    "1400-1500 nm center: pixels 1-32",
+    "1400-1500 nm center: pixels 481-512",
+    "1500-1600 nm center: pixels 1-32",
+    "1600-1700 nm center: pixels 1-32",
+    "1600-1700 nm center: pixels 481-512"
+  ],
+  "validation_gaps": [
+    "900-1000 nm center: pixels 1-32",
+    "1100-1200 nm center: pixels 481-512",
+    "1200-1300 nm center: pixels 481-512",
+    "1300-1400 nm center: pixels 1-32",
+    "1400-1500 nm center: pixels 1-32",
+    "1400-1500 nm center: pixels 481-512",
+    "1500-1600 nm center: pixels 1-32",
+    "1600-1700 nm center: pixels 1-32",
+    "1600-1700 nm center: pixels 129-384",
+    "1600-1700 nm center: pixels 481-512"
+  ],
+  "status": "not_validated",
+  "note": "Candidate line assignments only. Existing data cannot establish a full-detector calibration; no model enabled."
+}

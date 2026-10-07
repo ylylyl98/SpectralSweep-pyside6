@@ -89,6 +89,57 @@ class MainWindowLayoutTests(unittest.TestCase):
         self.assertEqual(filtered["panels"]["instruments"]["stage"]["jog"], 0.2)
         self.assertIn("base_out", state["panels"]["settings"]["output"])
 
+    def test_startup_prefers_saved_sample_over_legacy_panel_defaults(self):
+        from types import SimpleNamespace
+        session = SimpleNamespace(schema_version=1, sample_id='BO146', sample_profiles={},
+                                  panels={'dual_gate': {'metadata': {'sample_id': 'YZ365'}}})
+        self.assertEqual(MainWindow._saved_sample_id(session), 'BO146')
+        session.sample_id = ''
+        session.sample_profiles = {
+            'YZ365': {'updated_at': '2026-09-20', 'state': {}},
+            'BO146': {'updated_at': '2026-09-26', 'state': {}},
+        }
+        self.assertEqual(MainWindow._saved_sample_id(session), 'BO146')
+
+    def test_save_now_commits_typed_selector_before_saving(self):
+        from types import SimpleNamespace
+        calls = []
+        host = SimpleNamespace(
+            _sample_selector=SimpleNamespace(currentText=lambda: 'BO146'),
+            _commit_sample_selection=lambda value: calls.append(('select', value)) or True,
+            _persist_session=lambda: calls.append(('save',)),
+        )
+        MainWindow._save_current_sample(host)
+        self.assertEqual(calls, [('select', 'BO146'), ('save',)])
+
+    def test_restart_restores_last_sample_profile_not_yz365(self):
+        from types import SimpleNamespace
+        from utils.config import AppConfig
+        from pathlib import Path
+        import tempfile
+        config = AppConfig()
+        config.session.sample_id = 'BO146'
+        config.session.panels = {'dual_gate': {'value': 'old-yz365'}}
+        store = SampleSettingsStore({'sample_profiles': config.session.sample_profiles})
+        store.save('YZ365', {'panels': {'dual_gate': {'value': 'old-yz365'}}})
+        store.save('BO146', {'panels': {'dual_gate': {'value': 'last-bo146'}}})
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'config.json'
+            config.save(path)
+            restored = AppConfig(); restored.load(path)
+        states = []
+        host = SimpleNamespace(
+            _sample_id_binder=SimpleNamespace(value=MainWindow._saved_sample_id(restored.session), commit=lambda value: None),
+            _sample_store=SampleSettingsStore({'sample_profiles': restored.session.sample_profiles}),
+            _restore_panels=lambda panels: None,
+            _restore_state=states.append,
+            _sample_scoped_state=MainWindow._sample_scoped_state,
+            _refresh_sample_selector=lambda: None,
+        )
+        with patch.object(cfg, 'session', restored.session):
+            MainWindow._restore_session(host)
+        self.assertEqual(states[-1]['panels']['dual_gate']['value'], 'last-bo146')
+
     def test_sample_switch_saves_outgoing_profile_before_restoring_target(self):
         host = MainWindow.__new__(MainWindow)
         QMainWindow.__init__(host)

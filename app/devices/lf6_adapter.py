@@ -45,9 +45,8 @@ class SpectrometerLF6:
     def acquire(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Return (wavelengths, intensities).
-        Use the cached λ axis: configure_for_acquisition() and
-        change_spectra_center() invalidate the cache whenever the center
-        changes, so a per-spectrum re-read here would be pure overhead.
+        Refresh the SDK axis for every captured frame. LightField can also
+        change calibration outside this adapter's setting methods.
         """
         # acquire_2d preserves full-sensor geometry while still returning a
         # flat buffer when the LightField frame does not expose dimensions.
@@ -55,7 +54,7 @@ class SpectrometerLF6:
             y = np.asarray(self.setup.acquire_2d(), dtype=float)
         else:
             y = np.asarray(self.setup.acquire(), dtype=float)
-        wl = self.calibration_wavelengths(force=False)
+        wl = self.calibration_wavelengths(force=True)
         if y.ndim == 2 and y.shape[0] > 1 and y.shape[1] > 1:
             return align_wavelengths_to_image(wl, y)
         y = y.ravel()
@@ -67,66 +66,30 @@ class SpectrometerLF6:
         return bool(method()) if callable(method) else False
 
     def acquire_2d(self):
-        """
-        Capture one frame and return a 2D array if the frame reports Width/Height.
-        Keeps your existing acquire() behavior unchanged (still 1D for other code).
-        """
-        import numpy as np
-
-        frames = 1
-        dataset = self.experiment.Capture(frames)
-
-        frame = dataset.GetFrame(0, frames - 1)
-        image_data = frame.GetData()
-
-        arr = np.asarray(self.convert_buffer(image_data, frame.Format))
-
-        # Local helper => cannot NameError due to scope/indentation
-        def _dim(f, candidates):
-            for name in candidates:
-                if hasattr(f, name):
-                    v = getattr(f, name)
-                    try:
-                        return int(v() if callable(v) else v)
-                    except Exception:
-                        pass
-            return None
-
-        # Try common LightField frame dimension names
-        w = _dim(frame, ["Width", "GetWidth", "SizeX", "GetSizeX", "XSize", "GetXSize"])
-        h = _dim(frame, ["Height", "GetHeight", "SizeY", "GetSizeY", "YSize", "GetYSize"])
-
-        # If 2D is flattened, reshape back
-        if w and h and arr.ndim == 1 and arr.size == w * h:
-            arr = arr.reshape(h, w)
-
-        return arr
+        """Use the setup's validated capture and metadata path for 2D too."""
+        return self.setup.acquire_2d()
 
     # ---- convenience setter that also clears λ cache ----
     def change_spectra_center(self, center_nm) -> None:
         """Accepts '730' or 730.0; forwards to LF6 and invalidates λ cache."""
-        method = getattr(self.setup, "set_center_wavelength_when_ready", None)
-        if callable(method):
-            method(float(center_nm))
-        else:
-            raise AttributeError("LF6Setup has no guarded center-wavelength setter")
-        self.invalidate_wavelengths()
+        self.set_center_wavelength_when_ready(center_nm)
+
+    change_center_wavelength = change_spectra_center
 
     def set_center_wavelength_when_ready(self, center_nm, **kwargs) -> None:
         """Guarded shared center setter used by all production callers."""
         method = getattr(self.setup, "set_center_wavelength_when_ready", None)
         if not callable(method):
             raise AttributeError("LF6Setup has no guarded center-wavelength setter")
-        method(float(center_nm), **kwargs)
         self.invalidate_wavelengths()
+        method(float(center_nm), **kwargs)
 
     def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
         method = getattr(self.setup, "configure_for_acquisition", None)
         if not callable(method):
             raise AttributeError("LF6Setup has no acquisition preparation surface")
-        result = method(center_nm=center_nm, exposure_ms=exposure_ms, frames=frames)
         self.invalidate_wavelengths()
-        return result
+        return method(center_nm=center_nm, exposure_ms=exposure_ms, frames=frames)
 
     # ---- frames/accums convenience ----
     def set_accumulations(self, n: int) -> None:

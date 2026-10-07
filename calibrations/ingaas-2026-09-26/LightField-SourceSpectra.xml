@@ -1,0 +1,2525 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<sources>
+  <source name="PI Neon" type="lines" symbol="Ne" units="nm" display="PI NeAr" notes="Ne in glass with trace Ar" show="true" index="1">
+    <line index="0"  order="0" rel="1000"  v="*" s="Ne">0.0000</line>
+    <line index="0"  order="1" rel="1000"   v="*" s="Ne">352.04714</line>
+    <line order="1" rel="1100" v="*" s="Ne">540.05616</line>
+    <line order="1" rel="270"   v="*" s="Ne">574.82985</line>
+    <line order="1" rel="800"   v="*" s="Ne">576.44188</line>
+    <line order="1" rel="400"   v="*" s="Ne">582.01558</line>
+    <line order="1" rel="52500" v="*" s="Ne">585.2488</line>
+    <line order="1" rel="4200"  v="*" s="Ne">588.1895</line>
+    <line order="1" rel="7200"  v="*" s="Ne">594.4834</line>
+    <line order="1" rel="2100"  v="*" s="Ne">597.553</line>
+    <line order="1" rel="2280"  v="*" s="Ne">603.000</line>
+    <line order="1" rel="6400"  v="*" s="Ne">607.434</line>
+    <line order="1" rel="11500" v="*" s="Ne">609.616</line>
+    <line order="1" rel="18700" v="*" s="Ne">614.306</line>
+    <line order="1" rel="5300"  v="*" s="Ne">616.359</line>
+    <line order="1" rel="3500"  v="*" s="Ne">621.728</line>
+    <line order="1" rel="11500" v="*" s="Ne">626.650</line>
+    <line order="1" rel="4200"  v="*" s="Ne">630.479</line>
+    <line order="1" rel="9200"  v="*" s="Ne">633.443</line>
+    <line order="1" rel="17500" v="*" s="Ne">638.299</line>
+    <line order="1" rel="30500" v="*" s="Ne">640.225</line>
+    <line order="1" rel="17100" v="*" s="Ne">650.653</line>
+    <line order="1" rel="5800"  v="*" s="Ne">653.288</line>
+    <line order="1" rel="8800"  v="*" s="Ne">659.895</line>
+    <line order="1" rel="16000" v="*" s="Ne">667.830</line>
+    <line order="1" rel="8500"  v="*" s="Ne">671.7043</line>
+    <line order="1" rel="13500" v="1" s="Ne">692.947</line>
+    <line order="2" rel="2500"  v="1" s="Ar">696.5431</line>
+    <line order="1" rel="35500" v="1" s="Ne">703.241</line>
+    <line order="2" rel="1700"  v="1" s="Ar">706.7218</line>
+    <line order="1" rel="2000"  v="1" s="Ne">717.394</line>
+    <line order="1" rel="11200" v="1" s="Ne">724.51665</line>
+    <line order="1" rel="200"   v="1" s="Ar" notes="maybe seeing this with the LS">727.2936</line>
+    <line order="2" rel="3000"  v="1" s="Ar">738.3980</line>
+    <line order="1" rel="3300"  v="1" s="Ne">743.899</line>
+    <line order="1" rel="150"   v="1" s="Ne">747.24383</line>
+    <line order="1" rel="3900"  v="1" s="Ne">748.887</line>
+    <line order="1" rel="14000" v="1" s="Ar">750.387</line>
+    <line order="1" rel="6600"  v="1" s="Ar">751.465</line>
+    <line order="1" rel="3500"  v="1" s="Ne">753.577</line>
+    <line order="1" rel="1800"  v="1" s="Ne">754.404</line>
+    <line order="1" rel="19000" v="1" s="Ar">763.5106</line>
+    <line order="1" rel="6400"  v="1" s="Ar">772.3761</line>
+    <line order="1" rel="200"   v="1" s="Ne">794.31805</line>
+    <line order="1" rel="5000"  v="1" s="Ar">794.8176</line>
+    <line order="1" rel="2200"  v="1" s="Ar">800.6157</line>
+    <line order="1" rel="2600"  v="1" s="Ar">801.4786</line>
+    <line order="1" rel="900"   v="1" s="Ne">808.24576</line>
+    <line order="1" rel="6200"  v="1" s="Ar">810.3693</line>
+    <line order="2" rel="400"   v="1" s="Ne">811.85495</line>
+    <line order="1" rel="21000" v="1" s="Ar">811.5311</line>     
+    <line order="2" rel="1000"  v="1" s="Ne">811.8546</line>
+    <line order="2" rel="400"   v="1" s="Ne">812.8911</line>
+    <line order="2" rel="950"   v="1" s="Ne">813.6406</line>
+    <line order="1" rel="150"   v="0" s="Ne">825.93795</line>
+    <line order="1" rel="3100"  v="0" s="Ar">826.4522</line>
+    <line order="2" rel="300"   v="0" s="Ne">826.60769</line>
+    <line order="2" rel="1600"  v="1" s="Ne">830.03248</line>
+    <line order="2" rel="140"   v="1" s="Ne">830.15570</line>
+    <line order="1" rel="280"   v="0" s="Ne">836.57465</line>
+    <line order="2" rel="600"   v="1" s="Ne">837.63590</line>
+    <line order="2" rel="6300"  v="1" s="Ne">837.7607</line>
+    <line order="1" rel="3800"  v="1" s="Ar">840.8210</line>
+    <line order="1" rel="100"   v="1" s="Ne">841.71597</line>
+    <line order="2" rel="1800"  v="1" s="Ne">841.8427</line>
+    <line order="2" rel="3900"  v="1" s="Ar">842.4648</line>
+    <line order="1" rel="170"   v="1" s="Ne">846.33569</line>
+    <line order="2" rel="100"   v="1" s="Ne">848.44424</line>
+    <line order="2" rel="3600"  v="1" s="Ne">849.536591</line>
+    <line order="1" rel="2500"  v="1" s="Ar">852.1442</line>
+    <line order="5" rel="1100"  v="0" s="Ne">859.12583</line>
+    <line order="3" rel="1400"  v="0" s="Ne">863.46472</line>
+    <line order="3" rel="3000"  v="0" s="Ne">865.43828</line>
+    <line order="3" rel="120"   v="0" s="Ne">865.55220</line>
+    <line order="3" rel="700"   v="0" s="Ne">867.94936</line>
+    <line order="3" rel="300"   v="0" s="Ne">868.19216</line>
+    <line order="3" rel="400"   v="0" s="Ne">877.16575</line>
+    <line order="3" rel="100"   v="0" s="Ne" minSp="2500">877.87322</line>
+    <line order="3" rel="4800"  v="0" s="Ne">878.06223</line>
+    <line order="3" rel="2950"  v="0" s="Ne">878.37539</line>
+    <line order="3" rel="1500"  v="0" s="Ne">885.38669</line>
+    <line order="3" rel="1000"  v="0" s="Ne">886.57562</line>
+    <line order="3" rel="780"   v="0" s="Ne">891.95007</line>
+    <line order="1" rel="4400"  v="1" s="Ar">912.2967</line>
+    <line order="2" rel="260"   v="1" s="Ne">914.86720</line>
+    <line order="2" rel="200"   v="1" s="Ar">919.4638</line>
+    <line order="2" rel="230"   v="1" s="Ne">920.17588</line>
+    <line order="2" rel="170"   v="1" s="Ne">922.00598</line>
+    <line order="2" rel="100"   v="1" s="Ne">922.15802</line>
+    <line order="1" rel="700"   v="1" s="Ar">922.4499</line>
+    <line order="2" rel="40"    v="1" s="Ne">922.6691</line>
+    <line order="2" rel="70"    v="1" s="Ar">927.5519</line>
+    <line order="2" rel="20"    v="1" s="Ne">928.7563</line>
+    <line order="2" rel="80"    v="1" s="Ar">929.1531</line>
+    <line order="2" rel="100"   v="1" s="Ne">930.08532</line>
+    <line order="2" rel="50"    v="1" s="Ne">931.0583</line>
+    <line order="2" rel="90"    v="1" s="Ne">931.3973</line>
+    <line order="2" rel="120"   v="1" s="Ne">932.65072</line>
+    <line order="2" rel="80"    v="1" s="Ar">935.4220</line>
+    <line order="2" rel="60"    v="1" s="Ne">937.33079</line>
+    <line order="2" rel="100"   v="1" s="Ne">942.53797</line>
+    <line order="2" rel="75"    v="1" s="Ne">945.9211</line>
+    <line order="2" rel="80"    v="1" s="Ne">948.6683</line>
+    <line order="2" rel="100"   v="1" s="Ne">953.41640</line>
+    <line order="2" rel="50"    v="1" s="Ne">954.7405</line>
+    <line order="1" rel="900"   v="1" s="Ar">965.7786</line>
+    <line order="2" rel="170"   v="1" s="Ne">966.54200</line>
+    <line order="2" rel="100"   v="1" s="Ar">978.4503</line>
+    <line order="1" rel="50"    v="1" s="Ne">1056.24089</line>
+    <line order="1" rel="50"    v="1" s="Ne">1079.80430</line>
+    <line order="1" rel="50"    v="1" s="Ne">1084.44774</line>
+    <line order="2" rel="100"   v="1" s="Ne">1114.30200</line>
+    <line order="2" rel="100"   v="1" s="Ne">1117.75246</line>
+    <line order="2" rel="50"    v="1" s="Ne">1139.04333</line>
+    <line order="2" rel="100"   v="1" s="Ne">1152.27450</line>
+    <line order="2" rel="50"    v="1" s="Ne">1152.50203</line>
+    <line order="2" rel="40"    v="1" s="Ne">1176.67929</line>
+    <line order="2" rel="40"    v="1" s="Ne">1178.90444</line> <!--Corrected by Jason 06/12/2012 -->
+  </source>
+  <source name="Neon" type="lines" symbol="Ne" units="nm" display="Neon" show="true" index="2">
+    <line order="0" rel="1000"   v="*" s="Ne">0.0000</line>
+    <line order="1" rel="1000"   v="*" s="Ne">451.7736</line>
+    <line order="1" rel="3000"   v="*" s="Ne">453.76768</line>
+    <line order="1" rel="10000"  v="*" s="Ne">453.77545</line>
+    <line order="1" rel="3000"   v="*" s="Ne">453.83026</line>
+    <line order="1" rel="3000"   v="*" s="Ne">457.50620</line>
+    <line order="1" rel="1500"   v="*" s="Ne">458.2035</line>
+    <line order="1" rel="1500"   v="*" s="Ne">458.24521</line>
+    <line order="1" rel="1500"   v="*" s="Ne">460.9910</line>
+    <line order="1" rel="1000"   v="*" s="Ne">461.4391</line>
+    <line order="1" rel="1500"   v="*" s="Ne">462.83113</line>
+    <line order="1" rel="3000"   v="*" s="Ne">464.54180</line>
+    <line order="1" rel="3000"   v="*" s="Ne">465.63936</line>
+    <line order="1" rel="1500"   v="*" s="Ne">466.11054</line>
+    <line order="1" rel="1000"   v="*" s="Ne">466.73643</line>
+    <line order="1" rel="3000"   v="*" s="Ne">467.8218</line>
+    <line order="1" rel="1500"   v="*" s="Ne">467.9135</line>
+    <line order="1" rel="1000"   v="*" s="Ne">468.03670</line>
+    <line order="1" rel="1000"   v="*" s="Ne">468.7671</line>
+    <line order="1" rel="1500"   v="*" s="Ne">470.25305</line>
+    <line order="1" rel="15000"  v="*" s="Ne">470.43949</line>
+    <line order="1" rel="12000"  v="*" s="Ne">470.88594</line>
+    <line order="1" rel="10000"  v="*" s="Ne">471.00650</line>
+    <line order="1" rel="15000"  v="*" s="Ne">471.20633</line>
+    <line order="1" rel="15000"  v="*" s="Ne">471.5344</line>
+    <line order="1" rel="3000"   v="*" s="Ne">474.95754</line>
+    <line order="1" rel="5000"   v="*" s="Ne">475.27320</line>
+    <line order="1" rel="1000"   v="*" s="Ne">475.4440</line>
+    <line order="1" rel="1500"   v="*" s="Ne">475.8728</line>
+    <line order="1" rel="3000"   v="*" s="Ne">478.0338</line>
+    <line order="1" rel="10000"  v="*" s="Ne">478.89258</line>
+    <line order="1" rel="1000"   v="*" s="Ne">478.95982</line>
+    <line order="1" rel="5000"   v="*" s="Ne">479.02195</line>
+    <line order="1" rel="1500"   v="*" s="Ne">481.00640</line>
+    <line order="1" rel="1000"   v="*" s="Ne">481.06392</line>
+    <line order="1" rel="3000"   v="*" s="Ne">481.76386</line>
+    <line order="1" rel="1500"   v="*" s="Ne">481.87847</line>
+    <line order="1" rel="3000"   v="*" s="Ne">482.19218</line>
+    <line order="1" rel="1000"   v="*" s="Ne">482.31725</line>
+    <line order="1" rel="10000"  v="*" s="Ne">482.7338</line>
+    <line order="1" rel="3000"   v="*" s="Ne">482.7587</line>
+    <line order="1" rel="5000"   v="*" s="Ne">483.73139</line>
+    <line order="1" rel="1000"   v="*" s="Ne">485.2655</line>
+    <line order="1" rel="1000"   v="*" s="Ne">486.30810</line>
+    <line order="1" rel="1000"   v="*" s="Ne">486.55065</line>
+    <line order="1" rel="10000"  v="*" s="Ne">488.49170</line>
+    <line order="1" rel="1000"   v="*" s="Ne">488.50971</line>
+    <line order="1" rel="5000"   v="*" s="Ne">489.2090</line>
+    <line order="1" rel="1000"   v="*" s="Ne">493.9041</line>
+    <line order="1" rel="1000"   v="*" s="Ne">494.4987</line>
+    <line order="1" rel="1500"   v="*" s="Ne">495.53905</line>
+    <line order="1" rel="10000"  v="*" s="Ne">495.70335</line>
+    <line order="1" rel="1500"   v="*" s="Ne">495.7122</line>
+    <line order="1" rel="1000"   v="*" s="Ne">497.35555</line>
+    <line order="1" rel="1500"   v="*" s="Ne">499.4930</line>
+    <line order="1" rel="5000"   v="*" s="Ne">500.5159</line>
+    <line order="1" rel="2500"   v="*" s="Ne">503.1348</line>
+    <line order="1" rel="5000"   v="*" s="Ne">503.7751</line>
+    <line order="1" rel="1500"   v="*" s="Ne">508.0383</line>
+    <line order="1" rel="1500"   v="*" s="Ne">511.6503</line>
+    <line order="1" rel="1500"   v="*" s="Ne">512.2257</line>
+    <line order="1" rel="1500"   v="*" s="Ne">512.2361</line>
+    <line order="1" rel="5000"   v="*" s="Ne">514.4938</line>
+    <line order="1" rel="5000"   v="*" s="Ne">514.5011</line>
+    <line order="1" rel="1500"   v="*" s="Ne">518.8612</line>
+    <line order="1" rel="1500"   v="*" s="Ne">519.3125</line>
+    <line order="1" rel="1500"   v="*" s="Ne">519.3224</line>
+    <line order="1" rel="1500"   v="*" s="Ne">520.3896</line>
+    <line order="1" rel="1500"   v="*" s="Ne">529.8189</line>
+    <line order="1" rel="6000"   v="*" s="Ne">533.0778</line>
+    <line order="1" rel="10000"  v="*" s="Ne">534.1093</line>
+    <line order="1" rel="6000"   v="*" s="Ne">534.3283</line>
+    <line order="1" rel="1500"   v="*" s="Ne">534.9204</line>
+    <line order="1" rel="1500"   v="*" s="Ne">535.5164</line>
+    <line order="1" rel="1500"   v="*" s="Ne">535.5424</line>
+    <line order="1" rel="1500"   v="*" s="Ne">536.0012</line>
+    <line order="1" rel="20000"  v="*" s="Ne">540.0562</line>
+    <line order="1" rel="2500"   v="*" s="Ne">541.2649</line>
+    <line order="1" rel="1500"   v="*" s="Ne">541.8558</line>
+    <line order="1" rel="2500"   v="*" s="Ne">543.3651</line>
+    <line order="1" rel="1500"   v="*" s="Ne">544.8509</line>
+    <line order="1" rel="1500"   v="*" s="Ne">556.2442</line>
+    <line order="1" rel="5000"   v="*" s="Ne">556.2766</line>
+    <line order="1" rel="5000"   v="*" s="Ne">565.6659</line>
+    <line order="1" rel="1500"   v="*" s="Ne">568.9816</line>
+    <line order="1" rel="1500"   v="*" s="Ne">571.8880</line>
+    <line order="1" rel="5000"   v="*" s="Ne">571.9225</line>
+    <line order="1" rel="5000"   v="*" s="Ne">574.8296</line>
+    <line order="1" rel="7000"   v="*" s="Ne">576.4419</line>
+    <line order="1" rel="5000"   v="*" s="Ne">580.4450</line>
+    <line order="1" rel="3000"   v="*" s="Ne">581.1407</line>
+    <line order="1" rel="5000"   v="*" s="Ne">582.0156</line>
+    <line order="1" rel="20000"  v="*" s="Ne">585.2488</line>
+    <line order="1" rel="5000"   v="*" s="Ne">587.2828</line>
+    <line order="1" rel="10000"  v="*" s="Ne">588.1895</line>
+    <line order="1" rel="2500"   v="*" s="Ne">591.3633</line>
+    <line order="1" rel="2500"   v="*" s="Ne">591.8907</line>
+    <line order="1" rel="5000"   v="*" s="Ne">594.4834</line>
+    <line order="1" rel="5000"   v="*" s="Ne">596.5471</line>
+    <line order="1" rel="5000"   v="*" s="Ne">597.4627</line>
+    <line order="1" rel="5000"   v="*" s="Ne">597.5534</line>
+    <line order="1" rel="10000"  v="*" s="Ne">602.9997</line>
+    <line order="1" rel="10000"  v="*" s="Ne">607.4338</line>
+    <line order="1" rel="3000"   v="*" s="Ne">609.6163</line>
+    <line order="1" rel="10000"  v="*" s="Ne">614.3063</line>
+    <line order="1" rel="10000"  v="*" s="Ne">616.3594</line>
+    <line order="1" rel="1500"   v="*" s="Ne">618.2146</line>
+    <line order="1" rel="1500"   v="*" s="Ne">621.3876</line>
+    <line order="1" rel="10000"  v="*" s="Ne">621.7281</line>
+    <line order="1" rel="10000"  v="*" s="Ne">626.6495</line>
+    <line order="1" rel="1500"   v="*" s="Ne">631.3686</line>
+    <line order="1" rel="3000"   v="*" s="Ne">632.8165</line>
+    <line order="1" rel="1500"   v="*" s="Ne">633.0889</line>
+    <line order="1" rel="10000"  v="*" s="Ne">633.4428</line>
+    <line order="1" rel="10000"  v="*" s="Ne">638.2991</line>
+    <line order="1" rel="20000"  v="*" s="Ne">640.2248</line>
+    <line order="1" rel="1500"   v="*" s="Ne">640.9747</line>
+    <line order="1" rel="1500"   v="*" s="Ne">644.4712</line>
+    <line order="1" rel="15000"  v="*" s="Ne">650.6528</line>
+    <line order="1" rel="1000"   v="*" s="Ne">653.2882</line>
+    <line order="1" rel="10000"  v="*" s="Ne">659.8953</line>
+    <line order="1" rel="1500"   v="*" s="Ne">665.2093</line>
+    <line order="1" rel="5000"   v="*" s="Ne">667.8277</line>
+    <line order="1" rel="100000" v="1" s="Ne">692.9467</line>
+    <line order="1" rel="34000"  v="1" s="Ne">702.4050</line>
+    <line order="1" rel="85000"  v="1" s="Ne">703.2413</line>
+    <line order="1" rel="2200"   v="0" s="Ne">705.1292</line>
+    <line order="1" rel="10000"  v="0" s="Ne">705.9108</line>
+    <line order="1" rel="77000"  v="1" s="Ne">717.3938</line>
+    <line order="1" rel="77000"  v="1" s="Ne">724.5167</line>
+    <line order="1" rel="60000"  v="1" s="Ne">743.8898</line>
+    <line order="1" rel="3100"   v="1" s="Ne">747.2438</line>
+    <line order="1" rel="32000"  v="1" s="Ne">748.8871</line>
+    <line order="1" rel="28000"  v="1" s="Ne">753.5774</line>
+    <line order="1" rel="13000"  v="1" s="Ne">754.4044</line>
+    <line order="1" rel="1300"   v="1" s="Ne">793.6996</line>
+    <line order="1" rel="7900"   v="1" s="Ne">794.3181</line>
+    <line order="2" rel="5700"   v="1" s="Ne">808.2458</line>
+    <line order="2" rel="3800"   v="1" s="Ne">811.8546</line>
+    <line order="2" rel="1200"   v="1" s="Ne">812.8911</line>
+    <line order="2" rel="17000"  v="1" s="Ne">813.641</line>
+    <line order="2" rel="3300"   v="0" s="Ne">825.9380</line>
+    <line order="2" rel="7200"   v="0" s="Ne">826.6077</line>
+    <line order="2" rel="29000"  v="1" s="Ne">830.0325</line>
+    <line order="2" rel="1900"   v="1" s="Ne">830.1557</line>
+    <line order="2" rel="4600"   v="0" s="Ne">836.5746</line>
+    <line order="2" rel="6600"   v="0" s="Ne">837.6359</line>
+    <line order="2" rel="76000"  v="1" s="Ne">837.7607</line>
+    <line order="2" rel="26000"  v="1" s="Ne">841.8427</line>
+    <line order="2" rel="3700"   v="1" s="Ne">846.3357</line>
+    <line order="2" rel="1300"   v="1" s="Ne">848.4442</line>
+    <line order="2" rel="69000"  v="1" s="Ne">849.5359</line>
+    <line order="2" rel="1600"   v="1" s="Ne">854.4695</line>
+    <line order="2" rel="2900"   v="1" s="Ne">857.1353</line>
+    <line order="5" rel="41000"  v="0" s="Ne">859.1258</line>
+    <line order="3" rel="35000"  v="0" s="Ne">863.4647</line>
+    <line order="3" rel="6000"   v="0" s="Ne">864.7041</line>
+    <line order="3" rel="64000"  v="0" s="Ne">865.4383</line>
+    <line order="3" rel="13000"  v="0" s="Ne">867.9494</line>
+    <line order="3" rel="15000"  v="0" s="Ne">868.1921</line>
+    <line order="3" rel="10000"  v="0" s="Ne">877.1658</line>
+    <line order="3" rel="2100"   v="0" s="Ne">877.8732</line>
+    <line order="3" rel="57000"  v="0" s="Ne">878.0622</line>
+    <line order="3" rel="43000"  v="0" s="Ne">878.3754</line>
+    <line order="3" rel="27000"  v="0" s="Ne">885.3867</line>
+    <line order="3" rel="2100"   v="0" s="Ne">886.5301</line>
+    <line order="3" rel="15000"  v="0" s="Ne">886.5756</line>
+    <line order="3" rel="6400"   v="0" s="Ne">891.9501</line>
+    <line order="3" rel="1800"   v="0" s="Ne">898.8856</line>
+    <line order="3" rel="12000"  v="0" s="Ne">914.8672</line>
+    <line order="3" rel="8900"   v="0" s="Ne">920.1758</line>
+    <line order="3" rel="6000"   v="0" s="Ne">922.0060</line>
+    <line order="3" rel="2200"   v="0" s="Ne">922.1580</line>
+    <line order="3" rel="1800"   v="0" s="Ne">922.6691</line>
+    <line order="3" rel="7700"   v="0" s="Ne">930.0853</line>
+    <line order="3" rel="2700"   v="0" s="Ne">931.3973</line>
+    <line order="3" rel="6900"   v="0" s="Ne">932.6507</line>
+    <line order="3" rel="1500"   v="0" s="Ne">937.3308</line>
+    <line order="3" rel="4800"   v="0" s="Ne">942.5380</line>
+    <line order="3" rel="2800"   v="0" s="Ne">945.9211</line>
+    <line order="3" rel="5000"   v="0" s="Ne">948.6683</line>
+    <line order="3" rel="6100"   v="0" s="Ne">953.4164</line>
+    <line order="3" rel="2800"   v="0" s="Ne">954.7405</line>
+    <line order="3" rel="18000"  v="0" s="Ne">966.5420</line>
+    <line order="2" rel="100"    v="1" s="Ne">1170.4976</line>
+  </source>
+  <source name="PI Mercury" type="lines" symbol="Hg" units="nm" display="PI Mercury" show="true" index="3">
+    <line order="0" rel="1" v="" s="Hg">0.000</line> -->
+    <line order="1" rel="1" v="" s="Hg">253.652</line>
+    <line order="1" rel="0.285134185330964" v="" s="Hg">265.204</line>
+    <line order="1" rel="0.000845764542294388" v="" s="Hg">265.369</line>
+    <line order="1" rel="0.0027122504023543" v="" s="Hg">289.3601</line>
+    <line order="1" rel="0.0677087569629033" v="" s="Hg">296.7283</line>
+    <line order="1" rel="0.013052483230525" v="" s="Hg">302.1504</line>
+    <line order="1" rel="0.13763687951207" v="" s="Hg">312.5674</line>
+    <line order="1" rel="0.204436775076323" v="" s="Hg">313.1555</line>
+    <line order="1" rel="0.254436775076323" v="" s="Hg">313.1844</line>
+    <line order="1" rel="0.00813424699807876" v="" s="Hg">334.1484</line>
+    <line order="1" rel="0.295692569658565" v="" s="Hg">365.0158</line>
+    <line order="1" rel="0.0511758159767439" v="" s="Hg">365.4842</line>
+    <line order="1" rel="0.0366098121836618" v="" s="Hg">366.3284</line>
+    <line order="1" rel="0.374930564701006" v="" s="Hg">404.6565</line>
+    <line order="1" rel="0.0125337279512055" v="" s="Hg">407.7837</line>
+    <line order="1" rel="0.000244280027508173" v="" s="Hg">433.922</line>
+    <line order="1" rel="0.00377738896327248" v="" s="Hg">434.7506</line>
+    <line order="1" rel="0.684716013640624" v="" s="Hg">435.8335</line>
+    <line order="1" rel="0.0626084035506391" v="" s="??">450.1500</line>
+    <line order="1" rel="5.96415091924081E-05" v="" s="??">475.6500</line>
+    <line order="1" rel="0.000316835620479623" v="" s="Hg">491.607</line>
+    <line order="1" rel="0.00239534674532959" v="" s="??">496.44</line>
+    <line order="1" rel="6.99384544379003E-05" v="" s="??">498.38</line>
+    <line order="2" rel="0.9" v="" s="Hg">507.3042</line>
+    <line order="2" rel="0.000899885154844223" v="" s="Hg">530.408</line>
+    <line order="2" rel="0.00061212086187642" v="" s="Hg">530.738</line>
+    <line order="1" rel="0.352955923535932" v="" s="Hg">546.075</line>
+    <line order="1" rel="0.042137389754701" v="" s="??">551.345</line>
+    <line order="1" rel="8.35874541912611E-05" v="" s="??">565.145</line>
+    <line order="1" rel="0.0273125742055912" v="" s="Hg">576.961</line>
+    <line order="2" rel="0.000996607063935755" v="" s="Hg">578.7202</line>
+    <line order="1" rel="0.0340748734506307" v="" s="Hg">579.067</line>
+    <line order="1" rel="1.72518257618179E-05" v="" s="??">585.1000</line>
+    <line order="2" rel="0.0201891075831465" v="" s="Hg">593.4566</line>
+    <line order="2" rel="0.00449290025861798" v="" s="Hg">604.3008</line>
+    <line order="1" rel="5.21334117501546E-05" v="" s="??">604.6500</line>
+    <line order="1" rel="0.000272136917486237" v="" s="??">621.4000</line>
+    <line order="2" rel="0.0219205655899042" v="" s="Hg">625.1348</line>
+    <line order="2" rel="0.0407830641895586" v="" s="Hg">626.311</line>
+    <line order="2" rel="3.41234E-5" v="" s="Ar">668.42924</line>
+    <line order="1" rel="3.35980E-5" v="" s="Hg">671.634</line>
+    <line order="1" rel="0.000580300172143123" v="" s="Hg">690.752</line>
+    <line order="1" rel="0.000515309326294326" v="" s="Ar">696.5431</line>
+    <line order="1" rel="0.000352177327938925" v="" s="Ar">706.7219</line>
+    <line order="1" rel="0.00012356"         v="" s="Hg">708.1901</line>
+    <line order="1" rel="0.000273816882073057" v="" s="Ar">727.2936</line>
+    <line order="2" rel="0.0044075764395614" v="" s="Hg">730.0316</line>
+    <line order="2" rel="0.00323295560629691" v="" s="Hg">730.968</line>
+    <line order="2" rel="0.00114100911523839" v="" s="Hg">732.6568</line>
+    <line order="2" rel="0.001226644993697221" v="" s="Ar">738.398</line>
+    <line order="2" rel="0.00419393101452558" v="" s="Ar">750.3869</line>
+    <line order="2" rel="0.002068822023043202" v="" s="Ar">751.4652</line>
+    <line order="3" rel="0.060236275003934" v="" s="Hg">760.9563</line>
+    <line order="2" rel="0.025128854203572" v="" s="Ar">763.5106</line>
+    <line order="2" rel="0.00592663689405141" v="" s="Ar">772.3761</line>
+    <line order="2" rel="0.001484504446748497" v="" s="Ar">794.8176</line>
+    <line order="2" rel="0.00127436743505199" v="" s="Ar">800.6157</line>
+    <line order="2" rel="0.001527673598819111" v="" s="Ar">801.4786</line>
+    <line order="2" rel="0.000661597984614355" v="" s="Hg">809.3130</line>
+    <line order="1" rel="0.00130928045507528" v="1" s="Ar">810.3693</line>
+    <line order="1" rel="0.0046579777071511" v="1" s="Ar">811.5311</line>    
+    <line order="2" rel="0.00170245536962822" v="" s="Ar">826.4522</line>
+    <line order="2" rel="0.00166754822964924" v="" s="Ar">840.8210</line>
+    <line order="2" rel="0.00234837587935048" v="" s="Ar">842.4648</line>
+    <line order="2" rel="0.000568846485157864" v="" s="Ar">852.1442</line>
+    <line order="2" rel="0.037647842626046" v="" s="Hg">871.6670</line>
+    <line order="1" rel="0.0161899560203384" v="1" s="Ar">912.2967</line>
+    <line order="1" rel="0.00242415415099042" v="1" s="Ar">922.4499</line>
+    <line order="3" rel="1.11264348049879E-05" v="" s="Hg">937.7022</line>
+    <line order="1" rel="0.00626107442897077" v="1" s="Ar">965.7786</line>
+    <line order="1" rel="0.0921572553143024" v="1" s="Hg">1013.975</line>
+    <line order="4" rel="0.208536219224663" v="1" s="Hg">1014.6084</line>
+    <line order="2" rel="0.0557042647874445" v="" s="Hg">1092.148</line>
+    <line order="3" rel="0.00677530974164846" v="" s="Hg">1095.0474</line>
+    <line order="3" rel="0.000437082991109318" v="" s="Hg">1096.4520</line>
+    <line order="1" rel="0.0161120999277878" v="" s="Hg">1128.740</line>
+    <line order="2" rel="8.23163537103999E-05" v="" s="Hg">1153.922</line>
+    <line order="2" rel="0.00029274790167079" v="" s="Hg">1158.134</line>
+    <line order="5" rel="0.0905460675166768" v="" s="Hg">1268.260</line>
+  </source>
+  <source name="Mercury" type="lines" symbol="Hg" units="nm" display="Mercury" show="true" index="3">
+    <line  order="0" rel="1" v="" s="Hg">0.000</line>
+    <line order="1" rel="0.977926563824528" v="" s="Hg">253.652</line>
+    <line order="1" rel="0.0933400984917921" v="" s="Hg">265.204</line>
+    <line order="1" rel="0.00115720639639634" v="" s="Hg">265.369</line>
+    <line order="1" rel="0.000458571976509551" v="" s="Hg">280.346</line>
+    <line order="1" rel="0.00428406978929236" v="" s="Hg">289.3601</line>
+    <line order="1" rel="0.0916000893289501" v="" s="Hg">296.7283</line>
+    <line order="1" rel="0.0148433263008264" v="" s="Hg">302.1504</line>
+    <line order="1" rel="0.166675898831906" v="" s="Hg">312.5674</line>
+    <line order="1" rel="0.263481195213131" v="" s="Hg">313.1555</line>
+    <line order="1" rel="0.0116785007063737" v="" s="Hg">334.1484</line>
+    <line order="1" rel="0.295692569658565" v="" s="Hg">365.0158</line>
+    <line order="1" rel="0.0997501135517113" v="" s="Hg">365.484</line>
+    <line order="1" rel="0.0740280366455632" v="" s="Hg">366.3284</line>
+    <line order="1" rel="0.618839533963253" v="" s="Hg">404.6565</line>
+    <line order="1" rel="0.051773548265353" v="" s="Hg">407.7837</line>
+    <line order="1" rel="0.00164234641630614" v="" s="Hg">433.922</line>
+    <line order="1" rel="0.00464617427429085" v="" s="Hg">434.7506</line>
+    <line order="1" rel="1" v="" s="Hg">435.8335</line>
+    <line order="1" rel="1.62846169064193E-06" v="" s="Hg">479.701</line>
+    <line order="1" rel="0.00105941009286841" v="" s="Hg">491.607</line>
+    <line order="2" rel="0.9" v="" s="Hg">507.3042</line>
+    <line order="2" rel="0.00132975019960704" v="" s="Hg">530.408</line>
+    <line order="2" rel="0.00067637909661011" v="" s="Hg">530.738</line>
+    <line order="1" rel="0.736694642119487" v="" s="Hg">546.075</line>
+    <line order="1" rel="0.00020947672105257" v="" s="??">560.8000</line>
+    <line order="1" rel="0.000137335161399941" v="" s="??">564.0500</line>
+    <line order="1" rel="0.000760208426007285" v="" s="??">564.3500</line>
+    <line order="1" rel="5.01711069399743E-05" v="" s="??">571.3500</line>
+    <line order="1" rel="0.0966116528570069" v="" s="Hg">576.961</line>
+    <line order="2" rel="0.00218781628202961" v="" s="Hg">578.7202</line>
+    <line order="1" rel="0.0983129219067316" v="" s="Hg">579.067</line>
+    <line order="2" rel="0.027161990822221" v="" s="Hg">593.4566</line>
+    <line order="2" rel="0.00330005183602972" v="" s="Hg">604.3008</line>
+    <line order="2" rel="0.0311937559326747" v="" s="Hg">625.1348</line>
+    <line order="2" rel="0.0449761002695588" v="" s="Hg">626.311</line>
+    <line order="2" rel="0.00155365337900063" v="" s="Hg">668.2968</line>
+    <line order="1" rel="0.00135"          v="" s="Hg">671.634</line>
+    <line order="1" rel="0.00082356"         v="" s="Hg">708.1901</line>
+    <line order="2" rel="0.0329426589055744" v="" s="Hg">730.0316</line>
+    <line order="2" rel="0.00692456791940549" v="" s="Hg">730.968</line>
+    <line order="2" rel="0.00503532182784075" v="" s="Hg">732.6568</line>
+    <line order="3" rel="0.120763118594061" v="" s="Hg">760.9563</line>
+    <line order="2" rel="0.040339286697323" v="" s="Hg">809.3130</line>
+    <line order="2" rel="0.00251040503850212" v="" s="Hg">815.5674</line>
+    <line order="2" rel="0.0552709224457581" v="" s="Hg">871.6670</line>
+    <line order="3" rel="0.000470503392120768" v="" s="Hg">890.1849</line>
+    <line order="3" rel="0.000122426953501482" v="" s="Hg">906.4512</line>
+    <line order="3" rel="0.00109649661536324" v="" s="Hg">937.7022</line>
+    <line order="3" rel="0.00101971556743783" v="" s="Hg">939.4665</line>
+    <line order="4" rel="0.0707376383712934" v="" s="Hg">1014.6084</line>
+    <line order="2" rel="0.015150234586127" v="" s="Hg">1092.148</line>
+    <line order="3" rel="0.0119379518085468" v="" s="Hg">1095.0474</line>
+    <line order="3" rel="0.00239373835983686" v="" s="Hg">1096.4520</line>
+    <line order="3" rel="0.00157700084503214" v="" s="Hg">1098.9852</line>
+    <line order="2" rel="0.00170982643213126" v="" s="Hg">1153.922</line>
+    <line order="2" rel="0.00190460020153583" v="" s="Hg">1158.134</line>
+    <line order="5" rel="0.0299045010491243" v="" s="Hg">1268.260</line>
+    <line order="3" rel="7.82007382936191E-07" v="" s="Hg">1529.582</line>
+  </source>
+  <source name="Argon" type="lines" symbol="Ar" units="nm" display="Argon" show="false" index="4">
+    <line order="0" rel="1000"    v="1" s="Ar">0.0000</line>
+    <line order="2" rel="550"    v="1" s="Ar">460.9567</line>
+    <line order="2" rel="550"    v="1" s="Ar">472.6868</line>
+    <line order="2" rel="800"    v="1" s="Ar">476.4864</line>
+    <line order="2" rel="500"    v="1" s="Ar">480.6020</line>
+    <line order="2" rel="800"    v="1" s="Ar">487.9863</line>
+    <line order="2" rel="10000"  v="1" s="Ar">696.5431</line>
+    <line order="2" rel="10000"  v="1" s="Ar">706.7218</line>
+    <line order="2" rel="1000"   v="1" s="Ar">714.7041</line>
+    <line order="2" rel="2000"   v="1" s="Ar">727.2935</line>
+    <line order="2" rel="10000"  v="1" s="Ar">738.3980</line>
+    <line order="1" rel="20000"  v="1" s="Ar">750.3868</line>
+    <line order="1" rel="15000"  v="1" s="Ar">751.465</line>
+    <line order="1" rel="25000"  v="1" s="Ar">763.5106</line>
+    <line order="1" rel="15000"  v="1" s="Ar">772.3760</line>
+    <line order="1" rel="10000"  v="1" s="Ar">772.4207</line>
+    <line order="1" rel="20000"  v="1" s="Ar">794.8176</line>
+    <line order="1" rel="20000"  v="1" s="Ar">800.6157</line>
+    <line order="1" rel="25000"  v="1" s="Ar">801.4786</line>
+    <line order="1" rel="20000"  v="1" s="Ar">810.3693</line>
+    <line order="1" rel="20000"  v="1" s="Ar">842.4647</line>
+    <line order="1" rel="15000"  v="1" s="Ar">852.1442</line>
+    <line order="1" rel="4500"   v="1" s="Ar">866.7943</line>
+    <line order="1" rel="35000"  v="1" s="Ar">912.2967</line>
+    <line order="2" rel="550"    v="1" s="Ar">919.4638</line>
+    <line order="2" rel="15000"  v="1" s="Ar">922.4498</line>
+    <line order="2" rel="1600"   v="1" s="Ar">935.4218</line>
+    <line order="1" rel="20500"  v="1" s="Ar">965.7786</line>
+    <line order="2" rel="4500"   v="1" s="Ar">978.4502</line>
+  </source>
+  <source name="Nd:YAG" type="lines" symbol="Nd:YAG" units="nm" display="Nd:YAG" show="false">
+    <line order="1" rel="10000" v="">0</line>
+  </source>
+  <source name="YO4" type="lines" symbol="Y04" units="nm" display="Y04" show="false" notes="did Y1 only so far">
+    <line order="1" rel="1000" v="">0.0000</line>
+    <line order="1" rel="390" v="">294.840</line>
+    <line order="3" rel="480" v="">297.459</line>
+    <line order="3" rel="750" v="">298.426</line>
+    <line order="3" rel="540" v="">355.269</line>
+    <line order="1" rel="2800" v="">359.292</line>
+    <line order="1" rel="4300" v="">362.094</line>
+    <line order="1" rel="2400" v="">404.764</line>
+    <line order="1" rel="9400" v="">407.738</line>
+    <line order="1" rel="2000" v="">408.371</line>
+    <line order="1" rel="9900" v="">410.238</line>
+    <line order="1" rel="8900" v="">412.831</line>
+    <line order="1" rel="7500" v="">414.285</line>
+    <line order="1" rel="2400" v="">416.752</line>
+    <line order="1" rel="2000" v="">417.414</line>
+    <line order="1" rel="2200" v="">423.594</line>
+    <line order="1" rel="440" v="">434.879</line>
+    <line order="1" rel="500" v="">450.595</line>
+    <line order="1" rel="890" v="">452.725</line>
+    <line order="1" rel="440" v="">452.780</line>
+    <line order="1" rel="2000" v="">464.370</line>
+    <line order="1" rel="2000" v="">467.484</line>
+    <line order="1" rel="410" v="">476.098</line>
+    <line order="1" rel="770" v="">483.987</line>
+    <line order="1" rel="550" v="">484.568</line>
+    <line order="1" rel="410" v="">485.269</line>
+    <line order="1" rel="710" v="">546.646</line>
+    <line order="1" rel="740" v="">552.754</line>
+    <line order="1" rel="620" v="">558.187</line>
+    <line order="1" rel="560" v="">563.013</line>
+    <line order="1" rel="1200" v="">619.173</line>
+    <line order="1" rel="1000" v="">643.500</line>
+  </source>
+  <source name="PI HgNeAr" type="lines" symbol="HgNeAr" units="nm" display="PI Mixed Gas" notes="Hg++" show="false" index="5">
+    <line order="1" rel="10000" v="*" s="Hg">0.0000</line>
+    <line order="1" rel="15000" v="*" s="Hg">253.6521</line>
+    <line order="1" rel="65"    v="*" s="Hg">265.204</line>
+    <line order="1" rel="100"   v="*" s="Hg">265.369</line>
+    <line order="1" rel="800"   v="*" s="Hg">296.7283</line>
+    <line order="1" rel="400"   v="*" s="Hg">302.1504</line>
+    <line order="1" rel="900"   v="*" s="Hg">312.5674</line>
+    <line order="1" rel="900"   v="*" s="Hg">313.1555</line>
+    <line order="1" rel="900"   v="*" s="Hg">313.1844</line>
+    <line order="1" rel="100"  v="*" s="??">352.1</line>
+    <line order="1" rel="100"  v="*" s="??">354.55</line>
+    <line order="1" rel="100"  v="*" s="??">356.2</line>
+    <line order="1" rel="100"  v="*" s="??">357.5</line>
+    <line order="1" rel="100"  v="*" s="??">358.2</line>
+    <line order="1" rel="100"  v="*" s="??">358.85</line>
+    <line order="1" rel="1800"  v="*" s="Hg">365.0158</line>
+    <line order="1" rel="380"   v="*" s="Hg">365.4840</line>
+    <line order="1" rel="284"   v="*" s="Hg">366.3284</line>
+    <line order="1" rel="50"  v="*" s="??">394.1</line>
+    <line order="1" rel="50"  v="*" s="??">394.4</line>
+    <line order="1" rel="350"  v="*" s="Hg">404.6565</line>
+    <line order="1" rel="200"   v="*" s="ArII">407.2005</line>
+    <line order="1" rel="150"   v="*" s="Hg">407.7837</line>
+    <line order="1" rel="150"  v="*" s="??">410.2</line>
+    <line order="1" rel="150"   v="*" s="ArII">413.1724</line>
+    <line order="1" rel="400"   v="*" s="Ar">415.8590</line>
+    <line order="1" rel="100"   v="*" s="??">416.0</line>
+    <line order="1" rel="200"   v="*" s="??">418.2</line>
+    <line order="1" rel="200"   v="*" s="Ar">419.0713</line>
+    <line order="1" rel="480"   v="*" s="Ar">419.8317</line>
+    <line order="1" rel="400"   v="*" s="Ar">420.0674</line>
+    <line order="1" rel="100"   v="*" s="ArII">422.8158</line>
+    <line order="1" rel="100"   v="*" s="ArII">423.7220</line>
+    <line order="1" rel="100"   v="*" s="??">425.16</line>
+    <line order="1" rel="540"   v="*" s="Ar">425.9362</line>
+    <line order="1" rel="300"   v="*" s="Ar">426.6286</line>
+    <line order="1" rel="350"   v="*" s="Ar">427.2169</line>
+    <line order="1" rel="550"   v="*" s="Ar">427.7528</line>
+    <line order="1" rel="300"   v="*" s="Ar">430.0101</line>
+    <line order="1" rel="200"   v="*" s="Ar">433.1200</line>
+    <line order="1" rel="350"   v="*" s="Ar">433.3561</line>
+    <line order="1" rel="50"    v="*" s="Hg">433.922</line>
+    <line order="1" rel="500"   v="*" s="Hg">434.7506</line>
+    <line order="1" rel="100"   v="*" s="Ar">434.8064</line>
+    <line order="1" rel="3000"  v="*" s="Hg">435.8335</line>
+    <line order="1" rel="50"   v="*" s="??">436.4</line>
+    <line order="1" rel="100"   v="*" s="ArII">437.0753</line>
+    <line order="1" rel="75"    v="*" s="ArII">437.9667</line>
+    <line order="1" rel="100"   v="*" s="ArII">440.0986</line>
+    <line order="1" rel="350"   v="*" s="ArII">442.6001</line>
+    <line order="1" rel="250"   v="*" s="ArII">443.0189</line>
+    <line order="1" rel="50"   v="*" s="???">443.5</line>
+    <line order="1" rel="80"   v="*" s="???">444.7</line>
+    <line order="1" rel="70"   v="*" s="???">445.5</line>
+    <line order="1" rel="30"   v="*" s="???">446.0</line>
+    <line order="1" rel="100"   v="*" s="ArII">447.4759</line>
+    <line order="1" rel="250"   v="*" s="ArII">448.180733</line>
+    <line rder="1" rel="100" v="*" s="???">449.8</line>
+    <line order="1" rel="275"   v="*" s="Ar">451.0733</line>
+    <line order="1" rel="75"     v="*" s="??">452.3</line>
+    <line order="1" rel="250"   v="*" s="Ne">453.7755</line>
+    <line order="1" rel="875"   v="*" s="ArII">454.5052</line>
+    <line order="1" rel="550"   v="*" s="ArII">457.9350</line>
+    <line order="1" rel="300"   v="*" s="ArII">458.9898</line>
+    <line rder="1" rel="300" v="*" s="???">459.3</line>
+    <line order="1" rel="1000"   v="*" s="ArII">460.9567</line>
+    <line order="1" rel="950"   v="*" s="ArII">465.7091</line>
+    <line order="1" rel="750"   v="*" s="ArII">472.6868</line>
+    <line order="1" rel="400"   v="*" s="ArII">473.5906</line>
+    <line order="1" rel="1950"   v="*" s="ArII">476.4865</line>
+    <line order="1" rel="675"   v="*" s="ArII">480.6020</line>
+    <line order="1" rel="325"   v="*" s="ArII">484.7810</line>
+    <line order="1" rel="1500"   v="*" s="ArII">487.9864</line>
+    <line order="1" rel="700"   v="*" s="ArII">496.5080</line>
+    <line order="2" rel="29900"  v="*" s="Hg">507.3042</line>
+    <line order="1" rel="250"   v="*" s="ArII">514.1783</line>
+    <line order="1" rel="250"   v="*" s="ArII">516.5773</line>
+    <line order="1" rel="250"   v="*" s="ArII">518.7746</line>
+    <line order="1" rel="250"   v="*" s="ArII">521.6814</line>
+    <line order="1" rel="350"   v="*" s="??">521.9</line>
+    <line order="1" rel="350"   v="*" s="??">524.9</line>
+    <line order="1" rel="100"    v="*" s="??">532.9</line>
+    <line order="1" rel="100"    v="*" s="??">533.65</line>
+    <line order="1" rel="300"   v="*" s="Ne">540.05616</line>
+    <line order="1" rel="5000"  v="*" s="Hg">546.0750</line>
+    <line order="1" rel="75"     v="*" s="??">549.6</line>
+    <line order="1" rel="75"     v="*" s="??">555.86</line>
+    <line order="1" rel="75"     v="*" s="??">560.8</line>
+    <line order="1" rel="180"    v="*" s="??">576.5</line>
+    <line order="1" rel="580"    v="*" s="??">576.9610</line>
+    <line order="1" rel="620"  v="*" s="Hg">579.0670</line>
+    <line order="1" rel="250"    v="*" s="??">582.0</line>
+    <!-- <line order="1" rel="250" v="*" s="??">584.12</line> -->
+    <line order="1" rel="10000" v="*" s="Ne">585.2488</line>
+    <line order="1" rel="700"   v="*" s="Ne">588.1895</line>
+    <!-- <line order="1" rel="250" v="*" s="??">589.8</line> -->
+    <!-- <line order="1" rel="250" v="*" s="??">590.2</line> -->
+    <line order="1" rel="250"   v="*" s="??">591.3</line>
+    <line order="1" rel="550"   v="*" s="??">594.5</line>
+    <line order="1" rel="250"   v="*" s="??">597.5</line>
+    <line order="1" rel="200"   v="*" s="Ne">603.0000</line>
+    <line order="1" rel="700"   v="*" s="Ne">607.4338</line>
+    <line order="1" rel="1100"  v="*" s="Ne" n="pi">609.6163</line>
+    <line order="1" rel="1280"  v="*" s="Ne">614.3063</line>
+    <line order="1" rel="520"   v="*" s="Ne">616.3594</line>
+    <line order="1" rel="175"   v="*" s="??">617.3</line>
+    <line order="1" rel="175"   v="*" s="??">618.1</line>
+    <line order="1" rel="175"   v="*" s="??">621.1</line>
+    <line order="1" rel="175"   v="*" s="Ne">621.7281</line>
+    <line order="1" rel="750"   v="*" s="Ne">626.6495</line>
+    <line order="1" rel="80"   v="*" s="??">629.8</line>
+    <line order="1" rel="250"   v="*" s="Ne" n="pi">630.4789</line>
+    <line order="1" rel="300"   v="*" s="??">632.8</line>
+    <line order="1" rel="500"   v="*" s="Ne">633.4428</line>
+    <line order="1" rel="950"   v="*" s="Ne">638.2991</line>
+    <line order="1" rel="1880"  v="*" s="Ne">640.2248</line>
+    <line order="1" rel="250" v="*" s="??">641.7</line>
+    <line order="1" rel="1100"  v="*" s="Ne">650.6528</line>
+    <line order="1" rel="300"   v="*" s="Ne">653.2882</line>
+    <line order="1" rel="300"   v="*" s="??">654.0</line>
+    <line order="1" rel="200"   v="*" s="??">660.1</line>
+    <line order="1" rel="70"    v="*" s="??">660.7</line>
+    <line order="1" rel="50"    v="*" s="??">663.8</line>
+    <line order="1" rel="50"    v="*" s="??">664.3</line>
+    <line order="1" rel="50"    v="*" s="??">667.3</line>
+    <line order="1" rel="20"    v="*" s="??">667.9</line>
+    <line order="1" rel="660"   v="*" s="Ne" n="pi">671.7043</line>
+    <line order="1" rel="1250"   v="Ar" s="??">667.7282</line>
+    <line order="1" rel="370"   v="*" s="Ar">675.2834</line>
+    <line order="1" rel="350"   v="*" s="??">687.1289</line>
+    <line order="1" rel="50"   v="1" s="Hg">690.752</line>
+    <line order="1" rel="700"  v="1" s="Ne">692.9467</line>
+    <line order="2" rel="8500"  v="1" s="Ar">696.5431</line>
+    <line order="1" rel="50"  v="*" s="Ne">702.4050</line>
+    <line order="1" rel="150"   v="1" s="Ar">703.0251</line>
+    <line order="1" rel="1100"  v="1" s="Ne">703.2413</line>
+    <line order="1" rel="70"   v="1"  s="Ne">705.9108</line>
+    <line order="2" rel="4700"  v="1" s="Ar">706.7218</line>
+    <line order="1" rel="50"    v="*" s="??">706.8736</line>
+    <line order="1" rel="25"   v="*" s="Hg">708.190</line>
+    <line order="1" rel="20"   v="*" s="Hg">709.186</line>
+    <line order="1" rel="1000"   v="*" s="Ar">714.7042</line>      
+    <line order="1" rel="200"  v="1" s="Ne">717.3938</line>
+    <line order="1" rel="200"  v="1" s="??">720.8</line>
+    <line order="1" rel="300"  v="1" s="Ne">724.5167</line>
+    <line order="1" rel="3200"   v="1" s="Ar">727.2936</line>
+    <line order="2" rel="500"    v="1" s="??">735.4</line>
+    <line order="2" rel="500"    v="1" s="Ar">737.2118</line>
+    <line order="2" rel="8000"  v="1" s="Ar">738.3980</line>
+    <line order="1" rel="330"  v="1" s="Ne">743.8898</line>
+    <line order="1" rel="390"  v="1" s="Ne">748.8871</line>
+    <line order="1" rel="35000" v="1" s="Ar">750.3869</line>
+    <line order="1" rel="13500"  v="1" s="Ar">751.4652</line>
+    <line order="1" rel="350"  v="1" s="Ne">753.5774</line>
+    <line order="1" rel="180"  v="1" s="Ne">754.4044</line>
+    <line order="3" rel="50"  v="1" s="Hg">760.9563</line>
+    <line order="1" rel="30200" v="1" s="Ar">763.5106</line>
+    <line order="1" rel="14000"  v="1" s="Ar" notes="shoulder at .4207">772.3761</line>
+    <line order="1" rel="9500"  v="1" s="Ar">794.8176</line>
+    <line order="1" rel="6400"  v="1" s="Ar">800.6157</line>
+    <line order="1" rel="7600"  v="1" s="Ar">801.4786</line>
+    <line order="1" rel="11000" v="1" s="Ar">810.3693</line>
+    <line order="2" rel="400"   v="1" s="Ne">811.8546</line>
+    <line order="1" rel="21000" v="1" s="Ar">811.5311</line>     
+    <line order="2" rel="130"   v="1" s="Ne">811.8546</line>
+    <line order="2" rel="95"    v="1" s="Ne">813.6406</line>
+    <line order="2" rel="9000"  v="0" s="Ne">826.6077</line>
+    <line order="2" rel="160"   v="1" s="Ne">830.0325</line>
+    <line order="2" rel="230"   v="1" s="Ne">837.7607</line>
+    <line order="1" rel="8700"  v="1" s="Ar">840.8210</line>
+    <line order="2" rel="100"   v="1" s="Ne">841.8427</line>
+    <line order="2" rel="10700" v="1" s="Ar">842.4648</line>
+    <line order="2" rel="200"   v="1" s="Ne">849.5359</line>
+    <line order="1" rel="5000"  v="1" s="Ar">852.1442</line>
+    <line order="5" rel="75"    v="0" s="Ne">859.1258</line>
+    <line order="5" rel="75"  v="0" s="??">860.5</line>
+    <line order="5" rel="75"  v="0" s="??">861.9</line>
+    <line order="3" rel="75"     v="0" s="Ne">863.4647</line>
+    <line order="3" rel="100"    v="0" s="Ne">865.4383</line>
+    <line order="1" rel="750"    v="1" s="Ar">866.7944</line>
+    <line order="3" rel="40"     v="0" s="Ne">867.9494</line>
+    <line order="3" rel="40"     v="0" s="Ne">868.1922</line>
+    <line order="2" rel="200"    v="1" s="Hg">871.8335</line>
+    <line order="3" rel="20"     v="0" s="Ne">877.1658</line>
+    <line order="3" rel="90"     v="0" s="Ne">878.0622</line>
+    <line order="3" rel="40"     v="0" s="Ne">878.3754</line>
+    <line order="1" rel="25"     v="1" s="Ar">884.9910</line>
+    <line order="3" rel="50"     v="0" s="Ne">885.3867</line>
+    <line order="3" rel="50"     v="0" s="Ne">886.5756</line>
+    <line order="1" rel="13800"  v="1" s="Ar">912.2967</line>
+    <line order="2" rel="25"     v="1" s="Ne">914.8672</line>
+    <line order="2" rel="150"    v="1" s="Ar">919.4638</line>
+    <line order="1" rel="3300"   v="1" s="Ar">922.4499</line>
+    <line order="2" rel="25"     v="1" s="Ar">927.5519</line>
+    <line order="2" rel="80"     v="1" s="Ar">929.1531</line>
+    <line order="2" rel="160"    v="1" s="Ar">935.4220</line>
+    <line order="1" rel="3300"   v="1" s="Ar">965.7786</line>
+    <line order="2" rel="30"     v="1" s="Ne">966.54200</line>
+    <line order="2" rel="300"    v="1" s="Ar">978.4503</line>
+    <line order="2" rel="12"     v="1" s="Ar">1005.206</line>
+    <line order="2" rel="25"     v="1" s="Hg">1013.975</line>
+    <line order="2" rel="15"     v="1" s="ArII">1046.71776</line>
+    <line order="2" rel="60"     v="1" s="Ar">1047.0054</line>
+    <line order="2" rel="2"      v="1" s="Ar">1050.650</line>
+    <line order="2" rel="18"     v="1" s="Ar">1067.3565</line>
+    <line order="2" rel="10"     v="1" s="Hg">1092.150</line>
+  </source>
+  <source name="Asprin" type="CalFile" symbol="C9H8O4" fileName="Asprin.spe" display="Asprin Reference" show="false">
+    <line order="1" rel="10000" v="">0</line>
+  </source>
+  <source name="Caffine"  type="CalFile" symbol="C8H10N4O2" fileName="Caffine.spe" display="Caffine Reference" show="false">
+    <line order="1" rel="10000" v="">0</line>
+  </source>
+  <source name="Zero" type="lines" symbol="0" units="nm" show="false">
+    <line order="1" rel="10000" v="">0</line>
+  </source>
+
+  <source name="NIR PI Mercury" type="lines" symbol="Hg" units="nm" display="NIR Mercury" show="true" index="3">
+    <line order="0" rel="3990" v="" s="Hg">0.000</line>
+    <line order="1" rel="95.55" v="" s="Ar">912.2967</line>
+    <line order="1" rel="66.79" v="" s="Ar">922.4499</line>
+    <line order="1" rel="336" v="" s="Ar">965.7786</line>
+    <line order="1" rel="31.8" v="" s="Ar">978.4503</line>
+    <line order="1" rel="1600" v="" s="Hg">1013.975</line>
+    <line order="1" rel="72.28" v="" s="Ar">1047.0054</line>
+    <line order="1" rel="1585" v="" s="Hg">1128.71</line>
+    <line order="1" rel="3" v="" s="Ar">1144.1832</line>
+    <line order="1" rel="13.1" v="" s="Ar">1148.8109</line>
+    <line order="1" rel="12.4" v="" s="Ar">1166.871</line>
+    <line order="1" rel="3.6" v="" s="Hg">1168.70</line>
+    <line order="1" rel="4.2" v="" s="Ar">1172.04462</line>
+    <line order="1" rel="8.7" v="" s="Hg">1176.89</line>
+    <line order="1" rel="12.5" v="" s="Hg">1188.52</line>
+    <line order="1" rel="9.4" v="" s="Hg">1189.06</line>
+    <line order="1" rel="7.5" v="" s="Hg">1195.15</line>
+    <line order="1" rel="13.16" v="" s="Hg">1197.63</line>
+    <line order="1" rel="19.2" v="" s="Hg">1201.96</line>
+    <line order="1" rel="19.2" v="" s="Hg">1202.7042</line>
+    <line order="1" rel="71.6" v="" s="N">1207.15</line>
+    <line order="1" rel="16.15" v="" s="Ar">1211.233</line>
+    <line order="1" rel="18.5" v="" s="Hg">1212.85</line>
+    <line order="1" rel="18.83" v="" s="Ar">1213.974</line>
+    <line order="1" rel="5.5" v="" s="Ar">1234.3393</line>
+    <line order="1" rel="28.1" v="" s="Ar">1240.2827</line>
+    <line order="1" rel="45.4" v="" s="Ar">1243.9321</line>
+    <line order="1" rel="15.4" v="" s="Ar">1245.612</line>
+    <line order="1" rel="30.34" v="" s="Ar">1248.7663</line>
+    <line order="1" rel="20.8" v="" s="Ar">1270.2281</line>
+    <line order="1" rel="15.4" v="" s="Ar">1280.2734</line>
+    <line order="1" rel="9.8" v="" s="Ar">1293.3195</line>
+    <line order="1" rel="155" v="" s="Ar">1295.6659</line>
+    <line order="1" rel="25" v="" s="Ar">1300.8264</line>
+    <line order="1" rel="57" v="" s="Ar">1320.995</line>
+    <line order="1" rel="63" v="" s="Ar">1321.399</line>
+    <line order="1" rel="36.73" v="" s="Ar">1322.8107</line>
+    <line order="1" rel="82.4" v="" s="Ar">1327.264</line>
+    <line order="1" rel="55.8" v="" s="Ar">1331.321</line>
+    <line order="1" rel="124.65" v="" s="Hg">1336.7111</line>
+    <line order="1" rel="38.3" v="" s="Hg">1342.657</line>
+    <line order="1" rel="17" v="" s="Hg">1346.838</line>
+    <line order="1" rel="215.055" v="" s="Hg">1350.4191</line>
+    <line order="1" rel="1091"   v="" s="Hg">1357.021</line>
+    <line order="1" rel="60.7"   v="" s="Hg">1362.418</line>
+    <line order="1" rel="1634"   v="" s="Hg">1367.351</line>
+    <line order="1" rel="281.6" v="" s="Hg">1371.8577</line>
+    <line order="1" rel="959"    v="" s="Hg">1395.055</line>
+    <line order="1" rel="7922.87"   v="" s="Hg">1529.582</line>
+  </source>
+
+  <source name="NIR Mercury" type="lines" symbol="Hg" units="nm" display="NIR Mercury" show="true" index="3">
+    <line order="0" rel="3990" v="" s="Hg">0.000</line>
+    <line order="1" rel="1600" v="" s="Hg">1013.975</line>
+    <line order="1" rel="1585" v="" s="Hg">1128.71</line>
+    <line order="1" rel="3.6" v="" s="Hg">1168.70</line>
+    <line order="1" rel="8.7" v="" s="Hg">1176.89</line>
+    <line order="1" rel="12.5" v="" s="Hg">1188.52</line>
+    <line order="1" rel="9.4" v="" s="Hg">1189.06</line>
+    <line order="1" rel="7.5" v="" s="Hg">1195.15</line>
+    <line order="1" rel="13.16" v="" s="Hg">1197.63</line>
+    <line order="1" rel="19.2" v="" s="Hg">1201.96</line>
+    <line order="1" rel="19.2" v="" s="Hg">1202.7042</line>
+    <line order="1" rel="71.6" v="" s="N">1207.15</line>
+    <line order="1" rel="18.5" v="" s="Hg">1212.85</line>
+    <line order="1" rel="124.65" v="" s="Hg">1336.7111</line>
+    <line order="1" rel="38.3" v="" s="Hg">1342.657</line>
+    <line order="1" rel="17" v="" s="Hg">1346.838</line>
+    <line order="1" rel="215.055" v="" s="Hg">1350.4191</line>
+    <line order="1" rel="1091"   v="" s="Hg">1357.021</line>
+    <line order="1" rel="60.7"   v="" s="Hg">1362.418</line>
+    <line order="1" rel="1634"   v="" s="Hg">1367.351</line>
+    <line order="1" rel="281.6" v="" s="Hg">1371.8577</line>
+    <line order="1" rel="959"    v="" s="Hg">1395.055</line>
+    <line order="1" rel="7922.87"   v="" s="Hg">1529.582</line>
+  </source>
+
+  <source name="NIR PI Neon" type="lines" symbol="Ne" units="nm" display="NIR NeAr" show="true" index="1">
+    <line order="1" rel="1000" v="" s="Ne">0.0000</line>
+    <line order="1" rel="9" v="" s="Ne I">903.69985</line>
+    <line order="1" rel="1" v="" s="Ne I">904.68</line>
+    <line order="1" rel="4" v="" s="Ne I">904.9086</line>
+    <line order="1" rel="3" v="" s="Ne I">905.2424</line>
+    <line order="1" rel="7" v="" s="Ne I">905.2642</line>
+    <line order="1" rel="5" v="" s="Ne I">907.3033</line>
+    <line order="1" rel="20" v="" s="Ar I">907.5394</line>
+    <line order="1" rel="1" v="" s="Ne I">910.21</line>
+    <line order="1" rel="4" v="" s="Ne I">910.353</line>
+    <line order="1" rel="1" v="" s="Ne I">911.53</line>
+    <line order="1" rel="32000" v="" s="Ar I">912.2967</line>
+    <line order="1" rel="5000" v="" s="Ne I">914.86720</line>
+    <line order="1" rel="1" v="" s="Ne I">919.38</line>
+    <line order="1" rel="550" v="" s="Ar I">919.4638</line>
+    <line order="1" rel="10900" v="" s="Ne I">920.17588</line>
+    <line order="1" rel="6000" v="" s="Ne I">922.00598</line>
+    <line order="1" rel="2200" v="" s="Ne I">922.15802</line>
+    <line order="1" rel="15000" v="" s="Ar I">922.4499</line>
+    <line order="1" rel="1800" v="" s="Ne I">922.66910</line>
+    <line order="1" rel="910" v="" s="Ne I">927.55191</line>
+    <line order="1" rel="400" v="" s="Ar I">929.1531</line>
+    <line order="1" rel="10780" v="" s="Ne I">930.08532</line>
+    <line order="1" rel="830" v="" s="Ne I">931.05833</line>
+    <line order="1" rel="2700" v="" s="Ne I">931.39731</line>
+    <line order="1" rel="8970" v="" s="Ne I">932.65072</line>
+    <line order="1" rel="3" v="" s="Ne I">934.05</line>
+    <line order="1" rel="6" v="" s="Ne I">935.33</line>
+    <line order="1" rel="2400" v="" s="Ar I">935.4220</line>
+    <line order="1" rel="2250" v="" s="Ne I">937.33079</line>
+    <line order="1" rel="7" v="" s="Ne I">937.72276</line>
+    <line order="1" rel="9" v="" s="Ne I">941.075</line>
+    <line order="1" rel="6" v="" s="Ne I">941.232</line>
+    <line order="1" rel="4800" v="" s="Ne I">942.53797</line>
+    <line order="1" rel="66" v="" s="Ne I">943.30082</line>
+    <line order="1" rel="3" v="" s="Ne I">944.38</line>
+    <line order="1" rel="4" v="" s="Ne I">944.526</line>
+    <line order="1" rel="1" v="" s="Ne I">945.40</line>
+    <line order="1" rel="2800" v="" s="Ne I">945.92110</line>
+    <line order="1" rel="5000" v="" s="Ne I">948.66825</line>
+    <line order="1" rel="4" v="" s="Ne I">950.659</line>
+    <line order="1" rel="7" v="" s="Ne I">950.84</line>
+    <line order="1" rel="12200" v="" s="Ne I">953.41640</line>
+    <line order="1" rel="2800" v="" s="Ne I">954.74052</line>
+    <line order="1" rel="2" v="" s="Ne I">957.4002</line>
+    <line order="1" rel="1" v="" s="Ne I">964.22</line>
+    <line order="1" rel="50000" v="" s="Ar I">965.7786</line>
+    <line order="1" rel="6000" v="" s="Ne I">966.54200</line>
+    <line order="1" rel="1" v="" s="Ne I">972.48</line>
+    <line order="1" rel="2250" v="" s="Ar I">978.4503</line>
+    <line order="1" rel="3" v="" s="Ne I">978.81</line>
+    <line order="1" rel="3" v="" s="Ne I">982.3453</line>
+    <line order="1" rel="13" v="" s="Ne I">983.7507</line>
+    <line order="1" rel="4" v="" s="Ne I">989.730</line>
+    <line order="1" rel="3" v="" s="Ne I">989.906</line>
+    <line order="1" rel="30" v="" s="Ne I">990.0594</line>
+    <line order="1" rel="25" v="" s="Ne I">990.2337</line>
+    <line order="1" rel="13" v="" s="Ne I">991.5195</line>
+    <line order="1" rel="6" v="" s="Ne I">991.8602</line>
+    <line order="1" rel="10" v="" s="Ne I">993.6853</line>
+    <line order="1" rel="16" v="" s="Ne I">993.8352</line>
+    <line order="1" rel="9" v="" s="Ne I">994.4140</line>
+    <line order="1" rel="4" v="" s="Ne I">994.5058</line>
+    <line order="1" rel="9" v="" s="Ne I">994.8061</line>
+    <line order="1" rel="7" v="" s="Ne I">996.3605</line>
+    <line order="1" rel="3" v="" s="Ne I">997.42</line>
+    <line order="1" rel="13" v="" s="Ne I">1000.5600</line>
+    <line order="1" rel="20" v="" s="Ne I">1000.7385</line>
+    <line order="1" rel="5" v="" s="Ne I">1000.8685</line>
+    <line order="1" rel="3" v="" s="Ne I">1003.71</line>
+    <line order="1" rel="3" v="" s="Ne I">1003.89</line>
+    <line order="1" rel="180" v="" s="Ar I">1005.206</line>
+    <line order="1" rel="2" v="" s="Ne I">1021.0835</line>
+    <line order="1" rel="4" v="" s="Ne I">1022.4659</line>
+    <line order="1" rel="16" v="" s="Ne I">1024.57132</line>
+    <line order="1" rel="210" v="" s="Ne I">1029.54162</line>
+    <line order="1" rel="30" v="" s="Ar I">1033.272</line>
+    <line order="1" rel="13" v="" s="Ne I">1043.25909</line>
+    <line order="1" rel="1600" v="" s="Ar I">1047.0054</line>
+    <line order="1" rel="13" v="" s="Ar I">1047.8034</line>
+    <line order="1" rel="180" v="" s="Ar I">1050.650</line>
+    <line order="1" rel="1200" v="" s="Ne I">1056.24089</line>
+    <line order="1" rel="390" v="" s="Ne I">1062.06637</line>
+    <line order="1" rel="200" v="" s="Ar I">1067.3565</line>
+    <line order="1" rel="19" v="" s="Ne I">1067.3870</line>
+    <line order="1" rel="11" v="" s="Ar I">1068.1773</line>
+    <line order="1" rel="55" v="" s="Ne I">1069.0457</line>
+    <line order="1" rel="30" v="" s="Ar I">1073.387</line>
+    <line order="1" rel="15" v="" s="Ne I">1075.8204</line>
+    <line order="1" rel="30" v="" s="Ar I">1075.916</line>
+    <line order="1" rel="14" v="" s="Ne I">1076.0270</line>
+    <line order="1" rel="150" v="" s="Ne I">1076.4023</line>
+    <line order="1" rel="110" v="" s="Ne I">1076.6087</line>
+    <line order="1" rel="69" v="" s="Ne I">1078.0531</line>
+    <line order="1" rel="16" v="" s="Ne I">1078.6286</line>
+    <line order="1" rel="2" v="" s="Ne I">1079.0862</line>
+    <line order="1" rel="3050" v="" s="Ne I">1079.80430</line>
+    <line order="1" rel="54" v="" s="Ne I">1080.6358</line>
+    <line order="1" rel="74" v="" s="Ne I">1080.8128</line>
+    <line order="1" rel="40" v="" s="Ne I">1081.4755</line>
+    <line order="1" rel="92" v="" s="Ne I">1081.9819</line>
+    <line order="1" rel="37" v="" s="Ne I">1083.82180</line>
+    <line order="1" rel="4700" v="" s="Ne I">1084.44774</line>
+    <line order="1" rel="58" v="" s="Ne I">1088.6277</line>
+    <line order="1" rel="85" v="" s="Ne I">1088.8392</line>
+    <line order="1" rel="25" v="" s="Ne I">1089.1151</line>
+    <line order="1" rel="78" v="" s="Ne I">1102.08794</line>
+    <line order="1" rel="64" v="" s="Ne I">1104.40002</line>
+    <line order="1" rel="200" v="" s="Ne I">1104.97221</line>
+    <line order="1" rel="29" v="" s="Ne I">1106.0808</line>
+    <line order="1" rel="11" v="" s="Ar I">1107.8869</line>
+    <line order="1" rel="30" v="" s="Ar I">1110.646</line>
+    <line order="1" rel="73" v="" s="Ne I">1112.02780</line>
+    <line order="1" rel="49" v="" s="Ne I">1113.45095</line>
+    <line order="1" rel="55" v="" s="Ne I">1113.84329</line>
+    <line order="1" rel="31200" v="" s="Ne I">1114.30200</line>
+    <line order="1" rel="270" v="" s="Ne I">1116.02133</line>
+    <line order="1" rel="53000" v="" s="Ne I">1117.75246</line>
+    <line order="1" rel="65" v="" s="Ne I">1129.29647</line>
+    <line order="1" rel="46" v="" s="Ne I">1129.84416</line>
+    <line order="1" rel="140" v="" s="Ne I">1130.38878</line>
+    <line order="1" rel="100" v="" s="Ne I">1130.45457</line>
+    <line order="1" rel="41" v="" s="Ne I">1132.96259</line>
+    <line order="1" rel="37" v="" s="Ne I">1133.36873</line>
+    <line order="1" rel="110" v="" s="Ne I">1136.66716</line>
+    <line order="1" rel="13500" v="" s="Ne I">1139.04333</line>
+    <line order="1" rel="12320" v="" s="Ne I">1140.91338</line>
+    <line order="1" rel="12" v="" s="Ar I">1144.1832</line>
+    <line order="1" rel="400" v="" s="Ar I">1148.8109</line>
+    <line order="1" rel="33000" v="" s="Ne I">1152.27450</line>
+    <line order="1" rel="17000" v="" s="Ne I">1152.50203</line>
+    <line order="1" rel="6000" v="" s="Ne I">1153.63446</line>
+    <line order="1" rel="2600" v="" s="Ne I">1160.15369</line>
+    <line order="1" rel="7800" v="" s="Ne I">1161.40805</line>
+    <line order="1" rel="2450" v="" s="Ar I">1166.8710</line>
+    <line order="1" rel="7350" v="" s="Ne I">1168.80028</line>
+    <line order="1" rel="12" v="" s="Ar I">1171.9488</line>
+    <line order="1" rel="15000" v="" s="Ne I">1176.67929</line>
+    <line order="1" rel="6500" v="" s="Ne I">1178.90444</line>
+    <line order="1" rel="3200" v="" s="Ne I">1178.98894</line>
+    <line order="1" rel="20" v="" s="Ne I">1197.9781</line>
+    <line order="1" rel="7400" v="" s="Ne I">1198.49139</line>
+    <line order="1" rel="18" v="" s="Ne I">1199.6569</line>
+    <line order="1" rel="5" v="" s="Ne I">1199.7813</line>
+    <line order="1" rel="12000" v="" s="Ne I">1206.63343</line>
+    <line order="1" rel="4600" v="" s="Ar I">1211.2326</line>
+    <line order="1" rel="25000" v="" s="Ar I">1213.9738</line>
+    <line order="1" rel="1000" v="" s="Ar I">1234.3393</line>
+    <line order="1" rel="3" v="" s="Ne I">1238.8983</line>
+    <line order="1" rel="12000" v="" s="Ar I">1240.2827</line>
+    <line order="1" rel="4" v="" s="Ne I">1240.8769</line>
+    <line order="1" rel="18" v="" s="Ne I">1243.0505</line>
+    <line order="1" rel="20000" v="" s="Ar I">1243.9321</line>
+    <line order="1" rel="75" v="" s="Ne I">1245.33684</line>
+    <line order="1" rel="2300" v="" s="Ar I">1245.612</line>
+    <line order="1" rel="16000" v="" s="Ne I">1245.93903</line>
+    <line order="1" rel="160" v="" s="Ne I">1246.41163</line>
+    <line order="1" rel="23" v="" s="Ne I">1247.3468</line>
+    <line order="1" rel="1700" v="" s="Ne I">1248.67315</line>
+    <line order="1" rel="200" v="" s="Ar I">1248.7663</line>
+    <line order="1" rel="21" v="" s="Ne I">1252.02343</line>
+    <line order="1" rel="15" v="" s="Ne I">1253.7742</line>
+    <line order="1" rel="48" v="" s="Ne I">1255.97621</line>
+    <line order="1" rel="130" v="" s="Ne I">1257.10054</line>
+    <line order="1" rel="96" v="" s="Ne I">1257.38231</line>
+    <line order="1" rel="8" v="" s="Ne I">1257.7349</line>
+    <line order="1" rel="6" v="" s="Ne I">1258.0144</line>
+    <line order="1" rel="1200" v="" s="Ne I">1258.46021</line>
+    <line order="1" rel="850" v="" s="Ne I">1258.74256</line>
+    <line order="1" rel="1600" v="" s="Ne I">1259.50049</line>
+    <line order="1" rel="32" v="" s="Ne I">1260.07778</line>
+    <line order="1" rel="13" v="" s="Ne I">1260.1293</line>
+    <line order="1" rel="18" v="" s="Ne I">1260.33179</line>
+    <line order="1" rel="550" v="" s="Ne I">1260.41773</line>
+    <line order="1" rel="150" v="" s="Ne I">1261.76692</line>
+    <line order="1" rel="6" v="" s="Ne I">1263.1024</line>
+    <line order="1" rel="500" v="" s="Ne I">1264.03174</line>
+    <line order="1" rel="710" v="" s="Ne I">1264.27394</line>
+    <line order="1" rel="330" v="" s="Ne I">1265.09824</line>
+    <line order="1" rel="470" v="" s="Ne I">1265.83460</line>
+    <line order="1" rel="98" v="" s="Ne I">1266.46063</line>
+    <line order="1" rel="300" v="" s="Ne I">1268.35329</line>
+    <line order="1" rel="2150" v="" s="Ne I">1268.92032</line>
+    <line order="1" rel="1500" v="" s="Ar I">1270.2281</line>
+    <line order="1" rel="23" v="" s="Ne I">1271.8797</line>
+    <line order="1" rel="11" v="" s="Ne I">1272.6785</line>
+    <line order="1" rel="30" v="" s="Ar I">1273.3418</line>
+    <line order="1" rel="540" v="" s="Ne I">1274.62264</line>
+    <line order="1" rel="12" v="" s="Ar I">1274.6232</line>
+    <line order="1" rel="710" v="" s="Ne I">1274.91248</line>
+    <line order="1" rel="120" v="" s="Ne I">1275.27222</line>
+    <line order="1" rel="170" v="" s="Ne I">1275.56507</line>
+    <line order="1" rel="37" v="" s="Ne I">1275.99494</line>
+    <line order="1" rel="6" v="" s="Ne I">1276.6582</line>
+    <line order="1" rel="1600" v="" s="Ne I">1276.95250</line>
+    <line order="1" rel="16" v="" s="Ne I">1277.6652</line>
+    <line order="1" rel="200" v="" s="Ar I">1280.2739</line>
+    <line order="1" rel="5" v="" s="Ne I">1285.3034</line>
+    <line order="1" rel="7" v="" s="Ne I">1286.4091</line>
+    <line order="1" rel="11" v="" s="Ne I">1286.4730</line>
+    <line order="1" rel="14" v="" s="Ne I">1288.71630</line>
+    <line order="1" rel="500" v="" s="Ne I">1291.20141</line>
+    <line order="1" rel="50" v="" s="Ar I">1293.3195</line>
+    <line order="1" rel="8400" v="" s="Ar I">1295.6659</line>
+    <line order="1" rel="25" v="" s="Ne I">1298.00736</line>
+    <line order="1" rel="1000" v="" s="Ar I">1300.8264</line>
+    <line order="1" rel="12" v="" s="Ne I">1305.4788</line>
+    <line order="1" rel="6" v="" s="Ne I">1305.8815</line>
+    <line order="1" rel="6" v="" s="Ne I">1309.6396</line>
+    <line order="1" rel="6" v="" s="Ne I">1312.6171</line>
+    <line order="1" rel="12" v="" s="Ne I">1312.7681</line>
+    <line order="1" rel="5" v="" s="Ne I">1314.5446</line>
+    <line order="1" rel="200" v="" s="Ar I">1321.399</line>
+    <line order="1" rel="4500" v="" s="Ne I">1321.92426</line>
+    <line order="1" rel="200" v="" s="Ar I">1322.8107</line>
+    <line order="1" rel="100" v="" s="Ar I">1323.090</line>
+    <line order="1" rel="8" v="" s="Ne I">1325.1199</line>
+    <line order="1" rel="1000" v="" s="Ar I">1327.264</line>
+    <line order="1" rel="6" v="" s="Ne I">1329.6547</line>
+    <line order="1" rel="2000" v="" s="Ar I">1331.3210</line>
+    <line order="1" rel="10" v="" s="Ne I">1333.9714</line>
+    <line order="1" rel="2000" v="" s="Ar I">1336.7111</line>
+    <line order="1" rel="7" v="" s="Ne I">1338.9290</line>
+    <line order="1" rel="30" v="" s="Ar I">1349.941</line>
+    <line order="1" rel="2000" v="" s="Ar I">1350.4191</line>
+    <line order="1" rel="5" v="" s="Ne I">1352.7073</line>
+    <line order="1" rel="11" v="" s="Ar I">1357.3617</line>
+    <line order="1" rel="5" v="" s="Ne I">1358.5088</line>
+    <line order="1" rel="30" v="" s="Ar I">1359.9333</line>
+    <line order="1" rel="400" v="" s="Ar I">1362.2659</line>
+    <line order="1" rel="200" v="" s="Ar I">1367.8550</line>
+    <line order="1" rel="1000" v="" s="Ar I">1371.8577</line>
+    <line order="1" rel="4" v="" s="Ne I">1373.8735</line>
+    <line order="1" rel="10" v="" s="Ar I">1382.5715</line>
+    <line order="1" rel="9" v="" s="Ne I">1386.6305</line>
+    <line order="1" rel="10" v="" s="Ar I">1390.7478</line>
+    <line order="1" rel="5" v="" s="Ne I">1390.8173</line>
+    <line order="1" rel="3" v="" s="Ne I">1397.0972</line>
+    <line order="1" rel="4" v="" s="Ne I">1401.2921</line>
+    <line order="1" rel="6" v="" s="Ne I">1401.5900</line>
+    <line order="1" rel="9" v="" s="Ne I">1404.3107</line>
+    <line order="1" rel="5" v="" s="Ne I">1407.4110</line>
+    <line order="1" rel="400" v="" s="Ar I">1409.3640</line>
+    <line order="1" rel="7" v="" s="Ne I">1428.3603</line>
+    <line order="1" rel="130" v="" s="Ne I">1430.08338</line>
+    <line order="1" rel="120" v="" s="Ne I">1434.21609</line>
+    <line order="1" rel="51" v="" s="Ne I">1435.33494</line>
+    <line order="1" rel="5" v="" s="Ne I">1438.4113</line>
+    <line order="1" rel="18" v="" s="Ne I">1449.99217</line>
+    <line order="1" rel="110" v="" s="Ne I">1492.98061</line>
+    <line order="1" rel="7" v="" s="Ne I">1493.1183</line>
+    <line order="1" rel="15" v="" s="Ne I">1497.0774</line>
+    <line order="1" rel="22" v="" s="Ne I">1498.4854</line>
+    <line order="1" rel="530" v="" s="Ne I">1498.63193</line>
+    <line order="1" rel="5000" v="" s="Ar I">1504.650</line>
+    <line order="1" rel="19" v="" s="Ne I">1505.89894</line>
+    <line order="1" rel="140" v="" s="Ne I">1507.41688</line>
+    <line order="1" rel="48" v="" s="Ne I">1507.50431</line>
+    <line order="1" rel="4" v="" s="Ne I">1508.3912</line>
+    <line order="1" rel="94" v="" s="Ne I">1508.53103</line>
+    <line order="1" rel="13" v="" s="Ne I">1510.6454</line>
+    <line order="1" rel="5" v="" s="Ne I">1512.5728</line>
+    <line order="1" rel="350" v="" s="Ne I">1514.00981</line>
+    <line order="1" rel="6" v="" s="Ne I">1517.1965</line>
+    <line order="1" rel="25" v="" s="Ar I">1517.269</line>
+    <line order="1" rel="32" v="" s="Ne I">1517.43113</line>
+    <line order="1" rel="4" v="" s="Ne I">1517.6335</line>
+    <line order="1" rel="63" v="" s="Ne I">1518.97238</line>
+    <line order="1" rel="99" v="" s="Ne I">1519.06122</line>
+    <line order="1" rel="270" v="" s="Ne I">1519.09319</line>
+    <line order="1" rel="48" v="" s="Ne I">1519.26365</line>
+    <line order="1" rel="10600" v="" s="Ne I">1523.07144</line>
+    <line order="1" rel="10" v="" s="Ar I">1532.934</line>
+    <line order="1" rel="160" v="" s="Ne I">1534.81896</line>
+    <line order="1" rel="74" v="" s="Ne I">1537.00789</line>
+    <line order="1" rel="17" v="" s="Ne I">1539.0028</line>
+    <line order="1" rel="250" v="" s="Ne I">1540.75930</line>
+    <line order="1" rel="6" v="" s="Ne I">1540.9058</line>
+    <line order="1" rel="4" v="" s="Ne I">1543.1122</line>
+    <line order="1" rel="11" v="" s="Ne I">1545.0863</line>
+    <line order="1" rel="110" v="" s="Ne I">1545.12285</line>
+    <line order="1" rel="25" v="" s="Ne I">1546.62267</line>
+    <line order="1" rel="23" v="" s="Ne I">1549.9484</line>
+    <line order="1" rel="13" v="" s="Ne I">1550.0897</line>
+    <line order="1" rel="65" v="" s="Ne I">1560.42140</line>
+    <line order="1" rel="4" v="" s="Ne I">1576.1050</line>
+    <line order="1" rel="4" v="" s="Ne I">1580.2647</line>
+    <line order="1" rel="7" v="" s="Ne I">1581.2181</line>
+    <line order="1" rel="30" v="" s="Ar I">1598.949</line>
+    <line order="1" rel="130" v="" s="Ne I">1602.27694</line>
+    <line order="1" rel="5" v="" s="Ne I">1604.5498</line>
+    <line order="1" rel="47" v="" s="Ne I">1609.84859</line>
+    <line order="1" rel="5" v="" s="Ne I">1625.2672</line>
+    <line order="1" rel="7" v="" s="Ne I">1626.3592</line>
+    <line order="1" rel="44" v="" s="Ne I">1626.42476</line>
+    <line order="1" rel="8" v="" s="Ne I">1626.8353</line>
+    <line order="1" rel="63" v="" s="Ne I">1626.89559</line>
+    <line order="1" rel="40" v="" s="Ne I">1634.69230</line>
+    <line order="1" rel="150" v="" s="Ne I">1640.52557</line>
+    <line order="1" rel="15" v="" s="Ne I">1642.3662</line>
+    <line order="1" rel="19" v="" s="Ne I">1646.8993</line>
+    <line order="1" rel="81" v="" s="Ne I">1647.47531</line>
+    <line order="1" rel="30" v="" s="Ar I">1651.986</line>
+    <line order="1" rel="34" v="" s="Ne I">1652.80869</line>
+    <line order="1" rel="34" v="" s="Ne I">1659.15089</line>
+    <line order="1" rel="30" v="" s="Ne I">1660.7020</line>
+    <line order="1" rel="89" v="" s="Ne I">1660.94386</line>
+    <line order="1" rel="35" v="" s="Ne I">1663.40497</line>
+    <line order="1" rel="16" v="" s="Ne I">1666.7111</line>
+    <line order="1" rel="54" v="" s="Ne I">1678.87921</line>
+    <line order="1" rel="37" v="" s="Ne I">1686.16497</line>
+    <line order="1" rel="11" v="" s="Ne I">1691.0058</line>
+    <line order="1" rel="500" v="" s="Ar I">1694.058</line>
+    <line order="1" rel="67" v="" s="Ne I">1698.39743</line>
+    <line order="1" rel="5" v="" s="Ne I">1711.2136</line>
+    <line order="1" rel="1800" v="" s="Ne I">1716.19348</line>
+    <line order="1" rel="7" v="" s="Ne I">1723.4185</line>
+    <line order="1" rel="7" v="" s="Ne I">1729.4240</line>
+    <line order="1" rel="4" v="" s="Ne I">1731.0510</line>
+    <line order="1" rel="13" v="" s="Ne I">1796.1168</line>
+    <line order="1" rel="160" v="" s="Ne I">1802.96473</line>
+    <line order="1" rel="1900" v="" s="Ne I">1803.58121</line>
+    <line order="1" rel="4500" v="" s="Ne I">1808.3181</line>
+    <line order="1" rel="910" v="" s="Ne I">1808.3263</line>
+    <line order="1" rel="250" v="" s="Ne I">1821.03066</line>
+    <line order="1" rel="1600" v="" s="Ne I">1822.10868</line>
+    <line order="1" rel="1300" v="" s="Ne I">1822.70157</line>
+    <line order="1" rel="87" v="" s="Ne I">1824.74481</line>
+    <line order="1" rel="64" v="" s="Ne I">1825.33198</line>
+    <line order="1" rel="14000" v="" s="Ne I">1827.66415</line>
+    <line order="1" rel="10000" v="" s="Ne I">1828.26140</line>
+    <line order="1" rel="6800" v="" s="Ne I">1830.39674</line>
+    <line order="1" rel="1900" v="" s="Ne I">1835.90945</line>
+    <line order="1" rel="9" v="" s="Ne I">1837.1441</line>
+    <line order="1" rel="360" v="" s="Ne I">1838.39858</line>
+    <line order="1" rel="6400" v="" s="Ne I">1838.48256</line>
+    <line order="1" rel="480" v="" s="Ne I">1838.91674</line>
+    <line order="1" rel="8600" v="" s="Ne I">1838.99366</line>
+    <line order="1" rel="3900" v="" s="Ne I">1840.28356</line>
+    <line order="1" rel="6300" v="" s="Ne I">1842.24016</line>
+    <line order="1" rel="26" v="" s="Ne I">1842.3200</line>
+    <line order="1" rel="12" v="" s="Ar I">1842.776</line>
+    <line order="1" rel="1300" v="" s="Ne I">1845.86404</line>
+    <line order="1" rel="4100" v="" s="Ne I">1847.57997</line>
+    <line order="1" rel="6900" v="" s="Ne I">1859.1541</line>
+    <line order="1" rel="9500" v="" s="Ne I">1859.7698</line>
+    <line order="1" rel="1600" v="" s="Ne I">1861.8908</line>
+    <line order="1" rel="2000" v="" s="Ne I">1862.5159</line>
+    <line order="1" rel="9" v="" s="Ne I">1865.5605</line>
+    <line order="1" rel="87" v="" s="Ne I">1867.6080</line>
+    <line order="1" rel="14" v="" s="Ne I">1867.945</line>
+    <line order="1" rel="130" v="" s="Ne I">1868.2238</line>
+    <line order="1" rel="30" v="" s="Ne I">1889.8826</line>
+    <line order="1" rel="150" v="" s="Ne I">1893.7552</line>
+    <line order="1" rel="6" v="" s="Ne I">1894.4644</line>
+    <line order="1" rel="5" v="" s="Ne I">1911.1191</line>
+    <line order="1" rel="260" v="" s="Ne I">1957.3750</line>
+    <line order="1" rel="790" v="" s="Ne I">1957.7110</line>
+    <line order="1" rel="32" v="" s="Ne I">1977.2462</line>
+    <line order="1" rel="5" v="" s="Ne I">1987.7309</line>
+    <line order="1" rel="1" v="" s="Ne I">2013.4727</line>
+    <line order="1" rel="630" v="" s="Ne I">2035.0216</line>
+    <line order="1" rel="43" v="" s="Ne I">2035.3848</line>
+    <line order="1" rel="2" v="" s="Ne I">2036.6641</line>
+    <line order="1" rel="8" v="" s="Ne I">2041.1627</line>
+    <line order="1" rel="37" v="" s="Ne I">2041.6014</line>
+    <line order="1" rel="3" v="" s="Ne I">2041.9873</line>
+    <line order="1" rel="50" v="" s="Ar I">2061.623</line>
+    <line order="1" rel="11" v="" s="Ne I">2084.8755</line>
+    <line order="1" rel="7" v="" s="Ne I">2089.5895</line>
+    <line order="1" rel="29" v="" s="Ne I">2090.4530</line>
+    <line order="1" rel="2" v="" s="Ne I">2096.1214</line>
+    <line order="1" rel="30" v="" s="Ar I">2098.611</line>
+    <line order="1" rel="11" v="" s="Ne I">2100.8880</line>
+    <line order="1" rel="8" v="" s="Ne I">2101.3525</line>
+    <line order="1" rel="3" v="" s="Ne I">2101.7605</line>
+    <line order="1" rel="2700" v="" s="Ne I">2104.1270</line>
+    <line order="1" rel="4" v="" s="Ne I">2118.5583</line>
+    <line order="1" rel="11" v="" s="Ne I">2122.0107</line>
+    <line order="1" rel="26" v="" s="Ne I">2132.5462</line>
+    <line order="1" rel="20" v="" s="Ne I">2133.0452</line>
+    <line order="1" rel="15" v="" s="Ne I">2136.872</line>
+    <line order="1" rel="10" v="" s="Ne I">2138.6912</line>
+    <line order="1" rel="15" v="" s="Ne I">2139.1131</line>
+    <line order="1" rel="12" v="" s="Ne I">2139.5956</line>
+    <line order="1" rel="30" v="" s="Ne I">2141.5094</line>
+    <line order="1" rel="46" v="" s="Ne I">2142.2036</line>
+    <line order="1" rel="13" v="" s="Ne I">2145.1421</line>
+    <line order="1" rel="17" v="" s="Ne I">2145.8480</line>
+    <line order="1" rel="20" v="" s="Ne I">2149.884</line>
+    <line order="1" rel="90" v="" s="Ne I">2150.3746</line>
+    <line order="1" rel="8" v="" s="Ne I">2152.8681</line>
+    <line order="1" rel="18" v="" s="Ne I">2153.346</line>
+    <line order="1" rel="20" v="" s="Ne I">2156.3117</line>
+    <line order="1" rel="34" v="" s="Ne I">2157.6524</line>
+    <line order="1" rel="32" v="" s="Ne I">2157.9870</line>
+    <line order="1" rel="36" v="" s="Ne I">2159.6455</line>
+    <line order="1" rel="15" v="" s="Ne I">2162.0738</line>
+    <line order="1" rel="12" v="" s="Ne I">2162.1659</line>
+    <line order="1" rel="23" v="" s="Ne I">2163.2565</line>
+    <line order="1" rel="3" v="" s="Ne I">2163.9692</line>
+    <line order="1" rel="15" v="" s="Ne I">2165.3341</line>
+    <line order="1" rel="23" v="" s="Ne I">2166.7353</line>
+    <line order="1" rel="6" v="" s="Ne I">2166.876</line>
+    <line order="1" rel="2900" v="" s="Ne I">2170.8114</line>
+  </source>
+
+  <source name="NIR Neon" type="lines" symbol="Ne" units="nm" display="NIR NeAr" show="true" index="1">
+    <line order="1" rel="1000" v="" s="Ne">0.0000</line>
+    <line order="1" rel="9" v="" s="Ne I">903.69985</line>
+    <line order="1" rel="1" v="" s="Ne I">904.68</line>
+    <line order="1" rel="4" v="" s="Ne I">904.9086</line>
+    <line order="1" rel="3" v="" s="Ne I">905.2424</line>
+    <line order="1" rel="7" v="" s="Ne I">905.2642</line>
+    <line order="1" rel="5" v="" s="Ne I">907.3033</line>
+    <line order="1" rel="1" v="" s="Ne I">910.21</line>
+    <line order="1" rel="4" v="" s="Ne I">910.353</line>
+    <line order="1" rel="1" v="" s="Ne I">911.53</line>
+    <line order="1" rel="5000" v="" s="Ne I">914.86720</line>
+    <line order="1" rel="1" v="" s="Ne I">919.38</line>
+    <line order="1" rel="10900" v="" s="Ne I">920.17588</line>
+    <line order="1" rel="6000" v="" s="Ne I">922.00598</line>
+    <line order="1" rel="2200" v="" s="Ne I">922.15802</line>
+    <line order="1" rel="1800" v="" s="Ne I">922.66910</line>
+    <line order="1" rel="910" v="" s="Ne I">927.55191</line>
+    <line order="1" rel="10780" v="" s="Ne I">930.08532</line>
+    <line order="1" rel="830" v="" s="Ne I">931.05833</line>
+    <line order="1" rel="2700" v="" s="Ne I">931.39731</line>
+    <line order="1" rel="8970" v="" s="Ne I">932.65072</line>
+    <line order="1" rel="3" v="" s="Ne I">934.05</line>
+    <line order="1" rel="6" v="" s="Ne I">935.33</line>
+    <line order="1" rel="2250" v="" s="Ne I">937.33079</line>
+    <line order="1" rel="7" v="" s="Ne I">937.72276</line>
+    <line order="1" rel="9" v="" s="Ne I">941.075</line>
+    <line order="1" rel="6" v="" s="Ne I">941.232</line>
+    <line order="1" rel="4800" v="" s="Ne I">942.53797</line>
+    <line order="1" rel="66" v="" s="Ne I">943.30082</line>
+    <line order="1" rel="3" v="" s="Ne I">944.38</line>
+    <line order="1" rel="4" v="" s="Ne I">944.526</line>
+    <line order="1" rel="1" v="" s="Ne I">945.40</line>
+    <line order="1" rel="2800" v="" s="Ne I">945.92110</line>
+    <line order="1" rel="5000" v="" s="Ne I">948.66825</line>
+    <line order="1" rel="4" v="" s="Ne I">950.659</line>
+    <line order="1" rel="7" v="" s="Ne I">950.84</line>
+    <line order="1" rel="12200" v="" s="Ne I">953.41640</line>
+    <line order="1" rel="2800" v="" s="Ne I">954.74052</line>
+    <line order="1" rel="2" v="" s="Ne I">957.4002</line>
+    <line order="1" rel="1" v="" s="Ne I">964.22</line>
+    <line order="1" rel="6000" v="" s="Ne I">966.54200</line>
+    <line order="1" rel="1" v="" s="Ne I">972.48</line>
+    <line order="1" rel="3" v="" s="Ne I">978.81</line>
+    <line order="1" rel="3" v="" s="Ne I">982.3453</line>
+    <line order="1" rel="13" v="" s="Ne I">983.7507</line>
+    <line order="1" rel="4" v="" s="Ne I">989.730</line>
+    <line order="1" rel="3" v="" s="Ne I">989.906</line>
+    <line order="1" rel="30" v="" s="Ne I">990.0594</line>
+    <line order="1" rel="25" v="" s="Ne I">990.2337</line>
+    <line order="1" rel="13" v="" s="Ne I">991.5195</line>
+    <line order="1" rel="6" v="" s="Ne I">991.8602</line>
+    <line order="1" rel="10" v="" s="Ne I">993.6853</line>
+    <line order="1" rel="16" v="" s="Ne I">993.8352</line>
+    <line order="1" rel="9" v="" s="Ne I">994.4140</line>
+    <line order="1" rel="4" v="" s="Ne I">994.5058</line>
+    <line order="1" rel="9" v="" s="Ne I">994.8061</line>
+    <line order="1" rel="7" v="" s="Ne I">996.3605</line>
+    <line order="1" rel="3" v="" s="Ne I">997.42</line>
+    <line order="1" rel="13" v="" s="Ne I">1000.5600</line>
+    <line order="1" rel="20" v="" s="Ne I">1000.7385</line>
+    <line order="1" rel="5" v="" s="Ne I">1000.8685</line>
+    <line order="1" rel="3" v="" s="Ne I">1003.71</line>
+    <line order="1" rel="3" v="" s="Ne I">1003.89</line>
+    <line order="1" rel="2" v="" s="Ne I">1021.0835</line>
+    <line order="1" rel="4" v="" s="Ne I">1022.4659</line>
+    <line order="1" rel="16" v="" s="Ne I">1024.57132</line>
+    <line order="1" rel="210" v="" s="Ne I">1029.54162</line>
+    <line order="1" rel="13" v="" s="Ne I">1043.25909</line>
+    <line order="1" rel="1200" v="" s="Ne I">1056.24089</line>
+    <line order="1" rel="390" v="" s="Ne I">1062.06637</line>
+    <line order="1" rel="19" v="" s="Ne I">1067.3870</line>
+    <line order="1" rel="55" v="" s="Ne I">1069.0457</line>
+    <line order="1" rel="15" v="" s="Ne I">1075.8204</line>
+    <line order="1" rel="14" v="" s="Ne I">1076.0270</line>
+    <line order="1" rel="150" v="" s="Ne I">1076.4023</line>
+    <line order="1" rel="110" v="" s="Ne I">1076.6087</line>
+    <line order="1" rel="69" v="" s="Ne I">1078.0531</line>
+    <line order="1" rel="16" v="" s="Ne I">1078.6286</line>
+    <line order="1" rel="2" v="" s="Ne I">1079.0862</line>
+    <line order="1" rel="3050" v="" s="Ne I">1079.80430</line>
+    <line order="1" rel="54" v="" s="Ne I">1080.6358</line>
+    <line order="1" rel="74" v="" s="Ne I">1080.8128</line>
+    <line order="1" rel="40" v="" s="Ne I">1081.4755</line>
+    <line order="1" rel="92" v="" s="Ne I">1081.9819</line>
+    <line order="1" rel="37" v="" s="Ne I">1083.82180</line>
+    <line order="1" rel="4700" v="" s="Ne I">1084.44774</line>
+    <line order="1" rel="58" v="" s="Ne I">1088.6277</line>
+    <line order="1" rel="85" v="" s="Ne I">1088.8392</line>
+    <line order="1" rel="25" v="" s="Ne I">1089.1151</line>
+    <line order="1" rel="78" v="" s="Ne I">1102.08794</line>
+    <line order="1" rel="64" v="" s="Ne I">1104.40002</line>
+    <line order="1" rel="200" v="" s="Ne I">1104.97221</line>
+    <line order="1" rel="29" v="" s="Ne I">1106.0808</line>
+    <line order="1" rel="73" v="" s="Ne I">1112.02780</line>
+    <line order="1" rel="49" v="" s="Ne I">1113.45095</line>
+    <line order="1" rel="55" v="" s="Ne I">1113.84329</line>
+    <line order="1" rel="31200" v="" s="Ne I">1114.30200</line>
+    <line order="1" rel="270" v="" s="Ne I">1116.02133</line>
+    <line order="1" rel="53000" v="" s="Ne I">1117.75246</line>
+    <line order="1" rel="65" v="" s="Ne I">1129.29647</line>
+    <line order="1" rel="46" v="" s="Ne I">1129.84416</line>
+    <line order="1" rel="140" v="" s="Ne I">1130.38878</line>
+    <line order="1" rel="100" v="" s="Ne I">1130.45457</line>
+    <line order="1" rel="41" v="" s="Ne I">1132.96259</line>
+    <line order="1" rel="37" v="" s="Ne I">1133.36873</line>
+    <line order="1" rel="110" v="" s="Ne I">1136.66716</line>
+    <line order="1" rel="13500" v="" s="Ne I">1139.04333</line>
+    <line order="1" rel="12320" v="" s="Ne I">1140.91338</line>
+    <line order="1" rel="33000" v="" s="Ne I">1152.27450</line>
+    <line order="1" rel="17000" v="" s="Ne I">1152.50203</line>
+    <line order="1" rel="6000" v="" s="Ne I">1153.63446</line>
+    <line order="1" rel="2600" v="" s="Ne I">1160.15369</line>
+    <line order="1" rel="7800" v="" s="Ne I">1161.40805</line>
+    <line order="1" rel="7350" v="" s="Ne I">1168.80028</line>
+    <line order="1" rel="15000" v="" s="Ne I">1176.67929</line>
+    <line order="1" rel="6500" v="" s="Ne I">1178.90444</line>
+    <line order="1" rel="3200" v="" s="Ne I">1178.98894</line>
+    <line order="1" rel="20" v="" s="Ne I">1197.9781</line>
+    <line order="1" rel="7400" v="" s="Ne I">1198.49139</line>
+    <line order="1" rel="18" v="" s="Ne I">1199.6569</line>
+    <line order="1" rel="5" v="" s="Ne I">1199.7813</line>
+    <line order="1" rel="12000" v="" s="Ne I">1206.63343</line>
+    <line order="1" rel="3" v="" s="Ne I">1238.8983</line>
+    <line order="1" rel="4" v="" s="Ne I">1240.8769</line>
+    <line order="1" rel="18" v="" s="Ne I">1243.0505</line>
+    <line order="1" rel="75" v="" s="Ne I">1245.33684</line>
+    <line order="1" rel="16000" v="" s="Ne I">1245.93903</line>
+    <line order="1" rel="160" v="" s="Ne I">1246.41163</line>
+    <line order="1" rel="23" v="" s="Ne I">1247.3468</line>
+    <line order="1" rel="1700" v="" s="Ne I">1248.67315</line>
+    <line order="1" rel="21" v="" s="Ne I">1252.02343</line>
+    <line order="1" rel="15" v="" s="Ne I">1253.7742</line>
+    <line order="1" rel="48" v="" s="Ne I">1255.97621</line>
+    <line order="1" rel="130" v="" s="Ne I">1257.10054</line>
+    <line order="1" rel="96" v="" s="Ne I">1257.38231</line>
+    <line order="1" rel="8" v="" s="Ne I">1257.7349</line>
+    <line order="1" rel="6" v="" s="Ne I">1258.0144</line>
+    <line order="1" rel="1200" v="" s="Ne I">1258.46021</line>
+    <line order="1" rel="850" v="" s="Ne I">1258.74256</line>
+    <line order="1" rel="1600" v="" s="Ne I">1259.50049</line>
+    <line order="1" rel="32" v="" s="Ne I">1260.07778</line>
+    <line order="1" rel="13" v="" s="Ne I">1260.1293</line>
+    <line order="1" rel="18" v="" s="Ne I">1260.33179</line>
+    <line order="1" rel="550" v="" s="Ne I">1260.41773</line>
+    <line order="1" rel="150" v="" s="Ne I">1261.76692</line>
+    <line order="1" rel="6" v="" s="Ne I">1263.1024</line>
+    <line order="1" rel="500" v="" s="Ne I">1264.03174</line>
+    <line order="1" rel="710" v="" s="Ne I">1264.27394</line>
+    <line order="1" rel="330" v="" s="Ne I">1265.09824</line>
+    <line order="1" rel="470" v="" s="Ne I">1265.83460</line>
+    <line order="1" rel="98" v="" s="Ne I">1266.46063</line>
+    <line order="1" rel="300" v="" s="Ne I">1268.35329</line>
+    <line order="1" rel="2150" v="" s="Ne I">1268.92032</line>
+    <line order="1" rel="23" v="" s="Ne I">1271.8797</line>
+    <line order="1" rel="11" v="" s="Ne I">1272.6785</line>
+    <line order="1" rel="540" v="" s="Ne I">1274.62264</line>
+    <line order="1" rel="710" v="" s="Ne I">1274.91248</line>
+    <line order="1" rel="120" v="" s="Ne I">1275.27222</line>
+    <line order="1" rel="170" v="" s="Ne I">1275.56507</line>
+    <line order="1" rel="37" v="" s="Ne I">1275.99494</line>
+    <line order="1" rel="6" v="" s="Ne I">1276.6582</line>
+    <line order="1" rel="1600" v="" s="Ne I">1276.95250</line>
+    <line order="1" rel="16" v="" s="Ne I">1277.6652</line>
+    <line order="1" rel="5" v="" s="Ne I">1285.3034</line>
+    <line order="1" rel="7" v="" s="Ne I">1286.4091</line>
+    <line order="1" rel="11" v="" s="Ne I">1286.4730</line>
+    <line order="1" rel="14" v="" s="Ne I">1288.71630</line>
+    <line order="1" rel="500" v="" s="Ne I">1291.20141</line>
+    <line order="1" rel="25" v="" s="Ne I">1298.00736</line>
+    <line order="1" rel="12" v="" s="Ne I">1305.4788</line>
+    <line order="1" rel="6" v="" s="Ne I">1305.8815</line>
+    <line order="1" rel="6" v="" s="Ne I">1309.6396</line>
+    <line order="1" rel="6" v="" s="Ne I">1312.6171</line>
+    <line order="1" rel="12" v="" s="Ne I">1312.7681</line>
+    <line order="1" rel="5" v="" s="Ne I">1314.5446</line>
+    <line order="1" rel="4500" v="" s="Ne I">1321.92426</line>
+    <line order="1" rel="8" v="" s="Ne I">1325.1199</line>
+    <line order="1" rel="6" v="" s="Ne I">1329.6547</line>
+    <line order="1" rel="10" v="" s="Ne I">1333.9714</line>
+    <line order="1" rel="7" v="" s="Ne I">1338.9290</line>
+    <line order="1" rel="5" v="" s="Ne I">1352.7073</line>
+    <line order="1" rel="5" v="" s="Ne I">1358.5088</line>
+    <line order="1" rel="4" v="" s="Ne I">1373.8735</line>
+    <line order="1" rel="9" v="" s="Ne I">1386.6305</line>
+    <line order="1" rel="5" v="" s="Ne I">1390.8173</line>
+    <line order="1" rel="3" v="" s="Ne I">1397.0972</line>
+    <line order="1" rel="4" v="" s="Ne I">1401.2921</line>
+    <line order="1" rel="6" v="" s="Ne I">1401.5900</line>
+    <line order="1" rel="9" v="" s="Ne I">1404.3107</line>
+    <line order="1" rel="5" v="" s="Ne I">1407.4110</line>
+    <line order="1" rel="7" v="" s="Ne I">1428.3603</line>
+    <line order="1" rel="130" v="" s="Ne I">1430.08338</line>
+    <line order="1" rel="120" v="" s="Ne I">1434.21609</line>
+    <line order="1" rel="51" v="" s="Ne I">1435.33494</line>
+    <line order="1" rel="5" v="" s="Ne I">1438.4113</line>
+    <line order="1" rel="18" v="" s="Ne I">1449.99217</line>
+    <line order="1" rel="110" v="" s="Ne I">1492.98061</line>
+    <line order="1" rel="7" v="" s="Ne I">1493.1183</line>
+    <line order="1" rel="15" v="" s="Ne I">1497.0774</line>
+    <line order="1" rel="22" v="" s="Ne I">1498.4854</line>
+    <line order="1" rel="530" v="" s="Ne I">1498.63193</line>
+    <line order="1" rel="19" v="" s="Ne I">1505.89894</line>
+    <line order="1" rel="140" v="" s="Ne I">1507.41688</line>
+    <line order="1" rel="48" v="" s="Ne I">1507.50431</line>
+    <line order="1" rel="4" v="" s="Ne I">1508.3912</line>
+    <line order="1" rel="94" v="" s="Ne I">1508.53103</line>
+    <line order="1" rel="13" v="" s="Ne I">1510.6454</line>
+    <line order="1" rel="5" v="" s="Ne I">1512.5728</line>
+    <line order="1" rel="350" v="" s="Ne I">1514.00981</line>
+    <line order="1" rel="6" v="" s="Ne I">1517.1965</line>
+    <line order="1" rel="32" v="" s="Ne I">1517.43113</line>
+    <line order="1" rel="4" v="" s="Ne I">1517.6335</line>
+    <line order="1" rel="63" v="" s="Ne I">1518.97238</line>
+    <line order="1" rel="99" v="" s="Ne I">1519.06122</line>
+    <line order="1" rel="270" v="" s="Ne I">1519.09319</line>
+    <line order="1" rel="48" v="" s="Ne I">1519.26365</line>
+    <line order="1" rel="10600" v="" s="Ne I">1523.07144</line>
+    <line order="1" rel="160" v="" s="Ne I">1534.81896</line>
+    <line order="1" rel="74" v="" s="Ne I">1537.00789</line>
+    <line order="1" rel="17" v="" s="Ne I">1539.0028</line>
+    <line order="1" rel="250" v="" s="Ne I">1540.75930</line>
+    <line order="1" rel="6" v="" s="Ne I">1540.9058</line>
+    <line order="1" rel="4" v="" s="Ne I">1543.1122</line>
+    <line order="1" rel="11" v="" s="Ne I">1545.0863</line>
+    <line order="1" rel="110" v="" s="Ne I">1545.12285</line>
+    <line order="1" rel="25" v="" s="Ne I">1546.62267</line>
+    <line order="1" rel="23" v="" s="Ne I">1549.9484</line>
+    <line order="1" rel="13" v="" s="Ne I">1550.0897</line>
+    <line order="1" rel="65" v="" s="Ne I">1560.42140</line>
+    <line order="1" rel="4" v="" s="Ne I">1576.1050</line>
+    <line order="1" rel="4" v="" s="Ne I">1580.2647</line>
+    <line order="1" rel="7" v="" s="Ne I">1581.2181</line>
+    <line order="1" rel="130" v="" s="Ne I">1602.27694</line>
+    <line order="1" rel="5" v="" s="Ne I">1604.5498</line>
+    <line order="1" rel="47" v="" s="Ne I">1609.84859</line>
+    <line order="1" rel="5" v="" s="Ne I">1625.2672</line>
+    <line order="1" rel="7" v="" s="Ne I">1626.3592</line>
+    <line order="1" rel="44" v="" s="Ne I">1626.42476</line>
+    <line order="1" rel="8" v="" s="Ne I">1626.8353</line>
+    <line order="1" rel="63" v="" s="Ne I">1626.89559</line>
+    <line order="1" rel="40" v="" s="Ne I">1634.69230</line>
+    <line order="1" rel="150" v="" s="Ne I">1640.52557</line>
+    <line order="1" rel="15" v="" s="Ne I">1642.3662</line>
+    <line order="1" rel="19" v="" s="Ne I">1646.8993</line>
+    <line order="1" rel="81" v="" s="Ne I">1647.47531</line>
+    <line order="1" rel="34" v="" s="Ne I">1652.80869</line>
+    <line order="1" rel="34" v="" s="Ne I">1659.15089</line>
+    <line order="1" rel="30" v="" s="Ne I">1660.7020</line>
+    <line order="1" rel="89" v="" s="Ne I">1660.94386</line>
+    <line order="1" rel="35" v="" s="Ne I">1663.40497</line>
+    <line order="1" rel="16" v="" s="Ne I">1666.7111</line>
+    <line order="1" rel="54" v="" s="Ne I">1678.87921</line>
+    <line order="1" rel="37" v="" s="Ne I">1686.16497</line>
+    <line order="1" rel="11" v="" s="Ne I">1691.0058</line>
+    <line order="1" rel="67" v="" s="Ne I">1698.39743</line>
+    <line order="1" rel="5" v="" s="Ne I">1711.2136</line>
+    <line order="1" rel="1800" v="" s="Ne I">1716.19348</line>
+    <line order="1" rel="7" v="" s="Ne I">1723.4185</line>
+    <line order="1" rel="7" v="" s="Ne I">1729.4240</line>
+    <line order="1" rel="4" v="" s="Ne I">1731.0510</line>
+    <line order="1" rel="13" v="" s="Ne I">1796.1168</line>
+    <line order="1" rel="160" v="" s="Ne I">1802.96473</line>
+    <line order="1" rel="1900" v="" s="Ne I">1803.58121</line>
+    <line order="1" rel="4500" v="" s="Ne I">1808.3181</line>
+    <line order="1" rel="910" v="" s="Ne I">1808.3263</line>
+    <line order="1" rel="250" v="" s="Ne I">1821.03066</line>
+    <line order="1" rel="1600" v="" s="Ne I">1822.10868</line>
+    <line order="1" rel="1300" v="" s="Ne I">1822.70157</line>
+    <line order="1" rel="87" v="" s="Ne I">1824.74481</line>
+    <line order="1" rel="64" v="" s="Ne I">1825.33198</line>
+    <line order="1" rel="14000" v="" s="Ne I">1827.66415</line>
+    <line order="1" rel="10000" v="" s="Ne I">1828.26140</line>
+    <line order="1" rel="6800" v="" s="Ne I">1830.39674</line>
+    <line order="1" rel="1900" v="" s="Ne I">1835.90945</line>
+    <line order="1" rel="9" v="" s="Ne I">1837.1441</line>
+    <line order="1" rel="360" v="" s="Ne I">1838.39858</line>
+    <line order="1" rel="6400" v="" s="Ne I">1838.48256</line>
+    <line order="1" rel="480" v="" s="Ne I">1838.91674</line>
+    <line order="1" rel="8600" v="" s="Ne I">1838.99366</line>
+    <line order="1" rel="3900" v="" s="Ne I">1840.28356</line>
+    <line order="1" rel="6300" v="" s="Ne I">1842.24016</line>
+    <line order="1" rel="26" v="" s="Ne I">1842.3200</line>
+    <line order="1" rel="1300" v="" s="Ne I">1845.86404</line>
+    <line order="1" rel="4100" v="" s="Ne I">1847.57997</line>
+    <line order="1" rel="6900" v="" s="Ne I">1859.1541</line>
+    <line order="1" rel="9500" v="" s="Ne I">1859.7698</line>
+    <line order="1" rel="1600" v="" s="Ne I">1861.8908</line>
+    <line order="1" rel="2000" v="" s="Ne I">1862.5159</line>
+    <line order="1" rel="9" v="" s="Ne I">1865.5605</line>
+    <line order="1" rel="87" v="" s="Ne I">1867.6080</line>
+    <line order="1" rel="14" v="" s="Ne I">1867.945</line>
+    <line order="1" rel="130" v="" s="Ne I">1868.2238</line>
+    <line order="1" rel="30" v="" s="Ne I">1889.8826</line>
+    <line order="1" rel="150" v="" s="Ne I">1893.7552</line>
+    <line order="1" rel="6" v="" s="Ne I">1894.4644</line>
+    <line order="1" rel="5" v="" s="Ne I">1911.1191</line>
+    <line order="1" rel="260" v="" s="Ne I">1957.3750</line>
+    <line order="1" rel="790" v="" s="Ne I">1957.7110</line>
+    <line order="1" rel="32" v="" s="Ne I">1977.2462</line>
+    <line order="1" rel="5" v="" s="Ne I">1987.7309</line>
+    <line order="1" rel="1" v="" s="Ne I">2013.4727</line>
+    <line order="1" rel="630" v="" s="Ne I">2035.0216</line>
+    <line order="1" rel="43" v="" s="Ne I">2035.3848</line>
+    <line order="1" rel="2" v="" s="Ne I">2036.6641</line>
+    <line order="1" rel="8" v="" s="Ne I">2041.1627</line>
+    <line order="1" rel="37" v="" s="Ne I">2041.6014</line>
+    <line order="1" rel="3" v="" s="Ne I">2041.9873</line>
+    <line order="1" rel="11" v="" s="Ne I">2084.8755</line>
+    <line order="1" rel="7" v="" s="Ne I">2089.5895</line>
+    <line order="1" rel="29" v="" s="Ne I">2090.4530</line>
+    <line order="1" rel="2" v="" s="Ne I">2096.1214</line>
+    <line order="1" rel="11" v="" s="Ne I">2100.8880</line>
+    <line order="1" rel="8" v="" s="Ne I">2101.3525</line>
+    <line order="1" rel="3" v="" s="Ne I">2101.7605</line>
+    <line order="1" rel="2700" v="" s="Ne I">2104.1270</line>
+    <line order="1" rel="4" v="" s="Ne I">2118.5583</line>
+    <line order="1" rel="11" v="" s="Ne I">2122.0107</line>
+    <line order="1" rel="26" v="" s="Ne I">2132.5462</line>
+    <line order="1" rel="20" v="" s="Ne I">2133.0452</line>
+    <line order="1" rel="15" v="" s="Ne I">2136.872</line>
+    <line order="1" rel="10" v="" s="Ne I">2138.6912</line>
+    <line order="1" rel="15" v="" s="Ne I">2139.1131</line>
+    <line order="1" rel="12" v="" s="Ne I">2139.5956</line>
+    <line order="1" rel="30" v="" s="Ne I">2141.5094</line>
+    <line order="1" rel="46" v="" s="Ne I">2142.2036</line>
+    <line order="1" rel="13" v="" s="Ne I">2145.1421</line>
+    <line order="1" rel="17" v="" s="Ne I">2145.8480</line>
+    <line order="1" rel="20" v="" s="Ne I">2149.884</line>
+    <line order="1" rel="90" v="" s="Ne I">2150.3746</line>
+    <line order="1" rel="8" v="" s="Ne I">2152.8681</line>
+    <line order="1" rel="18" v="" s="Ne I">2153.346</line>
+    <line order="1" rel="20" v="" s="Ne I">2156.3117</line>
+    <line order="1" rel="34" v="" s="Ne I">2157.6524</line>
+    <line order="1" rel="32" v="" s="Ne I">2157.9870</line>
+    <line order="1" rel="36" v="" s="Ne I">2159.6455</line>
+    <line order="1" rel="15" v="" s="Ne I">2162.0738</line>
+    <line order="1" rel="12" v="" s="Ne I">2162.1659</line>
+    <line order="1" rel="23" v="" s="Ne I">2163.2565</line>
+    <line order="1" rel="3" v="" s="Ne I">2163.9692</line>
+    <line order="1" rel="15" v="" s="Ne I">2165.3341</line>
+    <line order="1" rel="23" v="" s="Ne I">2166.7353</line>
+    <line order="1" rel="6" v="" s="Ne I">2166.876</line>
+    <line order="1" rel="2900" v="" s="Ne I">2170.8114</line>
+  </source>
+
+  <source name="VISNIR PI Neon" type="lines" symbol="Ne" units="nm" display="VISNIR PI NeAr" show="true" index="1">
+    <line index="0"  order="1" rel="1000"  v="*" s="Ne">0.0000</line>
+    <line index="0"  order="1" rel="1000"   v="*" s="Ne">352.04714</line>
+    <line order="1" rel="1100" v="*" s="Ne">540.05616</line>
+    <line order="1" rel="270"   v="*" s="Ne">574.82985</line>
+    <line order="1" rel="800"   v="*" s="Ne">576.44188</line>
+    <line order="1" rel="400"   v="*" s="Ne">582.01558</line>
+    <line order="1" rel="52500" v="*" s="Ne">585.2488</line>
+    <line order="1" rel="4200"  v="*" s="Ne">588.1895</line>
+    <line order="1" rel="7200"  v="*" s="Ne">594.4834</line>
+    <line order="1" rel="2100"  v="*" s="Ne">597.553</line>
+    <line order="1" rel="2280"  v="*" s="Ne">603.000</line>
+    <line order="1" rel="6400"  v="*" s="Ne">607.434</line>
+    <line order="1" rel="11500" v="*" s="Ne">609.616</line>
+    <line order="1" rel="18700" v="*" s="Ne">614.306</line>
+    <line order="1" rel="5300"  v="*" s="Ne">616.359</line>
+    <line order="1" rel="3500"  v="*" s="Ne">621.728</line>
+    <line order="1" rel="11500" v="*" s="Ne">626.650</line>
+    <line order="1" rel="4200"  v="*" s="Ne">630.479</line>
+    <line order="1" rel="9200"  v="*" s="Ne">633.443</line>
+    <line order="1" rel="17500" v="*" s="Ne">638.299</line>
+    <line order="1" rel="30500" v="*" s="Ne">640.225</line>
+    <line order="1" rel="17100" v="*" s="Ne">650.653</line>
+    <line order="1" rel="5800"  v="*" s="Ne">653.288</line>
+    <line order="1" rel="8800"  v="*" s="Ne">659.895</line>
+    <line order="1" rel="16000" v="*" s="Ne">667.830</line>
+    <line order="1" rel="8500"  v="*" s="Ne">671.7043</line>
+    <line order="1" rel="13500" v="1" s="Ne">692.947</line>
+    <line order="2" rel="2500"  v="1" s="Ar">696.5431</line>
+    <line order="1" rel="35500" v="1" s="Ne">703.241</line>
+    <line order="2" rel="1700"  v="1" s="Ar">706.7218</line>
+    <line order="1" rel="2000"  v="1" s="Ne">717.394</line>
+    <line order="1" rel="11200" v="1" s="Ne">724.51665</line>
+    <line order="1" rel="200"   v="1" s="Ar" notes="maybe seeing this with the LS">727.2936</line>
+    <line order="2" rel="3000"  v="1" s="Ar">738.3980</line>
+    <line order="1" rel="3300"  v="1" s="Ne">743.899</line>
+    <line order="1" rel="150"   v="1" s="Ne">747.24383</line>
+    <line order="1" rel="3900"  v="1" s="Ne">748.887</line>
+    <line order="1" rel="14000" v="1" s="Ar">750.387</line>
+    <line order="1" rel="6600"  v="1" s="Ar">751.465</line>
+    <line order="1" rel="3500"  v="1" s="Ne">753.577</line>
+    <line order="1" rel="1800"  v="1" s="Ne">754.404</line>
+    <line order="1" rel="19000" v="1" s="Ar">763.5106</line>
+    <line order="1" rel="6400"  v="1" s="Ar">772.3761</line>
+    <line order="1" rel="200"   v="1" s="Ne">794.31805</line>
+    <line order="1" rel="5000"  v="1" s="Ar">794.8176</line>
+    <line order="1" rel="2200"  v="1" s="Ar">800.6157</line>
+    <line order="1" rel="2600"  v="1" s="Ar">801.4786</line>
+    <line order="1" rel="900"   v="1" s="Ne">808.24576</line>
+    <line order="1" rel="6200"  v="1" s="Ar">810.3693</line>
+    <line order="2" rel="400"   v="1" s="Ne">811.85495</line>
+    <line order="1" rel="21000" v="1" s="Ar">811.5311</line>     
+    <line order="2" rel="1000"  v="1" s="Ne">811.8546</line>
+    <line order="2" rel="400"   v="1" s="Ne">812.8911</line>
+    <line order="2" rel="950"   v="1" s="Ne">813.6406</line>
+    <line order="1" rel="150"   v="0" s="Ne">825.93795</line>
+    <line order="1" rel="6200"  v="0" s="Ar">826.4522</line>
+    <line order="2" rel="600"   v="0" s="Ne">826.60769</line>
+    <line order="2" rel="9600"  v="1" s="Ne">830.03248</line>
+    <line order="2" rel="280"   v="1" s="Ne">830.15570</line>
+    <line order="1" rel="560"   v="0" s="Ne">836.57465</line>
+    <line order="2" rel="1200"   v="1" s="Ne">837.63590</line>
+    <line order="2" rel="50000"  v="1" s="Ne">837.7607</line>
+    <line order="1" rel="7600"  v="1" s="Ar">840.8210</line>
+    <line order="1" rel="200"   v="1" s="Ne">841.71597</line>
+    <line order="2" rel="3600"  v="1" s="Ne">841.8427</line>
+    <line order="2" rel="7800"  v="1" s="Ar">842.4648</line>
+    <line order="1" rel="340"   v="1" s="Ne">846.33569</line>
+    <line order="2" rel="200"   v="1" s="Ne">848.44424</line>
+    <line order="2" rel="30000"  v="1" s="Ne">849.536591</line>
+    <line order="1" rel="15000"  v="1" s="Ar">852.1442</line>
+    <line order="5" rel="6600"  v="0" s="Ne">859.12583</line>
+    <line order="3" rel="9000"  v="0" s="Ne">863.46472</line>
+    <line order="3" rel="18000"  v="0" s="Ne">865.43828</line>
+    <line order="3" rel="700"   v="0" s="Ne">865.55220</line>
+    <line order="3" rel="4200"   v="0" s="Ne">867.94936</line>
+    <line order="3" rel="1800"   v="0" s="Ne">868.19216</line>
+    <line order="3" rel="800"   v="0" s="Ne">877.16575</line>
+    <line order="3" rel="200"   v="0" s="Ne" minSp="2500">877.87322</line>
+    <line order="3" rel="9600"  v="0" s="Ne">878.06223</line>
+    <line order="3" rel="6000"  v="0" s="Ne">878.37539</line>
+    <line order="3" rel="3000"  v="0" s="Ne">885.38669</line>
+    <line order="3" rel="2000"  v="0" s="Ne">886.57562</line>
+    <line order="3" rel="1660"   v="0" s="Ne">891.95007</line>
+    <line order="1" rel="9" v="" s="Ne I">903.69985</line>
+    <line order="1" rel="1" v="" s="Ne I">904.68</line>
+    <line order="1" rel="4" v="" s="Ne I">904.9086</line>
+    <line order="1" rel="3" v="" s="Ne I">905.2424</line>
+    <line order="1" rel="7" v="" s="Ne I">905.2642</line>
+    <line order="1" rel="5" v="" s="Ne I">907.3033</line>
+    <line order="1" rel="20" v="" s="Ar I">907.5394</line>
+    <line order="1" rel="1" v="" s="Ne I">910.21</line>
+    <line order="1" rel="4" v="" s="Ne I">910.353</line>
+    <line order="1" rel="1" v="" s="Ne I">911.53</line>
+    <line order="1" rel="40000" v="" s="Ar I">912.2967</line>
+    <line order="1" rel="5000" v="" s="Ne I">914.86720</line>
+    <line order="1" rel="1" v="" s="Ne I">919.38</line>
+    <line order="1" rel="550" v="" s="Ar I">919.4638</line>
+    <line order="1" rel="10900" v="" s="Ne I">920.17588</line>
+    <line order="1" rel="6000" v="" s="Ne I">922.00598</line>
+    <line order="1" rel="2200" v="" s="Ne I">922.15802</line>
+    <line order="1" rel="15000" v="" s="Ar I">922.4499</line>
+    <line order="1" rel="1800" v="" s="Ne I">922.66910</line>
+    <line order="1" rel="910" v="" s="Ne I">927.55191</line>
+    <line order="1" rel="400" v="" s="Ar I">929.1531</line>
+    <line order="1" rel="10780" v="" s="Ne I">930.08532</line>
+    <line order="1" rel="830" v="" s="Ne I">931.05833</line>
+    <line order="1" rel="2700" v="" s="Ne I">931.39731</line>
+    <line order="1" rel="8970" v="" s="Ne I">932.65072</line>
+    <line order="1" rel="3" v="" s="Ne I">934.05</line>
+    <line order="1" rel="6" v="" s="Ne I">935.33</line>
+    <line order="1" rel="2400" v="" s="Ar I">935.4220</line>
+    <line order="1" rel="2250" v="" s="Ne I">937.33079</line>
+    <line order="1" rel="7" v="" s="Ne I">937.72276</line>
+    <line order="1" rel="9" v="" s="Ne I">941.075</line>
+    <line order="1" rel="6" v="" s="Ne I">941.232</line>
+    <line order="1" rel="4800" v="" s="Ne I">942.53797</line>
+    <line order="1" rel="66" v="" s="Ne I">943.30082</line>
+    <line order="1" rel="3" v="" s="Ne I">944.38</line>
+    <line order="1" rel="4" v="" s="Ne I">944.526</line>
+    <line order="1" rel="1" v="" s="Ne I">945.40</line>
+    <line order="1" rel="2800" v="" s="Ne I">945.92110</line>
+    <line order="1" rel="5000" v="" s="Ne I">948.66825</line>
+    <line order="1" rel="4" v="" s="Ne I">950.659</line>
+    <line order="1" rel="7" v="" s="Ne I">950.84</line>
+    <line order="1" rel="12200" v="" s="Ne I">953.41640</line>
+    <line order="1" rel="2800" v="" s="Ne I">954.74052</line>
+    <line order="1" rel="2" v="" s="Ne I">957.4002</line>
+    <line order="1" rel="1" v="" s="Ne I">964.22</line>
+    <line order="1" rel="15000" v="" s="Ar I">965.7786</line>
+    <line order="1" rel="2000" v="" s="Ne I">966.54200</line>
+    <line order="1" rel="1" v="" s="Ne I">972.48</line>
+    <line order="1" rel="2250" v="" s="Ar I">978.4503</line>
+    <line order="1" rel="3" v="" s="Ne I">978.81</line>
+    <line order="1" rel="3" v="" s="Ne I">982.3453</line>
+    <line order="1" rel="13" v="" s="Ne I">983.7507</line>
+    <line order="1" rel="4" v="" s="Ne I">989.730</line>
+    <line order="1" rel="3" v="" s="Ne I">989.906</line>
+    <line order="1" rel="30" v="" s="Ne I">990.0594</line>
+    <line order="1" rel="25" v="" s="Ne I">990.2337</line>
+    <line order="1" rel="13" v="" s="Ne I">991.5195</line>
+    <line order="1" rel="6" v="" s="Ne I">991.8602</line>
+    <line order="1" rel="10" v="" s="Ne I">993.6853</line>
+    <line order="1" rel="16" v="" s="Ne I">993.8352</line>
+    <line order="1" rel="9" v="" s="Ne I">994.4140</line>
+    <line order="1" rel="4" v="" s="Ne I">994.5058</line>
+    <line order="1" rel="9" v="" s="Ne I">994.8061</line>
+    <line order="1" rel="7" v="" s="Ne I">996.3605</line>
+    <line order="1" rel="3" v="" s="Ne I">997.42</line>
+    <line order="1" rel="13" v="" s="Ne I">1000.5600</line>
+    <line order="1" rel="20" v="" s="Ne I">1000.7385</line>
+    <line order="1" rel="5" v="" s="Ne I">1000.8685</line>
+    <line order="1" rel="3" v="" s="Ne I">1003.71</line>
+    <line order="1" rel="3" v="" s="Ne I">1003.89</line>
+    <line order="1" rel="180" v="" s="Ar I">1005.206</line>
+    <line order="1" rel="2" v="" s="Ne I">1021.0835</line>
+    <line order="1" rel="4" v="" s="Ne I">1022.4659</line>
+    <line order="1" rel="16" v="" s="Ne I">1024.57132</line>
+    <line order="1" rel="210" v="" s="Ne I">1029.54162</line>
+    <line order="1" rel="30" v="" s="Ar I">1033.272</line>
+    <line order="1" rel="13" v="" s="Ne I">1043.25909</line>
+    <line order="1" rel="1600" v="" s="Ar I">1047.0054</line>
+    <line order="1" rel="13" v="" s="Ar I">1047.8034</line>
+    <line order="1" rel="180" v="" s="Ar I">1050.650</line>
+    <line order="1" rel="1200" v="" s="Ne I">1056.24089</line>
+    <line order="1" rel="390" v="" s="Ne I">1062.06637</line>
+    <line order="1" rel="200" v="" s="Ar I">1067.3565</line>
+    <line order="1" rel="19" v="" s="Ne I">1067.3870</line>
+    <line order="1" rel="11" v="" s="Ar I">1068.1773</line>
+    <line order="1" rel="55" v="" s="Ne I">1069.0457</line>
+    <line order="1" rel="30" v="" s="Ar I">1073.387</line>
+    <line order="1" rel="15" v="" s="Ne I">1075.8204</line>
+    <line order="1" rel="30" v="" s="Ar I">1075.916</line>
+    <line order="1" rel="14" v="" s="Ne I">1076.0270</line>
+    <line order="1" rel="150" v="" s="Ne I">1076.4023</line>
+    <line order="1" rel="110" v="" s="Ne I">1076.6087</line>
+    <line order="1" rel="69" v="" s="Ne I">1078.0531</line>
+    <line order="1" rel="16" v="" s="Ne I">1078.6286</line>
+    <line order="1" rel="2" v="" s="Ne I">1079.0862</line>
+    <line order="1" rel="3050" v="" s="Ne I">1079.80430</line>
+    <line order="1" rel="54" v="" s="Ne I">1080.6358</line>
+    <line order="1" rel="74" v="" s="Ne I">1080.8128</line>
+    <line order="1" rel="40" v="" s="Ne I">1081.4755</line>
+    <line order="1" rel="92" v="" s="Ne I">1081.9819</line>
+    <line order="1" rel="37" v="" s="Ne I">1083.82180</line>
+    <line order="1" rel="4700" v="" s="Ne I">1084.44774</line>
+    <line order="1" rel="58" v="" s="Ne I">1088.6277</line>
+    <line order="1" rel="85" v="" s="Ne I">1088.8392</line>
+    <line order="1" rel="25" v="" s="Ne I">1089.1151</line>
+    <line order="1" rel="78" v="" s="Ne I">1102.08794</line>
+    <line order="1" rel="64" v="" s="Ne I">1104.40002</line>
+    <line order="1" rel="200" v="" s="Ne I">1104.97221</line>
+    <line order="1" rel="29" v="" s="Ne I">1106.0808</line>
+    <line order="1" rel="11" v="" s="Ar I">1107.8869</line>
+    <line order="1" rel="30" v="" s="Ar I">1110.646</line>
+    <line order="1" rel="73" v="" s="Ne I">1112.02780</line>
+    <line order="1" rel="49" v="" s="Ne I">1113.45095</line>
+    <line order="1" rel="55" v="" s="Ne I">1113.84329</line>
+    <line order="1" rel="16000" v="" s="Ne I">1114.30200</line>
+    <line order="1" rel="270" v="" s="Ne I">1116.02133</line>
+    <line order="1" rel="12500" v="" s="Ne I">1117.75246</line>
+    <line order="1" rel="65" v="" s="Ne I">1129.29647</line>
+    <line order="1" rel="46" v="" s="Ne I">1129.84416</line>
+    <line order="1" rel="140" v="" s="Ne I">1130.38878</line>
+    <line order="1" rel="100" v="" s="Ne I">1130.45457</line>
+    <line order="1" rel="41" v="" s="Ne I">1132.96259</line>
+    <line order="1" rel="37" v="" s="Ne I">1133.36873</line>
+    <line order="1" rel="110" v="" s="Ne I">1136.66716</line>
+    <line order="1" rel="13500" v="" s="Ne I">1139.04333</line>
+    <line order="1" rel="12320" v="" s="Ne I">1140.91338</line>
+    <line order="1" rel="12" v="" s="Ar I">1144.1832</line>
+    <line order="1" rel="400" v="" s="Ar I">1148.8109</line>
+    <line order="1" rel="33000" v="" s="Ne I">1152.27450</line>
+    <line order="1" rel="17000" v="" s="Ne I">1152.50203</line>
+    <line order="1" rel="6000" v="" s="Ne I">1153.63446</line>
+    <line order="1" rel="2600" v="" s="Ne I">1160.15369</line>
+    <line order="1" rel="7800" v="" s="Ne I">1161.40805</line>
+    <line order="1" rel="2450" v="" s="Ar I">1166.8710</line>
+    <line order="1" rel="7350" v="" s="Ne I">1168.80028</line>
+    <line order="1" rel="20000" v="" s="Ar I">1171.9488</line>
+    <line order="1" rel="15000" v="" s="Ne I">1176.67929</line>
+    <line order="1" rel="6500" v="" s="Ne I">1178.90444</line>
+    <line order="1" rel="3200" v="" s="Ne I">1178.98894</line>
+    <line order="2" rel="4600"  v="*" s="Ne">1188.966</line>
+    <line order="1" rel="20" v="" s="Ne I">1197.9781</line>
+    <line order="1" rel="7400" v="" s="Ne I">1198.49139</line>
+    <line order="1" rel="18" v="" s="Ne I">1199.6569</line>
+    <line order="1" rel="5" v="" s="Ne I">1199.7813</line>
+    <line order="1" rel="12000" v="" s="Ne I">1206.63343</line>
+    <line order="1" rel="4600" v="" s="Ar I">1211.2326</line>
+    <line order="1" rel="8500" v="" s="Ar I">1213.9738</line>
+    <line order="2" rel="500" v="" s="Ne">1219.232</line>
+    <line order="2" rel="700" v="*" s="Ne">1228.612</line>
+    <line order="1" rel="1000" v="" s="Ar I">1234.3393</line>
+    <line order="1" rel="3" v="" s="Ne I">1238.8983</line>
+    <line order="1" rel="12000" v="" s="Ar I">1240.2827</line>
+    <line order="1" rel="4" v="" s="Ne I">1240.8769</line>
+    <line order="1" rel="18" v="" s="Ne I">1243.0505</line>
+    <line order="1" rel="20000" v="" s="Ar I">1243.9321</line>
+    <line order="1" rel="75" v="" s="Ne I">1245.33684</line>
+    <line order="1" rel="2300" v="" s="Ar I">1245.612</line>
+    <line order="1" rel="16000" v="" s="Ne I">1245.93903</line>
+    <line order="1" rel="160" v="" s="Ne I">1246.41163</line>
+    <line order="1" rel="23" v="" s="Ne I">1247.3468</line>
+    <line order="1" rel="1700" v="" s="Ne I">1248.67315</line>
+    <line order="1" rel="200" v="" s="Ar I">1248.7663</line>
+    <line order="1" rel="21" v="" s="Ne I">1252.02343</line>
+    <line order="2" rel="4600" v="*" s="Ne">1253.3</line>
+    <line order="1" rel="15" v="" s="Ne I">1253.7742</line>    
+    <line order="1" rel="48" v="" s="Ne I">1255.97621</line>
+    <line order="1" rel="130" v="" s="Ne I">1257.10054</line>
+    <line order="1" rel="96" v="" s="Ne I">1257.38231</line>
+    <line order="1" rel="8" v="" s="Ne I">1257.7349</line>
+    <line order="1" rel="6" v="" s="Ne I">1258.0144</line>
+    <line order="1" rel="1200" v="" s="Ne I">1258.46021</line>
+    <line order="1" rel="850" v="" s="Ne I">1258.74256</line>
+    <line order="1" rel="1600" v="" s="Ne I">1259.50049</line>
+    <line order="1" rel="32" v="" s="Ne I">1260.07778</line>
+    <line order="1" rel="13" v="" s="Ne I">1260.1293</line>
+    <line order="1" rel="18" v="" s="Ne I">1260.33179</line>
+    <line order="1" rel="550" v="" s="Ne I">1260.41773</line>
+    <line order="1" rel="150" v="" s="Ne I">1261.76692</line>
+    <line order="1" rel="6" v="" s="Ne I">1263.1024</line>
+    <line order="1" rel="500" v="" s="Ne I">1264.03174</line>
+    <line order="1" rel="710" v="" s="Ne I">1264.27394</line>
+    <line order="1" rel="330" v="" s="Ne I">1265.09824</line>
+    <line order="1" rel="470" v="" s="Ne I">1265.83460</line>
+    <line order="1" rel="98" v="" s="Ne I">1266.46063</line>
+    <line order="1" rel="300" v="" s="Ne I">1268.35329</line>
+    <line order="1" rel="2150" v="" s="Ne I">1268.92032</line>
+    <line order="1" rel="1500" v="" s="Ar I">1270.2281</line>
+    <line order="1" rel="23" v="" s="Ne I">1271.8797</line>
+    <line order="1" rel="11" v="" s="Ne I">1272.6785</line>
+    <line order="1" rel="30" v="" s="Ar I">1273.3418</line>
+    <line order="1" rel="540" v="" s="Ne I">1274.62264</line>
+    <line order="1" rel="12" v="" s="Ar I">1274.6232</line>
+    <line order="1" rel="710" v="" s="Ne I">1274.91248</line>
+    <line order="1" rel="120" v="" s="Ne I">1275.27222</line>
+    <line order="1" rel="170" v="" s="Ne I">1275.56507</line>
+    <line order="1" rel="37" v="" s="Ne I">1275.99494</line>
+    <line order="1" rel="6" v="" s="Ne I">1276.6582</line>
+    <line order="1" rel="1600" v="" s="Ne I">1276.95250</line>
+    <line order="1" rel="16" v="" s="Ne I">1277.6652</line>
+    <line order="1" rel="5000" v="" s="Ar I">1280.2739</line>
+    <line order="1" rel="5" v="" s="Ne I">1285.3034</line>
+    <line order="1" rel="7" v="" s="Ne I">1286.4091</line>
+    <line order="1" rel="11" v="" s="Ne I">1286.4730</line>
+    <line order="1" rel="14" v="" s="Ne I">1288.71630</line>
+    <line order="1" rel="500" v="" s="Ne I">1291.20141</line>
+    <line order="1" rel="50" v="" s="Ar I">1293.3195</line>
+    <line order="1" rel="8400" v="" s="Ar I">1295.6659</line>
+    <line order="1" rel="25" v="" s="Ne I">1298.00736</line>
+    <line order="1" rel="1000" v="" s="Ar I">1300.8264</line>
+    <line order="1" rel="12" v="" s="Ne I">1305.4788</line>
+    <line order="1" rel="6" v="" s="Ne I">1305.8815</line>
+    <line order="2" rel="2400"  v="*" s="Ne">1306.576</line>
+    <line order="1" rel="6" v="" s="Ne I">1309.6396</line>
+    <line order="1" rel="6" v="" s="Ne I">1312.6171</line>
+    <line order="1" rel="12" v="" s="Ne I">1312.7681</line>
+    <line order="1" rel="5" v="" s="Ne I">1314.5446</line>
+    <line order="1" rel="200" v="" s="Ar I">1321.399</line>
+    <line order="1" rel="4500" v="" s="Ne I">1321.92426</line>
+    <line order="1" rel="200" v="" s="Ar I">1322.8107</line>
+    <line order="1" rel="100" v="" s="Ar I">1323.090</line>
+    <line order="1" rel="8" v="" s="Ne I">1325.1199</line>
+    <line order="1" rel="1000" v="" s="Ar I">1327.264</line>
+    <line order="1" rel="6" v="" s="Ne I">1329.6547</line>
+    <line order="1" rel="2000" v="" s="Ar I">1331.3210</line>
+    <line order="1" rel="10" v="" s="Ne I">1333.9714</line>
+    <line order="1" rel="2000" v="" s="Ar I">1336.7111</line>
+    <line order="1" rel="7" v="" s="Ne I">1338.9290</line>
+    <line order="2" rel="3000"  v="*" s="Ne">1343.7043</line>
+    <line order="1" rel="30" v="" s="Ar I">1349.941</line>
+    <line order="1" rel="2000" v="" s="Ar I">1350.4191</line>
+    <line order="1" rel="5" v="" s="Ne I">1352.7073</line>
+    <line order="1" rel="11" v="" s="Ar I">1357.3617</line>
+    <line order="1" rel="5" v="" s="Ne I">1358.5088</line>
+    <line order="1" rel="30" v="" s="Ar I">1359.9333</line>
+    <line order="1" rel="400" v="" s="Ar I">1362.2659</line>
+    <line order="1" rel="800" v="" s="Ar I">1367.8550</line>
+    <line order="1" rel="6000" v="" s="Ar I">1371.8577</line>
+    <line order="1" rel="4" v="" s="Ne I">1373.8735</line>
+    <line order="1" rel="10" v="" s="Ar I">1382.5715</line>
+    <line order="1" rel="6000" v="" s="Ne I">1386.6305</line>
+    <line order="1" rel="10" v="" s="Ar I">1390.7478</line>
+    <line order="1" rel="5" v="" s="Ne I">1390.8173</line>
+    <line order="1" rel="3" v="" s="Ne I">1397.0972</line>
+    <line order="1" rel="4" v="" s="Ne I">1401.2921</line>
+    <line order="1" rel="6" v="" s="Ne I">1401.5900</line>
+    <line order="1" rel="9" v="" s="Ne I">1404.3107</line>
+    <line order="1" rel="12000" v="" s="Ne I">1407.4110</line>
+    <line order="1" rel="4000" v="" s="Ar I">1409.3640</line>
+    <line order="1" rel="7" v="" s="Ne I">1428.3603</line>
+    <line order="1" rel="130" v="" s="Ne I">1430.08338</line>
+    <line order="1" rel="120" v="" s="Ne I">1434.21609</line>
+    <line order="1" rel="51" v="" s="Ne I">1435.33494</line>
+    <line order="1" rel="5" v="" s="Ne I">1438.4113</line>
+    <line order="1" rel="6000" v="" s="Ne I">1449.99217</line>
+    <line order="2" rel="5000"  v="1" s="Ne">1487.798</line>    
+    <line order="1" rel="110" v="" s="Ne I">1492.98061</line>
+    <line order="1" rel="7" v="" s="Ne I">1493.1183</line>
+    <line order="1" rel="15" v="" s="Ne I">1497.0774</line>
+    <line order="1" rel="22" v="" s="Ne I">1498.4854</line>
+    <line order="1" rel="530" v="" s="Ne I">1498.63193</line>
+    <line order="1" rel="5000" v="" s="Ar I">1504.650</line>
+    <line order="1" rel="19" v="" s="Ne I">1505.89894</line>
+    <line order="1" rel="140" v="" s="Ne I">1507.41688</line>
+    <line order="1" rel="48" v="" s="Ne I">1507.50431</line>
+    <line order="1" rel="4" v="" s="Ne I">1508.3912</line>
+    <line order="1" rel="94" v="" s="Ne I">1508.53103</line>
+    <line order="1" rel="13" v="" s="Ne I">1510.6454</line>
+    <line order="1" rel="5" v="" s="Ne I">1512.5728</line>
+    <line order="1" rel="350" v="" s="Ne I">1514.00981</line>
+    <line order="1" rel="6" v="" s="Ne I">1517.1965</line>
+    <line order="1" rel="25" v="" s="Ar I">1517.269</line>
+    <line order="1" rel="32" v="" s="Ne I">1517.43113</line>
+    <line order="1" rel="4" v="" s="Ne I">1517.6335</line>
+    <line order="1" rel="63" v="" s="Ne I">1518.97238</line>
+    <line order="1" rel="99" v="" s="Ne I">1519.06122</line>
+    <line order="1" rel="270" v="" s="Ne I">1519.09319</line>
+    <line order="1" rel="48" v="" s="Ne I">1519.26365</line>
+    <line order="1" rel="10600" v="" s="Ne I">1523.07144</line>
+    <line order="2" rel="7500" v="1" s="Ar">1527.021</line>    
+    <line order="1" rel="10" v="" s="Ar I">1532.934</line>
+    <line order="1" rel="160" v="" s="Ne I">1534.81896</line>
+    <line order="1" rel="74" v="" s="Ne I">1537.00789</line>
+    <line order="1" rel="17" v="" s="Ne I">1539.0028</line>
+    <line order="1" rel="250" v="" s="Ne I">1540.75930</line>
+    <line order="1" rel="6" v="" s="Ne I">1540.9058</line>
+    <line order="1" rel="4" v="" s="Ne I">1543.1122</line>
+    <line order="1" rel="11" v="" s="Ne I">1545.0863</line>
+    <line order="1" rel="770" v="" s="Ne I">1545.12285</line>
+    <line order="1" rel="25" v="" s="Ne I">1546.62267</line>
+    <line order="1" rel="23" v="" s="Ne I">1549.9484</line>
+    <line order="1" rel="13" v="" s="Ne I">1550.0897</line>
+    <line order="1" rel="65" v="" s="Ne I">1560.42140</line>
+    <line order="1" rel="4" v="" s="Ne I">1576.1050</line>
+    <line order="1" rel="4" v="" s="Ne I">1580.2647</line>
+    <line order="1" rel="7" v="" s="Ne I">1581.2181</line>
+    <line order="2" rel="770"   v="1" s="Ne">1588.636</line>
+    <line order="2" rel="770"  v="1" s="Ar">1589.635</line>    
+    <line order="1" rel="380" v="" s="Ar I">1598.949</line>
+    <line order="1" rel="130" v="" s="Ne I">1602.27694</line>
+    <line order="1" rel="5" v="" s="Ne I">1604.5498</line>
+    <line order="1" rel="47" v="" s="Ne I">1609.84859</line>
+    <line order="2" rel="770"  v="1" s="Ar">1620.738</line>
+    <line order="2" rel="2100" v="1" s="Ar">1623.062</line>    
+    <line order="1" rel="5" v="" s="Ne I">1625.2672</line>
+    <line order="1" rel="7" v="" s="Ne I">1626.3592</line>
+    <line order="1" rel="44" v="" s="Ne I">1626.42476</line>
+    <line order="1" rel="8" v="" s="Ne I">1626.8353</line>
+    <line order="1" rel="189" v="" s="Ne I">1626.89559</line>    
+    <line order="1" rel="40" v="" s="Ne I">1634.69230</line>
+    <line order="1" rel="150" v="" s="Ne I">1640.52557</line>
+    <line order="1" rel="15" v="" s="Ne I">1642.3662</line>
+    <line order="1" rel="19" v="" s="Ne I">1646.8993</line>
+    <line order="1" rel="81" v="" s="Ne I">1647.47531</line>
+    <line order="1" rel="30" v="" s="Ar I">1651.986</line>
+    <line order="1" rel="34" v="" s="Ne I">1652.80869</line>
+    <line order="2" rel="770"  v="0" s="Ar">1652.904</line>    
+    <line order="1" rel="34" v="" s="Ne I">1659.15089</line>
+    <line order="1" rel="770" v="" s="Ne I">1660.158</line>
+    <line order="1" rel="30" v="" s="Ne I">1660.7020</line>
+    <line order="1" rel="89" v="" s="Ne I">1660.94386</line>
+    <line order="1" rel="35" v="" s="Ne I">1663.40497</line>
+    <line order="1" rel="16" v="" s="Ne I">1666.7111</line>
+    <line order="1" rel="3500" v="" s="Ne I">1675.493</line>
+    <line order="1" rel="54" v="" s="Ne I">1678.87921</line>
+    <line order="1" rel="37" v="" s="Ne I">1686.16497</line>
+    <line order="1" rel="11" v="" s="Ne I">1691.0058</line>
+    <line order="1" rel="500" v="" s="Ar I">1694.058</line>
+    <line order="1" rel="3500" v="" s="Ne I">1698.39743</line>
+    <line order="1" rel="5" v="" s="Ne I">1711.2136</line>
+    <line order="1" rel="1800" v="" s="Ne I">1716.19348</line>   
+  </source>
+
+  <source name="VISNIR PI Mercury" type="lines" symbol="Ne" units="nm" display="VISNIR PI Mecrury" show="true" index="1">
+    <line order="0" rel="55000"   v="" s="Hg">0.000</line>
+    <line order="1" rel="25000"   v="" s="Hg">253.652</line>
+    <line order="1" rel="100"     v="" s="Hg">265.204</line>
+    <line order="1" rel="50"      v="" s="Hg">265.369</line>
+    <line order="1" rel="149"     v="" s="Hg">289.3601</line>
+    <line order="1" rel="3725"    v="" s="Hg">296.7283</line>
+    <line order="1" rel="720"     v="" s="Hg">302.1504</line>
+    <line order="1" rel="7600"    v="" s="Hg">312.5674</line>
+    <line order="1" rel="11244"   v="" s="Hg">313.1555</line>
+    <line order="1" rel="450"     v="" s="Hg">334.1484</line>
+    <line order="1" rel="16263"   v="" s="Hg">365.0158</line>
+    <line order="1" rel="2814"    v="" s="Hg">365.4842</line>
+    <line order="1" rel="2000"    v="" s="Hg">366.3284</line>
+    <line order="1" rel="20500"   v="" s="Hg">404.6565</line>
+    <line order="1" rel="700"     v="" s="Hg">407.7837</line>
+    <line order="1" rel="14"      v="" s="Hg">433.922</line>
+    <line order="1" rel="208"     v="" s="Hg">434.7506</line>
+    <line order="1" rel="37700"   v="" s="Hg">435.8335</line>
+    <line order="1" rel="5"       v="" s="??">475.6500</line>
+    <line order="1" rel="17"      v="" s="Hg">491.607</line>
+    <line order="1" rel="132"     v="" s="??">496.44</line>
+    <line order="1" rel="5"       v="" s="??">498.38</line>
+    <line order="2" rel="19400"   v="" s="Hg">507.3042</line>
+    <line order="2" rel="50"      v="" s="Hg">530.408</line>
+    <line order="2" rel="34"      v="" s="Hg">530.738</line>
+    <line order="1" rel="49500"   v="" s="Hg">546.075</line>
+    <line order="1" rel="2317"    v="" s="??">551.345</line>
+    <line order="1" rel="6"       v="" s="??">565.145</line>
+    <line order="1" rel="1502"    v="" s="Hg">576.961</line>
+    <line order="2" rel="54"      v="" s="Hg">578.7202</line>
+    <line order="1" rel="1874"    v="" s="Hg">579.067</line>
+    <line order="1" rel="2"       v="" s="??">585.1000</line>
+    <line order="2" rel="1110"    v="" s="Hg">593.4566</line>
+    <line order="2" rel="247"     v="" s="Hg">604.3008</line>
+    <line order="1" rel="3"       v="" s="??">604.6500</line>
+    <line order="1" rel="15"      v="" s="??">621.4000</line>
+    <line order="2" rel="1205"    v="" s="Hg">625.1348</line>
+    <line order="2" rel="2243"    v="" s="Hg">626.311</line>
+    <line order="1" rel="32"      v="" s="Hg">690.752</line>
+    <line order="1" rel="28"      v="" s="Ar">696.5431</line>
+    <line order="1" rel="19"      v="" s="Ar">706.7219</line>
+    <line order="1" rel="15"      v="" s="Ar">727.2936</line>
+    <line order="2" rel="242"     v="" s="Hg">730.0316</line>
+    <line order="2" rel="177"     v="" s="Hg">730.968</line>
+    <line order="2" rel="63"      v="" s="Hg">732.6568</line>
+    <line order="2" rel="67"      v="" s="Ar">738.398</line>
+    <line order="2" rel="230"     v="" s="Ar">750.3869</line>
+    <line order="2" rel="114"     v="" s="Ar">751.4652</line>
+    <line order="3" rel="3312"    v="" s="Hg">760.9563</line>
+    <line order="2" rel="1382"    v="" s="Ar">763.5106</line>
+    <line order="2" rel="325"     v="" s="Ar">772.3761</line>
+    <line order="2" rel="1055"    v="" s="Ar">794.8176</line>
+    <line order="2" rel="1377"    v="" s="Ar">800.6157</line>
+    <line order="2" rel="100"     v="" s="Ar">801.4786</line>
+    <line order="2" rel="100"     v="" s="Hg">809.3130</line>
+    <line order="1" rel="100"     v="1" s="Ar">810.3693</line>
+    <line order="1" rel="3421"    v="1" s="Ar">811.5311</line>    
+    <line order="2" rel="1700"    v="" s="Ar">826.4522</line>    
+    <line order="2" rel="200"     v="" s="Ar">840.8210</line>
+    <line order="2" rel="2271"    v="" s="Ar">842.4648</line>
+    <line order="2" rel="1030"    v="" s="Ar">852.1442</line>    
+    <line order="1" rel="14800"   v="1" s="Ar">912.2967</line>
+    <line order="1" rel="2685"    v="1" s="Ar">922.4499</line>
+    <line order="3" rel="533"     v="" s="Hg">937.7022</line>
+    <line order="1" rel="5700"    v="1" s="Ar">965.7786</line>
+    <line order="1" rel="720"     v="" s="Ar">978.4503</line>
+    <line order="1" rel="5000"    v="1" s="Hg">1013.975</line>
+    <line order="4" rel="55000"   v="1" s="Hg">1014.6084</line>
+    <line order="1" rel="1342"    v="" s="Ar">1047.0054</line>
+    <line order="2" rel="4553"    v="" s="Hg">1092.148</line>
+    <line order="3" rel="330"     v="" s="Hg">1095.0474</line>
+    <line order="3" rel="800"     v="" s="Hg">1096.4520</line>
+    <line order="1" rel="3500"    v="" s="Hg">1128.740</line>
+    <line order="1" rel="35000"   v="" s="Hg">1128.71</line>
+    <line order="1" rel="50"      v="" s="Ar">1144.1832</line>
+    <line order="1" rel="552"     v="" s="Ar">1148.8109</line>
+    <line order="2" rel="834"     v="" s="Hg">1153.922</line>
+    <line order="2" rel="871"     v="" s="Hg">1158.134</line>
+    <line order="1" rel="368"     v="" s="Ar">1166.871</line>
+    <line order="1" rel="367"     v="" s="Hg">1168.70</line>
+    <line order="1" rel="367"     v="" s="Ar">1172.04462</line>
+    <line order="1" rel="300"     v="" s="Hg">1176.89</line>
+    <line order="1" rel="700"     v="" s="Hg">1188.52</line>
+    <line order="1" rel="50"      v="" s="Hg">1189.06</line>
+    <line order="1" rel="400"     v="" s="Hg">1195.15</line>
+    <line order="1" rel="630"     v="" s="Hg">1197.63</line>
+    <line order="1" rel="700"     v="" s="Hg">1201.96</line>
+    <line order="1" rel="700"     v="" s="Hg">1202.7042</line>
+    <line order="1" rel="1500"    v="" s="N">1207.15</line>
+    <line order="1" rel="50"      v="" s="Ar">1211.233</line>
+    <line order="1" rel="50"      v="" s="Hg">1212.85</line>
+    <line order="1" rel="1300"    v="" s="Ar">1213.974</line>
+    <line order="1" rel="400"     v="" s="Ar">1234.3393</line>
+    <line order="1" rel="905"     v="" s="Ar">1240.2827</line>
+    <line order="1" rel="1300"    v="" s="Ar">1243.9321</line>
+    <line order="1" rel="50"      v="" s="Ar">1245.612</line>
+    <line order="1" rel="782"     v="" s="Ar">1248.7663</line>
+    <line order="5" rel="1900"    v="" s="Hg">1268.260</line>
+    <line order="1" rel="50"      v="" s="Ar">1270.2281</line>
+    <line order="1" rel="425"     v="" s="Ar">1280.2734</line>
+    <line order="1" rel="20"      v="" s="Ar">1293.3195</line>
+    <line order="1" rel="1436"    v="" s="Ar">1295.6659</line>
+    <line order="1" rel="465"     v="" s="Ar">1300.8264</line>
+    <line order="3" rel="1500"    v="" s="Hg">1307.499</line>
+    <line order="1" rel="800"     v="" s="Ar">1320.995</line>
+    <line order="1" rel="1000"    v="" s="Ar">1321.399</line>
+    <line order="1" rel="956"     v="" s="Ar">1322.8107</line>
+    <line order="1" rel="715"     v="" s="Ar">1327.264</line>
+    <line order="1" rel="638"     v="" s="Ar">1331.321</line>
+    <line order="1" rel="1050"    v="" s="Hg">1336.7111</line>
+    <line order="1" rel="593"     v="" s="Hg">1342.657</line>
+    <line order="1" rel="50"      v="" s="Hg">1346.838</line>
+    <line order="1" rel="1983"    v="" s="Hg">1350.4191</line>
+    <line order="1" rel="9629"    v="" s="Hg">1357.021</line>
+    <line order="1" rel="200"     v="" s="Hg">1362.418</line>
+    <line order="1" rel="18144"   v="" s="Hg">1367.351</line>
+    <line order="1" rel="2475"    v="" s="Hg">1371.8577</line>
+    <line order="1" rel="8763"    v="" s="Hg">1395.055</line>
+    <line order="1" rel="57428"   v="" s="Hg">1529.582</line>
+    <line order="3" rel="1500"   v="" s="Hg">1638.225</line>
+  </source>
+
+  <source name="VISNIR Neon" type="lines" symbol="Ne" units="nm" display="VISNIR NeAr" show="true" index="1">
+    <line index="0"  order="1" rel="1000"  v="*" s="Ne">0.0000</line>
+    <line index="0"  order="1" rel="1000"   v="*" s="Ne">352.04714</line>
+    <line order="1" rel="1100" v="*" s="Ne">540.05616</line>
+    <line order="1" rel="270"   v="*" s="Ne">574.82985</line>
+    <line order="1" rel="800"   v="*" s="Ne">576.44188</line>
+    <line order="1" rel="400"   v="*" s="Ne">582.01558</line>
+    <line order="1" rel="52500" v="*" s="Ne">585.2488</line>
+    <line order="1" rel="4200"  v="*" s="Ne">588.1895</line>
+    <line order="1" rel="7200"  v="*" s="Ne">594.4834</line>
+    <line order="1" rel="2100"  v="*" s="Ne">597.553</line>
+    <line order="1" rel="2280"  v="*" s="Ne">603.000</line>
+    <line order="1" rel="6400"  v="*" s="Ne">607.434</line>
+    <line order="1" rel="11500" v="*" s="Ne">609.616</line>
+    <line order="1" rel="18700" v="*" s="Ne">614.306</line>
+    <line order="1" rel="5300"  v="*" s="Ne">616.359</line>
+    <line order="1" rel="3500"  v="*" s="Ne">621.728</line>
+    <line order="1" rel="11500" v="*" s="Ne">626.650</line>
+    <line order="1" rel="4200"  v="*" s="Ne">630.479</line>
+    <line order="1" rel="9200"  v="*" s="Ne">633.443</line>
+    <line order="1" rel="17500" v="*" s="Ne">638.299</line>
+    <line order="1" rel="30500" v="*" s="Ne">640.225</line>
+    <line order="1" rel="17100" v="*" s="Ne">650.653</line>
+    <line order="1" rel="5800"  v="*" s="Ne">653.288</line>
+    <line order="1" rel="8800"  v="*" s="Ne">659.895</line>
+    <line order="1" rel="16000" v="*" s="Ne">667.830</line>
+    <line order="1" rel="8500"  v="*" s="Ne">671.7043</line>
+    <line order="1" rel="13500" v="1" s="Ne">692.947</line>    
+    <line order="1" rel="35500" v="1" s="Ne">703.241</line>    
+    <line order="1" rel="2000"  v="1" s="Ne">717.394</line>
+    <line order="1" rel="11200" v="1" s="Ne">724.51665</line>        
+    <line order="1" rel="3300"  v="1" s="Ne">743.899</line>
+    <line order="1" rel="150"   v="1" s="Ne">747.24383</line>
+    <line order="1" rel="3900"  v="1" s="Ne">748.887</line>        
+    <line order="1" rel="3500"  v="1" s="Ne">753.577</line>
+    <line order="1" rel="1800"  v="1" s="Ne">754.404</line>        
+    <line order="1" rel="200"   v="1" s="Ne">794.31805</line>            
+    <line order="1" rel="900"   v="1" s="Ne">808.24576</line>    
+    <line order="2" rel="400"   v="1" s="Ne">811.85495</line>        
+    <line order="2" rel="1000"  v="1" s="Ne">811.8546</line>
+    <line order="2" rel="400"   v="1" s="Ne">812.8911</line>
+    <line order="2" rel="950"   v="1" s="Ne">813.6406</line>
+    <line order="1" rel="150"   v="0" s="Ne">825.93795</line>   
+    <line order="2" rel="600"   v="0" s="Ne">826.60769</line>
+    <line order="2" rel="9600"  v="1" s="Ne">830.03248</line>
+    <line order="2" rel="280"   v="1" s="Ne">830.15570</line>
+    <line order="1" rel="560"   v="0" s="Ne">836.57465</line>
+    <line order="2" rel="1200"   v="1" s="Ne">837.63590</line>
+    <line order="2" rel="50000"  v="1" s="Ne">837.7607</line>    
+    <line order="1" rel="200"   v="1" s="Ne">841.71597</line>
+    <line order="2" rel="3600"  v="1" s="Ne">841.8427</line>    
+    <line order="1" rel="340"   v="1" s="Ne">846.33569</line>
+    <line order="2" rel="200"   v="1" s="Ne">848.44424</line>
+    <line order="2" rel="30000"  v="1" s="Ne">849.536591</line>    
+    <line order="5" rel="6600"  v="0" s="Ne">859.12583</line>
+    <line order="3" rel="9000"  v="0" s="Ne">863.46472</line>
+    <line order="3" rel="18000"  v="0" s="Ne">865.43828</line>
+    <line order="3" rel="700"   v="0" s="Ne">865.55220</line>
+    <line order="3" rel="4200"   v="0" s="Ne">867.94936</line>
+    <line order="3" rel="1800"   v="0" s="Ne">868.19216</line>
+    <line order="3" rel="800"   v="0" s="Ne">877.16575</line>
+    <line order="3" rel="200"   v="0" s="Ne" minSp="2500">877.87322</line>
+    <line order="3" rel="9600"  v="0" s="Ne">878.06223</line>
+    <line order="3" rel="6000"  v="0" s="Ne">878.37539</line>
+    <line order="3" rel="3000"  v="0" s="Ne">885.38669</line>
+    <line order="3" rel="2000"  v="0" s="Ne">886.57562</line>
+    <line order="3" rel="1660"   v="0" s="Ne">891.95007</line>
+    <line order="1" rel="9" v="" s="Ne I">903.69985</line>
+    <line order="1" rel="1" v="" s="Ne I">904.68</line>
+    <line order="1" rel="4" v="" s="Ne I">904.9086</line>
+    <line order="1" rel="3" v="" s="Ne I">905.2424</line>
+    <line order="1" rel="7" v="" s="Ne I">905.2642</line>
+    <line order="1" rel="5" v="" s="Ne I">907.3033</line>    
+    <line order="1" rel="1" v="" s="Ne I">910.21</line>
+    <line order="1" rel="4" v="" s="Ne I">910.353</line>
+    <line order="1" rel="1" v="" s="Ne I">911.53</line>    
+    <line order="1" rel="5000" v="" s="Ne I">914.86720</line>
+    <line order="1" rel="1" v="" s="Ne I">919.38</line>    
+    <line order="1" rel="10900" v="" s="Ne I">920.17588</line>
+    <line order="1" rel="6000" v="" s="Ne I">922.00598</line>
+    <line order="1" rel="2200" v="" s="Ne I">922.15802</line>    
+    <line order="1" rel="1800" v="" s="Ne I">922.66910</line>
+    <line order="1" rel="910" v="" s="Ne I">927.55191</line>    
+    <line order="1" rel="10780" v="" s="Ne I">930.08532</line>
+    <line order="1" rel="830" v="" s="Ne I">931.05833</line>
+    <line order="1" rel="2700" v="" s="Ne I">931.39731</line>
+    <line order="1" rel="8970" v="" s="Ne I">932.65072</line>
+    <line order="1" rel="3" v="" s="Ne I">934.05</line>
+    <line order="1" rel="6" v="" s="Ne I">935.33</line>    
+    <line order="1" rel="2250" v="" s="Ne I">937.33079</line>
+    <line order="1" rel="7" v="" s="Ne I">937.72276</line>
+    <line order="1" rel="9" v="" s="Ne I">941.075</line>
+    <line order="1" rel="6" v="" s="Ne I">941.232</line>
+    <line order="1" rel="4800" v="" s="Ne I">942.53797</line>
+    <line order="1" rel="66" v="" s="Ne I">943.30082</line>
+    <line order="1" rel="3" v="" s="Ne I">944.38</line>
+    <line order="1" rel="4" v="" s="Ne I">944.526</line>
+    <line order="1" rel="1" v="" s="Ne I">945.40</line>
+    <line order="1" rel="2800" v="" s="Ne I">945.92110</line>
+    <line order="1" rel="5000" v="" s="Ne I">948.66825</line>
+    <line order="1" rel="4" v="" s="Ne I">950.659</line>
+    <line order="1" rel="7" v="" s="Ne I">950.84</line>
+    <line order="1" rel="12200" v="" s="Ne I">953.41640</line>
+    <line order="1" rel="2800" v="" s="Ne I">954.74052</line>
+    <line order="1" rel="2" v="" s="Ne I">957.4002</line>
+    <line order="1" rel="1" v="" s="Ne I">964.22</line>    
+    <line order="1" rel="2000" v="" s="Ne I">966.54200</line>
+    <line order="1" rel="1" v="" s="Ne I">972.48</line>    
+    <line order="1" rel="3" v="" s="Ne I">978.81</line>
+    <line order="1" rel="3" v="" s="Ne I">982.3453</line>
+    <line order="1" rel="13" v="" s="Ne I">983.7507</line>
+    <line order="1" rel="4" v="" s="Ne I">989.730</line>
+    <line order="1" rel="3" v="" s="Ne I">989.906</line>
+    <line order="1" rel="30" v="" s="Ne I">990.0594</line>
+    <line order="1" rel="25" v="" s="Ne I">990.2337</line>
+    <line order="1" rel="13" v="" s="Ne I">991.5195</line>
+    <line order="1" rel="6" v="" s="Ne I">991.8602</line>
+    <line order="1" rel="10" v="" s="Ne I">993.6853</line>
+    <line order="1" rel="16" v="" s="Ne I">993.8352</line>
+    <line order="1" rel="9" v="" s="Ne I">994.4140</line>
+    <line order="1" rel="4" v="" s="Ne I">994.5058</line>
+    <line order="1" rel="9" v="" s="Ne I">994.8061</line>
+    <line order="1" rel="7" v="" s="Ne I">996.3605</line>
+    <line order="1" rel="3" v="" s="Ne I">997.42</line>
+    <line order="1" rel="13" v="" s="Ne I">1000.5600</line>
+    <line order="1" rel="20" v="" s="Ne I">1000.7385</line>
+    <line order="1" rel="5" v="" s="Ne I">1000.8685</line>
+    <line order="1" rel="3" v="" s="Ne I">1003.71</line>
+    <line order="1" rel="3" v="" s="Ne I">1003.89</line>    
+    <line order="1" rel="2" v="" s="Ne I">1021.0835</line>
+    <line order="1" rel="4" v="" s="Ne I">1022.4659</line>
+    <line order="1" rel="16" v="" s="Ne I">1024.57132</line>
+    <line order="1" rel="210" v="" s="Ne I">1029.54162</line>    
+    <line order="1" rel="13" v="" s="Ne I">1043.25909</line>    
+    <line order="1" rel="1200" v="" s="Ne I">1056.24089</line>
+    <line order="1" rel="390" v="" s="Ne I">1062.06637</line>    
+    <line order="1" rel="19" v="" s="Ne I">1067.3870</line>    
+    <line order="1" rel="55" v="" s="Ne I">1069.0457</line>    
+    <line order="1" rel="15" v="" s="Ne I">1075.8204</line>    
+    <line order="1" rel="14" v="" s="Ne I">1076.0270</line>
+    <line order="1" rel="150" v="" s="Ne I">1076.4023</line>
+    <line order="1" rel="110" v="" s="Ne I">1076.6087</line>
+    <line order="1" rel="69" v="" s="Ne I">1078.0531</line>
+    <line order="1" rel="16" v="" s="Ne I">1078.6286</line>
+    <line order="1" rel="2" v="" s="Ne I">1079.0862</line>
+    <line order="1" rel="3050" v="" s="Ne I">1079.80430</line>
+    <line order="1" rel="54" v="" s="Ne I">1080.6358</line>
+    <line order="1" rel="74" v="" s="Ne I">1080.8128</line>
+    <line order="1" rel="40" v="" s="Ne I">1081.4755</line>
+    <line order="1" rel="92" v="" s="Ne I">1081.9819</line>
+    <line order="1" rel="37" v="" s="Ne I">1083.82180</line>
+    <line order="1" rel="4700" v="" s="Ne I">1084.44774</line>
+    <line order="1" rel="58" v="" s="Ne I">1088.6277</line>
+    <line order="1" rel="85" v="" s="Ne I">1088.8392</line>
+    <line order="1" rel="25" v="" s="Ne I">1089.1151</line>
+    <line order="1" rel="78" v="" s="Ne I">1102.08794</line>
+    <line order="1" rel="64" v="" s="Ne I">1104.40002</line>
+    <line order="1" rel="200" v="" s="Ne I">1104.97221</line>
+    <line order="1" rel="29" v="" s="Ne I">1106.0808</line>       
+    <line order="1" rel="73" v="" s="Ne I">1112.02780</line>
+    <line order="1" rel="49" v="" s="Ne I">1113.45095</line>
+    <line order="1" rel="55" v="" s="Ne I">1113.84329</line>
+    <line order="1" rel="16000" v="" s="Ne I">1114.30200</line>
+    <line order="1" rel="270" v="" s="Ne I">1116.02133</line>
+    <line order="1" rel="12500" v="" s="Ne I">1117.75246</line>
+    <line order="1" rel="65" v="" s="Ne I">1129.29647</line>
+    <line order="1" rel="46" v="" s="Ne I">1129.84416</line>
+    <line order="1" rel="140" v="" s="Ne I">1130.38878</line>
+    <line order="1" rel="100" v="" s="Ne I">1130.45457</line>
+    <line order="1" rel="41" v="" s="Ne I">1132.96259</line>
+    <line order="1" rel="37" v="" s="Ne I">1133.36873</line>
+    <line order="1" rel="110" v="" s="Ne I">1136.66716</line>
+    <line order="1" rel="13500" v="" s="Ne I">1139.04333</line>
+    <line order="1" rel="12320" v="" s="Ne I">1140.91338</line>        
+    <line order="1" rel="33000" v="" s="Ne I">1152.27450</line>
+    <line order="1" rel="17000" v="" s="Ne I">1152.50203</line>
+    <line order="1" rel="6000" v="" s="Ne I">1153.63446</line>
+    <line order="1" rel="2600" v="" s="Ne I">1160.15369</line>
+    <line order="1" rel="7800" v="" s="Ne I">1161.40805</line>    
+    <line order="1" rel="7350" v="" s="Ne I">1168.80028</line>    
+    <line order="1" rel="15000" v="" s="Ne I">1176.67929</line>
+    <line order="1" rel="6500" v="" s="Ne I">1178.90444</line>
+    <line order="1" rel="3200" v="" s="Ne I">1178.98894</line>
+    <line order="2" rel="4600"  v="*" s="Ne">1188.966</line>
+    <line order="1" rel="20" v="" s="Ne I">1197.9781</line>
+    <line order="1" rel="7400" v="" s="Ne I">1198.49139</line>
+    <line order="1" rel="18" v="" s="Ne I">1199.6569</line>
+    <line order="1" rel="5" v="" s="Ne I">1199.7813</line>
+    <line order="1" rel="12000" v="" s="Ne I">1206.63343</line>      
+    <line order="2" rel="500" v="" s="Ne">1219.232</line>
+    <line order="2" rel="700" v="*" s="Ne">1228.612</line>    
+    <line order="1" rel="3" v="" s="Ne I">1238.8983</line>    
+    <line order="1" rel="4" v="" s="Ne I">1240.8769</line>
+    <line order="1" rel="18" v="" s="Ne I">1243.0505</line>    
+    <line order="1" rel="75" v="" s="Ne I">1245.33684</line>    
+    <line order="1" rel="16000" v="" s="Ne I">1245.93903</line>
+    <line order="1" rel="160" v="" s="Ne I">1246.41163</line>
+    <line order="1" rel="23" v="" s="Ne I">1247.3468</line>
+    <line order="1" rel="1700" v="" s="Ne I">1248.67315</line>    
+    <line order="1" rel="21" v="" s="Ne I">1252.02343</line>
+    <line order="2" rel="4600" v="*" s="Ne">1253.3</line>
+    <line order="1" rel="15" v="" s="Ne I">1253.7742</line>
+    <line order="1" rel="48" v="" s="Ne I">1255.97621</line>
+    <line order="1" rel="130" v="" s="Ne I">1257.10054</line>
+    <line order="1" rel="96" v="" s="Ne I">1257.38231</line>
+    <line order="1" rel="8" v="" s="Ne I">1257.7349</line>
+    <line order="1" rel="6" v="" s="Ne I">1258.0144</line>
+    <line order="1" rel="1200" v="" s="Ne I">1258.46021</line>
+    <line order="1" rel="850" v="" s="Ne I">1258.74256</line>
+    <line order="1" rel="1600" v="" s="Ne I">1259.50049</line>
+    <line order="1" rel="32" v="" s="Ne I">1260.07778</line>
+    <line order="1" rel="13" v="" s="Ne I">1260.1293</line>
+    <line order="1" rel="18" v="" s="Ne I">1260.33179</line>
+    <line order="1" rel="550" v="" s="Ne I">1260.41773</line>
+    <line order="1" rel="150" v="" s="Ne I">1261.76692</line>
+    <line order="1" rel="6" v="" s="Ne I">1263.1024</line>
+    <line order="1" rel="500" v="" s="Ne I">1264.03174</line>
+    <line order="1" rel="710" v="" s="Ne I">1264.27394</line>
+    <line order="1" rel="330" v="" s="Ne I">1265.09824</line>
+    <line order="1" rel="470" v="" s="Ne I">1265.83460</line>
+    <line order="1" rel="98" v="" s="Ne I">1266.46063</line>
+    <line order="1" rel="300" v="" s="Ne I">1268.35329</line>
+    <line order="1" rel="2150" v="" s="Ne I">1268.92032</line>    
+    <line order="1" rel="23" v="" s="Ne I">1271.8797</line>
+    <line order="1" rel="11" v="" s="Ne I">1272.6785</line>    
+    <line order="1" rel="540" v="" s="Ne I">1274.62264</line>    
+    <line order="1" rel="710" v="" s="Ne I">1274.91248</line>
+    <line order="1" rel="120" v="" s="Ne I">1275.27222</line>
+    <line order="1" rel="170" v="" s="Ne I">1275.56507</line>
+    <line order="1" rel="37" v="" s="Ne I">1275.99494</line>
+    <line order="1" rel="6" v="" s="Ne I">1276.6582</line>
+    <line order="1" rel="1600" v="" s="Ne I">1276.95250</line>
+    <line order="1" rel="16" v="" s="Ne I">1277.6652</line>    
+    <line order="1" rel="5" v="" s="Ne I">1285.3034</line>
+    <line order="1" rel="7" v="" s="Ne I">1286.4091</line>
+    <line order="1" rel="11" v="" s="Ne I">1286.4730</line>
+    <line order="1" rel="14" v="" s="Ne I">1288.71630</line>
+    <line order="1" rel="500" v="" s="Ne I">1291.20141</line>        
+    <line order="1" rel="25" v="" s="Ne I">1298.00736</line>    
+    <line order="1" rel="12" v="" s="Ne I">1305.4788</line>
+    <line order="1" rel="6" v="" s="Ne I">1305.8815</line>
+    <line order="2" rel="2400"  v="*" s="Ne">1306.576</line>
+    <line order="1" rel="6" v="" s="Ne I">1309.6396</line>
+    <line order="1" rel="6" v="" s="Ne I">1312.6171</line>
+    <line order="1" rel="12" v="" s="Ne I">1312.7681</line>
+    <line order="1" rel="5" v="" s="Ne I">1314.5446</line>    
+    <line order="1" rel="4500" v="" s="Ne I">1321.92426</line>    
+    <line order="1" rel="8" v="" s="Ne I">1325.1199</line>    
+    <line order="1" rel="6" v="" s="Ne I">1329.6547</line>    
+    <line order="1" rel="10" v="" s="Ne I">1333.9714</line>    
+    <line order="1" rel="7" v="" s="Ne I">1338.9290</line>
+    <line order="2" rel="3000"  v="*" s="Ne">1343.7043</line>        
+    <line order="1" rel="5" v="" s="Ne I">1352.7073</line>    
+    <line order="1" rel="5" v="" s="Ne I">1358.5088</line>        
+    <line order="1" rel="4" v="" s="Ne I">1373.8735</line>    
+    <line order="1" rel="6000" v="" s="Ne I">1386.6305</line>    
+    <line order="1" rel="5" v="" s="Ne I">1390.8173</line>
+    <line order="1" rel="3" v="" s="Ne I">1397.0972</line>
+    <line order="1" rel="4" v="" s="Ne I">1401.2921</line>
+    <line order="1" rel="6" v="" s="Ne I">1401.5900</line>
+    <line order="1" rel="9" v="" s="Ne I">1404.3107</line>
+    <line order="1" rel="12000" v="" s="Ne I">1407.4110</line>    
+    <line order="1" rel="7" v="" s="Ne I">1428.3603</line>
+    <line order="1" rel="130" v="" s="Ne I">1430.08338</line>
+    <line order="1" rel="120" v="" s="Ne I">1434.21609</line>
+    <line order="1" rel="51" v="" s="Ne I">1435.33494</line>
+    <line order="1" rel="5" v="" s="Ne I">1438.4113</line>
+    <line order="1" rel="6000" v="" s="Ne I">1449.99217</line>
+    <line order="2" rel="5000"  v="1" s="Ne">1487.798</line>
+    <line order="1" rel="110" v="" s="Ne I">1492.98061</line>
+    <line order="1" rel="7" v="" s="Ne I">1493.1183</line>
+    <line order="1" rel="15" v="" s="Ne I">1497.0774</line>
+    <line order="1" rel="22" v="" s="Ne I">1498.4854</line>
+    <line order="1" rel="530" v="" s="Ne I">1498.63193</line>    
+    <line order="1" rel="19" v="" s="Ne I">1505.89894</line>
+    <line order="1" rel="140" v="" s="Ne I">1507.41688</line>
+    <line order="1" rel="48" v="" s="Ne I">1507.50431</line>
+    <line order="1" rel="4" v="" s="Ne I">1508.3912</line>
+    <line order="1" rel="94" v="" s="Ne I">1508.53103</line>
+    <line order="1" rel="13" v="" s="Ne I">1510.6454</line>
+    <line order="1" rel="5" v="" s="Ne I">1512.5728</line>
+    <line order="1" rel="350" v="" s="Ne I">1514.00981</line>
+    <line order="1" rel="6" v="" s="Ne I">1517.1965</line>    
+    <line order="1" rel="32" v="" s="Ne I">1517.43113</line>
+    <line order="1" rel="4" v="" s="Ne I">1517.6335</line>
+    <line order="1" rel="63" v="" s="Ne I">1518.97238</line>
+    <line order="1" rel="99" v="" s="Ne I">1519.06122</line>
+    <line order="1" rel="270" v="" s="Ne I">1519.09319</line>
+    <line order="1" rel="48" v="" s="Ne I">1519.26365</line>
+    <line order="1" rel="10600" v="" s="Ne I">1523.07144</line>        
+    <line order="1" rel="160" v="" s="Ne I">1534.81896</line>
+    <line order="1" rel="74" v="" s="Ne I">1537.00789</line>
+    <line order="1" rel="17" v="" s="Ne I">1539.0028</line>
+    <line order="1" rel="250" v="" s="Ne I">1540.75930</line>
+    <line order="1" rel="6" v="" s="Ne I">1540.9058</line>
+    <line order="1" rel="4" v="" s="Ne I">1543.1122</line>
+    <line order="1" rel="11" v="" s="Ne I">1545.0863</line>
+    <line order="1" rel="770" v="" s="Ne I">1545.12285</line>
+    <line order="1" rel="25" v="" s="Ne I">1546.62267</line>
+    <line order="1" rel="23" v="" s="Ne I">1549.9484</line>
+    <line order="1" rel="13" v="" s="Ne I">1550.0897</line>
+    <line order="1" rel="65" v="" s="Ne I">1560.42140</line>
+    <line order="1" rel="4" v="" s="Ne I">1576.1050</line>
+    <line order="1" rel="4" v="" s="Ne I">1580.2647</line>
+    <line order="1" rel="7" v="" s="Ne I">1581.2181</line>
+    <line order="2" rel="770"   v="1" s="Ne">1588.636</line>        
+    <line order="1" rel="130" v="" s="Ne I">1602.27694</line>
+    <line order="1" rel="5" v="" s="Ne I">1604.5498</line>
+    <line order="1" rel="47" v="" s="Ne I">1609.84859</line>        
+    <line order="1" rel="5" v="" s="Ne I">1625.2672</line>
+    <line order="1" rel="7" v="" s="Ne I">1626.3592</line>
+    <line order="1" rel="44" v="" s="Ne I">1626.42476</line>
+    <line order="1" rel="8" v="" s="Ne I">1626.8353</line>
+    <line order="1" rel="189" v="" s="Ne I">1626.89559</line>
+    <line order="1" rel="40" v="" s="Ne I">1634.69230</line>
+    <line order="1" rel="150" v="" s="Ne I">1640.52557</line>
+    <line order="1" rel="15" v="" s="Ne I">1642.3662</line>
+    <line order="1" rel="19" v="" s="Ne I">1646.8993</line>
+    <line order="1" rel="81" v="" s="Ne I">1647.47531</line>    
+    <line order="1" rel="34" v="" s="Ne I">1652.80869</line>    
+    <line order="1" rel="34" v="" s="Ne I">1659.15089</line>
+    <line order="1" rel="770" v="" s="Ne I">1660.158</line>
+    <line order="1" rel="30" v="" s="Ne I">1660.7020</line>
+    <line order="1" rel="89" v="" s="Ne I">1660.94386</line>
+    <line order="1" rel="35" v="" s="Ne I">1663.40497</line>
+    <line order="1" rel="16" v="" s="Ne I">1666.7111</line>
+    <line order="1" rel="3500" v="" s="Ne I">1675.493</line>
+    <line order="1" rel="54" v="" s="Ne I">1678.87921</line>
+    <line order="1" rel="37" v="" s="Ne I">1686.16497</line>
+    <line order="1" rel="11" v="" s="Ne I">1691.0058</line>    
+    <line order="1" rel="3500" v="" s="Ne I">1698.39743</line>
+    <line order="1" rel="5" v="" s="Ne I">1711.2136</line>
+    <line order="1" rel="1800" v="" s="Ne I">1716.19348</line>
+  </source>
+
+  <source name="VISNIR Mercury" type="lines" symbol="Ne" units="nm" display="VISNIR Mecrury" show="true" index="1">
+    <line order="0" rel="55000"   v="" s="Hg">0.000</line>
+    <line order="1" rel="25000"   v="" s="Hg">253.652</line>
+    <line order="1" rel="100"     v="" s="Hg">265.204</line>
+    <line order="1" rel="50"      v="" s="Hg">265.369</line>
+    <line order="1" rel="149"     v="" s="Hg">289.3601</line>
+    <line order="1" rel="3725"    v="" s="Hg">296.7283</line>
+    <line order="1" rel="720"     v="" s="Hg">302.1504</line>
+    <line order="1" rel="7600"    v="" s="Hg">312.5674</line>
+    <line order="1" rel="11244"   v="" s="Hg">313.1555</line>
+    <line order="1" rel="450"     v="" s="Hg">334.1484</line>
+    <line order="1" rel="16263"   v="" s="Hg">365.0158</line>
+    <line order="1" rel="2814"    v="" s="Hg">365.4842</line>
+    <line order="1" rel="2000"    v="" s="Hg">366.3284</line>
+    <line order="1" rel="20500"   v="" s="Hg">404.6565</line>
+    <line order="1" rel="700"     v="" s="Hg">407.7837</line>
+    <line order="1" rel="14"      v="" s="Hg">433.922</line>
+    <line order="1" rel="208"     v="" s="Hg">434.7506</line>
+    <line order="1" rel="37700"   v="" s="Hg">435.8335</line>
+    <line order="1" rel="5"       v="" s="??">475.6500</line>
+    <line order="1" rel="17"      v="" s="Hg">491.607</line>
+    <line order="1" rel="132"     v="" s="??">496.44</line>
+    <line order="1" rel="5"       v="" s="??">498.38</line>
+    <line order="2" rel="19400"   v="" s="Hg">507.3042</line>
+    <line order="2" rel="50"      v="" s="Hg">530.408</line>
+    <line order="2" rel="34"      v="" s="Hg">530.738</line>
+    <line order="1" rel="49500"   v="" s="Hg">546.075</line>
+    <line order="1" rel="2317"    v="" s="??">551.345</line>
+    <line order="1" rel="6"       v="" s="??">565.145</line>
+    <line order="1" rel="1502"    v="" s="Hg">576.961</line>
+    <line order="2" rel="54"      v="" s="Hg">578.7202</line>
+    <line order="1" rel="1874"    v="" s="Hg">579.067</line>
+    <line order="1" rel="2"       v="" s="??">585.1000</line>
+    <line order="2" rel="1110"    v="" s="Hg">593.4566</line>
+    <line order="2" rel="247"     v="" s="Hg">604.3008</line>
+    <line order="1" rel="3"       v="" s="??">604.6500</line>
+    <line order="1" rel="15"      v="" s="??">621.4000</line>
+    <line order="2" rel="1205"    v="" s="Hg">625.1348</line>
+    <line order="2" rel="2243"    v="" s="Hg">626.311</line>
+    <line order="1" rel="32"      v="" s="Hg">690.752</line>    
+    <line order="2" rel="242"     v="" s="Hg">730.0316</line>
+    <line order="2" rel="177"     v="" s="Hg">730.968</line>
+    <line order="2" rel="63"      v="" s="Hg">732.6568</line>            
+    <line order="3" rel="3312"    v="" s="Hg">760.9563</line>
+    <line order="2" rel="100"     v="" s="Hg">809.3130</line>
+    <line order="3" rel="533"     v="" s="Hg">937.7022</line>
+    <line order="1" rel="5000"    v="1" s="Hg">1013.975</line>
+    <line order="4" rel="55000"   v="1" s="Hg">1014.6084</line>    
+    <line order="2" rel="4553"    v="" s="Hg">1092.148</line>
+    <line order="3" rel="330"     v="" s="Hg">1095.0474</line>
+    <line order="3" rel="800"     v="" s="Hg">1096.4520</line>
+    <line order="1" rel="3500"    v="" s="Hg">1128.740</line>
+    <line order="1" rel="35000"   v="" s="Hg">1128.71</line>
+    <line order="2" rel="834"     v="" s="Hg">1153.922</line>
+    <line order="2" rel="871"     v="" s="Hg">1158.134</line>    
+    <line order="1" rel="367"     v="" s="Hg">1168.70</line>    
+    <line order="1" rel="300"     v="" s="Hg">1176.89</line>
+    <line order="1" rel="700"     v="" s="Hg">1188.52</line>
+    <line order="1" rel="50"      v="" s="Hg">1189.06</line>
+    <line order="1" rel="400"     v="" s="Hg">1195.15</line>
+    <line order="1" rel="630"     v="" s="Hg">1197.63</line>
+    <line order="1" rel="700"     v="" s="Hg">1201.96</line>
+    <line order="1" rel="700"     v="" s="Hg">1202.7042</line>
+    <line order="1" rel="1500"    v="" s="N">1207.15</line>    
+    <line order="1" rel="50"      v="" s="Hg">1212.85</line>
+    <line order="5" rel="1900"    v="" s="Hg">1268.260</line>
+    <line order="3" rel="1500"    v="" s="Hg">1307.499</line>
+    <line order="1" rel="1050"    v="" s="Hg">1336.7111</line>
+    <line order="1" rel="593"     v="" s="Hg">1342.657</line>
+    <line order="1" rel="50"      v="" s="Hg">1346.838</line>
+    <line order="1" rel="1983"    v="" s="Hg">1350.4191</line>
+    <line order="1" rel="9629"    v="" s="Hg">1357.021</line>
+    <line order="1" rel="200"     v="" s="Hg">1362.418</line>
+    <line order="1" rel="18144"   v="" s="Hg">1367.351</line>
+    <line order="1" rel="2475"    v="" s="Hg">1371.8577</line>
+    <line order="1" rel="8763"    v="" s="Hg">1395.055</line>
+    <line order="1" rel="57428"   v="" s="Hg">1529.582</line>
+    <line order="3" rel="1500"    v="" s="Hg">1638.225</line>
+  </source>
+
+</sources>

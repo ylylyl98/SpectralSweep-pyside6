@@ -1,0 +1,33 @@
+{
+  "pixis_file": "pixis-front-950nm-80ms.csv",
+  "ingaas_file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210515578768Z.json",
+  "scan_reference_file": "C:\\Users\\commo\\AppData\\Roaming\\SpectralSweep\\winspec-calibration-captures\\near-20260926T210501294963Z.json",
+  "scan_shift_pixels": 99,
+  "approx_nm_per_pixel": 0.5050505050505051,
+  "measurements": [
+    {
+      "feature_nm": 965,
+      "pixis_peak_axis_nm": 965.4533898262557,
+      "ingaas_peak_pixel": 196,
+      "pixis_fwhm_nm": 0.44992351001792485,
+      "ingaas_fwhm_pixels": 17.53057224255963,
+      "ingaas_approx_fwhm_nm": 8.853824364929105,
+      "approx_width_ratio": 19.678510164041818
+    },
+    {
+      "feature_nm": 912,
+      "pixis_peak_axis_nm": 912.0370343979679,
+      "ingaas_peak_pixel": 302,
+      "pixis_fwhm_nm": 0.34827284334699016,
+      "ingaas_fwhm_pixels": 20.573914581424788,
+      "ingaas_approx_fwhm_nm": 10.39086595021454,
+      "approx_width_ratio": 29.835418261026867
+    }
+  ],
+  "limitations": [
+    "Different exposure and detector response: amplitudes not comparable",
+    "InGaAs 11-point Savitzky-Golay smoothing for broad peak measurement",
+    "Peak identities and absolute InGaAs wavelength not independently calibrated",
+    "No mechanical adjustment; spacer/focus cause remains unconfirmed"
+  ]
+}

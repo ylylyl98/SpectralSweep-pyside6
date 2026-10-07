@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QComboBox, QCheckBox, QScrollArea, QSizePolicy, QFormLayout,
     QDoubleSpinBox, QSpinBox, QFrame, QToolButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QApplication, QMessageBox, QDialog,
-    QDialogButtonBox,
+    QDialogButtonBox, QLineEdit,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -455,30 +455,94 @@ class _LF6Section(QWidget):
         self._warming_disconnect = False
         self._last_andor_snapshot: dict = {}
         self._temperature_read_error = ""
+        self._background_temperatures = {}
+        self._pending_configuration = None
+        self._winspec_readback = None
+        self._winspec_readback_time = None
         self._warmup_timer = QTimer(self)
         self._warmup_timer.setInterval(5000)
         self._warmup_timer.timeout.connect(self._poll_warmup_temperature)
         self._build()
         self._wire()
+        self._status_refresh_timer = QTimer(self)
+        self._status_refresh_timer.setInterval(2000)
+        self._status_refresh_timer.timeout.connect(self._update_winspec_temperature)
+        self._status_refresh_timer.start()
+        self._update_connection_actions()
 
     def _build(self):
         lay = QVBoxLayout(self)
+        lay.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         backend_row = QHBoxLayout()
-        backend_row.addWidget(QLabel("Backend:"))
+        lay.addWidget(QLabel("Measurement setup:"))
         self._backend = QComboBox()
-        self._backend.addItem("LightField", "lightfield")
+        self._backend.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._backend.setMinimumContentsLength(22)
+        self._backend.addItem("LightField + PIXIS / CCD", "lightfield")
         self._backend.addItem("Andor Shamrock + Si CCD", "andor_si")
         self._backend.addItem("Andor Shamrock + InGaAs CCD", "andor_ingaas")
+        self._backend.addItem("WinSpec InGaAs + LightField spectrograph", "winspec_ingaas")
         selected = self._backend.findData(getattr(cfg.lf6, "backend", "lightfield"))
         self._backend.setCurrentIndex(max(0, selected))
         self._backend.setToolTip(
-            "Select the complete spectrum backend shared by every acquisition "
-            "tab. Each Andor option opens the Shamrock spectrometer together "
-            "with the selected Si or InGaAs detector."
+            "Choose the detector and spectrograph combination, then connect its required devices. "
+            "PIXIS and WinSpec share one LightField session. Switching preserves camera cooling."
         )
         backend_row.addWidget(self._backend, stretch=1)
         lay.addLayout(backend_row)
+        self._setup_help = QLabel()
+        self._setup_help.setWordWrap(True)
+        lay.addWidget(self._setup_help)
+        self._advanced_content = QWidget()
+        advanced_layout = QVBoxLayout(self._advanced_content)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._route_controls = QWidget()
+        route_layout = QFormLayout(self._route_controls)
+        self._optical_profile = QComboBox()
+        self._optical_profile.setEditable(True)
+        self._optical_profile.addItems(list(cfg.lf6.optical_profiles))
+        self._optical_profile.setCurrentText(cfg.lf6.optical_profile)
+        self._lf_route, self._winspec_route = QComboBox(), QComboBox()
+        for combo in (self._lf_route, self._winspec_route):
+            for label, value in [('Front (switchable)', 'front'), ('Side (switchable)', 'side'),
+                                 ('Fixed front (no switching)', 'fixed_front'), ('Fixed side (no switching)', 'fixed_side')]:
+                combo.addItem(label, value)
+        self._winspec_route.addItem('Not installed', 'disabled')
+        route_layout.addRow('Optical setup profile:', self._optical_profile)
+        route_layout.addRow('LightField camera exit:', self._lf_route)
+        route_layout.addRow('WinSpec detector exit:', self._winspec_route)
+        self._route_controls.setToolTip('Saved for this setup. Disconnect LightField and WinSpec before editing. Fixed means a physically fixed exit, not an unreadable device.')
+        advanced_layout.addWidget(self._route_controls)
+        self._optical_profile.currentTextChanged.connect(self._load_optical_profile)
+        self._load_optical_profile(cfg.lf6.optical_profile)
+
+        winspec_row = QHBoxLayout()
+        winspec_row.addWidget(QLabel("WinSpec XP host:"))
+        self._winspec_host = QLineEdit(cfg.lf6.winspec_host)
+        self._winspec_host.setToolTip("XP camera server address. Connect LightField first. WinSpec uses pixels until side-port calibration is available.")
+        winspec_row.addWidget(self._winspec_host)
+        self._winspec_port = QSpinBox()
+        self._winspec_port.setRange(1, 65535)
+        self._winspec_port.setValue(cfg.lf6.winspec_port)
+        winspec_row.addWidget(self._winspec_port)
+        advanced_layout.addLayout(winspec_row)
+        acquisition_row = QHBoxLayout()
+        acquisition_row.addWidget(QLabel('InGaAs acquisition:'))
+        self._winspec_acquisition_backend = QComboBox()
+        self._winspec_acquisition_backend.addItem('WinSpec', 'winspec')
+        self._winspec_acquisition_backend.addItem('PVCAM (experimental)', 'pvcam')
+        self._winspec_acquisition_backend.setCurrentIndex(max(0, self._winspec_acquisition_backend.findData(cfg.lf6.winspec_acquisition_backend)))
+        self._winspec_acquisition_backend.setToolTip('Select the running XP service. Disconnect InGaAs before changing. PVCAM uses software averaging; verify spectra before production measurements.')
+        acquisition_row.addWidget(self._winspec_acquisition_backend)
+        advanced_layout.addLayout(acquisition_row)
+        self._winspec_start_acceleration = QCheckBox('Enable WinSpec Start acceleration (experimental)')
+        self._winspec_start_acceleration.setChecked(cfg.lf6.winspec_start_acceleration)
+        self._winspec_start_acceleration.setToolTip(
+            'Applies when connecting WinSpec. The first capture and captures after settings changes '
+            'use a full Start; matching continuous captures can start faster. Disabled by default.')
+        advanced_layout.addWidget(self._winspec_start_acceleration)
 
         row = QHBoxLayout()
         self._mock_chk = QCheckBox("Use mock (no hardware)")
@@ -488,7 +552,8 @@ class _LF6Section(QWidget):
             "Useful for UI testing without the spectrometer connected."
         )
         row.addWidget(self._mock_chk)
-        lay.addLayout(row)
+        advanced_layout.addLayout(row)
+        self._advanced_expander = _Expander('Advanced connection settings', self._advanced_content, collapsed=True)
 
         btn_row = QHBoxLayout()
         self._connect_btn = QPushButton("Connect")
@@ -499,10 +564,18 @@ class _LF6Section(QWidget):
         lay.addLayout(btn_row)
 
         self._status = _status_label("Disconnected", "gray")
+        self._status.setWordWrap(True)
         lay.addWidget(self._status)
+        self._connections_status = QLabel("Online: none")
+        self._connections_status.setWordWrap(True)
+        self._connections_status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        lay.addWidget(self._connections_status)
+        lay.addWidget(self._advanced_expander)
 
         detector_row = QHBoxLayout()
         self._temperature = QLabel("Detector: N/A")
+        self._temperature.setWordWrap(True)
+        self._temperature.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self._temperature_refresh = QPushButton("Read temperature")
         self._temperature_refresh.setEnabled(False)
         self._cooler = QCheckBox("Cooler")
@@ -518,6 +591,9 @@ class _LF6Section(QWidget):
         self._temperature_monitor.setWordWrap(True)
         lay.addWidget(self._temperature_detail)
         lay.addWidget(self._temperature_monitor)
+        self._acquisition_condition = QLabel()
+        self._acquisition_condition.setWordWrap(True)
+        lay.addWidget(self._acquisition_condition)
 
         self._andor_group = self._build_andor_controls()
         self._andor_group.setVisible(False)
@@ -532,7 +608,7 @@ class _LF6Section(QWidget):
         self._exp_combo.setPlaceholderText("Saved experiments")
         self._exp_combo.setToolTip("LightField experiments available on the connected spectrometer.")
         self._exp_combo.setEnabled(False)
-        lay.addWidget(self._exp_combo)
+        advanced_layout.addWidget(self._exp_combo)
 
     def _build_andor_controls(self) -> QGroupBox:
         group = QGroupBox("Andor controls")
@@ -657,29 +733,209 @@ class _LF6Section(QWidget):
         self._andor_apply.clicked.connect(self._apply_andor_controls)
         self._andor_diagnostics.clicked.connect(self._show_andor_diagnostics)
         self._warm_disconnect_btn.clicked.connect(self._start_warmup_disconnect)
-        self._backend.currentIndexChanged.connect(
-            lambda _index: setattr(cfg.lf6, "backend", self._backend.currentData())
-        )
+        self._backend.currentIndexChanged.connect(self._update_connection_actions)
+        self._mock_chk.toggled.connect(self._update_connection_actions)
+        self._lf_route.currentIndexChanged.connect(self._update_connection_actions)
+        self._winspec_route.currentIndexChanged.connect(self._update_connection_actions)
+        self._winspec_acquisition_backend.currentIndexChanged.connect(self._update_connection_actions)
+        lock_signal = getattr(self._ctrl, "switching_lock_changed", None)
+        if lock_signal is not None:
+            lock_signal.connect(self._update_connection_actions)
+        state_signal = getattr(self._ctrl, "state_changed", None)
+        if state_signal is not None:
+            state_signal.connect(self._on_active_setup_state)
+        background_signal = getattr(self._ctrl, "backend_temperature_snapshot", None)
+        if background_signal is not None:
+            background_signal.connect(self._on_background_temperature)
+
+    def _on_background_temperature(self, payload):
+        backend, snapshot = payload
+        if snapshot:
+            self._background_temperatures[backend] = snapshot
+            self._update_connection_actions()
+
+    @Slot(object)
+    def _on_active_setup_state(self, state):
+        # Scan activation emits READY without a connected notification. Keep
+        # this display-only: connected handlers can schedule SDK refreshes.
+        if (getattr(state, 'value', state) != 'READY'
+                or not bool(getattr(self._ctrl, 'spectrum_actions_blocked', False))
+                or not bool(getattr(self._ctrl, 'is_connected', False))):
+            return
+        self._update_connection_actions()
+        active = self._ctrl.backend
+        index = self._backend.findData(active)
+        label = self._backend.itemText(index) if index >= 0 else active
+        route = (getattr(self._ctrl, 'identity', {}) or {}).get('output_route')
+        self._status.setText(f'In use: {label}' + (f' · Exit: {route}' if route else ''))
+
+    def _update_connection_actions(self, *_args):
+        locked = self._warming_disconnect or self._pending_configuration is not None or bool(getattr(self._ctrl, "switching_locked", False))
+        connected = bool(getattr(self._ctrl, "is_connected", False))
+        active = getattr(self._ctrl, "backend", "")
+        if connected and bool(getattr(self._ctrl, 'spectrum_actions_blocked', False)):
+            index = self._backend.findData(active)
+            if index >= 0 and index != self._backend.currentIndex():
+                blocked = self._backend.blockSignals(True)
+                self._backend.setCurrentIndex(index)
+                self._backend.blockSignals(blocked)
+                # A previous detector's temperature must not follow the setup
+                # label to the next detector. Idle polling fills these again.
+                self._last_temperature_c = None
+                self._winspec_readback = None
+                self._winspec_readback_time = None
+                self._temperature.setText('Detector: N/A')
+                self._temperature_detail.clear()
+                self._temperature_monitor.clear()
+        online = tuple(getattr(self._ctrl, "connected_backends", ()))
+        self._route_controls.setEnabled(not locked and not any(key in online for key in ('lightfield', 'winspec_ingaas')))
+        selected = self._backend.currentData()
+        self._winspec_host.setEnabled(not locked and "winspec_ingaas" not in online)
+        self._winspec_port.setEnabled(not locked and "winspec_ingaas" not in online)
+        self._winspec_acquisition_backend.setEnabled(not locked and 'winspec_ingaas' not in online)
+        self._winspec_start_acceleration.setEnabled(
+            not locked and 'winspec_ingaas' not in online
+            and self._winspec_acquisition_backend.currentData() == 'winspec')
+        self._backend.setEnabled(not locked)
+        self._connect_btn.setText("Switch to this setup" if selected in online else "Connect required devices")
+        self._connect_btn.setEnabled(not locked and (not connected or selected != active))
+        self._mock_chk.setEnabled(not locked and selected not in online)
+        self._disconnect_btn.setEnabled(not locked and connected)
+        self._disconnect_btn.setText("Disconnect WinSpec" if active == "winspec_ingaas" else "Disconnect LightField" if active == "lightfield" else "Disconnect Andor")
+        self._disconnect_btn.setToolTip("Disconnect the current device. For Andor, this closes both camera and spectrograph after the temperature check. Use Spectrum → Andor controls to disconnect only Shamrock.")
+        labels = {self._backend.itemData(i): self._backend.itemText(i) for i in range(self._backend.count())}
+        simulation = (str((getattr(self._ctrl, 'identity', {}) or {}).get('backend', '')).startswith('mock_')
+                      if selected == active and connected else self._mock_chk.isChecked() and selected not in online)
+        if selected in ('lightfield', 'winspec_ingaas'):
+            route = self._winspec_route.currentText() if selected == 'winspec_ingaas' else self._lf_route.currentText()
+            self._setup_help.setText(('Simulation mode — no hardware.\n' if simulation else '') +
+                f'Configured exit: {route}\nPIXIS and WinSpec share one LightField window.')
+            requirements = [('LightField spectrograph', 'lightfield')]
+            requirements.append(('XP WinSpec InGaAs', 'winspec_ingaas') if selected == 'winspec_ingaas' else ('PIXIS / CCD via LightField', 'lightfield'))
+        else:
+            self._setup_help.setText(('Simulation mode — no hardware.\n' if simulation else '') + 'Shamrock spectrograph and the selected Andor detector.')
+            requirements = [('Andor Shamrock', selected), ('Andor detector', selected)]
+        self._connections_status.setText('\n'.join(
+            f'{name}: {"Connected" if key in online else "Not connected"}' for name, key in requirements)
+            + '\nActive setup: ' + (labels.get(active, active) if connected else 'none'))
+        for key, snapshot in self._background_temperatures.items():
+            if key in online and key != active:
+                detail = ("temperature read failed" if "error" in snapshot else
+                          f"{float(snapshot['temperature_c']):.1f} °C · Cooler {'on' if snapshot.get('cooler_on') else 'off'}")
+                self._connections_status.setText(self._connections_status.text() + f"\n{labels.get(key, key)}: {detail}")
+        winspec = selected == 'winspec_ingaas'
+        self._acquisition_condition.setVisible(winspec)
+        self._cooler.setVisible(self._real_andor)
+        self._temperature_refresh.setVisible(self._real_andor or winspec)
+        if winspec:
+            self._update_winspec_temperature()
+
+    def _update_winspec_temperature(self):
+        """Refresh only changed temperature fields; never query hardware here."""
+        if self._backend.currentData() != 'winspec_ingaas':
+            return
+        import math
+        connected = bool(getattr(self._ctrl, 'is_connected', False)) and self._ctrl.backend == 'winspec_ingaas'
+        paused = bool(getattr(self._ctrl, 'temperature_monitor_paused', False) or getattr(self._ctrl, 'is_busy', False))
+        locked = self._pending_configuration is not None or bool(getattr(self._ctrl, 'switching_locked', False))
+        self._temperature_refresh.setEnabled(connected and not paused and not locked)
+        data = self._winspec_readback or {}
+        age = ((datetime.now(timezone.utc) - self._winspec_readback_time).total_seconds()
+               if self._winspec_readback_time else float('inf'))
+        value = data.get('temperature_c')
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        locked_temp = data.get('temperature_status') == 'Locked'
+        temperature = f'InGaAs: {value:.1f} °C · {"Locked" if locked_temp else "Not locked"}' if valid else 'InGaAs: —'
+        detail = f'Setpoint: {data.get("temperature_setpoint_c", "—")} °C' if valid else ''
+        tooltip = (f'Last idle read: {self._winspec_readback_time.astimezone().strftime("%H:%M:%S")}'
+                   if self._winspec_readback_time else 'No idle temperature reading yet')
+        if not connected:
+            temperature, detail, monitor = 'InGaAs temperature: unavailable', '', ''
+            condition = 'Select and connect this setup first'
+        elif paused:
+            monitor = 'Measurement in progress · Refresh paused'
+            condition = 'Measuring; showing last idle reading'
+        elif age > 15 or 'error' in data or not valid:
+            temperature, detail = 'InGaAs temperature: no fresh readback', ''
+            monitor = 'Waiting for idle temperature readback'
+            condition = 'Fresh temperature required before acquisition'
+        else:
+            monitor = 'Idle refresh: 10 s'
+            allowed = value <= -100 or locked_temp
+            condition = 'Temperature satisfied; rechecked at acquisition' if allowed else 'Blocked: requires Locked or <= -100 C'
+        for label, text in ((self._temperature, temperature), (self._temperature_detail, detail),
+                            (self._temperature_monitor, monitor), (self._acquisition_condition, 'Acquisition: ' + condition)):
+            if label.text() != text:
+                label.setText(text)
+        if self._temperature_monitor.toolTip() != tooltip:
+            self._temperature_monitor.setToolTip(tooltip)
 
     @Slot()
     def _on_connect(self):
+        if self._route_controls.isEnabled():
+            name = self._optical_profile.currentText().strip() or 'Custom setup'
+            cfg.lf6.optical_profiles[name] = {'lightfield': self._lf_route.currentData(),
+                                             'winspec_ingaas': self._winspec_route.currentData()}
+            cfg.lf6.optical_profile = name
+        cfg.lf6.winspec_host = self._winspec_host.text().strip()
+        cfg.lf6.winspec_port = self._winspec_port.value()
+        cfg.lf6.winspec_acquisition_backend = self._winspec_acquisition_backend.currentData()
+        cfg.lf6.winspec_start_acceleration = (
+            self._winspec_start_acceleration.isChecked()
+            and cfg.lf6.winspec_acquisition_backend == 'winspec')
+        cfg.save()
         self._status.setText("Connecting…")
         self._status.setStyleSheet("color: orange; font-weight: bold;")
         self._connect_btn.setEnabled(False)
         self._backend.setEnabled(False)
         self._mock_chk.setEnabled(False)
+        target = self._backend.currentData()
+        if target == 'winspec_ingaas' and not self._mock_chk.isChecked() and 'lightfield' not in tuple(getattr(self._ctrl, 'connected_backends', ())):
+            self._pending_configuration = target
+            target = 'lightfield'
         self._ctrl.connect_instrument(
             use_mock=self._mock_chk.isChecked(),
-            backend=self._backend.currentData(),
+            backend=target,
         )
+
+    def _load_optical_profile(self, name):
+        profile = cfg.lf6.optical_profiles.get(name)
+        if profile:
+            for combo, key in ((self._lf_route, 'lightfield'), (self._winspec_route, 'winspec_ingaas')):
+                combo.setCurrentIndex(max(0, combo.findData(profile.get(key, 'disabled'))))
 
     @Slot(list)
     def _on_connected(self, experiments: list):
+        active = getattr(self._ctrl, "backend", "")
+        if self._pending_configuration == 'winspec_ingaas' and active == 'lightfield':
+            self._status.setText('LightField connected; connecting XP WinSpec…')
+            # Other panels queue their initial optics refresh on this signal.
+            # Let that request run, then wait for its connection/settings lock.
+            QTimer.singleShot(50, self._continue_configuration)
+            return
+        index = self._backend.findData(active)
+        if index >= 0:
+            self._backend.blockSignals(True)
+            self._backend.setCurrentIndex(index)
+            self._backend.blockSignals(False)
+        self._last_temperature_c = None
+        self._winspec_readback = None
+        self._winspec_readback_time = None
+        self._last_andor_snapshot = {}
+        self._temperature.setText("Detector: N/A")
+        self._temperature_detail.clear()
+        self._temperature_monitor.clear()
         identity = getattr(self._ctrl, "identity", {}) or {}
+        self._mock_chk.blockSignals(True)
+        self._mock_chk.setChecked(str(identity.get('backend', '')).startswith('mock_'))
+        self._mock_chk.blockSignals(False)
         serial = str(identity.get("camera_serial", "")).strip()
         role = str(identity.get("camera_role", "")).strip()
         detail = ""
-        if role:
+        if identity.get("backend") == "winspec_ingaas":
+            acquisition = 'PVCAM' if identity.get('acquisition_backend') == 'pvcam' else 'WinSpec'
+            detail = f" · {acquisition} InGaAs + LightField · Exit: {identity.get('output_route', identity.get('required_output_port', 'unknown'))} · Raw pixel data"
+        elif role in {"si", "ingaas"}:
             detail = f" · Shamrock + {role.upper()} CCD"
         if serial:
             detail += f" · S/N {serial}"
@@ -728,11 +984,22 @@ class _LF6Section(QWidget):
         read_temperature = getattr(self._ctrl, "read_temperature", None)
         if real_andor and callable(read_temperature):
             read_temperature()
-        if real_andor:
+        if real_andor and identity.get("shamrock_connected", True):
             QTimer.singleShot(0, self._refresh_andor_status)
+        self._update_connection_actions()
+
+    def _continue_configuration(self):
+        if self._pending_configuration != 'winspec_ingaas':
+            return
+        if bool(getattr(self._ctrl, 'switching_locked', False)):
+            QTimer.singleShot(50, self._continue_configuration)
+            return
+        self._pending_configuration = None
+        self._ctrl.connect_instrument(use_mock=False, backend='winspec_ingaas')
 
     @Slot()
     def _on_disconnected(self):
+        self._pending_configuration = None
         self._status.setText("Disconnected")
         self._status.setStyleSheet("color: gray; font-weight: bold;")
         self._status.setToolTip("")
@@ -756,8 +1023,11 @@ class _LF6Section(QWidget):
         self._temperature_refresh.setEnabled(False)
         self._cooler.setEnabled(False)
 
+        self._update_connection_actions()
+
     @Slot(str)
     def _on_error(self, message: str):
+        self._pending_configuration = None
         first_line = str(message).splitlines()[0]
         self._status.setText(f"Error: {first_line[:80]}")
         self._status.setStyleSheet("color: #b91c1c; font-weight: bold;")
@@ -769,6 +1039,7 @@ class _LF6Section(QWidget):
         self._mock_chk.setEnabled(not connected)
         self._andor_refresh.setEnabled(connected and self._real_andor)
         self._andor_apply.setEnabled(connected and self._real_andor)
+        self._update_connection_actions()
 
     @Slot(bool)
     def _on_cooler_toggled(self, _on: bool):
@@ -778,6 +1049,15 @@ class _LF6Section(QWidget):
 
     @Slot(object)
     def _on_temperature_snapshot(self, data):
+        if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') == 'winspec_ingaas':
+            first_readback = self._winspec_readback is None
+            self._winspec_readback = dict(data)
+            self._winspec_readback_time = datetime.now(timezone.utc)
+            if first_readback:
+                self._update_connection_actions()
+            else:
+                self._update_winspec_temperature()
+            return
         if not self._real_andor or self._warming_disconnect:
             return
         if "error" in data:
@@ -795,6 +1075,9 @@ class _LF6Section(QWidget):
 
     @Slot(str)
     def _on_temperature_monitor_state(self, state):
+        if self._backend.currentData() == 'winspec_ingaas':
+            self._update_winspec_temperature()
+            return
         if self._real_andor and not self._warming_disconnect:
             suffix = " · Last temperature read failed" if self._temperature_read_error else ""
             self._temperature_monitor.setText(state + suffix)
@@ -802,7 +1085,7 @@ class _LF6Section(QWidget):
     @Slot()
     def _request_temperature(self):
         poll = getattr(self._ctrl, "poll_temperature", None)
-        if self._real_andor and callable(poll):
+        if (self._real_andor or (getattr(self._ctrl, 'identity', {}) or {}).get('backend') == 'winspec_ingaas') and callable(poll):
             poll()
         else:
             self._ctrl.read_temperature()
@@ -822,6 +1105,9 @@ class _LF6Section(QWidget):
                 if temperature >= threshold:
                     self._warming_disconnect = False
                     self._warmup_timer.stop()
+                    pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
+                    if callable(pause):
+                        pause("warmup", False)
                     self._ctrl.disconnect_instrument()
         except (TypeError, ValueError):
             self._temperature.setText(f"Detector: {value}")
@@ -1011,6 +1297,10 @@ class _LF6Section(QWidget):
             self._ctrl.disconnect_instrument()
             return
         self._warming_disconnect = True
+        pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("warmup", True)
+        self._update_connection_actions()
         self._cooler.setChecked(False)
         self._andor_temperature_status.setText("Warming detector before disconnect…")
         self._warmup_timer.start()
@@ -3519,6 +3809,7 @@ class _PM100DSection(QWidget):
         self._pwr_lbl.setStyleSheet(
             "color: darkgreen; font-weight: bold; font-size: 13px;"
         )
+
         _record_spectrum_readback(self, "power_meter", {"power_w": float(p_w)})
 
     @Slot(list)

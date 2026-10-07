@@ -1,0 +1,777 @@
+{
+  "kind": "physical_grating_model",
+  "id": "4b595e23-9f9b-4a25-a3df-1c1c05570544",
+  "created_utc": "2026-09-27T21:33:00.886967+00:00",
+  "context": {
+    "profile": "PIXIS front + WinSpec side",
+    "grating": "[750nm,600][2][0]",
+    "center_nm": 1700.0,
+    "output_port": "SideExit",
+    "spectrometer": [
+      {
+        "type": "Spectrometer",
+        "model": "SP-2-300i",
+        "serial": "23580208"
+      }
+    ],
+    "detector": {
+      "host": "192.168.170.128",
+      "port": 5000,
+      "model": "OMA V 512 (provisional)",
+      "serial_verified": false
+    },
+    "geometry": [
+      512,
+      1
+    ]
+  },
+  "parameters": [
+    5966.452751533495,
+    232.66648261791934,
+    0.2614485698275385,
+    -0.07293727372489037,
+    -0.0010918149544268975
+  ],
+  "grooves_per_mm": 600.0,
+  "parameter_names": [
+    "effective_focal_length_pixels",
+    "reference_pixel",
+    "half_inclusion_rad",
+    "detector_tilt_rad",
+    "rotation_offset_rad"
+  ],
+  "training": [
+    {
+      "center_nm": 1000.0,
+      "pixel": 15.093915343915343,
+      "wavelength_nm": 1047.0054,
+      "order": 1,
+      "source_wavelength_nm": 1047.0054
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 310.2204130262113,
+      "wavelength_nm": 978.4503,
+      "order": 1,
+      "source_wavelength_nm": 978.4503
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 364.1293488669007,
+      "wavelength_nm": 965.7786,
+      "order": 1,
+      "source_wavelength_nm": 965.7786
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 416.2434912505335,
+      "wavelength_nm": 953.4164,
+      "order": 1,
+      "source_wavelength_nm": 953.4164
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 436.3481751824817,
+      "wavelength_nm": 948.6683,
+      "order": 1,
+      "source_wavelength_nm": 948.6683
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 448.0896551724138,
+      "wavelength_nm": 945.9211,
+      "order": 1,
+      "source_wavelength_nm": 945.9211
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 462.24832962138083,
+      "wavelength_nm": 942.538,
+      "order": 1,
+      "source_wavelength_nm": 942.538
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 484.0665914221219,
+      "wavelength_nm": 937.3308,
+      "order": 1,
+      "source_wavelength_nm": 937.3308
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 492.07575757575756,
+      "wavelength_nm": 935.422,
+      "order": 1,
+      "source_wavelength_nm": 935.422
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 503.7610837438424,
+      "wavelength_nm": 932.65072,
+      "order": 1,
+      "source_wavelength_nm": 932.65072
+    },
+    {
+      "center_nm": 1000.0,
+      "pixel": 509.5673267326733,
+      "wavelength_nm": 931.27872,
+      "order": 2,
+      "source_wavelength_nm": 465.63936
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 18.5974025974026,
+      "wavelength_nm": 1243.9321,
+      "order": 1,
+      "source_wavelength_nm": 1243.9321
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 35.26,
+      "wavelength_nm": 1240.2827,
+      "order": 1,
+      "source_wavelength_nm": 1240.2827
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 88.73733583489681,
+      "wavelength_nm": 1228.6126,
+      "order": 2,
+      "source_wavelength_nm": 614.3063
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 131.36666666666667,
+      "wavelength_nm": 1219.232,
+      "order": 2,
+      "source_wavelength_nm": 609.616
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 155.1639603960396,
+      "wavelength_nm": 1213.9738,
+      "order": 1,
+      "source_wavelength_nm": 1213.9738
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 188.21603927986908,
+      "wavelength_nm": 1206.63343,
+      "order": 1,
+      "source_wavelength_nm": 1206.63343
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 225.04930875576036,
+      "wavelength_nm": 1198.49139,
+      "order": 1,
+      "source_wavelength_nm": 1198.49139
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 312.4107391910739,
+      "wavelength_nm": 1178.90444,
+      "order": 1,
+      "source_wavelength_nm": 1178.90444
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 322.3812979189485,
+      "wavelength_nm": 1176.67929,
+      "order": 1,
+      "source_wavelength_nm": 1176.67929
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 350.11908646003263,
+      "wavelength_nm": 1170.4976,
+      "order": 1,
+      "source_wavelength_nm": 1170.4976
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 366.01778329197685,
+      "wavelength_nm": 1166.871,
+      "order": 1,
+      "source_wavelength_nm": 1166.871
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 390.2279207920792,
+      "wavelength_nm": 1161.40805,
+      "order": 1,
+      "source_wavelength_nm": 1161.40805
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 424.43089279043704,
+      "wavelength_nm": 1153.63446,
+      "order": 1,
+      "source_wavelength_nm": 1153.63446
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 430.3202363198348,
+      "wavelength_nm": 1152.2745,
+      "order": 1,
+      "source_wavelength_nm": 1152.2745
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 480.28818203478676,
+      "wavelength_nm": 1140.91338,
+      "order": 1,
+      "source_wavelength_nm": 1140.91338
+    },
+    {
+      "center_nm": 1200.0,
+      "pixel": 488.19044006069805,
+      "wavelength_nm": 1139.04333,
+      "order": 1,
+      "source_wavelength_nm": 1139.04333
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 172.41089811856585,
+      "wavelength_nm": 1409.364,
+      "order": 1,
+      "source_wavelength_nm": 1409.364
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 186.23822678242567,
+      "wavelength_nm": 1406.4826,
+      "order": 2,
+      "source_wavelength_nm": 703.2413
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 259.42321116928446,
+      "wavelength_nm": 1390.8173,
+      "order": 1,
+      "source_wavelength_nm": 1390.8173
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 284.1217303822938,
+      "wavelength_nm": 1385.894,
+      "order": 2,
+      "source_wavelength_nm": 692.947
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 349.985799522673,
+      "wavelength_nm": 1371.8577,
+      "order": 1,
+      "source_wavelength_nm": 1371.8577
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 368.44346793349166,
+      "wavelength_nm": 1367.855,
+      "order": 1,
+      "source_wavelength_nm": 1367.855
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 394.5131926121372,
+      "wavelength_nm": 1362.2659,
+      "order": 1,
+      "source_wavelength_nm": 1362.2659
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 405.58984375,
+      "wavelength_nm": 1359.9333,
+      "order": 1,
+      "source_wavelength_nm": 1359.9333
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 417.3958611481976,
+      "wavelength_nm": 1357.3617,
+      "order": 1,
+      "source_wavelength_nm": 1357.3617
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 449.467868852459,
+      "wavelength_nm": 1350.5668,
+      "order": 2,
+      "source_wavelength_nm": 675.2834
+    },
+    {
+      "center_nm": 1400.0,
+      "pixel": 482.13324175824175,
+      "wavelength_nm": 1343.4086,
+      "order": 2,
+      "source_wavelength_nm": 671.7043
+    },
+    {
+      "center_nm": 1600.0,
+      "pixel": 100.02459016393442,
+      "wavelength_nm": 1623.0622,
+      "order": 2,
+      "source_wavelength_nm": 811.5311
+    },
+    {
+      "center_nm": 1600.0,
+      "pixel": 223.26796714579055,
+      "wavelength_nm": 1598.949,
+      "order": 1,
+      "source_wavelength_nm": 1598.949
+    },
+    {
+      "center_nm": 1600.0,
+      "pixel": 269.85449735449737,
+      "wavelength_nm": 1589.6352,
+      "order": 2,
+      "source_wavelength_nm": 794.8176
+    },
+    {
+      "center_nm": 1600.0,
+      "pixel": 310.21612903225804,
+      "wavelength_nm": 1581.2181,
+      "order": 1,
+      "source_wavelength_nm": 1581.2181
+    }
+  ],
+  "checks": [
+    {
+      "center_nm": 1100,
+      "pixel": 21.90449438202247,
+      "wavelength_nm": 1144.1832,
+      "order": 1,
+      "source_wavelength_nm": 1144.1832,
+      "file": "g600-center1100.json",
+      "error_nm": 0.17387971602693142
+    },
+    {
+      "center_nm": 1100,
+      "pixel": 36.272118666316615,
+      "wavelength_nm": 1140.91338,
+      "order": 1,
+      "source_wavelength_nm": 1140.91338,
+      "file": "g600-center1100.json",
+      "error_nm": 0.22823920237965467
+    },
+    {
+      "center_nm": 1100,
+      "pixel": 44.077004968062454,
+      "wavelength_nm": 1139.04333,
+      "order": 1,
+      "source_wavelength_nm": 1139.04333,
+      "file": "g600-center1100.json",
+      "error_nm": 0.34938939023254534
+    },
+    {
+      "center_nm": 1100,
+      "pixel": 139.17699194270367,
+      "wavelength_nm": 1117.75246,
+      "order": 1,
+      "source_wavelength_nm": 1117.75246,
+      "file": "g600-center1100.json",
+      "error_nm": 0.21140851536642913
+    },
+    {
+      "center_nm": 1100,
+      "pixel": 154.28531353135313,
+      "wavelength_nm": 1114.302,
+      "order": 1,
+      "source_wavelength_nm": 1114.302,
+      "file": "g600-center1100.json",
+      "error_nm": 0.2379190664851194
+    },
+    {
+      "center_nm": 1100,
+      "pixel": 285.2805560738944,
+      "wavelength_nm": 1084.44774,
+      "order": 1,
+      "source_wavelength_nm": 1084.44774,
+      "file": "g600-center1100.json",
+      "error_nm": 0.19574610308745832
+    },
+    {
+      "center_nm": 1100,
+      "pixel": 305.4251509054326,
+      "wavelength_nm": 1080.11232,
+      "order": 2,
+      "source_wavelength_nm": 540.05616,
+      "file": "g600-center1100.json",
+      "error_nm": -0.09789494370397733
+    },
+    {
+      "center_nm": 1100,
+      "pixel": 359.47,
+      "wavelength_nm": 1067.387,
+      "order": 1,
+      "source_wavelength_nm": 1067.387,
+      "file": "g600-center1100.json",
+      "error_nm": 0.16969868115143072
+    },
+    {
+      "center_nm": 1100,
+      "pixel": 407.5607966457023,
+      "wavelength_nm": 1056.24089,
+      "order": 1,
+      "source_wavelength_nm": 1056.24089,
+      "file": "g600-center1100.json",
+      "error_nm": 0.18529262296215165
+    },
+    {
+      "center_nm": 1100,
+      "pixel": 447.34298544441003,
+      "wavelength_nm": 1047.0054,
+      "order": 1,
+      "source_wavelength_nm": 1047.0054,
+      "file": "g600-center1100.json",
+      "error_nm": 0.1828432847573822
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 46.4453656462585,
+      "wavelength_nm": 1336.7111,
+      "order": 1,
+      "source_wavelength_nm": 1336.7111,
+      "file": "g600-center1300.json",
+      "error_nm": 0.11029922747547971
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 51.67093023255814,
+      "wavelength_nm": 1335.66,
+      "order": 2,
+      "source_wavelength_nm": 667.83,
+      "file": "g600-center1300.json",
+      "error_nm": 0.050286931563960025
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 72.1064209274673,
+      "wavelength_nm": 1331.321,
+      "order": 1,
+      "source_wavelength_nm": 1331.321,
+      "file": "g600-center1300.json",
+      "error_nm": 0.036929965000126685
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 91.12760511882998,
+      "wavelength_nm": 1327.264,
+      "order": 1,
+      "source_wavelength_nm": 1327.264,
+      "file": "g600-center1300.json",
+      "error_nm": 0.03265764715388286
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 118.30620444776677,
+      "wavelength_nm": 1321.399,
+      "order": 1,
+      "source_wavelength_nm": 1321.399,
+      "file": "g600-center1300.json",
+      "error_nm": 0.0779845348638446
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 214.03737925241495,
+      "wavelength_nm": 1300.8264,
+      "order": 1,
+      "source_wavelength_nm": 1300.8264,
+      "file": "g600-center1300.json",
+      "error_nm": 0.0010533860152008856
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 237.92793093580082,
+      "wavelength_nm": 1295.6659,
+      "order": 1,
+      "source_wavelength_nm": 1295.6659,
+      "file": "g600-center1300.json",
+      "error_nm": -0.026981431982221693
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 248.34913567312728,
+      "wavelength_nm": 1293.3195,
+      "order": 1,
+      "source_wavelength_nm": 1293.3195,
+      "file": "g600-center1300.json",
+      "error_nm": 0.05189097673860488
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 307.97420382165603,
+      "wavelength_nm": 1280.2739,
+      "order": 1,
+      "source_wavelength_nm": 1280.2739,
+      "file": "g600-center1300.json",
+      "error_nm": 0.07540132993722182
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 325.27107279693485,
+      "wavelength_nm": 1276.598,
+      "order": 2,
+      "source_wavelength_nm": 638.299,
+      "file": "g600-center1300.json",
+      "error_nm": -0.041351587045255656
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 354.2432707261634,
+      "wavelength_nm": 1270.2281,
+      "order": 1,
+      "source_wavelength_nm": 1270.2281,
+      "file": "g600-center1300.json",
+      "error_nm": -0.0387852342523729
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 431.08121632024637,
+      "wavelength_nm": 1253.299,
+      "order": 2,
+      "source_wavelength_nm": 626.6495,
+      "file": "g600-center1300.json",
+      "error_nm": -0.08208749066739074
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 451.3039538714992,
+      "wavelength_nm": 1248.7663,
+      "order": 1,
+      "source_wavelength_nm": 1248.7663,
+      "file": "g600-center1300.json",
+      "error_nm": -0.03606876304365869
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 465.2980922098569,
+      "wavelength_nm": 1245.612,
+      "order": 1,
+      "source_wavelength_nm": 1245.612,
+      "file": "g600-center1300.json",
+      "error_nm": 0.008809326045366106
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 473.1818509904563,
+      "wavelength_nm": 1243.9321,
+      "order": 1,
+      "source_wavelength_nm": 1243.9321,
+      "file": "g600-center1300.json",
+      "error_nm": -0.06466442734904376
+    },
+    {
+      "center_nm": 1300,
+      "pixel": 489.40276757286307,
+      "wavelength_nm": 1240.2827,
+      "order": 1,
+      "source_wavelength_nm": 1240.2827,
+      "file": "g600-center1300.json",
+      "error_nm": -0.0265267530512574
+    },
+    {
+      "center_nm": 1500,
+      "pixel": 55.18898623279099,
+      "wavelength_nm": 1532.934,
+      "order": 1,
+      "source_wavelength_nm": 1532.934,
+      "file": "g600-center1500.json",
+      "error_nm": -0.1334694432446213
+    },
+    {
+      "center_nm": 1500,
+      "pixel": 104.31201518402376,
+      "wavelength_nm": 1523.07144,
+      "order": 1,
+      "source_wavelength_nm": 1523.07144,
+      "file": "g600-center1500.json",
+      "error_nm": -0.12104681942628304
+    },
+    {
+      "center_nm": 1500,
+      "pixel": 133.28515007898895,
+      "wavelength_nm": 1517.1965,
+      "order": 1,
+      "source_wavelength_nm": 1517.1965,
+      "file": "g600-center1500.json",
+      "error_nm": -0.0887394293588386
+    },
+    {
+      "center_nm": 1500,
+      "pixel": 195.54977228366948,
+      "wavelength_nm": 1504.65,
+      "order": 1,
+      "source_wavelength_nm": 1504.65,
+      "file": "g600-center1500.json",
+      "error_nm": -0.17856929554500311
+    },
+    {
+      "center_nm": 1500,
+      "pixel": 214.73217550274222,
+      "wavelength_nm": 1500.7736,
+      "order": 2,
+      "source_wavelength_nm": 750.3868,
+      "file": "g600-center1500.json",
+      "error_nm": -0.21667699495719717
+    },
+    {
+      "center_nm": 1500,
+      "pixel": 278.2894736842105,
+      "wavelength_nm": 1487.7796,
+      "order": 2,
+      "source_wavelength_nm": 743.8898,
+      "file": "g600-center1500.json",
+      "error_nm": -0.2626777421648967
+    },
+    {
+      "center_nm": 1500,
+      "pixel": 464.44573024740623,
+      "wavelength_nm": 1449.0333,
+      "order": 2,
+      "source_wavelength_nm": 724.51665,
+      "file": "g600-center1500.json",
+      "error_nm": -0.2880448141806937
+    },
+    {
+      "center_nm": 1700,
+      "pixel": 223.16666666666666,
+      "wavelength_nm": 1699.0718,
+      "order": 2,
+      "source_wavelength_nm": 849.5359,
+      "file": "g600-center1700.json",
+      "error_nm": -0.24767585338031495
+    },
+    {
+      "center_nm": 1700,
+      "pixel": 346.10102301790283,
+      "wavelength_nm": 1675.2718,
+      "order": 2,
+      "source_wavelength_nm": 837.6359,
+      "file": "g600-center1700.json",
+      "error_nm": -0.08243277906080948
+    }
+  ],
+  "center_range": [
+    900.0,
+    1700.0
+  ],
+  "pixel_range": [
+    1,
+    512
+  ],
+  "measured_training_center_range": [
+    1000.0,
+    1600.0
+  ],
+  "checked_centers_nm": [
+    1100.0,
+    1300.0,
+    1500.0,
+    1700.0
+  ],
+  "rms_nm": 0.15473265311265172,
+  "max_check_error_nm": 0.3493893897250473,
+  "check_residual_nm": [
+    0.17387970173422218,
+    0.22823919721213315,
+    0.3493893897250473,
+    0.21140855496855693,
+    0.2379191096483737,
+    0.19574614546695557,
+    -0.09789490640332588,
+    0.16969869843364904,
+    0.1852926147062135,
+    0.18284324996875512,
+    0.11029903463168012,
+    0.05028674643517661,
+    0.03692980913365318,
+    0.032657517228244615,
+    0.07798443984302139,
+    0.0010533938764183404,
+    -0.02698140326901921,
+    0.0518910139505806,
+    0.07540140884930224,
+    -0.04135149822536732,
+    -0.038785131021313646,
+    -0.08208736230540126,
+    -0.03606863118693582,
+    0.008809459568965394,
+    -0.06466429315628375,
+    -0.02652661808974699,
+    -0.13346981830682125,
+    -0.12104708016795485,
+    -0.08873962660436518,
+    -0.17856936613566177,
+    -0.21667702920808551,
+    -0.2626776649487965,
+    -0.2880444879967854,
+    -0.24767590787405425,
+    -0.08243250991245077
+  ],
+  "fit_rms_nm": 0.0923074210960236,
+  "tolerance_nm": 0.2,
+  "source": "Application-only physical grating model; independent checks",
+  "accuracy_scope": "RMS describes check peaks only; other centers/pixels use physical-model prediction",
+  "provenance": {
+    "assignment": "Model-assisted mixed-order Ne/Ar; training assignments frozen before checks; check identification window 0.75 nm",
+    "unmatched_checks": [
+      {
+        "center_nm": 1100,
+        "pixel": 239.20353982300884,
+        "wavelength_nm": 1089.7018,
+        "order": 2,
+        "source_wavelength_nm": 544.8509,
+        "file": "g600-center1100.json",
+        "error_nm": 5.499084486630409
+      },
+      {
+        "center_nm": 1500,
+        "pixel": 69.02612282309808,
+        "wavelength_nm": 1532.934,
+        "order": 1,
+        "source_wavelength_nm": 1532.934,
+        "file": "g600-center1500.json",
+        "error_nm": -2.900882582340273
+      },
+      {
+        "center_nm": 1500,
+        "pixel": 388.054128440367,
+        "wavelength_nm": 1474.4236,
+        "order": 2,
+        "source_wavelength_nm": 737.2118,
+        "file": "g600-center1500.json",
+        "error_nm": -9.668404204835042
+      },
+      {
+        "center_nm": 1500,
+        "pixel": 395.7292595896521,
+        "wavelength_nm": 1454.5872,
+        "order": 2,
+        "source_wavelength_nm": 727.2936,
+        "file": "g600-center1500.json",
+        "error_nm": 8.565514596396042
+      },
+      {
+        "center_nm": 1500,
+        "pixel": 413.93832020997377,
+        "wavelength_nm": 1454.5872,
+        "order": 2,
+        "source_wavelength_nm": 727.2936,
+        "file": "g600-center1500.json",
+        "error_nm": 4.7581793469937566
+      }
+    ],
+    "training_unmatched": [
+      {
+        "center_nm": 1400.0,
+        "pixel": 97.96467391304348
+      },
+      {
+        "center_nm": 1400.0,
+        "pixel": 494.4255319148936
+      }
+    ]
+  }
+}
