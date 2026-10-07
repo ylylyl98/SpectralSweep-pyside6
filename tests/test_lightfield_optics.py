@@ -21,7 +21,8 @@ class LightFieldOpticsTests(unittest.TestCase):
         exp.SetValue = write
         return SimpleNamespace(experiment=exp, spectrometer_settings=SimpleNamespace(
             GratingSelected='grating', OpticalPortExitSelected='exit', GratingCenterWavelength='center'),
-            wait_until_setting_writable=lambda key: None)
+            wait_until_setting_writable=lambda key, **kwargs: None,
+            wait_until_optics_stable=lambda **kwargs: None)
 
     def test_detector_switch_restores_front(self):
         setup = self.setup_optics()
@@ -72,8 +73,9 @@ class LightFieldOpticsTests(unittest.TestCase):
         exp = Experiment()
         setup = SimpleNamespace(experiment=exp, spectrometer_settings=SimpleNamespace(
             GratingSelected='grating', OpticalPortExitSelected='exit', GratingCenterWavelength='center'),
-            wait_until_setting_writable=lambda key: None,
-            set_center_wavelength_when_ready=lambda value: exp.SetValue('center', value))
+            wait_until_setting_writable=lambda key, **kwargs: None,
+            wait_until_optics_stable=lambda **kwargs: None,
+            set_center_wavelength_when_ready=lambda value, **kwargs: exp.SetValue('center', value))
         self.assertEqual(read_optics(setup)['output_ports'], ['FrontExit', 'SideExit'])
         result = apply_optics(setup, {'grating': 'G2', 'output_port': 'SideExit', 'wavelength_nm': 750})
         self.assertEqual(result['grating'], 'G2')

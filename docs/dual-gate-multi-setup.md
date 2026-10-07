@@ -93,15 +93,27 @@ that gate voltage while switching optics. This increases optical switching.
 
 Every distinct recipe is configured/validated before the first gate write.
 LightField applies the configured exit before setting the center wavelength.
-It checks the SDK's `IsRunning` and `IsUpdating` flags and waits for an optical
-setting update to finish before reading back the exit/grating or changing the
-center. `IsReadyToRun` is recorded separately: an external WinSpec detector does
+It checks the SDK's `IsRunning` and `IsUpdating` flags and requires the exit,
+grating and finite center readbacks to remain unchanged for at least 300 ms
+while the center setting is available/writable and the experiment is idle.
+This also catches delayed exit/calibration updates after the SDK first reports
+Ready. `IsReadyToRun` is recorded separately: an external WinSpec detector does
 not require LightField's own camera to be ready to acquire. Setup preparation
 errors identify the requested setup, active setup and configured exit, as well
 as the underlying setting error.
 The center must read back within 0.01 nm of the request for three consecutive
-ready/idle checks, within the existing 15-second setting timeout. This tolerance
+ready/idle checks. Exit settling, center verification and recovery share the
+existing 15-second optical timeout; readiness or diagnostic queries do not
+restart it. Synchronous SDK calls cannot be interrupted by this timeout, but
+an expired deadline blocks further writes and prevents reporting success.
+This tolerance
 checks SDK setting agreement; it is not a claim of calibration accuracy.
+If a matching center subsequently reverts, preparation may rewrite that center
+at most twice, after another 300 ms settling check. Recovery requires complete
+initial exit/grating readbacks and aborts if either changes. A center that never
+matches, or becomes unavailable/nonfinite, is not automatically rewritten.
+The WinSpec scan preflight selects its configured exit before looking up the
+exit-specific wavelength calibration, within the same optical timeout.
 Exposure time and EPF must also match their readbacks. A missing or mismatched
 readback stops preparation instead of recording a successful setup change.
 
@@ -145,8 +157,10 @@ Real LightField connections also save center-write diagnostics in
 Each Spectrum Apply or scan center write records its source, requested center,
 SDK state before/after the call, state just before SetValue, actual exit/grating,
 IsRelevant/IsValid and allowed range when available, and up to 32 readback
-changes. These are read-only diagnostic queries; the log does not retry writes
-or relax acquisition checks. A log-write failure cannot replace the original
+changes. For recovery, the record preserves the first pre-write context and
+each subsequent write context, rewrite reason, readback and settling evidence.
+Diagnostic queries themselves do not write settings or relax acquisition
+checks. A log-write failure cannot replace the original
 setting outcome. Diagnostic records help compare manual success against an
 automatic setup failure; they are not evidence that an unresolved hardware
 failure has been repaired.

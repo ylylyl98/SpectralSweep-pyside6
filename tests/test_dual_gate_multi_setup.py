@@ -276,6 +276,9 @@ def test_real_controller_routes_and_calibrates_both_setups_under_dual_gate_lock(
     optics = winspec.lightfield
 
     def configure(**settings):
+        if live['output_port'] != 'FrontExit':
+            routes.append(True)
+        live['output_port'] = 'FrontExit'
         live['wavelength_nm'] = settings['center_nm']
         events.append(('configure_pixis', settings))
 
@@ -284,7 +287,12 @@ def test_real_controller_routes_and_calibrates_both_setups_under_dual_gate_lock(
         acquire=lambda: (np.array([729., 730., 731.]), np.ones(3)))
     controller._worker._parked['lightfield'] = (optics, pixis, {'backend': 'mock_lightfield'}, [])
     routes = []
-    controller._worker._route_selected_detector = lambda setup, *_args: routes.append(setup is optics)
+    def route(setup, output, **kwargs):
+        if live['output_port'] != 'SideExit':
+            routes.append(False)
+        live['output_port'] = 'SideExit'
+        return dict(live)
+    monkeypatch.setattr('app.devices.winspec_adapter.ensure_output_route', route)
     definition = loops()
     definition.loc[1, 'Values'] = '730, 1050'
     sequence, rows, _ = panel._build_plan(definition, batch(), 'Customized')

@@ -237,8 +237,19 @@ class WinSpecSetup:
         self.lightfield.set_center_wavelength_when_ready(
             float(center_nm), update_acquisition_recipe=False, **kwargs)
 
-    def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
+    def configure_for_acquisition(self, *, center_nm, exposure_ms, frames, timeout_s=15.0):
         self._acquisition_prepared = False
+        timeout_s = float(timeout_s)
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError('WinSpec optics timeout must be finite and positive')
+        deadline = time.monotonic() + timeout_s
+
+        def remaining():
+            value = deadline - time.monotonic()
+            if value <= 0:
+                raise TimeoutError('WinSpec optical preparation timed out; acquisition blocked')
+            return value
+
         if not self.is_ready or self.is_busy:
             raise RuntimeError('WinSpec/LightField is not ready or is busy')
         if not math.isfinite(float(center_nm)) or float(center_nm) <= 0 or not math.isfinite(float(exposure_ms)) or float(exposure_ms) <= 0 or int(frames) != frames or int(frames) < 1:
@@ -250,15 +261,16 @@ class WinSpecSetup:
             raise RuntimeError('Stop the current WinSpec acquisition before applying settings')
         if current.get('timing_mode') != 1:
             raise RuntimeError('Select Free Run timing in WinSpec for Spectrum acquisition')
-        optics = ensure_output_route(self.lightfield, self.output_route)
-        self.set_center_wavelength_when_ready(center_nm)
+        optics = ensure_output_route(self.lightfield, self.output_route, timeout_s=remaining())
+        self.set_center_wavelength_when_ready(center_nm, timeout_s=remaining())
         request = {'exposure_ms': float(exposure_ms), 'accumulations': int(frames), 'sequential_frames': 1}
-        reply, _ = self.client.request('SET_SETTINGS', request)
+        reply, _ = self.client.request('SET_SETTINGS', request, timeout_s=remaining())
         self._check_backend(reply)
         self._settings = reply.get('settings', {})
         for key, value in request.items():
             if key not in self._settings or not math.isclose(float(self._settings[key]), value, rel_tol=1e-6, abs_tol=1e-6):
                 raise RuntimeError(f'WinSpec {key} readback differs from request')
+        remaining()
         self._expected_settings = {**self._settings, **request}
         self._acquisition_prepared = True
         self._abort.clear()  # Only a successfully verified Apply arms the next run.

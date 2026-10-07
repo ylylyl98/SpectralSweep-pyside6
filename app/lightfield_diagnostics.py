@@ -4,9 +4,11 @@ from contextlib import contextmanager
 from functools import wraps
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import threading
+import time
 
 
 log = logging.getLogger(__name__)
@@ -75,6 +77,15 @@ def trace_center_write(method):
             return method(setup, value, *args, **kwargs)
         if path is None:
             return method(setup, value, *args, **kwargs)
+        # Establish the absolute write deadline before diagnostic SDK queries;
+        # a slow optional read must not grant the setter a fresh timeout.
+        try:
+            timeout_s = float(kwargs.get('timeout_s', 15.0))
+            if math.isfinite(timeout_s) and timeout_s > 0:
+                deadline = time.monotonic() + timeout_s
+                kwargs['_deadline'] = min(deadline, kwargs.get('_deadline', deadline))
+        except (TypeError, ValueError):
+            pass  # The setter owns validation and its exception.
         # Diagnostic failures must never replace the setter's own outcome.
         try:
             record['requested_nm'] = float(value)

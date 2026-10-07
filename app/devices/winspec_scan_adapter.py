@@ -1,6 +1,8 @@
 """Calibrated scan surface over the raw WinSpec detector acquisition."""
 import copy
 import logging
+import math
+import time
 
 import numpy as np
 
@@ -47,15 +49,28 @@ class WinSpecScanAdapter:
         for center in dict.fromkeys(float(value) for value in centers):
             self._resolve({**context, 'center_nm': center})
 
-    def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
+    def configure_for_acquisition(self, *, center_nm, exposure_ms, frames, timeout_s=15.0):
         self._prepared = None
+        timeout_s = float(timeout_s)
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError('WinSpec optics timeout must be finite and positive')
+        deadline = time.monotonic() + timeout_s
+        # Calibration is specific to the exit. Routing belongs to this complete
+        # preflight, so the requested exit must precede calibration validation.
+        winspec_adapter.ensure_output_route(
+            self.setup.lightfield, self.setup.output_route, timeout_s=timeout_s)
         self.validate_scan_centers([center_nm])
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('WinSpec scan optical preparation timed out; acquisition blocked')
         readback = self.setup.configure_for_acquisition(
-            center_nm=center_nm, exposure_ms=exposure_ms, frames=frames)
+            center_nm=center_nm, exposure_ms=exposure_ms, frames=frames, timeout_s=remaining)
         context = self._context()
         if context is None or not np.isclose(context['center_nm'], float(center_nm), rtol=0, atol=1e-6):
             raise RuntimeError('WinSpec scan center wavelength readback differs from request')
         record, axis, mask = self._resolve(context)
+        if time.monotonic() >= deadline:
+            raise TimeoutError('WinSpec scan optical preparation timed out; acquisition blocked')
         self._prepared = (copy.deepcopy(context), record, axis, mask)
         return {**readback, 'axis_unit': 'nm',
                 'calibration_status': record.get('kind', 'fixed_position_calibration'),

@@ -72,8 +72,11 @@ def setup():
     result.convert_buffer = lambda data, _format: np.asarray(data)
     # Keep production logic; allow scheduling headroom for the three stable
     # polls while shortening the 15-second hardware wait for offline failures.
-    result.set_center_wavelength_when_ready = lambda value, **kwargs: LF6Setup.set_center_wavelength_when_ready(
-        result, value, timeout_s=.25, poll_interval_s=.001, **kwargs)
+    def set_center(value, **kwargs):
+        timeout_s = min(.25, kwargs.pop('timeout_s', .25))
+        return LF6Setup.set_center_wavelength_when_ready(
+            result, value, timeout_s=timeout_s, poll_interval_s=.001, **kwargs)
+    result.set_center_wavelength_when_ready = set_center
     return result
 
 

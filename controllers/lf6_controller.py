@@ -153,7 +153,9 @@ class _LF6Worker(QObject):
                 previous = self._backend
                 self._park_active()
                 try:
-                    self._activate(backend, notify=False)
+                    # The complete acquisition preflight owns routing and its
+                    # shared optical deadline; activation must not route twice.
+                    self._activate(backend, route_output=False, notify=False)
                 except Exception:
                     self._activate(previous, route_output=False, notify=False)
                     raise
