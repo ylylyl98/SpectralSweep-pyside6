@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QModelIndex, QSize, Qt
+from PySide6.QtCore import QModelIndex, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QBrush, QFont, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -167,7 +167,10 @@ def _fmt_ctx(ctx: dict, param_order: Optional[List[str]] = None) -> str:
         except Exception:
             value = f"{v}"
         if k == 'Measurement setup':
-            value = {'lightfield': 'PIXIS', 'winspec_ingaas': 'WinSpec'}.get(value, value)
+            value = {
+                'lightfield': 'PIXIS', 'winspec_ingaas': 'WinSpec',
+                'andor_ingaas': 'Andor InGaAs', 'andor_si': 'Andor Silicon',
+            }.get(value, value)
         parts.append(f"{k0}={value}")
     return ", ".join(parts) if parts else "(no loop vars)"
 
@@ -390,16 +393,23 @@ class RunPlanTree(QTreeWidget):
         plan = locals().copy()
         plan.pop("self")
         self._last_plan = plan
-        if self._full_sequence_tree is not None:
+        if self._full_sequence_tree is not None and self._full_sequence_dialog.isVisible():
             self._full_sequence_tree.update_plan(**plan)
-        if acquisition_schedule and all(task.get("nested") for task in acquisition_schedule):
+        if getattr(self, "_classified_schedule", None) is not acquisition_schedule:
+            self._classified_schedule = acquisition_schedule
+            self._schedule_is_nested = bool(acquisition_schedule) and all(task.get("nested") for task in acquisition_schedule)
+        if getattr(self, "_schedule_is_nested", False):
             self._update_nested_schedule(
-                list(acquisition_schedule), done=done, total_acq=total_acq,
+                acquisition_schedule, done=done, total_acq=total_acq,
                 current_step=current_seq_i, completed_points=completed_points,
                 run_outcome=run_outcome, max_show=max_seq_show,
                 preview_state=preview_state,
             )
             return
+        self._nested_build = None
+        self._nested_schedule = None
+        if hasattr(self, "_nested_build_timer"):
+            self._nested_build_timer.stop()
         self.setColumnCount(4)
         self.setHeaderLabels(["Status", "Batch row", "Loop setting", "Measurement details"])
         self._fit_columns_to_viewport()
@@ -596,56 +606,41 @@ class RunPlanTree(QTreeWidget):
         limit = len(schedule) if self._show_full_sequence else min(max_show, 8)
         start = 0 if self._show_full_sequence else max(0, min(max(current_step, completed), len(schedule) - limit))
         stop = min(len(schedule), start + limit)
-        signature = repr((schedule, start, stop, self._show_full_sequence, preview_state))
-        expanded = self._expanded_node_ids()
-        if self._flat_signature != signature:
+        signature = (start, stop, self._show_full_sequence, preview_state)
+        rebuilt = getattr(self, "_nested_schedule", None) is not schedule or self._flat_signature != signature
+        if rebuilt:
+            expanded = self._expanded_node_ids()
+            self._nested_schedule = schedule
             self.clear()
             self._flat_steps.clear()
             self._flat_groups.clear()
             root = QTreeWidgetItem(self, [""])
             root.setData(0, _NODE_ID_ROLE, "nested-root")
             self._flat_root = root
-            branches = {}
-            for task_i in range(start, stop):
-                task = schedule[task_i]
-                ctx, row, point = task["ctx"], task["row"], task["gate_point"]
-                parent, prefix = root, ()
-                for level in task["execution_order"]:
-                    kind, level_id = level["kind"], level["id"]
-                    if kind == "group":
-                        identity = task.get("group_instances", {}).get(level_id, 0)
-                        label = _fmt_ctx(task.get("group_values", {}).get(level_id, {}))
-                    elif kind == "conditions":
-                        identity = (task["row_i"], task["repeat_i"])
-                        label = f"Row {task['row_i'] + 1}: {_condition_name(row, task['row_i'])} - repetition {task['repeat_i'] + 1}/{task['repeat_total']}"
-                    else:
-                        identity = point["point_i"]
-                        label = f"Gate point {point['point_number']}/{point['point_total']}: Vbg={point['Vbg']:g} V, Vtg={point['Vtg']:g} V"
-                        if point.get("Vbias") is not None:
-                            label += f", Vbias={point['Vbias']:g} V"
-                    prefix += ((level_id, identity),)
-                    if prefix not in branches:
-                        item = QTreeWidgetItem(parent, [label])
-                        item.setData(0, _NODE_ID_ROLE, repr(prefix))
-                        item.setToolTip(0, label)
-                        item.setExpanded(repr(prefix) in expanded or (not expanded and self._show_full_sequence) or parent.childCount() == 1)
-                        branches[prefix] = item
-                    parent = branches[prefix]
-                text = (
-                    f"{task_i + 1}. {_fmt_ctx(ctx)} | Row {task['row_i'] + 1} "
-                    f"{_condition_name(row, task['row_i'])} | Rep {task['repeat_i'] + 1}/{task['repeat_total']} "
-                    f"| Point {point['point_number']}/{point['point_total']} "
-                    f"(Vbg={point['Vbg']:g}, Vtg={point['Vtg']:g} V)"
-                )
-                acquisition_label = f"{task_i + 1}. Acquire spectrum" + (" + power" if _to_bool(row.get("MeasurePower", False)) else "")
-                item = QTreeWidgetItem(parent, [acquisition_label])
-                item.setToolTip(0, text + (" | Measure power" if _to_bool(row.get("MeasurePower", False)) else ""))
-                self._flat_steps[task_i] = {"item": item, "text": acquisition_label}
+            self._nested_build = {"schedule": schedule, "next": start, "stop": stop,
+                                  "branches": {}, "expanded": expanded}
+            self._append_nested_items(80 if stop - start > 500 else stop - start)
             root.setExpanded(True)
             self._flat_signature = signature
         root = self._flat_root
         root.setText(0, f"{preview_state} · {run_outcome.capitalize()} | {done}/{total_acq} files | {completed}/{len(schedule)} spectra | steps {start + 1}-{stop}")
-        for task_i, record in self._flat_steps.items():
+        if getattr(self, "_nested_build", None):
+            root.setText(0, root.text(0) + f" | Loading {len(self._flat_steps)}/{stop - start} steps…")
+            if not hasattr(self, "_nested_build_timer"):
+                self._nested_build_timer = QTimer(self)
+                self._nested_build_timer.setSingleShot(True)
+                self._nested_build_timer.timeout.connect(self._advance_nested_build)
+            self._nested_build_timer.start(1)
+        previous_completed = getattr(self, "_nested_completed", 0)
+        previous_active = getattr(self, "_nested_last_active", -1)
+        changed = (self._flat_steps.keys() if rebuilt else
+                   set(range(min(previous_completed, completed), max(previous_completed, completed))) | {previous_active, current_step} | set(getattr(self, "_new_nested_steps", [])))
+        newly_created = set(getattr(self, "_new_nested_steps", []))
+        self._new_nested_steps = []
+        for task_i in changed:
+            record = self._flat_steps.get(task_i)
+            if record is None:
+                continue
             state = "done" if task_i < completed else "todo"
             if task_i == current_step and task_i >= completed and run_outcome in {"running", "failed", "stopped"}:
                 state = {"running": "now", "failed": "failed", "stopped": "stopped"}[run_outcome]
@@ -654,14 +649,64 @@ class RunPlanTree(QTreeWidget):
             record["item"].setForeground(0, _brush({"done": _CLR_DONE_FG, "todo": _CLR_TODO_FG,
                 "now": _CLR_NOW_FG, "failed": _CLR_FAILED_FG, "stopped": _CLR_STOPPED_FG}[state]))
             record["item"].setBackground(0, _brush(_CLR_NOW_BG if state == "now" else QColor("transparent")))
-            if state in {"now", "failed", "stopped"} and current_step != getattr(self, "_nested_last_active", None):
+            if state in {"now", "failed", "stopped"} and (current_step != getattr(self, "_nested_last_active", None) or task_i in newly_created):
                 parent = record["item"].parent()
                 while parent is not None:
                     parent.setExpanded(True)
                     parent = parent.parent()
                 self.scrollToItem(record["item"], QAbstractItemView.ScrollHint.EnsureVisible)
         self._nested_last_active = current_step
+        self._nested_completed = completed
         self._semantic_tree_built = True
+
+    def _advance_nested_build(self):
+        if not self.isVisible() or not getattr(self, "_nested_build", None):
+            return
+        self._append_nested_items(80)
+        self.update_plan(**self._last_plan)
+
+    def _append_nested_items(self, count):
+        """Populate a large full tree between Qt events, preserving every task."""
+        build = self._nested_build
+        begin, end = build["next"], min(build["stop"], build["next"] + count)
+        branches, expanded = build["branches"], build["expanded"]
+        for task_i in range(begin, end):
+            task = build["schedule"][task_i]
+            ctx, row, point = task["ctx"], task["row"], task["gate_point"]
+            parent, prefix = self._flat_root, ()
+            for level in task["execution_order"]:
+                kind, level_id = level["kind"], level["id"]
+                if kind == "group":
+                    identity = task.get("group_instances", {}).get(level_id, 0)
+                    label = _fmt_ctx(task.get("group_values", {}).get(level_id, {}))
+                elif kind == "conditions":
+                    identity = (task["row_i"], task["repeat_i"])
+                    label = f"Row {task['row_i'] + 1}: {_condition_name(row, task['row_i'])} - repetition {task['repeat_i'] + 1}/{task['repeat_total']}"
+                else:
+                    identity = point["point_i"]
+                    label = f"Gate point {point['point_number']}/{point['point_total']}: Vbg={point['Vbg']:g} V, Vtg={point['Vtg']:g} V"
+                    if point.get("Vbias") is not None:
+                        label += f", Vbias={point['Vbias']:g} V"
+                prefix += ((level_id, identity),)
+                if prefix not in branches:
+                    item = QTreeWidgetItem(parent, [label])
+                    item.setData(0, _NODE_ID_ROLE, repr(prefix))
+                    item.setToolTip(0, label)
+                    item.setExpanded(repr(prefix) in expanded or (not expanded and self._show_full_sequence) or parent.childCount() == 1)
+                    branches[prefix] = item
+                parent = branches[prefix]
+            text = (f"{task_i + 1}. {_fmt_ctx(ctx)} | Row {task['row_i'] + 1} "
+                    f"{_condition_name(row, task['row_i'])} | Rep {task['repeat_i'] + 1}/{task['repeat_total']} "
+                    f"| Point {point['point_number']}/{point['point_total']} "
+                    f"(Vbg={point['Vbg']:g}, Vtg={point['Vtg']:g} V)")
+            label = f"{task_i + 1}. Acquire spectrum" + (" + power" if _to_bool(row.get("MeasurePower", False)) else "")
+            item = QTreeWidgetItem(parent, [label])
+            item.setToolTip(0, text + (" | Measure power" if _to_bool(row.get("MeasurePower", False)) else ""))
+            self._flat_steps[task_i] = {"item": item, "text": label}
+        self._new_nested_steps = list(range(begin, end))
+        build["next"] = end
+        if end == build["stop"]:
+            self._nested_build = None
 
     def _update_flat_schedule(
         self,
@@ -1207,3 +1252,9 @@ class RunPlanTree(QTreeWidget):
         self._flat_steps.clear()
         self._flat_groups.clear()
         self._flat_root = None
+        self._nested_schedule = None
+        self._classified_schedule = None
+        self._schedule_is_nested = False
+        self._nested_build = None
+        if hasattr(self, "_nested_build_timer"):
+            self._nested_build_timer.stop()

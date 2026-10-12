@@ -140,7 +140,31 @@ class MainWindowLayoutTests(unittest.TestCase):
             MainWindow._restore_session(host)
         self.assertEqual(states[-1]['panels']['dual_gate']['value'], 'last-bo146')
 
-    def test_sample_switch_saves_outgoing_profile_before_restoring_target(self):
+    def test_restart_without_sample_profile_keeps_last_session_settings(self):
+        from types import SimpleNamespace
+        from utils.config import AppConfig
+        config = AppConfig()
+        config.session.sample_id = 'new-sample'
+        config.session.active_tab = 'spectrum'
+        config.session.panels = {'dual_gate': {'value': 'last-used-draft'}}
+        states = []
+        commits = []
+        host = SimpleNamespace(
+            _sample_id_binder=SimpleNamespace(value='new-sample', commit=commits.append),
+            _sample_store=SampleSettingsStore(),
+            _default_profile_state={'active_tab': 'dual_gate', 'panels': {'dual_gate': {'value': 'defaults'}}},
+            _restore_panels=lambda panels: None,
+            _restore_state=states.append,
+            _sample_scoped_state=MainWindow._sample_scoped_state,
+            _refresh_sample_selector=lambda: None,
+        )
+        with patch.object(cfg, 'session', config.session):
+            MainWindow._restore_session(host)
+        self.assertEqual(states[-1]['panels']['dual_gate']['value'], 'last-used-draft')
+        self.assertEqual(states[-1]['active_tab'], 'spectrum')
+        self.assertEqual(commits, ['new-sample'])
+
+    def test_new_sample_keeps_current_draft_and_saves_independent_profiles(self):
         host = MainWindow.__new__(MainWindow)
         QMainWindow.__init__(host)
         edits = [QLineEdit("YZ365")]
@@ -163,7 +187,14 @@ class MainWindowLayoutTests(unittest.TestCase):
 
         self.assertTrue(MainWindow._commit_sample_selection(host, "YZ366"))
         self.assertEqual(host._sample_store.load("YZ365")["panels"]["dual_gate"]["value"], "draft-365")
-        self.assertEqual(host._sample_store.load("YZ366")["panels"]["dual_gate"]["value"], "defaults")
+        self.assertEqual(host._sample_store.load("YZ366")["panels"]["dual_gate"]["value"], "draft-365")
+        self.assertEqual(host._current_value, "draft-365")
+        host._current_value = "draft-366"
+        self.assertTrue(MainWindow._commit_sample_selection(host, "YZ365"))
+        self.assertEqual(host._current_value, "draft-365")
+        self.assertEqual(host._sample_store.load("YZ366")["panels"]["dual_gate"]["value"], "draft-366")
+        self.assertTrue(MainWindow._commit_sample_selection(host, "YZ366"))
+        self.assertEqual(host._current_value, "draft-366")
 
     def test_real_main_window_round_trips_two_sample_drafts_without_hardware(self):
         original_cfg = copy.deepcopy(cfg.__dict__)
@@ -190,8 +221,15 @@ class MainWindowLayoutTests(unittest.TestCase):
 
                 self.assertTrue(window._commit_sample_selection("__ui-test-a__"))
                 panel._point_edit.setText("point-a")
+                panel._loop_table.item(0, 2).setText("861")
+                panel._on_apply()
+                panel._loop_table.item(0, 2).setText("899")
                 window._persist_session()
                 self.assertTrue(window._commit_sample_selection("__ui-test-b__"))
+                self.assertEqual(panel._point_edit.text(), "point-a")
+                self.assertEqual(panel._loop_table.item(0, 2).text(), "899")
+                self.assertEqual(str(panel._loop_src.iloc[0]["Values"]), "861")
+                self.assertEqual(panel._sample_edit.text(), "__ui-test-b__")
                 panel._point_edit.setText("point-b")
                 window._persist_session()
                 self.assertTrue(window._commit_sample_selection("__ui-test-a__"))

@@ -798,12 +798,13 @@ class SMUController(QObject):
         self._worker = _SMUWorker()
         self._worker.moveToThread(self._thread)
         self._role_map: Dict[str, Optional[str]] = {}
+        self._voltage_readback = {}
         self._applied_limit_addresses: set[str] = set()
 
         self._worker.connected.connect(self.connected)
         self._worker.disconnected.connect(self._on_worker_disconnected)
         self._worker.error.connect(self.error)
-        self._worker.readings_ready.connect(self.readings_ready)
+        self._worker.readings_ready.connect(self._on_readings_ready)
         self._worker.ramp_complete.connect(self.ramp_complete)
         self._worker.manual_finished.connect(self.manual_finished)
         self._worker.manual_error.connect(self.manual_error)
@@ -850,6 +851,7 @@ class SMUController(QObject):
         compliance_by_addr: Optional[Dict[str, dict]] = None,
     ) -> None:
         self._role_map = dict(role_map)
+        self._voltage_readback.clear()
         self._applied_limit_addresses.clear()
         self._connect_requested.emit(
             visa_addrs,
@@ -859,13 +861,33 @@ class SMUController(QObject):
         )
 
     def disconnect_instrument(self) -> None:
+        self._voltage_readback.clear()
         self._disconnect_requested.emit()
 
     @Slot()
     def _on_worker_disconnected(self) -> None:
+        self._voltage_readback.clear()
         self._applied_limit_addresses.clear()
         self.limits_state_changed.emit()
         self.disconnected.emit()
+
+    @property
+    def latest_voltage_readback(self):
+        """Latest worker measurements for display; never initiate VISA I/O."""
+        return dict(self._voltage_readback)
+
+    @Slot(object)
+    def _on_readings_ready(self, readings):
+        if isinstance(readings, dict):
+            for role in ("Vbg", "Vtg", "Vbias"):
+                key = f"{role}_meas"
+                if key in readings:
+                    try:
+                        value = float(readings[key])
+                    except (TypeError, ValueError):
+                        value = math.nan
+                    self._voltage_readback[role] = value if math.isfinite(value) else None
+        self.readings_ready.emit(readings)
 
     @Slot(str, str, object)
     def _on_limits_result(self, action: str, address: str, settings) -> None:

@@ -1,0 +1,12 @@
+{
+  "serial": "37862922",
+  "timestamp_utc": "20261011T233617Z",
+  "mode": "Real MFF101 via setup combo activated; no spectrometer connection",
+  "checks": [],
+  "passed": false,
+  "final_position": null,
+  "shutdown": true,
+  "errors": [
+    "MFF101 connect failed: backend exception: D2XXException(3) ('Device Not Opened')"
+  ]
+}

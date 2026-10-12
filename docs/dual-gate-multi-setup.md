@@ -15,10 +15,29 @@ measurement the sidebar stays on the last setup used and becomes editable.
 
 In the existing **Dual Gate** loop table, add a row and select **Measurement
 setup** in the Parameter dropdown. Click its **Values** cell to open the setup
-selector. Choose PIXIS or WinSpec for each position using the dropdowns; use
+selector. Choose **PIXIS**, **WinSpec**, **Andor InGaAs** or **Andor Silicon**
+for each position using the dropdowns; use
 **Add setup**, **Up**, **Down** and **Remove** to edit the sequence. Repeated
 setups are allowed. **OK** updates the draft; **Cancel** leaves the table unchanged.
 Wavelength, exposure and EPF Values remain ordinary editable numeric lists.
+
+Connect each requested setup in the instrument panel before running. Andor
+Silicon uses **Andor Shamrock + Si CCD**; Andor InGaAs uses **Andor Shamrock +
+InGaAs CCD**. The existing shared-Shamrock connection allows one Andor role at
+a time, alongside LightField/WinSpec. Use one Andor role per run; disconnect
+the existing Andor camera before connecting the other role. The same Andor
+choices are available in the 2D-map optical-condition setup dropdown.
+
+With **Settings > MFF101 light paths > Automatically route the selected
+measurement setup** enabled, the scan routes the flipper before preparing and
+acquiring each setup: **Andor Silicon / InGaAs → position 1** and
+**LightField PIXIS / WinSpec → position 2** by default. Edit the setup-position
+dropdowns in Settings when the physical routing changes. This applies to
+complete sweeps, setups nested inside gate points, and 2D-map optical conditions.
+Initial recipe preflight also visits each requested setup. Acquisition waits
+for verified arrival; a routing failure stops the scan before the next setup
+can acquire. Editing/restoring the draft does not move hardware, and simulated
+setups do not move the physical flipper.
 
 Select a loop row and use **Up**, **Down**, **Top** or **Bottom** to move the
 complete row. Its enabled state, parameter, raw Values and Group move together.
@@ -26,13 +45,10 @@ The current execution nesting is retained, including in Synchronize mode;
 change actual nesting in **Execution order**. Reordering is a draft change that
 can be applied, discarded or saved with the session.
 
-Alternatively, click **Load PIXIS + WinSpec recipe** under the loop table.
-This loads an editable draft and selects **Customized** mode. It replaces the
-optical loop rows while preserving gate rows, motion values and motion nesting.
-The initial centers are 720 and 1100 nm; they are examples, not fixed limits.
-Exposure and EPF initially use the current settings for both detectors.
-
-Edit the Values cells, for example:
+For a paired setup sequence, select **Customized** mode, add and enable a
+**Measurement setup** row, and enable and edit the center, exposure and EPF
+rows. Assign the same Group to these rows and enter one value per setup,
+for example:
 
 | Parameter | Values | Group |
 | --- | --- | --- |
@@ -63,7 +79,7 @@ remain editable as before. **Exposure Time** is the integration time per exposur
 **EPF** is the device accumulation count; batch **frames** is the gate-point count.
 
 Review **Measurement sequence preview**, then click **Apply plan** before **Run**.
-Loading a recipe does not start a measurement or apply hardware settings.
+Editing the sequence does not start a measurement or apply hardware settings.
 If you change group membership, use **Reset order**, review the order,
 and apply the plan again, as with other Dual Gate loop edits.
 
@@ -168,3 +184,35 @@ failure has been repaired.
 Changes require restarting SpectralSweep. Automated verification uses simulated
 instruments; validate the selected optical route and acquisition on the actual
 instruments before a production measurement.
+
+## Choosing values for the current run
+
+Keep the complete arrays in **Values**. Use **This run** to choose All values,
+one value, or Select several. Selecting WinSpec in a paired setup/wavelength
+group also selects its matching wavelength; returning to All restores both
+setups without editing either array. Independent exposure-time groups can be
+selected separately. Apply plan commits the choice before Run.
+
+Selections follow the active loop mode: independent rows in Synchronize,
+all enabled rows together in Zip, and shared Group numbers in Customized.
+The complete enabled arrays are validated before selection, so selecting one
+position cannot hide unequal paired array lengths. Disabled rows keep their
+arrays and selections. Selection does not change execution nesting or activate
+the point scheduler for a legacy session.
+
+All automatically includes newly added values. A specific selection requires
+choosing again after the parsed array values or paired row membership change;
+the selector displays **Select again…** and Apply/Run remain blocked. Renaming
+a group or moving a complete row preserves its selection. Temporary invalid
+text stays editable and can be corrected or discarded. Repeated equal values
+remain separate occurrences; the picker shows position suffixes to distinguish
+them. Large arrays use the searchable multi-selection picker rather than
+expanding every value in the dropdown.
+
+Sessions save the complete draft and applied arrays and their respective
+selections. Older sessions default to All. Experiment metadata records the full
+definition, selected positions, and resolved execution plan. Run freezes the
+applied plan; draft edits cannot replace an active schedule. Readiness and
+detector reminders use the selected schedule, including When filters; a plan
+with no runnable acquisitions cannot run. Tab moves from Values through This
+run to the Group editor in Customized mode.

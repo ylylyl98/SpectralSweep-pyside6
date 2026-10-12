@@ -324,7 +324,7 @@ def _build_gate_token(Vbg: float, Vtg: float, Vbias: float) -> str:
     """Gate-voltage filename token: Vbg-2p5_Vtg+1p0_Vb0"""
     parts = []
     for name, val in [("Vbg", Vbg), ("Vtg", Vtg), ("Vb", Vbias)]:
-        if not math.isfinite(val):
+        if val is None or not math.isfinite(val):
             continue
         txt = format_compact_number(val, keep_sign=True, decimals=2)
         if txt:
@@ -375,6 +375,14 @@ class _PowerSweepWorker(QObject):
 
     def _run_sweep(self, p):
         p.setdefault("power_correction_factor", self._p.get("power_correction_factor", 1.0))
+        external_base = p.pop("external_gate_filename_base", None)
+        if external_base is not None and not p.get("apply_gates"):
+            token = ""
+            if self._smu is not None and bool(getattr(self._smu, "is_connected", False)):
+                iv = self._smu.device
+                vbg, vtg = _read_gates(iv)
+                token = _build_gate_token(vbg, vtg, _read_bias(iv))
+            p["base_name"] = f"{external_base}_{token}" if token else external_base
         if p.get("plan_schema") != "legacy" and p.get("motion_axes") is not None:
             return self._run_motion_axes(p)
         # A multi-condition plan is expanded into ordinary full sweeps.  This
@@ -421,6 +429,9 @@ class _PowerSweepWorker(QObject):
                 else:
                     raise RuntimeError("LF6 acquisition preparation surface is unavailable")
             except Exception as exc:
+                from controllers.mff101_controller import MFF101RoutingError
+                if isinstance(exc, MFF101RoutingError):
+                    raise
                 self.log.emit(f"[{_ts()}] LF6 settings warning: {exc}")
                 if p.get("strict_sequence"):
                     raise RuntimeError(f"LF6 acquisition preparation failed: {exc}") from exc
@@ -1980,6 +1991,9 @@ class PowerSweepPanel(QWidget):
                 self._on_lf6_connected([])
 
         if self._smu is not None:
+            readings = getattr(self._smu, "readings_ready", None)
+            if readings is not None and hasattr(readings, "connect"):
+                readings.connect(self._on_preview_readback)
             for name, slot in (("connected", self._on_smu_connected), ("disconnected", self._on_smu_disconnected)):
                 signal = getattr(self._smu, name, None)
                 if signal is not None and hasattr(signal, "connect"):
@@ -2037,7 +2051,7 @@ class PowerSweepPanel(QWidget):
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
         }
 
-    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+    def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
         allowed = {
             "center_nm": lambda v: self._center_spin.setValue(float(v)),
             "exp_ms": lambda v: self._exp_spin.setValue(float(v)),
@@ -2046,6 +2060,8 @@ class PowerSweepPanel(QWidget):
             "Vtg_target": lambda v: self._vtg_spin.setValue(float(v)),
             "Vbias_target": lambda v: self._vbias_spin.setValue(float(v)),
         }
+        if keys_only:
+            return {"supported_keys": list(allowed)}
         skipped = []
         for key, value in dict(settings or {}).items():
             setter = allowed.get(key)
@@ -2702,14 +2718,10 @@ class PowerSweepPanel(QWidget):
 
     # ── gate snapshot ──────────────────────────────────────────────────────────
 
-    def _read_gate_snapshot(self) -> tuple[float, float, float]:
-        """Read current gate voltages (non-blocking, main-thread safe)."""
-        if self._smu is None or not bool(getattr(self._smu, "is_connected", False)):
-            return 0.0, 0.0, 0.0
-        iv = self._smu.device
-        vbg, vtg = _read_gates(iv)
-        vbias = _read_bias(iv)
-        return vbg, vtg, vbias
+    @Slot(object)
+    def _on_preview_readback(self, _readings):
+        if not self._apply_gates_chk.isChecked():
+            self._update_filename_preview()
 
     def _filename_gate_values(self) -> tuple[float, float, float] | tuple[None, None, None]:
         """Return the gate values represented by the filename preview.
@@ -2722,7 +2734,8 @@ class PowerSweepPanel(QWidget):
             return (float(self._vbg_spin.value()), float(self._vtg_spin.value()),
                     float(self._vbias_spin.value()))
         if self._smu is not None and bool(getattr(self._smu, "is_connected", False)):
-            return self._read_gate_snapshot()
+            readings = getattr(self._smu, "latest_voltage_readback", {})
+            return tuple(readings.get(role) for role in ("Vbg", "Vtg", "Vbias"))
         return (None, None, None)
 
     # ── validation ────────────────────────────────────────────────────────────
@@ -2905,7 +2918,8 @@ class PowerSweepPanel(QWidget):
             # A condition sequence owns its gate values.  The legacy gate
             # spins are only a compatibility draft and must not leak into its
             # base filename.
-            if filename_gates[0] is not None and not condition_sequence:
+            external_gate_base = base_name if not apply_gates and not condition_sequence else None
+            if apply_gates and filename_gates[0] is not None and not condition_sequence:
                 gt = _build_gate_token(*filename_gates)
                 if gt: base_name = f"{base_name}_{gt}"
         except Exception as exc:
@@ -2924,6 +2938,10 @@ class PowerSweepPanel(QWidget):
             # settings edits made while the panel is open are honored.
             **self._frozen_ramp_defaults(),
             "return_to_zero": self._return_zero_chk.isChecked()}
+        if external_gate_base is not None:
+            # UI previews use cached readings; the worker refreshes actual
+            # external gates before choosing the saved file's name.
+            params["external_gate_filename_base"] = external_gate_base
         # Freeze the new independent-axis model in the run manifest.  The
         # legacy motion_key/positions fields above remain for older readers.
         try:

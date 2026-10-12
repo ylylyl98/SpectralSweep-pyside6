@@ -508,7 +508,7 @@ class AndorControlsWidget(QWidget):
     def _populate_spectrograph(self, data: dict[str, Any]) -> None:
         limits = data.get("wavelength_limits_nm")
         if isinstance(limits, (list, tuple)) and len(limits) == 2:
-            self.center.setRange(float(limits[0]), float(limits[1]))
+            self.center.setRange(0.0, float(limits[1]))
         if data.get("wavelength_nm") is not None:
             self.center.setValue(float(data["wavelength_nm"]))
         self.grating.blockSignals(True)
@@ -605,7 +605,9 @@ class AndorControlsWidget(QWidget):
             f"cooler {'on' if data.get('cooler_on') else 'off'}"
         )
         cal_range = data.get("calibration_range_nm")
-        if data.get("calibration_pixel_count") and cal_range:
+        if data.get("spectrograph_mode") == "zero_order":
+            self.calibration.setText("Zero order: detector pixel coordinates; wavelength calibration is not applicable.")
+        elif data.get("calibration_pixel_count") and cal_range:
             self.calibration.setText(
                 f"Stored calibration: {data['calibration_pixel_count']} pixels · "
                 f"{float(cal_range[0]):.2f} to {float(cal_range[1]):.2f} nm\n"

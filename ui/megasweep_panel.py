@@ -228,10 +228,6 @@ class _OpticalSequenceWidget(QWidget):
         self._remove_btn.clicked.connect(self._remove_selected)
         self._up_btn.clicked.connect(lambda: self._move_selected(-1))
         self._down_btn.clicked.connect(lambda: self._move_selected(1))
-        self._dual_setup_btn = QPushButton('Load PIXIS + WinSpec recipe')
-        self._dual_setup_btn.setToolTip('Load PIXIS 650 nm / 80 ms with Average 4 and WinSpec 1050 nm / 250 ms with Device EPF 4.')
-        self._dual_setup_btn.clicked.connect(self._load_dual_setup_recipe)
-        layout.addWidget(self._dual_setup_btn)
 
         self.set_conditions([
             OpticalCondition(
@@ -291,9 +287,17 @@ class _OpticalSequenceWidget(QWidget):
         self._table.setCellWidget(row, 3, self._make_exposure_spin(condition.exposure_ms))
         self._table.setCellWidget(row, 4, self._make_frames_spin(condition.frames))
         setup = _NoWheelComboBox()
-        for label, backend in [('Current setup', ''), ('LightField + PIXIS', 'lightfield'), ('LightField + WinSpec', 'winspec_ingaas')]:
+        for label, backend in [
+            ('Current setup', ''), ('LightField + PIXIS', 'lightfield'),
+            ('LightField + WinSpec', 'winspec_ingaas'),
+            ('Andor InGaAs', 'andor_ingaas'), ('Andor Silicon', 'andor_si'),
+        ]:
             setup.addItem(label, backend)
         setup.setCurrentIndex(max(0, setup.findData(condition.backend)))
+        setup.setToolTip(
+            "At measurement execution, MFF101 routes and verifies this setup's light path "
+            "when automatic routing is enabled. Configure positions in Settings > MFF101 light paths."
+        )
         setup.currentIndexChanged.connect(self.changed)
         self._table.setCellWidget(row, 5, setup)
         combine = _NoWheelComboBox()
@@ -463,12 +467,6 @@ class _OpticalSequenceWidget(QWidget):
         conditions.pop(row)
         self.set_conditions(conditions)
         self._table.selectRow(min(row, len(conditions) - 1))
-
-    def _load_dual_setup_recipe(self):
-        self.set_conditions([
-            OpticalCondition(True, 'PIXIS', 650., 80., 4, 'lightfield', 'average'),
-            OpticalCondition(True, 'WinSpec', 1050., 250., 4, 'winspec_ingaas', 'device'),
-        ])
 
     def _move_selected(self, delta: int) -> None:
         conditions = self.conditions()
@@ -3073,12 +3071,14 @@ class MegaSweepPanel(QWidget):
             "splitter_ratio": float(self._horizontal_splitter_ratio),
         }
 
-    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+    def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
         allowed = {
             "center_nm": lambda v: self._optical_widget.set_center(float(v)),
             "exp_ms": lambda v: self._optical_widget.set_exposure(float(v)),
             "frames": lambda v: self._optical_widget.set_frames(int(v)),
         }
+        if keys_only:
+            return {"supported_keys": list(allowed)}
         skipped = []
         for key, value in dict(settings or {}).items():
             setter = allowed.get(key)
@@ -3359,6 +3359,15 @@ class MegaSweepPanel(QWidget):
             raise ValueError("Ratio cannot be zero.")
         axis_a_vals = self._axis_a.get_array()
         axis_b_vals = self._axis_b.get_array()
+        geometry_key = (
+            coord, axis_a, axis_b, ratio, tuple(sorted(fixed.items())),
+            tuple(sorted(safety.items())), self._axis_selector.snake(),
+            axis_a_vals.tobytes(), axis_b_vals.tobytes(),
+            self._axis_a._mode.currentText(), self._axis_a._step.value(),
+            self._axis_b._mode.currentText(), self._axis_b._step.value(),
+        )
+        if geometry_key == getattr(self, "_preview_geometry_key", None):
+            return self._preview_geometry_data
         all_points, valid_points = build_sweep_points(
             coord=coord,
             axis_a=axis_a,
@@ -3370,7 +3379,7 @@ class MegaSweepPanel(QWidget):
             safety=safety,
             snake=self._axis_selector.snake(),
         )
-        return {
+        data = {
             "all_points": all_points,
             "valid_points": valid_points,
             "coord": coord,
@@ -3384,6 +3393,9 @@ class MegaSweepPanel(QWidget):
             "ratio": ratio,
             "fixed": fixed,
         }
+        self._preview_geometry_key = geometry_key
+        self._preview_geometry_data = data
+        return data
 
     def _format_axis_summary(self, axis_name: str, desc: dict) -> str:
         if desc["mode"] == "Total Points":
@@ -3462,6 +3474,7 @@ class MegaSweepPanel(QWidget):
         except Exception as exc:
             self._set_summary_text(f"Warning: {exc}", "#b42318")
             self._preview.clear()
+            self._last_drawn_preview = None
             return
 
         self._last_preview = data
@@ -3479,20 +3492,22 @@ class MegaSweepPanel(QWidget):
                 (data["safety"]["vtg_max"], data["safety"]["vbg_min"]),
             ]
             df_polygon = [_raw_to_physics(vtg, vbg, ratio) for vtg, vbg in raw_corners]
-        self._preview.update_plan(
-            all_points=all_points,
-            valid_points=valid_points,
-            safety=data["safety"],
-            axis_a_name=data["axis_a"],
-            axis_b_name=data["axis_b"],
-            axis_a_vals=data["axis_a_vals"],
-            axis_b_vals=data["axis_b_vals"],
-            snake=self._axis_selector.snake(),
-            draw_polygon=self._safety_polygon_for_preview(data["axis_a"], data["axis_b"], ratio, data["safety"]),
-            coord=coord,
-            ratio=ratio,
-            df_polygon=df_polygon,
-        )
+        if getattr(self, "_last_drawn_preview", None) is not data:
+            self._preview.update_plan(
+                all_points=all_points,
+                valid_points=valid_points,
+                safety=data["safety"],
+                axis_a_name=data["axis_a"],
+                axis_b_name=data["axis_b"],
+                axis_a_vals=data["axis_a_vals"],
+                axis_b_vals=data["axis_b_vals"],
+                snake=self._axis_selector.snake(),
+                draw_polygon=self._safety_polygon_for_preview(data["axis_a"], data["axis_b"], ratio, data["safety"]),
+                coord=coord,
+                ratio=ratio,
+                df_polygon=df_polygon,
+            )
+            self._last_drawn_preview = data
 
         fixed_txt = ", ".join(f"{k} = {v:.4f} V" for k, v in data["fixed"].items()) if data["fixed"] else "None"
         conditions = self._optical_widget.conditions(enabled_only=True)
@@ -3616,7 +3631,7 @@ class MegaSweepPanel(QWidget):
             missing = {c.get('backend') or active for c in enabled_conditions} - connected
             if missing:
                 QMessageBox.critical(self, 'Setup not connected',
-                    'Connect every selected setup before running. Connect LightField first, then WinSpec; keep both sessions open.\nMissing: ' + ', '.join(sorted(missing)))
+                    'Connect every selected setup in the instrument panel before running.\nMissing: ' + ', '.join(sorted(missing)))
                 return False
         if params["coord"] == CoordSystem.PHYSICAL and abs(params["ratio"]) < EPS:
             QMessageBox.critical(self, "Invalid ratio", "Ratio r = 0 is invalid - the doping/efield transform is undefined.")

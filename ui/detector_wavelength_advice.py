@@ -16,7 +16,7 @@ def _wavelength_warning(identity, centers):
     silicon = role in {'si', 'silicon'} or backend in {'lightfield', 'andor_si'}
     if not (ingaas or silicon):
         return ''
-    values = sorted({float(c) for c in centers if math.isfinite(float(c)) and
+    values = sorted({float(c) for c in centers if math.isfinite(float(c)) and float(c) > 0 and
                      (float(c) < 1000 if ingaas else float(c) > 1000)})
     if not values:
         return ''

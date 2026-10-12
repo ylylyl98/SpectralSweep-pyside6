@@ -72,7 +72,9 @@ class Manager(object):
             values=[float(settings[k]) for k in ('exposure_ms','accumulations','sequential_frames','timing_mode','detector_width','detector_height','output_width','output_height')]
             if any(math.isnan(v) or math.isinf(v) for v in values):return False
             e,n,s,t,w,h,x,y=values
-            return e>0 and n>=1 and int(n)==n and e*n<=1000 and (s,t,w,h,x,y)==(1,1,512,1,512,1) and settings.get('roi_enabled') is False
+            # Start acceleration validates each recipe's native state; exposure
+            # duration does not determine whether initialization can accelerate.
+            return e>0 and n>=1 and int(n)==n and (s,t,w,h,x,y)==(1,1,512,1,512,1) and settings.get('roi_enabled') is False
         except (TypeError,ValueError,KeyError):return False
 
     def request_invalidate(self,reason):

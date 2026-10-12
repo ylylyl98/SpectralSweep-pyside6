@@ -20,17 +20,21 @@ import subprocess
 import logging
 import weakref
 import copy
+from itertools import islice
 from functools import lru_cache
 from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Protocol
 
-# ``schema_version`` stays at 1 for readers shipped with older SpectralSweep
-# releases.  New records advertise the additive event/settings contract in
-# ``metadata_schema``; old readers can safely ignore those fields.
+from .metadata_storage import compact_metadata, expand_metadata
+
+# ``schema_version`` describes the original envelope. ``metadata_schema`` 3
+# adds declared local JSON pointers for repeated containers; consumers should
+# use load_metadata() to obtain the complete values. Legacy sidecars remain
+# readable and the separate compatibility projections stay ordinary JSON/text.
 SCHEMA_VERSION = 1
-METADATA_SCHEMA_VERSION = 2
+METADATA_SCHEMA_VERSION = 3
 RUNNING = "running"
 COMPLETED = "completed"
 CANCELLED = "cancelled"
@@ -213,7 +217,7 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             prefix=f".{path.name}.", suffix=".tmp", delete=False,
         ) as handle:
             temporary = Path(handle.name)
-            json.dump(_jsonable(value), handle, indent=2, sort_keys=True)
+            json.dump(compact_metadata(_jsonable(value)), handle, indent=2, sort_keys=True)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -353,7 +357,7 @@ class ExperimentHistory:
                         metadata["experiment_type"], metadata["started_utc"],
                         metadata.get("completed_utc"), metadata["status"],
                         str(Path(local_metadata_path).resolve()) if local_metadata_path is not None else metadata["metadata_path"],
-                        json.dumps(metadata.get("settings", {}), sort_keys=True),
+                        json.dumps(compact_metadata(metadata.get("settings", {})), sort_keys=True),
                         json.dumps(metadata.get("summary", {}), sort_keys=True),
                     ),
             )
@@ -380,6 +384,44 @@ class ExperimentHistory:
             if db is not None:
                 db.close()
 
+    def query_page(self, device_id: str, experiment_type: str, *, page: int = 0,
+                   page_size: int = 20, filter_text: str = "", cancel_event=None) -> dict[str, Any]:
+        """Read visible summaries; retain full settings search without decoding.
+
+        Call on a worker when filtering large records. ``query`` continues to
+        return complete settings for existing consumers.
+        """
+        db = self._connect()
+        try:
+            if cancel_event is not None:
+                db.set_progress_handler(lambda: int(cancel_event.is_set()), 1000)
+            where = "device_id=? AND experiment_type=?"
+            args = [str(device_id), str(experiment_type)]
+            if filter_text.strip():
+                where += (" AND instr(lower(experiment_id || ' ' || device_id || ' ' || "
+                          "experiment_type || ' ' || started_utc || ' ' || coalesce(completed_utc,'') || ' ' || "
+                          "status || ' ' || metadata_path || ' ' || settings_json || ' ' || summary_json), ?) > 0")
+                args.append(filter_text.strip().lower())
+            total = db.execute(f"SELECT count(*) FROM experiments WHERE {where}", args).fetchone()[0]
+            size = max(1, int(page_size))
+            page = min(max(0, int(page)), max(0, (total - 1) // size))
+            if not total:
+                return {"rows": [], "total": 0, "page": 0, "page_size": size}
+            fields = ("experiment_id", "device_id", "experiment_type", "started_utc",
+                      "completed_utc", "status", "metadata_path")
+            rows = db.execute(
+                f"SELECT {','.join(fields)} FROM experiments WHERE {where} "
+                "ORDER BY started_utc DESC, experiment_id DESC LIMIT ? OFFSET ?",
+                [*args, size, page * size],
+            ).fetchall()
+            result = [dict(zip(fields, row)) for row in rows]
+            for item in result:
+                item["started_at"] = item["started_utc"]
+                item["completed_at"] = item["completed_utc"]
+            return {"rows": result, "total": total, "page": page, "page_size": size}
+        finally:
+            db.close()
+
     def query(self, device_id: str, experiment_type: str, limit: int = 100) -> list[dict[str, Any]]:
         db = None
         try:
@@ -404,8 +446,9 @@ class ExperimentHistory:
             item["completed_at"] = item["completed_utc"]
             for key, raw in (("settings", row[7]), ("summary", row[8])):
                 try:
-                    item[key] = json.loads(raw)
-                except (TypeError, json.JSONDecodeError):
+                    decoded = json.loads(raw)
+                    item[key] = expand_metadata(decoded) if isinstance(decoded, Mapping) else decoded
+                except (TypeError, ValueError):
                     item[key] = {}
             result.append(item)
         return result
@@ -418,6 +461,7 @@ class ExperimentRun:
         self.path = path
         self.experiment_id = metadata["experiment_id"]
         self._lock = threading.RLock()
+        self._files_dirty = False
         self._terminal = metadata.get("status") in TERMINAL_STATUSES
         self._allow_post_completion = bool(allow_post_completion)
         self._event_index = 0
@@ -457,24 +501,48 @@ class ExperimentRun:
         with self._lock:
             _atomic_json(self.path, self.metadata)
             self.service.history.upsert(self.metadata, local_metadata_path=self.path)
+            self._files_dirty = False
+            self._events_since_checkpoint = 0
 
     def _rebuild_durable_summary(self, events: Iterable[Mapping[str, Any]]) -> None:
         """Recover bounded acquisition counters after reopening a run."""
-        captures = [event for event in events
-                    if str(event.get("event")) == "capture" and event.get("acquisition_id")]
         state = self.metadata.setdefault("acquisitions", {"count": 0, "outputs": []})
-        state["count"] = len(captures)
-        state["total_count"] = len(captures)
-        state["recent_ids"] = [str(event["acquisition_id"]) for event in captures[-100:]]
-        state["outputs"] = [
-            {"acquisition_id": str(event["acquisition_id"]), **dict(event.get("output", {}))}
-            for event in captures[-100:] if isinstance(event.get("output"), Mapping)
-        ]
+        state.update(count=0, total_count=0, recent_ids=[], outputs=[])
+        for event in events:
+            self._accumulate_capture(state, event)
+
+    @staticmethod
+    def _accumulate_capture(state: dict[str, Any], event: Mapping[str, Any]) -> None:
+        """Use identical capture-attempt semantics for live and recovered data."""
+        if str(event.get("event")) not in {"capture", "capture_started"} or not event.get("acquisition_id"):
+            return
+        acquisition_id = str(event["acquisition_id"])
+        state["count"] = int(state.get("count", 0)) + 1
+        state["total_count"] = state["count"]
+        state.setdefault("recent_ids", []).append(acquisition_id)
+        state["recent_ids"] = state["recent_ids"][-100:]
+        output = event.get("output")
+        if isinstance(output, Mapping):
+            state.setdefault("outputs", []).append({"acquisition_id": acquisition_id, **dict(output)})
+            state["outputs"] = state["outputs"][-100:]
 
     def register_file(self, path: str | Path, role: str = "raw", kind: Optional[str] = None,
                       details: Optional[Mapping[str, Any]] = None,
                       *, external: bool = False,
                       frozen_identity: Optional[Mapping[str, Any]] = None) -> str:
+        with self._lock:
+            portable = self._register_file(
+                path, role, kind, details, external=external, frozen_identity=frozen_identity,
+            )
+            if self._files_dirty:
+                self._write()
+            return portable
+
+    def _register_file(self, path: str | Path, role: str = "raw", kind: Optional[str] = None,
+                       details: Optional[Mapping[str, Any]] = None,
+                       *, external: bool = False,
+                       frozen_identity: Optional[Mapping[str, Any]] = None) -> str:
+        """Merge one file under the run lock; the caller persists the manifest."""
         if self._terminal and not self._allow_post_completion:
             raise RuntimeError("Cannot register files after experiment is terminal")
         path = Path(path)
@@ -514,13 +582,15 @@ class ExperimentRun:
                           if str(key) not in {"path", "role"} and value is not None})
         files = self.metadata.setdefault("files", [])
         existing = next((item for item in files if item.get("path") == entry["path"]), None)
+        changed = existing is None or any(existing.get(key) != value for key, value in entry.items())
+        if changed:
+            self._files_dirty = True
         if existing is None:
             files.append(entry)
         else:
             # Registration is incremental and idempotent: later observers can
             # add direction/partial details without duplicating the file.
             existing.update(entry)
-        self._write()
         return entry["path"]
 
     @property
@@ -575,16 +645,8 @@ class ExperimentRun:
                 # Counters describe durable events only.  They are checkpointed
                 # periodically and always at terminalization, avoiding a full
                 # manifest/index rewrite for every capture.
-                if str(event) in {"capture", "capture_started"} and acquisition_id is not None:
-                    acquisition_state = self.metadata.setdefault("acquisitions", {"count": 0, "outputs": []})
-                    acquisition_state["count"] = int(acquisition_state.get("count", 0)) + 1
-                    acquisition_state["total_count"] = acquisition_state["count"]
-                    acquisition_state.setdefault("recent_ids", []).append(str(acquisition_id))
-                    acquisition_state["recent_ids"] = acquisition_state["recent_ids"][-100:]
-                    if output is not None:
-                        acquisition_state.setdefault("outputs", []).append({
-                            "acquisition_id": str(acquisition_id), **_jsonable(dict(output))})
-                        acquisition_state["outputs"] = acquisition_state["outputs"][-100:]
+                acquisition_state = self.metadata.setdefault("acquisitions", {"count": 0, "outputs": []})
+                self._accumulate_capture(acquisition_state, record)
                 self._events_since_checkpoint += 1
                 if self._events_since_checkpoint >= self._checkpoint_interval:
                     self._events_since_checkpoint = 0
@@ -638,6 +700,8 @@ class ExperimentRun:
                 elif field not in old or old[field] != value:
                     changes[field] = value
             removed = [field for field in old if field not in new]
+            if name in self._compatibility_states and not changes and not removed and not tails:
+                return copy.deepcopy(new)
             event = self.record_event("compatibility_state", key=name,
                                       changes=changes, removed=removed, list_tails=tails)
             if event is None:
@@ -663,17 +727,24 @@ class ExperimentRun:
     # Public spelling used by adapters that do not need the semantic helpers.
     append_event = record_event
 
-    def _register_event_file(self, *, kind: str = "experiment_events") -> None:
+    def _register_event_file(self, *, kind: str = "experiment_events", persist: bool = True) -> None:
         files = self.metadata.setdefault("files", [])
         portable = _portable_path(self._event_path, self.service.output_root)
         existing = next((item for item in files if item.get("path") == portable), None)
         if existing is None:
             files.append({"path": portable, "role": "metadata", "kind": kind})
+            self._files_dirty = True
         elif kind != "experiment_events":
+            self._files_dirty |= existing.get("kind") != kind
             existing["kind"] = kind
+        if not self.metadata.get("event_log"):
+            self.metadata["event_log"] = {"path": portable, "format": "jsonl",
+                                          "append_only": True, "index": "event_index"}
+            self._files_dirty = True
         # The event itself is already durable.  Persist the association once;
         # repeating this write for every event defeats the append-only design.
-        self._write()
+        if persist and self._files_dirty:
+            self._write()
 
     def _repair_event_tail(self) -> None:
         if not self._event_path.exists():
@@ -701,20 +772,24 @@ class ExperimentRun:
                 raise
 
     def register_settings_snapshot(self, settings: Mapping[str, Any], *, source: str = "instrument",
-                                    observed_utc: Optional[str] = None) -> int:
+                                    observed_utc: Optional[str] = None, persist: bool = True) -> int:
         with self._lock:
             canonical_json = json.dumps(_jsonable(settings), sort_keys=True, separators=(",", ":"), allow_nan=False)
             canonical = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
             snapshots = self.metadata.setdefault("settings", {}).setdefault("snapshots", [])
             for item in snapshots:
                 if item.get("canonical") == canonical:
+                    if persist and self._files_dirty:
+                        self._write()
                     return int(item["settings_id"])
             settings_id = len(snapshots) + 1
             snapshots.append({"settings_id": settings_id, "source": str(source),
                               "observed_utc": observed_utc or utc_now(),
                               "canonical": canonical, "values": _jsonable(settings),
                               "canonical_format": "sha256-json"})
-            self._write()
+            self._files_dirty = True
+            if persist:
+                self._write()
             return settings_id
 
     add_settings_snapshot = register_settings_snapshot
@@ -781,33 +856,40 @@ class ExperimentRun:
         return records
 
     def update_observed(self, values: Mapping[str, Any]) -> None:
-        if self._terminal:
-            raise RuntimeError("Cannot update a terminal experiment")
-        self.metadata.setdefault("observed", {}).update(_jsonable(values))
-        self._write()
+        self._update_mapping(("observed",), values)
 
     def update_applied(self, values: Mapping[str, Any]) -> None:
-        if self._terminal:
-            raise RuntimeError("Cannot update a terminal experiment")
-        self.metadata.setdefault("settings", {}).setdefault("applied", {}).update(_jsonable(values))
-        self._write()
+        self._update_mapping(("settings", "applied"), values)
 
     def update_summary(self, values: Mapping[str, Any]) -> None:
-        if self._terminal:
-            raise RuntimeError("Cannot update a terminal experiment")
-        self.metadata.setdefault("summary", {}).update(_jsonable(values))
-        self._write()
+        self._update_mapping(("summary",), values)
 
-    def complete(self, summary: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
-        return self._finish(COMPLETED, summary=summary)
+    def _update_mapping(self, keys: tuple[str, ...], values: Mapping[str, Any]) -> None:
+        with self._lock:
+            if self._terminal:
+                raise RuntimeError("Cannot update a terminal experiment")
+            target = self.metadata
+            for key in keys:
+                target = target.setdefault(key, {})
+            normalized = _jsonable(values)
+            if any(key not in target or target[key] != value for key, value in normalized.items()):
+                target.update(normalized)
+                self._files_dirty = True
+            if self._files_dirty:
+                self._write()
 
-    def cancel(self, reason: Optional[str] = None) -> dict[str, Any]:
-        return self._finish(CANCELLED, reason=reason)
+    def complete(self, summary: Optional[Mapping[str, Any]] = None,
+                 *, files: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+        return self._finish(COMPLETED, summary=summary, files=files)
 
-    def fail(self, error: Any) -> dict[str, Any]:
+    def cancel(self, reason: Optional[str] = None,
+               *, files: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+        return self._finish(CANCELLED, reason=reason, files=files)
+
+    def fail(self, error: Any, *, files: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
         text = str(error)
         self.metadata["error"] = {"type": type(error).__name__, "message": text}
-        return self._finish(FAILED)
+        return self._finish(FAILED, files=files)
 
     def mark_metadata_failure(self, error: Any, *, event: Optional[str] = None) -> None:
         """Persist a recorder failure while allowing hardware cleanup to continue."""
@@ -824,12 +906,16 @@ class ExperimentRun:
                 log.warning("Could not persist metadata failure marker", exc_info=True)
 
     def _finish(self, status: str, *, summary: Optional[Mapping[str, Any]] = None,
-                reason: Optional[str] = None) -> dict[str, Any]:
+                reason: Optional[str] = None,
+                files: Iterable[Mapping[str, Any]] = ()) -> dict[str, Any]:
+        """Commit all output associations and the terminal state in one write."""
         with self._lock:
             if status not in TERMINAL_STATUSES:
                 raise ValueError(f"Unsupported terminal status: {status}")
             if self._terminal:
                 raise RuntimeError("Experiment is already terminal")
+            for entry in files:
+                self._register_file(**entry)
             if self.metadata.get("metadata_status") == "degraded":
                 status = FAILED
                 self.metadata.setdefault("error", {
@@ -1002,7 +1088,9 @@ class ExperimentMetadataService:
                 return [clean(v, key) for v in value]
             return _jsonable(value)
         return {str(k): value for k, v in settings.items()
-                if (value := clean(v, str(k))) is not None}
+                # Resolved tasks are provenance, not an editable setting.
+                # Keep the complete executed plan in requested only.
+                if k != "executed_plan" and (value := clean(v, str(k))) is not None}
 
     def query_history(self, device_id: str, experiment_type: str, limit: int = 100) -> list[dict[str, Any]]:
         return self.history.query(device_id, experiment_type, limit)
@@ -1035,7 +1123,7 @@ class ExperimentMetadataService:
             raw = json.load(stream)
         if not isinstance(raw, Mapping):
             raise ValueError("Experiment metadata root must be an object")
-        data = dict(raw)
+        data = expand_metadata(raw)
         if migrate:
             data.setdefault("metadata_schema", METADATA_SCHEMA_VERSION if data.get("schema_version", 1) >= 1 else 1)
             data.setdefault("run_id", data.get("experiment_id"))
@@ -1052,7 +1140,27 @@ class ExperimentMetadataService:
     @staticmethod
     def format_history_preview(metadata: Mapping[str, Any], *, event_limit: int = 20) -> str:
         """Create a bounded, readable history view shared by UI and scripts."""
-        sections = []
+        budget = [400]
+        def summarize(value, depth=0):
+            budget[0] -= 1
+            if isinstance(value, (Mapping, list, tuple)):
+                if depth >= 6 or budget[0] <= 0:
+                    return f"{len(value)} items omitted from preview"
+                limit = min(10, max(0, budget[0]))
+                if isinstance(value, Mapping):
+                    items = list(islice(value.items(), limit))
+                    result = {str(key)[:200]: summarize(item, depth + 1) for key, item in items}
+                    if len(items) < len(value):
+                        result["… preview"] = f"{len(value) - len(items)} items omitted"
+                else:
+                    result = [summarize(item, depth + 1) for item in islice(value, limit)]
+                    if len(result) < len(value):
+                        result.append(f"{len(value) - len(result)} items omitted")
+                return result
+            if isinstance(value, str) and len(value) > 500:
+                return value[:500] + f"… ({len(value) - 500} characters omitted)"
+            return value
+        sections = ["Preview summary. Omitted items remain in the complete metadata file; use Open metadata to inspect them."]
         for title, key in (("Setup", "settings"), ("Plan", "plan"),
                            ("Conditions", "conditions"), ("Acquisitions", "acquisitions"),
                            ("Instruments", "instruments"),
@@ -1060,10 +1168,12 @@ class ExperimentMetadataService:
                            ("Files", "files"), ("Status", "result")):
             value = metadata.get(key, {})
             if value not in ({}, [], None):
-                sections.append(f"[{title}]\n{json.dumps(value, indent=2, sort_keys=True, default=str)}")
+                sections.append(f"[{title}]\n{json.dumps(summarize(value), indent=2, sort_keys=True, default=str)}")
         events = metadata.get("events_preview")
         if events:
-            sections.append(f"[Events]\n{json.dumps(list(events)[:max(0, int(event_limit))], indent=2, sort_keys=True, default=str)}")
+            budget[0] = 200
+            entries = [summarize(event) for event in islice(events, max(0, int(event_limit)))]
+            sections.append(f"[Events]\n{json.dumps(entries, indent=2, sort_keys=True, default=str)}")
         return "\n\n".join(sections)
 
     @staticmethod

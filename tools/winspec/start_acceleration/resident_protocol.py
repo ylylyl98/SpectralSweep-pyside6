@@ -1,9 +1,33 @@
 """Explicit bounded Start boundaries; errors permanently disable this session."""
-import copy, json, os
+import copy, errno, json, os, time
 from .experiment_state import Gate, normalized
 from .experiment_trace import verify_caller
 from .experiment_analysis import analyze_trace
 from .winspec_debug_trace import save
+
+
+READ_PENDING = object()
+
+
+class PublishedReader(object):
+    """Defer transient file sharing errors before processing any command."""
+    def __init__(self, clock=None, retry_s=1.0):
+        self.clock=clock or getattr(time,'monotonic',None) or time.clock
+        self.retry_s=retry_s;self.pending=None;self.retries=0
+
+    def read(self,path):
+        try:
+            with open(path,'rb') as handle:value=json.load(handle)
+        except (IOError,OSError) as error:
+            if error.errno==errno.ENOENT:return READ_PENDING
+            if error.errno not in (errno.EACCES,errno.EAGAIN) and getattr(error,'winerror',None) not in (32,33):raise
+            now=self.clock()
+            if self.pending is None or self.pending[0]!=path:self.pending=(path,now+self.retry_s)
+            if now>=self.pending[1]:raise
+            self.retries+=1
+            return READ_PENDING
+        self.pending=None
+        return value
 
 
 def publish(path, value):

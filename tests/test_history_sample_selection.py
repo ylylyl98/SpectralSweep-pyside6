@@ -2,17 +2,26 @@ import os
 import sqlite3
 import tempfile
 import unittest
+import time
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QMainWindow, QComboBox, QLineEdit, QLabel, QListWidget, QPlainTextEdit, QPushButton
+from PySide6.QtTest import QTest
 from app.experiment_metadata import ExperimentHistory
 from app.sample_settings import SampleSettingsStore
 from ui.main_window import MainWindow
 
 
 class HistorySampleSelectionTests(unittest.TestCase):
+    def wait_for_history(self):
+        deadline = time.perf_counter() + 3
+        while self.host._history_task_runner._jobs and time.perf_counter() < deadline:
+            QTest.qWait(10)
+        self.assertFalse(self.host._history_task_runner._jobs)
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -63,9 +72,41 @@ class HistorySampleSelectionTests(unittest.TestCase):
         host._history_sample = "YZ365"
         host._sample_id_binder.value = "BO146"
         host._refresh_history()
+        self.wait_for_history()
         self.assertEqual(host._history_page, 0)
         self.assertEqual(host._history_list.count(), 1)
         host._history_page = 99
         host._refresh_history()
+        self.wait_for_history()
         self.assertEqual(host._history_page, 0)
         self.assertEqual(host._history_list.count(), 1)
+
+    def test_settings_loader_transfers_only_supported_values_and_keeps_skipped_names(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QListWidgetItem
+        host = self.host
+        path = Path(self.tmp.name) / "large.json"
+        path.write_text(json.dumps({"settings": {"loadable": {
+            "center_nm": 860, "executed_plan": [{"data": "x" * 1000}] * 2000}}}))
+        host._history_list = QListWidget(host)
+        item = QListWidgetItem("run")
+        item.setData(Qt.ItemDataRole.UserRole, {"metadata_path": str(path)})
+        host._history_list.addItem(item)
+        host._history_list.setCurrentRow(0)
+        host._history_type = QComboBox(host)
+        host._history_type.addItem("motion_sweep")
+        host._history_load = QPushButton(host)
+        received = []
+        def apply(settings, *, keys_only=False):
+            if keys_only:
+                return {"supported_keys": ["center_nm"]}
+            received.append(settings)
+            return {"skipped": ["executed_plan"]}
+        adapter = SimpleNamespace(apply_saved_experiment_settings=apply)
+        host._tabs = SimpleNamespace(currentWidget=lambda: adapter)
+        messages = []
+        host._status = SimpleNamespace(showMessage=lambda text, *_: messages.append(text))
+        host._load_history_settings()
+        self.wait_for_history()
+        self.assertEqual(received, [{"center_nm": 860, "executed_plan": None}])
+        self.assertIn("executed_plan", messages[-1])

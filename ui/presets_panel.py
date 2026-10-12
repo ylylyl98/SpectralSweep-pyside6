@@ -32,6 +32,9 @@ import sys
 import time
 import threading
 import traceback
+import uuid
+from copy import deepcopy
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -93,6 +96,7 @@ def resolve_mcd_gate_condition(condition, ratio):
 from ui.preview_widget import RunPlanTree
 from ui.dual_gate_spectrum_viewer import DualGateSpectrumViewer
 from ui.setup_sequence_editor import SetupSequenceDialog
+from ui.loop_run_selection import LoopRunSelections, RunSelectionCombo, LoopSelectionDialog
 from utils.dual_gate_preview import load_last_dual_gate_acquisition
 
 # ── Schema constants ───────────────────────────────────────────────────────────
@@ -108,7 +112,13 @@ LOOP_PARAMS = [
     "Measurement setup",
 ]
 _SETUP_PARAM = "Measurement setup"
-_SETUP_LABELS = {"lightfield": "PIXIS", "winspec_ingaas": "WinSpec"}
+_LIVE_DRAFT_SPECTRA_LIMIT = 20_000
+_SETUP_LABELS = {
+    "lightfield": "PIXIS",
+    "winspec_ingaas": "WinSpec",
+    "andor_ingaas": "Andor InGaAs",
+    "andor_si": "Andor Silicon",
+}
 _SPECTROMETER_PARAMS = ("Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)")
 _RECIPE_PARAMS = (_SETUP_PARAM, *_SPECTROMETER_PARAMS)
 
@@ -116,10 +126,12 @@ _RECIPE_PARAMS = (_SETUP_PARAM, *_SPECTROMETER_PARAMS)
 def _setup_backend(value: Any) -> str:
     aliases = {"pixis": "lightfield", "lightfield": "lightfield",
                "lightfield + pixis": "lightfield", "winspec": "winspec_ingaas",
-               "winspec_ingaas": "winspec_ingaas", "lightfield + winspec": "winspec_ingaas"}
+               "winspec_ingaas": "winspec_ingaas", "lightfield + winspec": "winspec_ingaas",
+               "andor_ingaas": "andor_ingaas", "andor ingaas": "andor_ingaas",
+               "andor_si": "andor_si", "andor si": "andor_si", "andor silicon": "andor_si"}
     backend = aliases.get(str(value).strip().lower())
     if backend is None:
-        raise ValueError(f"Unknown measurement setup '{value}'. Use PIXIS or WinSpec.")
+        raise ValueError(f"Unknown measurement setup '{value}'. Use {', '.join(_SETUP_LABELS.values())}.")
     return backend
 
 
@@ -146,8 +158,9 @@ def _validate_setup_group(active: pd.DataFrame) -> None:
                 raise ValueError("Accumulations (EPF) requires positive integers.")
 
 
-def _setup_readiness_issues(controller, schedule) -> List[str]:
-    requested = {_setup_backend(task['ctx'][_SETUP_PARAM]) for task in schedule if _SETUP_PARAM in task['ctx']}
+def _setup_readiness_issues(controller, schedule, requested=None) -> List[str]:
+    if requested is None:
+        requested = {_setup_backend(task['ctx'][_SETUP_PARAM]) for task in schedule if _SETUP_PARAM in task['ctx']}
     missing = requested - set(getattr(controller, 'connected_backends', ()))
     return (["Connect all requested setups before running: " + ", ".join(_SETUP_LABELS[b] for b in sorted(missing))]
             if missing else [])
@@ -303,6 +316,8 @@ def _parse_values(s: str, param: str = "") -> Optional[List[Any]]:
 
 def _normalize_loop(df: pd.DataFrame) -> pd.DataFrame:
     df = (df if isinstance(df, pd.DataFrame) else pd.DataFrame()).copy()
+    if "_run_id" in df:
+        df.attrs["loop_row_ids"] = df["_run_id"].tolist()
     for c in LOOP_SCHEMA:
         if c not in df.columns:
             df[c] = "" if c not in ("Group",) else 1
@@ -375,44 +390,11 @@ def _build_plan(
       "Zip"         – all enabled rows share Level 1 (zipped together).
       "Customized"  – use the Group column as Level.
     """
-    loop = _normalize_loop(loop_df)
-    active = loop[loop["Enable"]].reset_index(drop=True).copy()
-
+    groups = _loop_group_combinations(loop_df, mode)
     if mode == "Synchronize" and parameter_order:
         priority = {parameter: index for index, parameter in enumerate(parameter_order)}
-        positions = sorted(range(len(active)), key=lambda i: priority.get(str(active.iloc[i]['Parameter']), len(priority)))
-        active = active.iloc[positions].reset_index(drop=True)
-
-    if mode == "Zip":
-        active["Level"] = 1
-    elif mode == "Synchronize":
-        active["Level"] = range(1, len(active) + 1)
-    else:  # Customized
-        active["Level"] = active["Group"].fillna(1).astype(int)
-
-    _validate_setup_group(active)
-
-    levels: Dict[int, List[dict]] = {}
-    for _, row in active.iterrows():
-        vals = _parse_values(str(row["Values"]), str(row["Parameter"]))
-        if vals and str(row["Parameter"]).startswith("Stage Position"):
-            vals = [_validate_stage_position_value(v) for v in vals]
-        if vals:
-            levels.setdefault(int(row["Level"]), []).append(
-                {"p": row["Parameter"], "v": vals}
-            )
-
-    level_combos = []
-    for lvl in sorted(levels.keys()):
-        specs = levels[lvl]
-        lengths = [len(s["v"]) for s in specs]
-        if len(set(lengths)) > 1:
-            raise ValueError(
-                f"Group {lvl}: value-count mismatch {lengths}. "
-                "All rows in the same group must have the same number of values."
-            )
-        zipped = list(zip(*[s["v"] for s in specs]))
-        level_combos.append([{s["p"]: v for s, v in zip(specs, z)} for z in zipped])
+        groups.sort(key=lambda group: priority.get(group["parameters"][0], len(priority)))
+    level_combos = [group["contexts"] for group in groups]
 
     if not level_combos:
         final_sequence = [{}]
@@ -521,8 +503,18 @@ def _loop_group_combinations(
             {spec["p"]: value for spec, value in zip(specs, zipped)}
             for zipped in zip(*[spec["v"] for spec in specs])
         ]
+        selection = loop.attrs.get("loop_run_positions", {}).get(level)
+        if selection == "reselect":
+            raise ValueError(f"Group {level}: values or pairing changed; select values again for this run.")
+        positions = list(range(len(contexts)))
+        if selection is not None:
+            if (not isinstance(selection, (list, tuple)) or not selection
+                    or any(type(i) is not int or i < 0 or i >= len(contexts) for i in selection)):
+                raise ValueError(f"Group {level}: select at least one valid value for this run.")
+            positions = sorted(set(selection))
+            contexts = [contexts[i] for i in positions]
         label = " + ".join(str(spec["p"]).replace("Rotation1", "RotIn").replace("Rotation2", "RotOut") for spec in specs)
-        grouped.append({"id": f"group:{level}", "group": level, "label": label, "parameters": [spec["p"] for spec in specs], "contexts": contexts})
+        grouped.append({"id": f"group:{level}", "group": level, "label": label, "parameters": [spec["p"] for spec in specs], "contexts": contexts, "positions": positions})
     return grouped
 
 
@@ -621,6 +613,7 @@ def _build_nested_execution_schedule(
     *,
     mode: str = "Synchronize",
     execution_order: Optional[Sequence[Any]] = None,
+    max_tasks: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Resolve a nested group/condition/point schedule into acquisition tasks.
 
@@ -649,8 +642,8 @@ def _build_nested_execution_schedule(
         kind = level["kind"]
         if kind == "group":
             options.append([
-                {"ctx": dict(ctx), "group_id": level["id"], "context_i": context_i}
-                for context_i, ctx in enumerate(by_group[level["id"]]["contexts"])
+                {"ctx": dict(ctx), "group_id": level["id"], "context_i": position}
+                for position, ctx in zip(by_group[level["id"]]["positions"], by_group[level["id"]]["contexts"])
             ])
         elif kind == "conditions":
             condition_options: List[Dict[str, Any]] = []
@@ -676,6 +669,7 @@ def _build_nested_execution_schedule(
     if not options:
         options = [[{}]]
     schedule: List[Dict[str, Any]] = []
+    sweeps: Dict[int, Dict[str, Any]] = {}
     for product in itertools.product(*options):
         ctx: Dict[str, Any] = {}
         group_values: Dict[str, Dict[str, Any]] = {}
@@ -707,9 +701,11 @@ def _build_nested_execution_schedule(
                 continue
         if not _when_ok(row.get("When", ""), _outer_ctx(ctx)):
             continue
-        sweep = _resolve_sweep_vectors(row)
-        if point_i >= int(sweep["point_count"]):
+        if point_i >= _sweep_point_count(row):
             continue
+        if row_i not in sweeps:
+            sweeps[row_i] = _resolve_sweep_vectors(row)
+        sweep = sweeps[row_i]
         point = {
             "point_i": point_i,
             "point_number": point_i + 1,
@@ -739,6 +735,8 @@ def _build_nested_execution_schedule(
             "group_values": group_values,
             "group_instances": group_instances,
         })
+        if max_tasks is not None and len(schedule) >= max_tasks:
+            break
     context_ids = {}
     for task in schedule:
         key = tuple(sorted(task["group_instances"].items()))
@@ -906,6 +904,7 @@ def _validate_safe_jumps(
     )
     previous_point: Optional[Tuple[float, float, Optional[float]]] = None
     previous_scope: Optional[Tuple[Any, ...]] = None
+    sweeps = {}
     for task_i, task in enumerate(schedule, start=1):
         row_dict = task["row"]
         row_i = int(task.get("row_i", 0))
@@ -917,7 +916,13 @@ def _validate_safe_jumps(
         sweep_row = dict(row_dict)
         if task.get("nested") and row_dict.get("_nested_original_frames") is not None:
             sweep_row["frames"] = int(row_dict.get("_nested_original_frames"))
-        sweep = _resolve_sweep_vectors(sweep_row)
+        sweep_key = tuple(sweep_row.get(key) for key in (
+            "frames", "Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop",
+            "Vbias_start", "Vbias_stop",
+        ))
+        if sweep_key not in sweeps:
+            sweeps[sweep_key] = _resolve_sweep_vectors(sweep_row)
+        sweep = sweeps[sweep_key]
         if task.get("nested") and isinstance(task.get("gate_point"), dict):
             point = task["gate_point"]
             current_point = (
@@ -2467,6 +2472,7 @@ class _RunWorker(QObject):
     tree_update    = Signal(int, str, int)
     incident       = Signal(object)
     acquisition_ready = Signal(object)
+    finalizing     = Signal()
     finished       = Signal(bool, str)
     error          = Signal(str)
 
@@ -2484,6 +2490,7 @@ class _RunWorker(QObject):
         preview_event: Optional[threading.Event] = None,
         acquisition_schedule: Optional[Sequence[Dict[str, Any]]] = None,
         metadata_run=None,
+        files_before: Optional[Sequence[Path]] = None,
     ) -> None:
         super().__init__()
         self._seq      = final_sequence
@@ -2510,6 +2517,9 @@ class _RunWorker(QObject):
         )
         self._active_run_context: Dict[str, Any] = {}
         self._metadata_run = metadata_run
+        self._metadata_finalizing = threading.Event()
+        self.metadata_failed = False
+        self._files_before = set(files_before) if files_before is not None else set(_experiment_output_files(out_dir))
         self._setup_sequence = any(_SETUP_PARAM in task['ctx'] for task in self._schedule)
         self._active_recipe = None
         self._required_smu_roles = _required_smu_roles(
@@ -2518,6 +2528,35 @@ class _RunWorker(QObject):
         self._required_optical_axes = _required_optical_axes(
             self._seq, self._schedule
         )
+
+    @property
+    def metadata_finalizing(self) -> bool:
+        return self._metadata_finalizing.is_set()
+
+    def _finalize_metadata(self, failed: bool, stopped: bool, message: str) -> None:
+        run = self._metadata_run
+        if run is None:
+            return
+        self._metadata_finalizing.set()
+        self.finalizing.emit()
+        self.log.emit("Saving experiment metadata...")
+        try:
+            files = [
+                {"path": path, "role": "raw" if path.suffix.lower() == ".csv" else "intermediate"}
+                for path in _experiment_output_files(run.path.parent)
+                if path != run.path and path not in self._files_before
+                and path.suffix.lower() in {".csv", ".log", ".json", ".txt"}
+            ]
+            if failed:
+                result = run.fail(message, files=files)
+            elif stopped:
+                result = run.cancel(message, files=files)
+            else:
+                result = run.complete({"message": message}, files=files)
+            if not failed and result["status"] == "failed":
+                raise RuntimeError((result.get("error") or {}).get("message", "Metadata recording failed"))
+        finally:
+            self._metadata_finalizing.clear()
 
     def _wait_for_voltage_settle(self, *, initial_ramp: bool) -> None:
         """Wait after a completed voltage move while keeping Stop responsive."""
@@ -3403,13 +3442,22 @@ class _RunWorker(QObject):
                 except Exception:
                     pass
 
+            stopped = self._stop.is_set()
+            try:
+                self._finalize_metadata(failed, stopped, summary)
+            except Exception as exc:
+                failed = True
+                self.metadata_failed = True
+                summary = f"Metadata finalization failed: {exc}"
+                self.log.emit(summary)
+                self.error.emit(summary)
             if failed:
                 self.log.emit("Run failed.")
-            elif self._stop.is_set():
+            elif stopped:
                 self.log.emit("Run stopped.")
             else:
                 self.log.emit("Run complete.")
-            self.finished.emit(not failed and not self._stop.is_set(), summary)
+            self.finished.emit(not failed and not stopped, summary)
 
 
 # ── Loop table read / write ────────────────────────────────────────────────────
@@ -3422,6 +3470,9 @@ def _populate_loop_table(table: QTableWidget, df: pd.DataFrame) -> None:
         table.setCellWidget(r, 0, _make_check_cell(_to_bool(row.get("Enable", False))))
         table.setCellWidget(r, 1, _make_param_combo(str(row.get("Parameter", LOOP_PARAMS[0]))))
         table.setItem(r, 2, QTableWidgetItem(str(row.get("Values", ""))))
+        saved_ids = df.attrs.get("loop_row_ids", [])
+        row_id = row.get("_run_id") or (saved_ids[r] if r < len(saved_ids) else None)
+        table.item(r, 2).setData(Qt.ItemDataRole.UserRole + 92, str(row_id or uuid.uuid4()))
         # Draft snapshots must preserve exactly what the user typed, including
         # blanks and temporarily invalid values.  Validation happens only when
         # Apply/Run parses the recipe.
@@ -3447,7 +3498,10 @@ def _read_loop_table(table: QTableWidget) -> pd.DataFrame:
         except ValueError:
             group = 1
         rows.append({"Enable": enabled, "Parameter": param, "Values": values, "Group": group})
-    return pd.DataFrame(rows, columns=LOOP_SCHEMA) if rows else pd.DataFrame(columns=LOOP_SCHEMA)
+    result = pd.DataFrame(rows, columns=LOOP_SCHEMA) if rows else pd.DataFrame(columns=LOOP_SCHEMA)
+    result.attrs["loop_row_ids"] = [row["_run_id"] for row in _read_loop_table_raw(table)]
+    result.attrs["loop_run_positions"] = deepcopy(getattr(table, "_loop_run_positions", {}))
+    return result
 
 
 def _read_loop_table_raw(table: QTableWidget) -> list[dict]:
@@ -3466,6 +3520,7 @@ def _read_loop_table_raw(table: QTableWidget) -> list[dict]:
             ),
             "Values": value_item.text() if value_item is not None else "",
             "Group": group_item.text() if group_item is not None else "",
+            "_run_id": str(value_item.data(Qt.ItemDataRole.UserRole + 92)) if value_item is not None else "",
         })
     return rows
 
@@ -3563,6 +3618,8 @@ class PresetsPanel(QWidget):
         self._pm    = pm_ctrl
 
         self._loop_src  = _normalize_loop(_DEFAULT_LOOP)
+        self._loop_run_selections = LoopRunSelections()
+        self._applied_loop_run_selections = []
         self._batch_src = _normalize_batch(_DEFAULT_BATCH)
         self._applied_mode = "Synchronize"
         self._applied_acquisition_grouping = "loop_first"
@@ -3783,7 +3840,7 @@ class PresetsPanel(QWidget):
         self._measurement_order_indicator.hide()
 
         # Loop table itself
-        self._loop_table = QTableWidget(0, len(LOOP_SCHEMA))
+        self._loop_table = QTableWidget(0, len(LOOP_SCHEMA) + 1)
         self._loop_table.setObjectName("DualGateLoopTable")
         self._loop_table.setStyleSheet(
             "QTableWidget#DualGateLoopTable { background: #FFFFFF; gridline-color: #DDD6FE; }"
@@ -3796,7 +3853,11 @@ class PresetsPanel(QWidget):
         self._loop_table.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self._loop_table.setHorizontalHeaderLabels(LOOP_SCHEMA)
+        self._loop_table.setHorizontalHeaderLabels([*LOOP_SCHEMA, "This run"])
+        self._loop_table.horizontalHeader().moveSection(4, 3)
+        self._loop_table.horizontalHeaderItem(4).setToolTip(
+            "Choose All values, one value, or several values for this run.\n"
+            "Rows paired in the same group share this choice; the full Values arrays are kept.")
         self._loop_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._loop_table.verticalHeader().setVisible(False)
         # Column header tooltips
@@ -3824,6 +3885,7 @@ class PresetsPanel(QWidget):
         self._loop_table.horizontalHeader().resizeSection(1, 180)  # Parameter
         self._loop_table.horizontalHeader().resizeSection(2, 120)  # Values
         self._loop_table.horizontalHeader().resizeSection(3, 55)   # Group
+        self._loop_table.horizontalHeader().resizeSection(4, 145)  # This run
         self._loop_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.Stretch
         )
@@ -3854,13 +3916,6 @@ class PresetsPanel(QWidget):
         loop_btn_row.addStretch()
         loop_lay.addWidget(self._loop_table)
         loop_lay.addLayout(loop_btn_row)
-        self._dual_setup_btn = QPushButton("Load PIXIS + WinSpec recipe")
-        self._dual_setup_btn.setToolTip(
-            "Replace optical loop rows with an editable paired recipe. "
-            "Center, exposure and EPF can all be changed. Gate rows and motion values are kept."
-        )
-        self._dual_setup_btn.clicked.connect(self._load_dual_setup_recipe)
-        loop_lay.addWidget(self._dual_setup_btn)
         setup_help = QLabel(
             "Click setup Values to select detectors. Same Group: pair values by position (equal counts). "
             "Different Groups: measure all combinations. Use Execution order to change loop nesting."
@@ -4503,8 +4558,8 @@ class PresetsPanel(QWidget):
         self._mode_combo.currentTextChanged.connect(lambda _mode: self._update_filename_preview())
         self._mode_combo_name.currentTextChanged.connect(self._update_filename_preview)
         self._safe_jump_spin.valueChanged.connect(self._on_safety_changed)
-        self._initial_voltage_settle_spin.valueChanged.connect(self._update_plan)
-        self._voltage_settle_spin.valueChanged.connect(self._update_plan)
+        self._initial_voltage_settle_spin.valueChanged.connect(self._refresh_plan_timing)
+        self._voltage_settle_spin.valueChanged.connect(self._refresh_plan_timing)
         for widget in (
             self._sample_edit,
             self._point_edit,
@@ -4585,6 +4640,9 @@ class PresetsPanel(QWidget):
             "legacy_loop_order": list(self._legacy_loop_order),
             "applied_legacy_loop_order": list(self._applied_legacy_loop_order),
             "draft_loop": _read_loop_table_raw(self._loop_table),
+            "loop_run_selections": self._loop_run_selections.export(),
+            "applied_loop_run_selections": deepcopy(self._applied_loop_run_selections),
+            "applied_loop_row_ids": list(self._loop_src.attrs.get("loop_row_ids", [])),
             "draft_batch": self._session_records(_read_batch_table(self._batch_table)),
             "applied_loop": self._session_records(self._loop_src),
             "applied_batch": self._session_records(self._batch_src),
@@ -4620,7 +4678,7 @@ class PresetsPanel(QWidget):
             "preview_splitter_sizes": [int(v) for v in self._preview_splitter.sizes()],
         }
 
-    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+    def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
         allowed = {
             "safe_jump_v": lambda v: self._safe_jump_spin.setValue(float(v)),
             "initial_voltage_settle_s": lambda v: (
@@ -4628,6 +4686,8 @@ class PresetsPanel(QWidget):
             ),
             "voltage_settle_s": lambda v: self._voltage_settle_spin.setValue(float(v)),
         }
+        if keys_only:
+            return {"supported_keys": list(allowed)}
         skipped = []
         for key, value in dict(settings or {}).items():
             setter = allowed.get(key)
@@ -4750,13 +4810,25 @@ class PresetsPanel(QWidget):
                 for column in LOOP_SCHEMA:
                     if column not in frame:
                         frame[column] = "" if column in ("Values", "Group") else False
-                return frame.loc[:, LOOP_SCHEMA].copy()
+                return frame.loc[:, [*LOOP_SCHEMA, *(["_run_id"] if "_run_id" in frame else [])]].copy()
             except Exception:
                 return fallback.copy()
 
         self._loop_src = records_frame(
             "applied_loop", _normalize_loop, self._loop_src
         )
+        self._loop_src.attrs["loop_row_ids"] = list(state.get("applied_loop_row_ids", []))
+        self._applied_loop_run_selections = deepcopy(state.get("applied_loop_run_selections", []))
+        applied_selection = LoopRunSelections(self._applied_loop_run_selections)
+        applied_rows = self._session_records(self._loop_src)
+        saved_ids = self._loop_src.attrs["loop_row_ids"]
+        for row_i, row in enumerate(applied_rows):
+            row["_run_id"] = saved_ids[row_i] if row_i < len(saved_ids) else str(uuid.uuid4())
+        self._loop_src.attrs["loop_row_ids"] = [row["_run_id"] for row in applied_rows]
+        applied_selection.synchronize(applied_rows, self._applied_mode, _parse_values)
+        self._loop_src.attrs["loop_run_positions"] = applied_selection.positions()
+        self._loop_run_selections = LoopRunSelections(state.get("loop_run_selections", []))
+        self._loop_selection_sync_key = None
         self._batch_src = records_frame(
             "applied_batch", _normalize_batch, self._batch_src
         )
@@ -5288,6 +5360,8 @@ class PresetsPanel(QWidget):
             loop_df, batch_df = self._draft_frames()
             if not loop_df.equals(_normalize_loop(self._loop_src)):
                 reasons.append("Loop variables changed")
+            if loop_df.attrs.get("loop_run_positions", {}) != self._loop_src.attrs.get("loop_run_positions", {}):
+                reasons.append("Run selection changed")
             if not batch_df.equals(_normalize_batch(self._batch_src)):
                 reasons.append("Gate conditions changed")
         except Exception:
@@ -5448,6 +5522,7 @@ class PresetsPanel(QWidget):
     @Slot()
     def _on_draft_edited(self, *_args):
         self._sync_setup_value_editors()
+        self._sync_loop_run_selectors()
         self._update_loop_row_buttons()
         self._refresh_execution_order_table()
         self._refresh_draft_state()
@@ -5468,6 +5543,8 @@ class PresetsPanel(QWidget):
 
     @Slot()
     def _on_discard(self):
+        self._loop_run_selections = LoopRunSelections(self._applied_loop_run_selections)
+        self._loop_selection_sync_key = None
         self._mode_combo.blockSignals(True)
         self._mode_combo.setCurrentText(self._applied_mode)
         self._mode_combo.blockSignals(False)
@@ -5487,6 +5564,7 @@ class PresetsPanel(QWidget):
     def _refresh_draft_state(self):
         if not hasattr(self, "_draft_badge"):
             return
+        self._sync_loop_run_selectors()
         try:
             validation_issues = self._draft_validation_issues()
         except Exception as exc:
@@ -5550,6 +5628,7 @@ class PresetsPanel(QWidget):
             self._mode_combo.currentText(), self._current_acquisition_grouping(),
             self._nested_schedule_enabled, self._execution_order,
             self._legacy_loop_order,
+            self._loop_run_selections.positions(),
             getattr(self, "_draft_issues", []),
         ))
         if key == getattr(self, "_draft_preview_key", None):
@@ -5566,11 +5645,12 @@ class PresetsPanel(QWidget):
             count = 1
             for group in _loop_group_combinations(loop_df, mode):
                 count *= len(group["contexts"])
+            context_count = count
             count *= sum(
                 max(int(row["repeat"]), 1) * max(int(row["frames"]), 1)
                 for _, row in batch_df[batch_df["Run"]].iterrows()
             )
-            if count > 20_000:
+            if context_count > _LIVE_DRAFT_SPECTRA_LIMIT or count > _LIVE_DRAFT_SPECTRA_LIMIT:
                 unavailable = "Applied sequence · apply to preview large draft"
                 raise ValueError("Live draft preview is limited to 20,000 potential spectra.")
             seq, batch, total = _build_plan(
@@ -5624,17 +5704,23 @@ class PresetsPanel(QWidget):
         from ui.detector_wavelength_advice import sequence_wavelength_warning
         preview = getattr(self._tree, '_last_plan', None) or {}
         state = preview.get('preview_state', '')
+        schedule = preview.get('acquisition_schedule', [])
+        identity = getattr(self._lf6, 'identity', {})
+        key = (state, repr(identity), cfg.lf6.center_nm)
+        cached = getattr(self, '_detector_advice_cache', None)
+        if cached is not None and cached[0] is schedule and cached[1] == key:
+            return
         if 'draft unavailable' in state or 'apply to preview large draft' in state:
             message = 'Detector wavelength check pending: resolve the draft and Apply to check its measurement combinations.'
         else:
             message = sequence_wavelength_warning(
-                (task['ctx'] for task in preview.get('acquisition_schedule', [])),
-                getattr(self._lf6, 'identity', {}), cfg.lf6.center_nm)
+                (task['ctx'] for task in schedule), identity, cfg.lf6.center_nm)
             if message:
                 message = 'Detector wavelength reminder\n' + message
         self._detector_warning_lbl.setText(message)
         self._detector_warning_lbl.setToolTip(message)
         self._detector_warning_lbl.setVisible(bool(message))
+        self._detector_advice_cache = (schedule, key)
 
     def _show_applied_sequence(self, preview_state="Applied sequence") -> None:
         self._tree.update_plan(
@@ -5686,16 +5772,23 @@ class PresetsPanel(QWidget):
             issues.append("At least one filename part is required.")
         if not self._lf6 or not self._lf6.is_connected:
             issues.append("LF6 is not connected or in mock mode.")
-        issues.extend(_setup_readiness_issues(self._lf6, self._acquisition_schedule))
-        required_smu_roles = _required_smu_roles(
-            self._final_seq, self._df_batch, self._acquisition_schedule
-        )
+        requirements = getattr(self, "_plan_readiness_cache", None)
+        if requirements is None or requirements[0] is not self._acquisition_schedule:
+            requirements = (
+                self._acquisition_schedule,
+                _required_smu_roles(self._final_seq, self._df_batch, self._acquisition_schedule),
+                _required_optical_axes(self._final_seq, self._acquisition_schedule),
+                {_setup_backend(task['ctx'][_SETUP_PARAM]) for task in self._acquisition_schedule if _SETUP_PARAM in task['ctx']},
+            )
+            self._plan_readiness_cache = requirements
+        issues.extend(_setup_readiness_issues(self._lf6, self._acquisition_schedule, requirements[3]))
+        required_smu_roles = requirements[1]
         issues.extend(_smu_readiness_issues(self._smu, required_smu_roles))
         issues.extend(
             _optical_readiness_issues(
                 self._rot,
                 self._stage,
-                _required_optical_axes(self._final_seq, self._acquisition_schedule),
+                requirements[2],
             )
         )
         if self._hardware_incident_active:
@@ -5712,20 +5805,24 @@ class PresetsPanel(QWidget):
             for _, row in self._df_batch.iterrows()
         ) and (not self._pm or not self._pm.is_connected):
             issues.append("MeasurePower requires a connected PM100D.")
-        jump_issues = _validate_safe_jumps(
-            self._final_seq,
-            self._df_batch,
-            float(self._safe_jump_spin.value()),
-            self._acquisition_schedule,
-        )
+        limit = float(self._safe_jump_spin.value())
+        cached = getattr(self, "_readiness_jump_cache", None)
+        if cached is None or cached[0] is not self._acquisition_schedule or cached[1] != limit:
+            cached = (self._acquisition_schedule, limit, _validate_safe_jumps(
+                self._final_seq, self._df_batch, limit, self._acquisition_schedule,
+            ))
+            self._readiness_jump_cache = cached
+        jump_issues = cached[2]
         if jump_issues:
             issues.append(jump_issues[0])
         return issues
 
     @Slot()
+    @Slot()
     def _refresh_readiness(self, *_args, when_errors=None, validation_issues=None):
         if not hasattr(self, "_readiness_lbl"):
             return
+        self._sync_loop_run_selectors()
         self._update_loop_row_buttons()
         self._refresh_detector_wavelength_advice()
         running = bool(self._run_thread and self._run_thread.isRunning())
@@ -5793,6 +5890,133 @@ class PresetsPanel(QWidget):
                 combo.currentTextChanged.connect(self._on_draft_edited)
                 combo.setProperty("draft_connected", True)
         self._sync_setup_value_editors()
+        self._sync_loop_run_selectors()
+
+    def _sync_loop_run_selectors(self):
+        table = self._loop_table
+        blocked = table.blockSignals(True)
+        try:
+            used = set()
+            for row_i in range(table.rowCount()):
+                item = table.item(row_i, 2)
+                if item is None:
+                    continue
+                row_id = item.data(Qt.ItemDataRole.UserRole + 92)
+                if not row_id or row_id in used:
+                    row_id = str(uuid.uuid4())
+                    item.setData(Qt.ItemDataRole.UserRole + 92, row_id)
+                used.add(row_id)
+            rows = _read_loop_table_raw(table)
+            running = bool(self._run_thread and self._run_thread.isRunning())
+            key = repr((rows, self._mode_combo.currentText(), running))
+            if key == getattr(self, "_loop_selection_sync_key", None):
+                return
+            # Invalid Group text stays in the table for normal draft validation.
+            for row in rows:
+                try:
+                    row["Group"] = int(row["Group"] or 1)
+                except ValueError:
+                    row["Group"] = 1
+            groups = self._loop_run_selections.synchronize(rows, self._mode_combo.currentText(), _parse_values)
+            table._loop_run_positions = self._loop_run_selections.positions()
+            by_row = {row_i: (level, group) for level, group in groups.items()
+                      for row_i, _ in group["members"]}
+            for row_i, row in enumerate(rows):
+                combo = table.cellWidget(row_i, 4)
+                if not isinstance(combo, RunSelectionCombo):
+                    combo = RunSelectionCombo()
+                    combo.tab_to_group = lambda target=combo: self._tab_loop_run_to_group(target)
+                    combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+                    combo.activated.connect(lambda index, target=combo: self._choose_loop_run_value(target, index))
+                    table.setCellWidget(row_i, 4, combo)
+                combo.setProperty("loop_row_id", row["_run_id"])
+                combo.setAccessibleName(f"This run: {row['Parameter']}")
+                if row_i not in by_row:
+                    combo.configure([], "all", "Disabled")
+                    combo.setEnabled(False)
+                    continue
+                level, group = by_row[row_i]
+                state = self._loop_run_selections.states[group["key"]]
+                values = group["baseline"][row["_run_id"]]["values"] or []
+                counts = Counter(values)
+                labels = []
+                for position, value in enumerate(values):
+                    if row['Parameter'] == _SETUP_PARAM:
+                        label = _SETUP_LABELS.get(value, str(value))
+                    else:
+                        label = str(int(value)) if float(value).is_integer() else str(value)
+                    for _, peer in group["members"]:
+                        if peer["Parameter"] == "Center Wavelength (nm)" and row["Parameter"] == _SETUP_PARAM:
+                            peers = group["baseline"][peer["_run_id"]]["values"] or []
+                            if position < len(peers):
+                                center = peers[position]
+                                label += f" · {str(int(center)) if float(center).is_integer() else str(center)} nm"
+                    if counts[value] > 1:
+                        label += f" (#{position + 1})"
+                    labels.append(label)
+                positions = state["positions"]
+                if state.get("stale"):
+                    choice, summary = "reselect", "Select again…"
+                elif positions is None:
+                    choice, summary = "all", "All values"
+                elif len(positions) == 1 and 0 <= positions[0] < len(labels):
+                    choice, summary = positions[0], labels[positions[0]]
+                else:
+                    choice, summary = "subset", f"{len(positions)} selected"
+                combo.configure(labels, choice, summary)
+                lengths = [len(v["values"] or []) for v in group["baseline"].values()]
+                combo.setEnabled(not running and group["valid"] and len(set(lengths)) == 1)
+                table.setRowHeight(row_i, max(table.rowHeight(row_i), combo.sizeHint().height() + 1))
+            self._loop_selection_sync_key = key
+        finally:
+            table.blockSignals(blocked)
+
+    def _set_loop_run_selection(self, row, positions):
+        self._sync_loop_run_selectors()
+        for level, group in self._loop_run_selections.groups.items():
+            if any(row_i == row for row_i, _ in group["members"]):
+                self._loop_run_selections.choose(level, positions)
+                self._loop_selection_sync_key = None
+                self._on_draft_edited()
+                return
+        raise ValueError("Enable this loop row before selecting values.")
+
+    def _tab_loop_run_to_group(self, combo):
+        table = self._loop_table
+        if table.isColumnHidden(3):
+            return False
+        row_id = combo.property("loop_row_id")
+        for row, record in enumerate(_read_loop_table_raw(table)):
+            if record["_run_id"] == row_id:
+                table.setCurrentCell(row, 3)
+                table.editItem(table.item(row, 3))
+                return True
+        return False
+
+    def _choose_loop_run_value(self, combo, index):
+        row_id = combo.property("loop_row_id")
+        row = next((i for i, item in enumerate(_read_loop_table_raw(self._loop_table)) if item["_run_id"] == row_id), None)
+        if row is None:
+            return
+        choice = combo.itemData(index)
+        if choice == "all":
+            self._set_loop_run_selection(row, None)
+        elif type(choice) is int:
+            self._set_loop_run_selection(row, [choice])
+        elif choice == "several":
+            group = next(group for group in self._loop_run_selections.groups.values()
+                         if any(i == row for i, _ in group["members"]))
+            state = self._loop_run_selections.states[group["key"]]
+            positions = [] if state.get("stale") else state["positions"]
+            dialog = LoopSelectionDialog(combo.labels, positions, self)
+            accepted = dialog.exec() == LoopSelectionDialog.DialogCode.Accepted
+            selected = dialog.positions() if accepted else None
+            dialog.deleteLater()
+            if accepted:
+                self._set_loop_run_selection(row, selected)
+            else:
+                self._loop_selection_sync_key = None
+                self._sync_loop_run_selectors()
 
     def _sync_setup_value_editors(self):
         """Keep the saved Values item authoritative; only setup rows use a picker."""
@@ -5924,17 +6148,45 @@ class PresetsPanel(QWidget):
         cfg.ramp.safe_jump_V = float(value)
         if hasattr(self, "_sweep_calc"):
             self._sweep_calc._recalculate()
-        self._update_plan()
         self._refresh_readiness()
 
-    def _draft_loop_and_batch(self) -> Tuple[pd.DataFrame, pd.DataFrame, List[dict], pd.DataFrame]:
+    def _draft_loop_and_batch(self) -> Tuple[pd.DataFrame, pd.DataFrame, Optional[List[dict]], pd.DataFrame]:
+        """Reuse resolved preview data; defer large drafts before planning them."""
         loop_df = _normalize_loop(_read_loop_table(self._loop_table))
         batch_df = _normalize_batch(_read_batch_table(self._batch_table))
+        mode = self._mode_combo.currentText()
+        grouping = self._current_acquisition_grouping()
+        enabled_batch = batch_df[batch_df["Run"]].reset_index(drop=True)
+        visible_plan = self._tree._last_plan or {}
+        cached_loop = visible_plan.get("loop_definition")
+        cached_batch = visible_plan.get("df_batch")
+        if (
+            (visible_plan.get("preview_state") == "Draft sequence" or
+             (visible_plan.get("preview_state") == "Applied sequence" and not self._tables_dirty))
+            and "final_sequence" in visible_plan
+            and visible_plan.get("loop_mode") == mode
+            and visible_plan.get("acquisition_grouping") == grouping
+            and isinstance(cached_loop, pd.DataFrame) and cached_loop.equals(loop_df)
+            and cached_loop.attrs.get("loop_run_positions", {}) == loop_df.attrs.get("loop_run_positions", {})
+            and isinstance(cached_batch, pd.DataFrame) and cached_batch.equals(enabled_batch)
+        ):
+            return loop_df, batch_df, visible_plan["final_sequence"], cached_batch
+
+        context_count = 1
+        for group in _loop_group_combinations(loop_df, mode):
+            context_count *= len(group["contexts"])
+        potential_spectra = context_count * sum(
+            max(int(row["repeat"]), 1) * max(int(row["frames"]), 1)
+            for _, row in enabled_batch.iterrows()
+        )
+        # Contexts themselves must also fit when every batch row is disabled.
+        if context_count > _LIVE_DRAFT_SPECTRA_LIMIT or potential_spectra > _LIVE_DRAFT_SPECTRA_LIMIT:
+            return loop_df, batch_df, None, enabled_batch
         seq, batch, _total = _build_plan(
             loop_df,
             batch_df,
-            mode=self._mode_combo.currentText(),
-            acquisition_grouping=self._current_acquisition_grouping(),
+            mode=mode,
+            acquisition_grouping=grouping,
             parameter_order=self._legacy_loop_order if not self._nested_schedule_enabled else None,
         )
         return loop_df, batch_df, seq, batch
@@ -5974,6 +6226,9 @@ class PresetsPanel(QWidget):
                 "batch_definition": getattr(self, "_batch_src", pd.DataFrame()),
                 "acquisition_schedule": list(getattr(self, "_acquisition_schedule", []) or []),
                 "loop_definition": getattr(self, "_loop_src", pd.DataFrame()),
+                "loop_run_positions": deepcopy(self._loop_src.attrs.get("loop_run_positions", {})),
+                "loop_run_selections": deepcopy(self._applied_loop_run_selections),
+                "loop_row_ids": list(self._loop_src.attrs.get("loop_row_ids", [])),
                 "acquisition_grouping": getattr(self, "_applied_acquisition_grouping", "loop_first"),
                 "execution_order": [dict(item) for item in (getattr(self, "_applied_execution_order", None) or [])],
                 "nested_schedule_enabled": bool(getattr(self, "_applied_execution_order", None)),
@@ -6014,6 +6269,15 @@ class PresetsPanel(QWidget):
             self._save_path_preview_lbl.setText("Folder: -")
             self._preview_note_lbl.setText("Fix table errors to update the filename preview.")
             self._upcoming_preview.setPlainText("")
+            return
+
+        if seq is None:
+            message = "Apply this large draft to preview filenames."
+            self._filename_preview_lbl.setText(f"Filename: {message}")
+            self._filename_preview_lbl.setToolTip(message)
+            self._save_path_preview_lbl.setText("Folder: -")
+            self._preview_note_lbl.setText(message)
+            self._upcoming_preview.setPlainText(message)
             return
 
         run_meta = self._current_run_meta()
@@ -6065,12 +6329,17 @@ class PresetsPanel(QWidget):
         if self._nested_schedule_enabled and getattr(self, "_execution_order_error", ""):
             self._upcoming_preview.setPlainText(self._execution_order_error)
             return
-        if self._nested_schedule_enabled:
+        visible_plan = self._tree._last_plan or {}
+        if (visible_plan.get("preview_state") == "Draft sequence" or
+                (visible_plan.get("preview_state") == "Applied sequence" and not self._tables_dirty)):
+            draft_schedule = visible_plan.get("acquisition_schedule") or []
+        elif self._nested_schedule_enabled:
             draft_schedule = _build_nested_execution_schedule(
                 loop_df,
                 batch_df,
                 mode=self._mode_combo.currentText(),
                 execution_order=self._execution_order,
+                max_tasks=4,
             )
         else:
             draft_schedule = _build_acquisition_schedule(
@@ -6159,55 +6428,6 @@ class PresetsPanel(QWidget):
             return None, f"Filename metadata is incomplete: {exc}"
         return run_meta, None
 
-    @Slot()
-    def _load_dual_setup_recipe(self):
-        if self._run_thread and self._run_thread.isRunning():
-            return
-        current = _read_loop_table(self._loop_table)
-        previous_order = self._execution_order_entries()
-        # Preserve non-optical values and their old grouping, even when changing
-        # from Synchronize or Zip to Customized for the paired optical group.
-        mode = self._mode_combo.currentText()
-        remaining = current[~current['Parameter'].isin(_RECIPE_PARAMS)].copy()
-        row_groups = {}
-        for index in remaining.index:
-            key = index if mode == 'Synchronize' else 0 if mode == 'Zip' else int(remaining.at[index, 'Group'])
-            row_groups[index] = key
-        group_ids = {key: offset + 2 for offset, key in enumerate(sorted(set(row_groups.values())))}
-        for index, key in row_groups.items():
-            remaining.at[index, 'Group'] = group_ids[key]
-        recipe = pd.DataFrame([
-            dict(Enable=True, Parameter=parameter, Values=values, Group=1)
-            for parameter, values in zip(_RECIPE_PARAMS, ('PIXIS, WinSpec', '720, 1100',
-                f'{cfg.lf6.exposure_ms:g}, {cfg.lf6.exposure_ms:g}', f'{cfg.lf6.accumulations}, {cfg.lf6.accumulations}'))
-        ])
-        definition = pd.concat([recipe, remaining], ignore_index=True)
-        self._mode_combo.blockSignals(True)
-        self._mode_combo.setCurrentText('Customized')
-        self._mode_combo.blockSignals(False)
-        self._loop_table.blockSignals(True)
-        _populate_loop_table(self._loop_table, definition)
-        self._loop_table.blockSignals(False)
-        self._connect_loop_param_signals()
-        self._nested_schedule_enabled = True
-        default_order = _default_execution_order(definition, 'Customized')
-        # Only the new optical recipe becomes outermost. Existing motion groups
-        # retain their order and their position on either side of Gate points.
-        new_groups = {tuple(sorted(entry['parameters'])): entry
-                      for entry in default_order if entry['kind'] == 'group'}
-        restored_order = [default_order[0]]
-        for entry in previous_order:
-            if entry['kind'] != 'group':
-                restored_order.append(entry)
-                continue
-            motion_params = tuple(sorted(set(entry['parameters']) - set(_RECIPE_PARAMS)))
-            if motion_params in new_groups:
-                restored_order.append(new_groups[motion_params])
-        self._execution_order = (_normalize_execution_order(restored_order, definition, 'Customized')
-                                 if previous_order else default_order)
-        self._on_mode_changed('Customized')
-        self._on_draft_edited()
-
     def _add_loop_row(self):
         r = self._loop_table.rowCount()
         self._loop_table.insertRow(r)
@@ -6249,7 +6469,7 @@ class PresetsPanel(QWidget):
         updates = table.updatesEnabled()
         table.setUpdatesEnabled(False)
         try:
-            _populate_loop_table(table, pd.DataFrame(values, columns=LOOP_SCHEMA))
+            _populate_loop_table(table, pd.DataFrame(values))
             self._connect_loop_param_signals()
             table.setCurrentCell(target, column)
             table.selectRow(target)
@@ -6869,6 +7089,7 @@ class PresetsPanel(QWidget):
                 return
 
         self._loop_src = loop_draft
+        self._applied_loop_run_selections = self._loop_run_selections.export()
         self._batch_src = batch_draft
         self._applied_mode = mode
         self._applied_acquisition_grouping = acquisition_grouping
@@ -6963,16 +7184,9 @@ class PresetsPanel(QWidget):
         self._current_frame_total = 0
         self._progress.setMaximum(max(total_points, 1))
         self._progress.setValue(0)
-        if grouping == "batch_first":
-            order_label = "batch row → loop settings"
-        else:
-            order_label = "loop setting → batch rows"
-        initial_settle_s = float(self._initial_voltage_settle_spin.value())
-        point_settle_s = float(self._voltage_settle_spin.value())
         initial_point_count = min(total, total_points)
         later_point_count = max(total_points - initial_point_count, 0)
         if self._applied_execution_order:
-            order_label = "custom nested order"
             initial_point_count = later_point_count = 0
             previous_state = None
             for task in schedule:
@@ -6980,22 +7194,8 @@ class PresetsPanel(QWidget):
                 initial_point_count += transition == "initial"
                 later_point_count += transition == "direct"
                 previous_state = state
-        settle_overhead = _format_duration(
-            initial_point_count * initial_settle_s
-            + later_point_count * point_settle_s
-        )
-        self._applied_plan_details = (
-            f"Applied plan: {len(schedule)} ordered step(s)\n"
-            f"Mode: {mode}\nExecution order: {order_label}\n"
-            f"Total voltage settling time: {settle_overhead}"
-        )
-        self._full_sequence_btn.setToolTip(self._applied_plan_details)
-        self._execution_order_group.setToolTip(
-            f"Applied mode: {mode}. Execution order: {order_label}."
-        )
-        self._voltage_timing_bar.setToolTip(
-            f"Estimated total voltage settling time for the applied plan: {settle_overhead}."
-        )
+        self._settle_transition_counts = (initial_point_count, later_point_count)
+        self._refresh_plan_timing()
         self._tree.update_plan(
             seq,
             batch,
@@ -7011,10 +7211,35 @@ class PresetsPanel(QWidget):
         )
         self._update_filename_preview()
         self._refresh_readiness()
-
-        # Timing settings can rebuild the applied summary while edits remain.
-        # Keep the visible sequence tied to the same draft as the editors.
         self._refresh_sequence_preview()
+
+    def _refresh_plan_timing(self, *_args):
+        """Timing edits change the estimate, not the resolved task order."""
+        if self._run_thread and self._run_thread.isRunning():
+            return
+        initial_point_count, later_point_count = getattr(self, "_settle_transition_counts", (0, 0))
+        mode = self._applied_mode
+        order_label = ("custom nested order" if self._applied_execution_order else
+                       "batch row → loop settings" if self._applied_acquisition_grouping == "batch_first" else
+                       "loop setting → batch rows")
+        initial_settle_s = float(self._initial_voltage_settle_spin.value())
+        point_settle_s = float(self._voltage_settle_spin.value())
+        settle_overhead = _format_duration(
+            initial_point_count * initial_settle_s
+            + later_point_count * point_settle_s
+        )
+        self._applied_plan_details = (
+            f"Applied plan: {len(self._acquisition_schedule)} ordered step(s)\n"
+            f"Mode: {mode}\nExecution order: {order_label}\n"
+            f"Total voltage settling time: {settle_overhead}"
+        )
+        self._full_sequence_btn.setToolTip(self._applied_plan_details)
+        self._execution_order_group.setToolTip(
+            f"Applied mode: {mode}. Execution order: {order_label}."
+        )
+        self._voltage_timing_bar.setToolTip(
+            f"Estimated total voltage settling time for the applied plan: {settle_overhead}."
+        )
 
     def _tree_param_order(self) -> List[str]:
         if hasattr(self, "_loop_src") and not self._loop_src.empty:
@@ -7101,9 +7326,12 @@ class PresetsPanel(QWidget):
             preview_event=self._preview_event,
             acquisition_schedule=self._acquisition_schedule,
             metadata_run=self._experiment_run,
+            files_before=self._run_files_before,
         )
         self._run_worker.moveToThread(self._run_thread)
         self._run_thread.started.connect(self._run_worker.run)
+        self._run_thread.started.connect(self._refresh_readiness)
+        self._run_thread.finished.connect(self._refresh_readiness)
         self._run_worker.log.connect(self._log)
         self._run_worker.progress.connect(self._on_progress)
         self._run_worker.frame_progress.connect(self._on_frame_progress)
@@ -7112,6 +7340,7 @@ class PresetsPanel(QWidget):
         self._run_worker.incident.connect(self._on_hardware_incident)
         self._run_worker.acquisition_ready.connect(self._on_acquisition_ready)
         self._run_worker.error.connect(lambda e: self._log(f"ERROR: {e}"))
+        self._run_worker.finalizing.connect(self._on_finalizing)
         self._run_worker.finished.connect(self._on_finished)
         self._run_worker.finished.connect(self._run_thread.quit)
 
@@ -7119,7 +7348,6 @@ class PresetsPanel(QWidget):
         self._stop_btn.setEnabled(True)
         self._initial_voltage_settle_spin.setEnabled(False)
         self._voltage_settle_spin.setEnabled(False)
-        self._dual_setup_btn.setEnabled(False)
         self._status_lbl.setText("Running…")
         self._status_lbl.setStyleSheet("color: orange;")
         self._on_progress(0, self._total_acq)
@@ -7283,6 +7511,17 @@ class PresetsPanel(QWidget):
             run_outcome=self._run_outcome,
         )
 
+    @property
+    def metadata_finalizing(self) -> bool:
+        worker = getattr(self, "_run_worker", None)
+        return bool(worker and worker.metadata_finalizing)
+
+    @Slot()
+    def _on_finalizing(self):
+        self._stop_btn.setEnabled(False)
+        self._status_lbl.setText("Saving experiment metadata...")
+        self._status_lbl.setStyleSheet("color: orange;")
+
     @Slot(bool, str)
     def _on_finished(self, success: bool, message: str):
         pause = getattr(self._lf6, "set_temperature_monitor_paused", None)
@@ -7291,10 +7530,13 @@ class PresetsPanel(QWidget):
         self._stop_btn.setEnabled(False)
         self._initial_voltage_settle_spin.setEnabled(True)
         self._voltage_settle_spin.setEnabled(True)
-        self._dual_setup_btn.setEnabled(True)
         if self._hardware_incident_active:
             self._run_outcome = "failed"
             self._status_lbl.setText("Hardware fault - reconnect SMUs")
+            self._status_lbl.setStyleSheet("color: red;")
+        elif getattr(self._run_worker, "metadata_failed", False):
+            self._run_outcome = "failed"
+            self._status_lbl.setText("Metadata error")
             self._status_lbl.setStyleSheet("color: red;")
         elif success:
             self._run_outcome = "completed"
@@ -7312,22 +7554,6 @@ class PresetsPanel(QWidget):
             self._run_outcome = "failed"
             self._status_lbl.setText("Failed")
             self._status_lbl.setStyleSheet("color: red;")
-        run = getattr(self, "_experiment_run", None)
-        if run is not None:
-            try:
-                for data_file in _experiment_output_files(Path(run.path.parent)):
-                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".log", ".json", ".txt"}:
-                        continue
-                    run.register_file(data_file, "raw" if data_file.suffix.lower() == ".csv" else "intermediate")
-                if self._run_outcome == "completed":
-                    run.complete({"message": message})
-                elif self._run_outcome == "stopped":
-                    run.cancel(message)
-                else:
-                    run.fail(message)
-            except Exception as exc:
-                self._log(f"Metadata finalization error: {exc}")
-                QMessageBox.critical(self, "Metadata error", f"Experiment metadata could not be finalized:\n\n{exc}")
         self._tree.update_plan(
             self._final_seq,
             self._df_batch,

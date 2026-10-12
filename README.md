@@ -12,21 +12,91 @@ The application is intended for lab setups that combine either Princeton Instrum
 - MegaSweep voltage-mapping workflow for Vtg/Vbg and D/Vbias acquisition patterns
 - BFP viewing and export tools
 - Hardware-controller wrappers for LightField/Andor, Keithley SMU workflows, rotation stages, linear stage, and Thorlabs PM100D
+- Thorlabs MFF101 manual controls and automatic setup routing with verified position readback
 - Mock spectrum mode for UI development without live spectrometer hardware
+
+## Sample settings
+
+Selecting a Sample ID with saved settings restores that sample's setup. A new
+Sample ID, or one without a saved setup, keeps the current settings, active tab,
+and unapplied drafts, then saves an independent profile for the new sample.
+At startup, a sample without its own profile uses the last saved session.
+Measurement records in run history remain associated with their original sample.
+
+## MFF101 flipper
+
+Expand **MFF101 Flipper** in the Instruments sidebar. Connect the powered
+flipper by USB, click **Scan** (or enter its eight-digit serial number), then
+**Connect**. **Position 1** and **Position 2** move to the two device positions;
+the display reports arrival only after reading back the target. Under
+**Settings > MFF101 light paths**, the default mapping is **Position 1 → Andor**
+and **Position 2 → LightField**. Edit either name when the physical paths change,
+then click **Save config to disk**. The sidebar immediately shows the configured
+paths and the name corresponding to the current position. Names are global
+equipment settings and are not replaced when switching samples or loading old
+measurement settings. Editing a name does not move the flipper.
+Position is also refreshed once per second, including changes made with the
+flipper's physical button. **Read position** requests an immediate refresh.
+
+The existing `pylablib` dependency uses the FTDI D2XX USB driver. Install the
+Thorlabs/FTDI driver if discovery fails, and close other applications using the
+same flipper before connecting. Connection, polling, and movement run on a
+background thread. A failed read clears the position and disconnects; a failed
+move reports an error instead of assuming arrival. Disconnecting closes the USB
+connection; it does not stop an already-issued physical flip.
+
+Manual moves and automatic setup routing allow at most **two motion commands**
+(the initial command plus one retry). The first command has a 5-second arrival
+window; the whole operation has a 10-second deadline. Before retrying, the app
+reads the position: a target readback completes the operation, an in-transit
+readback only continues waiting, and only the other known endpoint permits a
+retry. USB/read/write errors fail immediately without reissuing a command.
+Measurement Stop and application shutdown end polling after the current USB
+call and prevent further commands; they do not halt a physical flip. A second
+failure or unresolved motion blocks acquisition and reports an unverified
+position. Retry attempts are recorded in the application log.
+Spectrum **Stop** and **Abort** also cancel queued acquisition requests and
+pending flipper checks, so a delayed position read cannot start a new exposure
+after cancellation. A subsequent acquisition uses a fresh cancellation state.
+
+Some MFF101 APT firmware reports the internal model `MFF002` and a zero firmware
+serial. This variant is accepted only with the filter-flipper hardware type and
+one channel; the selected USB serial still identifies the connection. A nonzero
+firmware serial must match. See the [MFF101 driver example](https://github.com/calico/triplet_tumbling_microscopy/blob/main/lib/thorlabs_MFF101.py)
+for the internal model identifier. pylablib may print a model-prefix warning for
+this firmware even though the connection is supported.
+
+The app remembers the serial number. Starting the app, loading settings, and
+changing samples do not connect or move the flipper automatically. Explicitly
+selecting a measurement setup routes **Andor Si / InGaAs → position 1** and
+**LightField / WinSpec → position 2**. Settings includes an automatic-routing
+checkbox and editable setup-to-position dropdowns, separate from descriptive
+path names. In **Dual Gate Measurement setup** recipes and **2D Sweep optical
+conditions**, execution automatically routes each selected setup before its
+measurements, including setups nested inside gate points. Initial recipe
+preflight also visits the requested setups. Editing a draft does not move the
+flipper. Connecting/switching setups and acquisition preflight also verify
+the configured position. Routing failures block that operation. A disconnected
+flipper connects using its saved serial, or the single discovered USB device;
+ambiguous discovery requires selecting a serial. Simulation does not route real
+hardware, and manual flipper actions are locked during measurements.
+The Spectrum sidebar metadata
+snapshot includes its last observed position and readback timestamp.
 
 ## LightField experiment metadata
 
 LightField runs in Presets, Power Sweep, MegaSweep, BFP, and both MCD tabs
 automatically read instrument settings immediately before each capture. The
 experiment's `*.experiment.metadata.json` stores distinct configurations under
-`observed.lightfield.settings_snapshots`, separate from requested UI settings.
+`settings.snapshots`, separate from requested UI settings. The compatibility
+view under `observed.lightfield.settings_snapshots` links to those snapshots.
 Readbacks include exposure, exposures per frame, combination method, stored
 frames, grating label, center wavelength, ports/slits, readout/gain, detector
 temperature setpoint, ROI/binning, correction flags, device identity, experiment
 name, application assembly version, and detector wavelength calibration.
 Unsupported or failed reads are `null` with a reason in `unavailable`.
 
-The adjacent `*.experiment.lightfield.jsonl` contains capture start/completion
+The adjacent `*.experiment.events.jsonl` contains capture start/completion
 or failure events, linked by `acquisition_index` and `settings_id`. Start events
 include actual detector temperature, the number of frames requested from Capture,
 and sweep context (output file/point where available; angle for MCD2100).
@@ -39,9 +109,14 @@ and data files when copying a run.
 The grating label is preserved exactly as LightField reports it; groove density
 is not inferred from an index. Calibration in the JSON is the SDK's detector
 axis before alignment/binning; the exported spectrum's wavelength column is the
-authoritative saved axis. Optional metadata failures are logged without stopping
-acquisition. This metadata is provenance and is not automatically restored to
-hardware when loading saved settings.
+authoritative saved axis. Optional readback failures are logged without stopping
+acquisition. A failure to store settings or capture events marks metadata as
+degraded and prevents the run from reporting successful completion, while
+allowing detector cleanup. Compatibility settings references are unique within
+the run, including when switching setups or recreating a recorder. Recovery
+counts capture attempts consistently with live recording, without counting
+completion events again. This metadata is provenance and is not automatically
+restored to hardware when loading saved settings.
 
 ## Power-meter correction
 
@@ -157,6 +232,17 @@ stored wavelength calibration. For the Si CCD it also exposes 2D ROI and
 horizontal/vertical binning. **Apply + verify** writes the displayed operating
 controls and reads them back before reporting success. The Instruments sidebar
 remains focused on connection, detector temperature, and safe warm disconnect.
+
+The **Spectrum → Spectrograph** center and the shared **Settings** center accept
+**0 nm** for zero-order imaging / alignment. Photon energy is shown as
+**N/A (zero order)** until a positive wavelength is selected. Andor moves with
+the dedicated Shamrock zero-order command and checks the hardware confirmation.
+Zero-order Spectrum captures display and export detector pixel coordinates;
+stored wavelength coefficients are not used for that position. WinSpec retains
+its full pixel frame without applying or cropping to a saved wavelength fit.
+Selecting a positive center restores photon energy and the usual backend axis
+(wavelengths for PIXIS / Andor, pixels or matching calibration for WinSpec). This
+control does not extend wavelength-calibration coverage for automated sweeps.
 
 ### MCD 2100 magnet preparation
 
@@ -349,7 +435,8 @@ Every acquisition and processing workflow creates one portable
 and observed values, instrument identities, cached software commit/dirty
 status, immutable settings snapshots, conditions, output file links, and the
 terminal result. Spectrum and image CSV files remain the scientific data
-artifacts; metadata does not duplicate their axes or arrays.
+artifacts; metadata also retains calibration and raw-detector provenance when
+needed to explain how those artifacts were produced.
 
 When a run reaches its first acquisition, the run also creates one append-only
 `*.experiment.events.jsonl` journal. Capture attempts, warmups, repeats,
@@ -366,6 +453,24 @@ content hashes, so equal basenames cannot silently merge. NumPy arrays are
 serialized with dtype and shape and are never converted to truncated repr
 strings. Unsupported ambiguous objects raise a serialization error so the
 run can report incomplete metadata instead of claiming provenance.
+
+Metadata schema 3 stores repeated objects and arrays of at least 256 serialized
+bytes once, with file-local JSON pointers declared in `metadata_storage`.
+Read full values through `ExperimentMetadataService.load_metadata(path)`;
+plain `json.load()` exposes the stored pointers. The history index applies the
+same encoding and its query API expands the values. Older metadata remains
+readable, and legacy `.meta.json` / `.meta.txt` projections keep their formats.
+Pointers never resolve external files or URLs.
+
+Spectrum exports retain one metadata record per output path. Repeating an
+identical save leaves the metadata and event journal unchanged. Overwriting
+that path with another frame refreshes its current settings and records the new
+CSV content hash; it does not create another history row. A failed automatic
+save retries the allocated destination, and an already saved reference is a
+no-op. Detector temperature and status belong to capture events rather than
+settings identity; a changing Andor temperature does not replicate calibration
+snapshots. WinSpec events link to a recorded previous acquisition instead of
+repeating its frame arrays.
 # Motion Sweep condition batches
 
 Motion Sweep supports an optional across-conditions run. Enter paired or
@@ -409,8 +514,11 @@ footer identifies which parts have pending changes and keeps Run disabled until
 they are applied or discarded. Invalid edits are highlighted with a reason.
 The compact and full previews identify draft versus applied sequences. An
 invalid draft cannot replace the applied plan with a runnable sequence.
-For drafts above 20,000 potential spectra, live expansion is deferred until
-Apply; both preview views explicitly identify the displayed applied sequence.
+For drafts above 20,000 loop combinations or potential spectra, live expansion
+is deferred until Apply; both preview views explicitly identify the displayed
+applied sequence. Filename previews use the same limit and ask for Apply rather
+than expanding a large draft while typing. Resolved previews are reused when
+their loop definitions, selections, and batch settings still match.
 Drag the divider between execution order and preview to adjust their space;
 the Apply/Discard and Run controls remain outside the scrolling content.
 

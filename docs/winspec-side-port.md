@@ -999,6 +999,59 @@ Offscreen UI delivery also includes debugger preparation, transfer and display;
 its timing is a different interval. Optics were a test fixture, so this acceptance
 establishes digital integrity, not optical equivalence between noisy exposures.
 
+#### Exposure duration eligibility update (2026-10-07)
+
+Start acceleration no longer rejects a recipe solely because exposure multiplied
+by accumulations exceeds one second. The earlier one-second envelope described
+the initial hardware validation range, rather than a constraint of initialization.
+For example, 800 ms x2 can now establish its own full Start baseline and then use
+combined acceleration when subsequent native state checks match. Changing exposure
+or accumulations still invalidates the baseline. Geometry, Free Run, native
+identity/state, temperature, watchdog and transfer/cleanup checks remain in place.
+
+Regression tests cover 800 ms x2, 1250 ms x1 and 5000 ms x2, including combined
+document retention and native arm/disarm ordering. The focused suite passed 150
+tests, and independent review found no issues. Real hardware acceleration at
+800 ms x2 remains unmeasured: the user requested direct integration without a
+hardware benchmark. The ordinary-path check at those settings gave
+2.370 s median request-to-receipt/cleanup and 0.770 s after subtracting the 1.600 s
+total exposure (five measured frames after one warmup).
+
+The prepared XP package is recorded in
+`tmp/winspec-exposure-limit-20261007/staging.json`. The updated manager and Python
+2.7 bytecode were directly installed in `C:\WinSpecRemote\start_acceleration`,
+with previous files backed up to `C:\WinSpecRemote\before-exposure-limit-20261007`.
+The installation receipt is `tmp/winspec-exposure-limit-20261007/installation.json`.
+The running service was not restarted and camera settings were not accessed by
+installation. Restart only the XP bridge to load the change; SpectralSweep itself
+does not require restart. If Start acceleration is not already selected, disconnect
+InGaAs, enable the existing option and reconnect. The first frame builds a baseline.
+
+#### Transient control-file read failure (2026-10-07)
+
+A live accelerated run stopped before opening frame 19 of its current resident
+session: reading `command-038.json` returned errno 13 (permission denied). The
+previous 19 frames had completed, and the failed command was subsequently readable.
+The record does not identify the process responsible for the access failure.
+The debugger restored thread state and detached, but the manager correctly latched
+recovery after the abnormal session termination; the idle native helper's import
+hooks remained in WinSpec. There was no pending native write or failed exposure.
+Evidence is retained under `tmp/winspec-failure-20261007/`.
+
+Command, acknowledgement and completed-frame readers now defer transient access
+or sharing errors for up to one second within the existing boundary timeout.
+This polling happens before command processing; commands and camera Starts are
+never repeated. Corrupt JSON, other I/O errors and persistent denial still fail.
+Published completed-frame evidence may be read after a normal idle debugger exit
+once the close acknowledgement was validated. Regression and focused checks:
+161 passed; independent reviewer: 43 passed, no remaining findings.
+
+For this retained failed session, restart both WinSpec and the XP bridge after
+stopping/disconnecting InGaAs in SpectralSweep. WinSpec process exit clears the
+retained native hooks. Keep the acceleration option enabled and reconnect InGaAs;
+SpectralSweep itself needs no restart. The control-file fix preserves acceleration
+and the removal of the one-second exposure gate.
+
 The formal lifecycle keeps one DLL, one native event and two remote allocations
 (DLL path and reusable CONTROL buffer) per owned WinSpec process. Successful
 retirement verifies debugger detach, durably archives native records and hashes,

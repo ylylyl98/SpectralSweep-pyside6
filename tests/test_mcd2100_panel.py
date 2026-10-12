@@ -1424,8 +1424,11 @@ class MCD2100PanelTests(unittest.TestCase):
         panel = MCD2100Panel(
             controller, worker_factory=WorkerFactory([]), optical_factory=lambda: object()
         )
-        self.addCleanup(lambda: panel.shutdown(100))
         self.addCleanup(lambda: controller.shutdown(1.0))
+        # unittest cleanups run in reverse order: stop the preparation while
+        # its controller owner can still finish accepted requests.
+        self.addCleanup(lambda: panel.shutdown(2000))
+        self.addCleanup(adapter.unblock)
         adapter.arm_gate("read")
         display = controller.read_display_snapshot_async(max_age_s=0, source="manual")
         deadline = time.monotonic() + 1.0
@@ -1441,7 +1444,10 @@ class MCD2100PanelTests(unittest.TestCase):
         self.assertFalse(any(name == "preflight" for name, _, _ in adapter.calls))
         adapter.unblock()
         deadline = time.monotonic() + 1.5
-        while panel.worker is None and panel._workflow_intent is not None and time.monotonic() < deadline:
+        # Launching the QThread publishes panel.worker before the owner has
+        # executed preflight; wait for that observable handoff result.
+        while (not any(name == "preflight" for name, _, _ in adapter.calls)
+               and time.monotonic() < deadline):
             self.app.processEvents()
             time.sleep(.002)
         self.assertIsNone(panel._workflow_intent)

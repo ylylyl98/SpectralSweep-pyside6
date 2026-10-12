@@ -53,12 +53,14 @@ def setup(tmp_path,limit=30):
                              counter=lambda c=itertools.count():next(c),clock=lambda:0.,frame_limit=limit)
     return manager,Owner,acquire,events,starts,created
 
-def test_baseline_unarmed_and_combined_start_retains_document_before_arm(tmp_path):
+@pytest.mark.parametrize('exposure',[500,800,5000])
+def test_baseline_unarmed_and_combined_start_retains_document_before_arm(tmp_path,exposure):
     m,Owner,acq,events,starts,created=setup(tmp_path)
-    assert m.capture(Owner(),settings(),'a'*32,acq)[0]['start_acceleration']['mode']=='baseline'
+    recipe=dict(settings(),exposure_ms=exposure)
+    assert m.capture(Owner(),recipe,'a'*32,acq)[0]['start_acceleration']['mode']=='baseline'
     assert 'arm' not in events and events[:2]==['install','baseline']
     boundary=len(events)
-    result=m.capture(Owner(),settings(),'a'*32,acq)
+    result=m.capture(Owner(),recipe,'a'*32,acq)
     assert result[0]['start_acceleration']['native_batch']=={'batches':5}
     assert events[boundary:]==['resident','open','retain','arm','retain','Start','disarm','close']
     m.release('a'*32)

@@ -38,8 +38,11 @@ class SetupSequenceDialog(QDialog):
         layout = QVBoxLayout(self)
         hint = QLabel(
             "Select setups in measurement order. Values in the same Group pair by position; "
-            "other Groups run all combinations. PIXIS uses Silicon CCD; WinSpec uses InGaAs. "
-            "Repeated setups are allowed."
+            "other Groups run all combinations. PIXIS and Andor Silicon use silicon detectors; "
+            "WinSpec and Andor InGaAs use InGaAs detectors. "
+            "Repeated setups are allowed. When MFF101 automatic routing is enabled, "
+            "each setup's light path is verified before measurement. "
+            "Set its position in Settings > MFF101 light paths."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)

@@ -1673,10 +1673,6 @@ class MCD2100Worker:
                                  "magnet_stop_requested": metadata.get("magnet_stop_requested", False)},
                         output={"metadata_file": metadata_path.name},
                     )
-                    # The cleanup event is part of the shared authoritative
-                    # record; refresh the retained compatibility projection
-                    # once after the terminal cleanup state is known.
-                    self._write_metadata(metadata_path, metadata)
                 except Exception:
                     pass
         csv_paths = metadata.get("batch_file_paths") or [str(csv_path)]

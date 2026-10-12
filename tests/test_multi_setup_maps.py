@@ -137,13 +137,15 @@ def test_validation_uses_actual_trimmed_axis_and_rejects_image():
         averaged.validate_spectrum()
 
 
-def test_real_controller_switches_pixis_winspec_and_keeps_temperature_paused(scan, tmp_path):
+def test_real_controller_switches_pixis_winspec_and_keeps_temperature_paused(scan, tmp_path, monkeypatch):
+    from app.devices import lightfield_optics
     from tests.test_megasweep_sequence import _params, _FakeSMUController
     from ui.megasweep_panel import _MegaSweepWorker
     ctrl, winspec, camera, live = scan
     optics = winspec.lightfield
     pixis_calls = []
     def configure(**kwargs):
+        lightfield_optics.ensure_output_route(optics, 'front')
         live['wavelength_nm'] = kwargs['center_nm']
         pixis_calls.append(kwargs)
         return kwargs
@@ -155,11 +157,24 @@ def test_real_controller_switches_pixis_winspec_and_keeps_temperature_paused(sca
         acquire=lambda: (np.array([649., 650., 651.]), np.ones(3)))
     ctrl._worker._parked['lightfield'] = (optics, pixis, {'backend': 'mock_lightfield'}, [])
     routes = []
-    ctrl._worker._route_selected_detector = lambda setup, *_args: routes.append(setup is optics)
+    def route(setup, requested, *, apply=True, **_):
+        target = 'FrontExit' if requested == 'front' else 'SideExit'
+        if apply:
+            if live['output_port'] != target:
+                routes.append(requested)
+            live['output_port'] = target
+        else:
+            assert live['output_port'] == target
+        return dict(live)
+    monkeypatch.setattr('app.devices.lightfield_optics.ensure_output_route', route)
+    monkeypatch.setattr('app.devices.winspec_adapter.ensure_output_route', route)
     p = _params(tmp_path)
     panel = MegaSweepPanel()
     try:
-        panel._optical_widget._load_dual_setup_recipe()
+        panel._optical_widget.set_conditions([
+            OpticalCondition(True, 'PIXIS', 650., 80., 4, 'lightfield', 'average'),
+            OpticalCondition(True, 'WinSpec', 1050., 250., 4, 'winspec_ingaas', 'device'),
+        ])
         p['optical_conditions'] = [condition.as_dict() for condition in panel._optical_widget.conditions()]
     finally:
         panel.close()
@@ -176,7 +191,7 @@ def test_real_controller_switches_pixis_winspec_and_keeps_temperature_paused(sca
         winspec_file = next(path for path in tmp_path.glob('*.csv') if 'WinSpec' in path.name)
         np.testing.assert_allclose(np.loadtxt(winspec_file, delimiter=',', skiprows=1)[:, -1], [122.25, 122.25])
         assert len(list(tmp_path.glob('*.csv'))) == 2
-        assert routes == [True, False, True, False]
+        assert routes == ['front', 'side', 'front', 'side']
     finally:
         ctrl.set_temperature_monitor_paused('megasweep', False)
 
@@ -226,3 +241,23 @@ def test_stop_during_average_discards_partial_point_and_skips_next_map(tmp_path)
     files = list(tmp_path.glob('*.csv'))
     assert len(files) == 1 and len(files[0].read_text().splitlines()) == 1
     assert '# Status: Stopped' in next(tmp_path.glob('*.meta.txt')).read_text()
+
+
+@pytest.mark.parametrize('backend', ['andor_si', 'andor_ingaas'])
+def test_andor_map_setup_can_be_selected_and_restored(backend):
+    from ui.megasweep_panel import _OpticalSequenceWidget
+    app = QApplication.instance() or QApplication([])
+    widget = _OpticalSequenceWidget()
+    restored = _OpticalSequenceWidget()
+    try:
+        combo = widget._table.cellWidget(0, 5)
+        index = combo.findData(backend)
+        assert index >= 0, 'Andor setup must be selectable for maps'
+        combo.setCurrentIndex(index)
+        saved = widget.raw_conditions()
+        assert saved[0]['backend'] == backend
+        restored.set_conditions(saved)
+        assert restored.conditions()[0].backend == backend
+    finally:
+        widget.close()
+        restored.close()

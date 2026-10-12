@@ -97,8 +97,21 @@ def test_uncertain_detach_blocks_all_future_capture_and_release(tmp_path):
 
 def test_unsupported_recipe_does_not_attach(tmp_path):
     m,e,acq,events,captures,_=setup_manager(tmp_path)
-    result=m.capture(e,settings(5000.,2),'a'*32,acq)
+    recipe=dict(settings(),roi_enabled=True)
+    result=m.capture(e,recipe,'a'*32,acq)
     assert result[0]['start_acceleration']['mode']=='fallback' and not events and len(captures)==1
+
+
+@pytest.mark.parametrize('exposure,accumulations',[(800.,2),(1250.,1),(5000.,2)])
+def test_longer_exposure_establishes_baseline_then_accelerates(tmp_path,exposure,accumulations):
+    m,e,acq,events,captures,_=setup_manager(tmp_path)
+    recipe=settings(exposure,accumulations)
+    results=[m.capture(e,recipe,'a'*32,acq) for _ in range(2)]
+    assert [r[0]['start_acceleration']['mode'] for r in results]==['baseline','optimized']
+    assert all(r[1]==b'raw' for r in results) and len(captures)==2
+    assert events.count('baseline')==1 and events.count('resident')==1
+    m.release('a'*32)
+    assert m.profile is None
 
 
 def test_ineligible_completed_baseline_returns_full_frame_without_second_start(tmp_path):

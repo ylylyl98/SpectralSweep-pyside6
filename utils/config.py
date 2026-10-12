@@ -150,6 +150,16 @@ class PM100DConfig:
 
 
 @dataclass
+class MFF101Config:
+    serial_number: str = ""
+    position_1_path: str = "Andor"
+    position_2_path: str = "LightField"
+    auto_route: bool = True
+    andor_position: int = 1
+    lightfield_position: int = 2
+
+
+@dataclass
 class NDCalibrationConfig:
     profile_name: str = "default"
     wavelength_nm: Optional[float] = None
@@ -422,6 +432,7 @@ class AppConfig:
     ramp: RampConfig = field(default_factory=RampConfig)
     filename: FilenameConfig = field(default_factory=FilenameConfig)
     pm100d: PM100DConfig = field(default_factory=PM100DConfig)
+    mff101: MFF101Config = field(default_factory=MFF101Config)
     nd_calibration: NDCalibrationConfig = field(default_factory=NDCalibrationConfig)
     bfp_naming: BFPNamingConfig = field(default_factory=BFPNamingConfig)
     bfp_rc: BFPRCConfig = field(default_factory=BFPRCConfig)
@@ -534,6 +545,7 @@ class AppConfig:
             _update_dataclass(self.rotation.rot2, rotation_data["rot2"])
         _update_dataclass(self.stage,    data.get("stage", {}))
         _update_dataclass(self.imaging_stage, data.get("imaging_stage", {}))
+        _update_dataclass(self.mff101, data.get("mff101", {}))
         _update_dataclass(self.magnet,   data.get("magnet", {}))
         # Accept the names used by early 2100 prototypes as well as the
         # canonical names written by current versions.

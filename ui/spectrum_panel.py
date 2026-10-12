@@ -81,8 +81,10 @@ def _wavelength_energy_text(value) -> str:
         wavelength = float(value)
     except (TypeError, ValueError):
         return "Not read"
-    if not np.isfinite(wavelength) or wavelength <= 0:
+    if not np.isfinite(wavelength) or wavelength < 0:
         return "Not read"
+    if wavelength == 0:
+        return "0 nm (zero order)"
     return f"{wavelength:g} nm / {PHOTON_EV_NM / wavelength:.4f} eV"
 
 
@@ -336,7 +338,8 @@ class SpectrumPanel(QWidget):
         settings_row = QHBoxLayout()
         optics_row.addWidget(QLabel("Requested center:"), 0, 0)
         self._center = QDoubleSpinBox()
-        self._center.setRange(200.0, 2000.0)
+        self._center.setRange(0.0, 2000.0)
+        self._center.setToolTip("0 nm selects zero order for imaging / alignment.")
         self._center.setDecimals(1)
         self._center.setSingleStep(1.0)
         self._center.setSuffix(" nm")
@@ -346,15 +349,16 @@ class SpectrumPanel(QWidget):
         optics_row.addWidget(QLabel("Requested energy:"), 1, 0)
         self._energy = QDoubleSpinBox()
         self._energy.setDecimals(6)
-        self._energy.setRange(PHOTON_EV_NM / self._center.maximum(),
-                              PHOTON_EV_NM / self._center.minimum())
+        self._energy.setRange(0.0, PHOTON_EV_NM / (10 ** -self._center.decimals()))
+        self._energy.setSpecialValueText("N/A (zero order)")
         self._energy.setSingleStep(0.01)
         self._energy.setKeyboardTracking(False)
         self._energy.setSuffix(" eV")
-        self._energy.setMaximumWidth(125)
+        self._energy.setMinimumWidth(150)
+        self._energy.setMaximumWidth(180)
         self._energy.setAccessibleName("Requested photon energy")
-        self._energy.setToolTip("Linked to wavelength: E (eV) = 1239.841984 / wavelength (nm).")
-        self._energy.setValue(PHOTON_EV_NM / self._center.value())
+        self._energy.setToolTip("Linked to wavelength: E (eV) = 1239.841984 / wavelength (nm). No photon energy at zero order.")
+        self._energy.setValue(PHOTON_EV_NM / self._center.value() if self._center.value() > 0 else 0.0)
         optics_row.addWidget(self._energy, 1, 1)
         optics_row.addWidget(QLabel("Grating:"), 2, 0)
         self._grating = QComboBox()
@@ -659,10 +663,12 @@ class SpectrumPanel(QWidget):
 
     def _sync_energy_from_wavelength(self, wavelength):
         with QSignalBlocker(self._energy):
-            self._energy.setValue(PHOTON_EV_NM / wavelength)
+            self._energy.setValue(PHOTON_EV_NM / wavelength if wavelength > 0 else 0.0)
+        self._refresh_action_controls()
 
     def _sync_wavelength_from_energy(self, energy):
-        self._center.setValue(PHOTON_EV_NM / energy)
+        if energy > 0:
+            self._center.setValue(PHOTON_EV_NM / energy)
         # Show the energy of the rounded, canonical wavelength sent to hardware.
         self._sync_energy_from_wavelength(self._center.value())
 
@@ -969,7 +975,8 @@ class SpectrumPanel(QWidget):
     def _set_spectrum_axis(self, snapshot):
         identity = (snapshot or {}).get('instrument_identity', {})
         self._calibration_status.setText('Displayed wavelength axis: ' +
-            ('pixels — not calibrated' if identity.get('axis_unit') == 'pixel' else 'nm') +
+            ('pixels — zero order' if identity.get('spectrograph_mode') == 'zero_order' else
+             'pixels — not calibrated' if identity.get('axis_unit') == 'pixel' else 'nm') +
             ' · Calibration settings are in the Calibration tab')
         self._spec_plot.set_axis_unit(identity.get('axis_unit', 'nm'),
             reverse_pixels=(identity.get('backend') == 'winspec_ingaas'
@@ -1266,10 +1273,28 @@ class SpectrumPanel(QWidget):
         method = getattr(self._ctrl, "abort_acquisition", None)
         try:
             if callable(method) and method():
-                self._status_lbl.setText("Cancelling acquisition…")
+                self._finish_cancelled_acquisition()
+                self._show_stop_result(getattr(self._ctrl, "acquisition_abort_error", None))
         except Exception as exc:
             self._status_lbl.setText(f"Stop not confirmed: {exc}")
         self._abort_btn.setEnabled(False)
+
+    def _finish_cancelled_acquisition(self) -> None:
+        self._continuous_mode = None
+        self._pending_acquisition = None
+        self._pending_acquisition_snapshot = None
+        self._add_pending = False
+        self._calibration_capture_pending = False
+        if self._wavelength_dialog is not None and self._wavelength_dialog.broad_dialog is not None:
+            self._wavelength_dialog.broad_dialog.stop_collection('Collection stopped: acquisition cancelled')
+        # Cancellation produces no frame/error callback. Finish calibration via
+        # its existing signal, then release Spectrum ownership and controls.
+        self._finish_one_shot()
+
+    def _show_stop_result(self, diagnostic=None) -> None:
+        self._status_lbl.setText(
+            f"Acquisition cancelled; detector Stop not confirmed: {diagnostic}" if diagnostic else "Stopped")
+        self._status_lbl.setToolTip(str(diagnostic or ""))
 
     def _start_continuous(self, mode: str) -> None:
         if not self._connected or self._continuous_mode is not None:
@@ -1290,13 +1315,18 @@ class SpectrumPanel(QWidget):
         self._continuous_mode = None
         self._pending_acquisition = None
         method = getattr(self._ctrl, "abort_acquisition", None)
-        if was_running and callable(method):
-            method()
-        self._abort_btn.setEnabled(False)
-        self._stop_btn.setEnabled(False)
-        self._andor_controls.set_controls_locked(False)
-        self._set_action_controls_enabled(self._connected)
-        self._status_lbl.setText("Stopped" if was_running else "Ready")
+        diagnostic = None
+        try:
+            if was_running and callable(method):
+                method()
+                diagnostic = getattr(self._ctrl, "acquisition_abort_error", None)
+        except Exception as exc:
+            diagnostic = str(exc)
+        self._finish_cancelled_acquisition()
+        if was_running:
+            self._show_stop_result(diagnostic)
+        else:
+            self._status_lbl.setText("Ready")
 
     def _queue_next_continuous(self, completed_mode: str) -> None:
         if self._continuous_mode != completed_mode or not self._connected:
@@ -1351,7 +1381,7 @@ class SpectrumPanel(QWidget):
         self._run_1d_btn.setEnabled(enabled)
         self._run_2d_btn.setEnabled(enabled and self._supports_2d)
         self._center.setEnabled(enabled)
-        self._energy.setEnabled(enabled)
+        self._energy.setEnabled(enabled and self._center.value() > 0)
         self._enable_optics()
         self._exposure.setEnabled(enabled)
         self._accumulations.setEnabled(enabled)
@@ -1483,6 +1513,9 @@ class SpectrumPanel(QWidget):
                         self._wavelength_dialog.broad_dialog.stop_collection(f'Save failed: {exc}')
                     self._wavelength_dialog.result.setText(f'Raw capture could not be saved: {exc}')
             wl, cts = self._apply_winspec_calibration(frame, wl, cts)
+        if self._sync_frame_axis(self._last_acquisition_snapshot):
+            if self._last_acquisition_snapshot['instrument_identity'].get('backend') != 'winspec_ingaas':
+                wl = np.arange(np.asarray(cts).size, dtype=float)
         self._last_data_kind = "spectrum_1d"
         self._last_wavelength = np.asarray(wl, dtype=float).copy()
         self._last_data = np.asarray(cts, dtype=float).copy()
@@ -1506,6 +1539,7 @@ class SpectrumPanel(QWidget):
             self._pending_acquisition_snapshot or self._acquisition_settings_snapshot or {}
         ))
         self._last_acquisition_snapshot.setdefault("instrument_identity", copy.deepcopy(getattr(self._ctrl, "identity", {}) or {}))
+        self._sync_frame_axis(self._last_acquisition_snapshot)
         self._last_acquisition_snapshot.setdefault("sample_id", str(getattr(cfg.session, "sample_id", "") or ""))
         self._last_acquisition_snapshot["completed_utc"] = datetime.now(timezone.utc).isoformat()
         self._update_source_label()
@@ -1520,6 +1554,24 @@ class SpectrumPanel(QWidget):
         self._queue_next_continuous("2d")
 
     # ── direct update (called by sweep loop without going through controller) ─
+
+    @staticmethod
+    def _sync_frame_axis(snapshot):
+        center = snapshot.get("center_nm")
+        identity = dict(snapshot.get("instrument_identity") or {})
+        if center == 0:
+            identity.update(axis_unit="pixel", spectrograph_mode="zero_order", calibration_status="zero_order")
+            snapshot["instrument_identity"] = identity
+            return True
+        if center is not None and center > 0 and identity.get("spectrograph_mode") == "zero_order":
+            # The request may freeze identity before hardware leaves zero order.
+            identity["spectrograph_mode"] = "wavelength"
+            if identity.get("backend") != "winspec_ingaas":
+                identity["axis_unit"] = "nm"
+            if identity.get("calibration_status") == "zero_order":
+                identity.pop("calibration_status")
+            snapshot["instrument_identity"] = identity
+        return False
 
     def create_calibration_page(self):
         from ui.wavelength_calibration_dialog import WavelengthCalibrationDialog
@@ -1651,6 +1703,8 @@ class SpectrumPanel(QWidget):
         self._last_acquisition_snapshot['raw_detector'] = copy.deepcopy(frame)
         identity = self._last_acquisition_snapshot['instrument_identity']
         identity.update(axis_unit='pixel', calibration_status='uncalibrated')
+        if self._last_acquisition_snapshot.get('center_nm') == 0:
+            return wl, cts
         if self._use_winspec_nm.isChecked():
             for record in reversed(cfg.lf6.winspec_wavelength_calibrations):
                 try:
@@ -1752,7 +1806,8 @@ class SpectrumPanel(QWidget):
                       *, name: Optional[str] = None, color: Optional[str] = None,
                       source: str = "acquired", path: Optional[str | Path] = None,
                       settings_snapshot: Optional[dict] = None,
-                      metadata: Optional[dict] = None, auto_save: bool = True) -> dict:
+                      metadata: Optional[dict] = None, auto_save: bool = True,
+                      axis_unit: Optional[str] = None) -> dict:
         wl = np.asarray(wavelength, dtype=float).copy()
         raw = np.asarray(counts, dtype=float).copy()
         if wl.ndim != 1 or raw.ndim != 1 or wl.size != raw.size or not wl.size:
@@ -1777,7 +1832,7 @@ class SpectrumPanel(QWidget):
             "path": str(Path(path).resolve()) if path is not None else None,
             "metadata": dict(metadata or (settings_snapshot or {}).get("metadata_context", {})),
             "settings_snapshot": copy.deepcopy(frozen_settings),
-            "axis_unit": frozen_settings.get("instrument_identity", {}).get("axis_unit", "nm"),
+            "axis_unit": axis_unit or frozen_settings.get("instrument_identity", {}).get("axis_unit", "nm"),
             "sample_id": str((settings_snapshot or {}).get("sample_id") or getattr(cfg.session, "sample_id", "") or ""),
             "save_root": str((settings_snapshot or {}).get("save_root") or self._spectrum_output_root()),
             "observed_readback": (dict(frozen_settings.get("actual_readback", {}))
@@ -1788,7 +1843,7 @@ class SpectrumPanel(QWidget):
         }
         self._references.append(ref)
         if self._last_data is None:
-            self._set_spectrum_axis(ref['settings_snapshot'])
+            self._set_spectrum_axis({"instrument_identity": {"axis_unit": ref["axis_unit"]}})
         self._spec_plot.set_reference(reference_id, wl, self._display_counts(ref), ref["color"], True, ref["axis_unit"])
         self._add_reference_item(ref)
         if auto_save and source == "acquired":
@@ -1814,14 +1869,21 @@ class SpectrumPanel(QWidget):
         stem = f"spectrum_{stamp}"
         candidate = folder / f"{stem}.csv"
         sequence = 1
-        while candidate.exists() or candidate.with_name(f"{candidate.stem}.experiment.metadata.json").exists():
+        while (candidate.exists()
+               or candidate.with_name(f"{candidate.stem}.experiment.metadata.json").exists()
+               or candidate.with_name(f"{candidate.name}.experiment.metadata.json").exists()):
             candidate = folder / f"{stem}_{sequence:02d}.csv"
             sequence += 1
         return candidate
 
     def _auto_save_reference(self, ref: dict) -> bool:
         try:
-            output = self._auto_save_path(ref)
+            if ref.get("saved"):
+                return True
+            output = Path(ref["path"]) if ref.get("path") else self._auto_save_path(ref)
+            # A metadata failure can occur after the CSV was written. Keep its
+            # destination for retry instead of allocating another raw file.
+            ref["path"] = str(output)
             metadata_path = self._save_spectrum_data(
                 ref["wavelength"], ref["counts"], output,
                 settings_snapshot=ref.get("settings_snapshot"),
@@ -1858,7 +1920,7 @@ class SpectrumPanel(QWidget):
             axis_unit = "pixel" if "pixel" in [item.strip().lower() for item in header] else "nm"
             loaded.append(self.add_reference(
                 wavelengths, counts, source="loaded", path=path,
-                settings_snapshot={"instrument_identity": {"axis_unit": axis_unit}},
+                settings_snapshot={}, axis_unit=axis_unit,
                 metadata=self._load_adjacent_metadata(path),
                 auto_save=False,
             ))
@@ -1897,9 +1959,10 @@ class SpectrumPanel(QWidget):
     def _load_adjacent_metadata(path: Path) -> dict:
         """Load a matching experiment sidecar when one records this CSV."""
         try:
-            for sidecar in path.parent.glob("*.experiment.metadata.json"):
-                with sidecar.open(encoding="utf-8") as stream:
-                    payload = json.load(stream)
+            from app.experiment_metadata import ExperimentMetadataService
+            for sidecar in sorted(path.parent.glob("*.experiment.metadata.json"),
+                                  key=lambda candidate: candidate.stat().st_mtime_ns, reverse=True):
+                payload = ExperimentMetadataService.load_metadata(sidecar)
                 files = payload.get("files", []) if isinstance(payload, dict) else []
                 if any(Path(str(item.get("path", ""))).name == path.name for item in files if isinstance(item, dict)):
                     return {"metadata_path": str(sidecar), "experiment": payload}
@@ -1922,6 +1985,7 @@ class SpectrumPanel(QWidget):
                             observed_readback: Optional[dict] = None) -> Path:
         output = Path(output).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
+        output_existed = output.exists()
         axis_identity = (settings_snapshot or {}).get("instrument_identity", getattr(self._ctrl, "identity", {}) or {})
         axis_unit = axis_identity.get("axis_unit", "nm")
         with output.open("w", newline="", encoding="utf-8") as stream:
@@ -1929,7 +1993,7 @@ class SpectrumPanel(QWidget):
             writer.writerow(("pixel" if axis_unit == "pixel" else "wavelength_nm", "intensity_counts"))
             writer.writerows(zip(np.asarray(wavelength, dtype=float).tolist(),
                                  np.asarray(counts, dtype=float).tolist()))
-        from app.experiment_metadata import ExperimentMetadataService
+        from app.experiment_integration import persist_output_snapshot
         snapshot = dict(settings_snapshot or {"available": False, "source": "unknown"})
         frozen_provenance = bool(settings_snapshot is not None and (
             "instrument_identity" in snapshot or "instrument_inventory" in snapshot
@@ -1969,14 +2033,6 @@ class SpectrumPanel(QWidget):
         effective_sample_id = (sample_id if sample_id is not None else
                                (snapshot.get("sample_id") if frozen_provenance else
                                 str(getattr(cfg.session, "sample_id", "") or "")))
-        run = ExperimentMetadataService(output.parent).begin(
-            "spectrum_preview", device_id, output_dir=output.parent,
-            settings=settings,
-            instruments=inventory,
-            sample_id=str(effective_sample_id or "") or None,
-        )
-        run.register_file(output, role="raw", kind="spectrum_1d",
-                          details={"shape": [int(np.asarray(counts).size)], "source": source})
         context = (copy.deepcopy(snapshot.get("metadata_context", {}))
                    if frozen_provenance and metadata_context is None
                    else (self._available_metadata_context() if metadata_context is None
@@ -1984,11 +2040,13 @@ class SpectrumPanel(QWidget):
         context.update(dict(metadata_context or {}))
         context.setdefault("sample_id", str(effective_sample_id or "") or None)
         context.setdefault("sidebar", {"available": False, "reason": "No sidebar snapshot supplied"})
-        run.metadata["context"] = context
-        run.record_export({"path": output.name, "kind": "spectrum_1d"},
-                          output={"file": output.name})
-        run.complete({"shape": [int(np.asarray(counts).size)], "source": source})
-        return run.path
+        return persist_output_snapshot(
+            output, experiment_type="spectrum_preview", device_id=device_id,
+            settings=settings, instruments=inventory, context=context,
+            sample_id=str(effective_sample_id or "") or None, kind="spectrum_1d",
+            summary={"shape": [int(np.asarray(counts).size)], "source": source},
+            reuse_legacy=output_existed,
+        )
 
     def _capture_readbacks(self) -> dict:
         controller = self._ctrl
@@ -2071,9 +2129,10 @@ class SpectrumPanel(QWidget):
                 source="current", reference_name=None,
             )
         else:
+            output_existed = output.exists()
             np.savetxt(output, last_data, delimiter=",")
             # Keep 2D behavior and existing output format unchanged.
-            from app.experiment_metadata import ExperimentMetadataService
+            from app.experiment_integration import persist_output_snapshot
             settings = {"display_kind": last_kind,
                         "acquisition_time_snapshot": (settings_snapshot if settings_snapshot is not None
                                                        else self._last_acquisition_snapshot),
@@ -2082,14 +2141,11 @@ class SpectrumPanel(QWidget):
                                         "source": "acquired_data_axis"}}
             identity = getattr(self._ctrl, "identity", {}) or {}
             device_id = str(identity.get("serial_number") or identity.get("model") or "spectrum")
-            run = ExperimentMetadataService(output.parent).begin(
-                "spectrum_preview", device_id, output_dir=output.parent,
+            persist_output_snapshot(
+                output, experiment_type="spectrum_preview", device_id=device_id,
                 settings=settings,
                 instruments=instrument_inventory(lightfield=self._ctrl),
+                kind=last_kind, summary={"shape": list(last_data.shape)},
+                reuse_legacy=output_existed,
             )
-            run.register_file(output, role="raw", kind=last_kind,
-                              details={"shape": list(last_data.shape)})
-            run.record_export({"path": output.name, "kind": last_kind},
-                              output={"file": output.name})
-            run.complete({"shape": list(last_data.shape)})
         return output

@@ -4,8 +4,9 @@ Connect LightField/PIXIS first, then WinSpec using the same LightField spectrogr
 Keep both sessions connected. WinSpec needs a matching saved wavelength calibration.
 The sequence only selects existing connections; it never starts a second LightField instance.
 
-In 2D Sweep, click **Load PIXIS + WinSpec recipe** in the optical condition editor.
-This replaces only the optical rows, leaving the voltage grid and timing intact:
+In 2D Sweep, use **Add** in the optical condition editor to create one row per
+setup. Choose each row's **Setup**, then edit its center, exposure, frames and
+combination mode. For example, configure these two rows:
 
 | Setup | Center | Exposure per frame | Frames | Combine |
 | --- | --- | --- | --- | --- |
@@ -24,7 +25,7 @@ WinSpec defaults to **Device EPF**: four internal accumulations return one frame
 per gate point, and SpectralSweep divides the acquired sum by the verified
 accumulation count to store mean counts per exposure. This reduces repeated
 document/file/transfer overhead. **Average** remains selectable; an explicitly
-saved Average recipe is restored as saved. PIXIS retains Average in this recipe.
+saved Average recipe is restored as saved. PIXIS uses Average in this example.
 
 Before any gate writes, every selected recipe is configured and Average rows receive one
 single-exposure validation capture (not saved as a map point or included in the average).

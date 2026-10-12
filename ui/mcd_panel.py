@@ -3266,7 +3266,7 @@ class MCDPanel(QWidget):
             "gate_entry_expansion": self._gate_entry_expansion.currentData(),
         }
 
-    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+    def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
         allowed = {
             "start_t": lambda v: self._start_t.setValue(float(v)),
             "stop_t": lambda v: self._stop_t.setValue(float(v)),
@@ -3279,6 +3279,8 @@ class MCDPanel(QWidget):
             "initial_voltage_settle_s": lambda v: self._initial_voltage_settle.setValue(float(v)),
             "voltage_settle_s": lambda v: self._voltage_settle.setValue(float(v)),
         }
+        if keys_only:
+            return {"supported_keys": list(allowed)}
         skipped = []
         for key, value in dict(settings or {}).items():
             setter = allowed.get(key)

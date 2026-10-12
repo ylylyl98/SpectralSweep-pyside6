@@ -111,7 +111,7 @@ def _input_identity(path: str | Path, role: str) -> dict:
     # in the portable sidecar settings.
     try:
         for sidecar in sorted(candidate.parent.glob("*.experiment.metadata.json")):
-            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            data = ExperimentMetadataService.load_metadata(sidecar)
             listed = data.get("files", []) if isinstance(data, dict) else []
             if any(Path(str(item.get("path", ""))).name == candidate.name
                    and str(item.get("role", "")) in {"raw", "processed"}
@@ -130,21 +130,12 @@ def _frozen_input(run, path: str | Path, identity: dict, kind: str) -> None:
     """Register an input while retaining the compute-time content identity."""
     # Keep the historical ``metadata`` file role for compatibility while the
     # explicit input_role records whether this was sample or background.
-    portable = run.register_file(
+    run.register_file(
         path, role="metadata", kind=kind, external=True,
         frozen_identity=identity,
         details={"input_role": identity.get("role"),
                  "parent_experiment_id": identity.get("parent_experiment_id")},
     )
-    # ``register_file`` returns the exact registration.  Do not look it up by
-    # basename: sample and background files commonly share one, and the source
-    # can be replaced after compute has started.
-    if portable:
-        for item in run.metadata.get("files", []):
-            if item.get("path") == portable:
-                item.setdefault("input_role", identity.get("role"))
-                break
-        run._write()
 
 
 def _make_png_size_combo() -> QComboBox:
@@ -373,6 +364,9 @@ class _AcquireWorker(QObject):
             if spec is None:
                 raise RuntimeError("LF6 not connected.")
             setup = getattr(spec, "setup", spec)
+            ensure_path = getattr(self._ctrl, "ensure_light_path", None)
+            if callable(ensure_path):
+                ensure_path()
             if self._auto_apply:
                 self.status.emit("Applying settings...")
                 prepare = getattr(self._ctrl, "configure_for_acquisition", None)
@@ -852,8 +846,10 @@ class _BRCWidget(QWidget):
                     pass
             self._info_lbl.setText(f"Save failed: {exc}")
 
-    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+    def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
         allowed = {"scale": lambda v: self._scale_spin.setValue(float(v)), "mode": lambda v: self._mode_combo.setCurrentText(str(v))}
+        if keys_only:
+            return {"supported_keys": list(allowed)}
         skipped = []
         for key, value in dict(settings or {}).items():
             if key not in allowed:
@@ -1219,8 +1215,10 @@ class _FRCWidget(QWidget):
                     pass
             self._info_lbl.setText(f"Save failed: {exc}")
 
-    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+    def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
         allowed = {"calculation": lambda v: self._calc_combo.setCurrentText(str(v))}
+        if keys_only:
+            return {"supported_keys": list(allowed)}
         skipped = []
         for key, value in dict(settings or {}).items():
             if key not in allowed:
@@ -1581,11 +1579,11 @@ class BFPPanel(QWidget):
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
         }
 
-    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+    def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
         if self._tabs.currentIndex() == 1:
-            return self._brc.apply_saved_experiment_settings(settings)
+            return self._brc.apply_saved_experiment_settings(settings, keys_only=keys_only)
         if self._tabs.currentIndex() == 2:
-            return self._frc.apply_saved_experiment_settings(settings)
+            return self._frc.apply_saved_experiment_settings(settings, keys_only=keys_only)
         allowed = {
             "center_nm": lambda v: self._center_spin.setValue(float(v)),
             "exposure_ms": lambda v: self._exp_spin.setValue(float(v)),
@@ -1593,6 +1591,8 @@ class BFPPanel(QWidget):
             "repeat": lambda v: self._repeat_spin.setValue(int(v)),
             "roi_mode": lambda v: self._roi_combo.setCurrentText(str(v)),
         }
+        if keys_only:
+            return {"supported_keys": list(allowed)}
         skipped = []
         for key, value in dict(settings or {}).items():
             setter = allowed.get(key)

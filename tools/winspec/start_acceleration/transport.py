@@ -1,7 +1,7 @@
 """Hidden, bounded debugger child. No camera Start is issued by this transport."""
 import hashlib,json,os,subprocess,sys,time
 from .native_identity import modules
-from .resident_protocol import publish,analyze_light
+from .resident_protocol import PublishedReader,READ_PENDING,publish,analyze_light
 from .experiment_analysis import analyze_trace
 from .experiment_state import BaselineIneligible
 from .winspec_debug_trace import save
@@ -32,6 +32,7 @@ class Transport(object):
     def __init__(self,output,baseline=None,frame_limit=30,native=None):
         self.output=output;self.baseline=baseline;self.frame_limit=frame_limit
         self.child=None;self.detached=True;self.trace=None;self.command_seq=0
+        self.file_reader=PublishedReader(clock=clock)
         self.native=native
 
     def start(self):
@@ -92,14 +93,18 @@ class Transport(object):
                 raise Unavailable('Native original-frame ancestry not observed in full baseline')
         return dict(pid=self.trace['pid'],modules=self.modules,programs=a['programs'],start_begin=begin,start_end=end)
 
+    def read_boundary_file(self,path,deadline,require_running=True):
+        while True:
+            if require_running and not self.running() or clock()>deadline:raise RuntimeError('Debugger boundary acknowledgement missing')
+            value=self.file_reader.read(path)
+            if value is not READ_PENDING:return value
+            time.sleep(.005)
+
     def command(self,value,expected):
         if not self.running():raise RuntimeError('Debugger coverage ended before frame boundary')
         publish(os.path.join(self.output,'command-%03d.json'%self.command_seq),value)
-        path=os.path.join(self.output,'ack-%03d.json'%self.command_seq);deadline=clock()+5
-        while not os.path.isfile(path):
-            if not self.running() or clock()>deadline:raise RuntimeError('Debugger boundary acknowledgement missing')
-            time.sleep(.005)
-        with open(path,'rb') as handle:ack=json.load(handle)
+        path=os.path.join(self.output,'ack-%03d.json'%self.command_seq)
+        ack=self.read_boundary_file(path,clock()+5)
         if not self.running() or ack['status']!=expected or ack['frame_id']!=value['frame_id']:
             raise RuntimeError('Debugger boundary acknowledgement differs')
         self.command_seq+=1;return ack
@@ -109,7 +114,9 @@ class Transport(object):
     def close_frame(self,index,begin,end):
         result=self.command(dict(op='close',frame_id=index,start_begin=begin,start_end=end),'closed')['analysis']
         # Independent parent-side validation of the durable child evidence.
-        with open(os.path.join(self.output,'frame-%03d.json'%index),'rb') as handle:evidence=json.load(handle)
+        # A validated close ends coverage. Idle expiry may safely detach while
+        # the parent reads its already-published completed-frame evidence.
+        evidence=self.read_boundary_file(os.path.join(self.output,'frame-%03d.json'%index),clock()+5,require_running=False)
         actual=analyze_light(evidence['trace'],begin,end,self.modules,self.baseline,allow_fallback=True)
         if result!=actual:raise RuntimeError('Parent/child frame decisions differ')
         if self.native is not None:

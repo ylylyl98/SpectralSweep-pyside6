@@ -7,10 +7,111 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import hashlib
 from typing import Any, Iterable, Mapping, Optional
 
-from .experiment_metadata import ExperimentMetadataService, ExperimentRun
+from .experiment_metadata import (
+    ExperimentMetadataService, ExperimentRun, METADATA_SCHEMA_VERSION,
+    _jsonable, _portable_settings, _sha256, utc_now,
+)
 
+
+def _raw_output_paths(metadata: Mapping[str, Any]) -> set[str]:
+    files = metadata.get("files", [])
+    if not isinstance(files, list) or any(not isinstance(item, Mapping) for item in files):
+        raise ValueError("Invalid output metadata file list")
+    paths = [item.get("path") for item in files if item.get("role") == "raw"]
+    if any(not isinstance(path, str) for path in paths):
+        raise ValueError("Invalid output metadata file path")
+    return set(paths)
+
+
+def persist_output_snapshot(
+    output_file: str | Path, *, experiment_type: str, device_id: str,
+    settings: Mapping[str, Any], instruments: Iterable[Mapping[str, Any]] = (),
+    context: Optional[Mapping[str, Any]] = None, sample_id: Optional[str] = None,
+    kind: str = "data", summary: Optional[Mapping[str, Any]] = None,
+    reuse_legacy: bool = False,
+) -> Path:
+    """Own one current metadata record per exported output path.
+
+    An unchanged export is a no-op. Overwriting the output refreshes its one
+    record and journals the new content hash, rather than leaving multiple
+    acquisition sidecars claiming to describe the same mutable file.
+    """
+    output = Path(output_file).expanduser().resolve()
+    service = ExperimentMetadataService(output.parent)
+    requested = _portable_settings(settings, output.parent)
+    inventory = _jsonable(list(instruments))
+    context = _jsonable(dict(context or {}))
+    summary = _jsonable(dict(summary or {}))
+    digest = _sha256(output)
+    if digest is None:
+        raise OSError(f"Cannot hash exported output: {output}")
+    signature = hashlib.sha256(json.dumps(
+        {"file_sha256": digest, "settings": requested, "instruments": inventory,
+         "context": context, "sample_id": sample_id, "device_id": device_id,
+         "kind": kind, "summary": summary},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    sidecar = output.with_name(f"{output.name}.experiment.metadata.json")
+    if reuse_legacy and not sidecar.exists():
+        # Reuse the most recent matching UUID sidecar from older versions.
+        for candidate in sorted(output.parent.glob("*.experiment.metadata.json"),
+                                key=lambda path: path.stat().st_mtime_ns, reverse=True):
+            try:
+                old = service.load_metadata(candidate)
+                if old.get("experiment_type") != experiment_type:
+                    continue
+                if _raw_output_paths(old) == {output.name}:
+                    sidecar = candidate
+                    break
+            except (OSError, ValueError, TypeError):
+                continue
+    if sidecar.exists():
+        old = service.load_metadata(sidecar)
+        if old.get("experiment_type") != experiment_type:
+            raise ValueError("Output metadata belongs to another experiment type")
+        raw_paths = _raw_output_paths(old)
+        if raw_paths and raw_paths != {output.name}:
+            raise ValueError("Output metadata belongs to another output file")
+        if old.get("export_signature") == signature and old.get("status") == "completed":
+            return sidecar
+    run = service.begin(experiment_type, device_id, metadata_path=sidecar,
+                        settings=requested, instruments=inventory, sample_id=sample_id,
+                        allow_post_completion=True)
+    with run._lock:
+        run.metadata["metadata_schema"] = METADATA_SCHEMA_VERSION
+        run.metadata["device_id"] = device_id
+        run.metadata["device"] = {"device_id": device_id, **({"sample_id": sample_id} if sample_id else {})}
+        run.metadata["settings"]["requested"] = requested
+        run.metadata["settings"]["loadable"] = service.loadable_settings(requested)
+        run.metadata["instruments"] = inventory
+        run.metadata["context"] = context
+        run.metadata["export_signature"] = signature
+        run._register_file(output, role="raw", kind=kind, details={"sha256": digest, **summary})
+        run._register_event_file(persist=False)
+        recorded = run.record_export({"path": output.name, "kind": kind, "sha256": digest},
+                                     output={"file": output.name})
+        if recorded is None:
+            raise RuntimeError("Export metadata could not be durably recorded")
+        if run._terminal:
+            if run.metadata.get("metadata_status") == "degraded":
+                raise RuntimeError("Export metadata is degraded")
+            run.metadata["status"] = "completed"
+            run.metadata.pop("error", None)
+            run.metadata.pop("cancellation_reason", None)
+            run.metadata["summary"] = summary
+            run.metadata["completed_utc"] = utc_now()
+            run.metadata["completed_at"] = run.metadata["completed_utc"]
+            run.metadata["result"] = {"status": "completed", "summary": summary,
+                                      "error": None, "cancellation": None}
+            run._write()
+        else:
+            result = run.complete(summary)
+            if result["status"] != "completed":
+                raise RuntimeError("Export metadata finalization failed")
+    return run.path
 
 def begin_output_metadata(
     output_file: str | Path,
@@ -105,4 +206,4 @@ def finalize_output_metadata(
     return run.path
 
 
-__all__ = ["begin_output_metadata", "finalize_output_metadata"]
+__all__ = ["begin_output_metadata", "finalize_output_metadata", "persist_output_snapshot"]

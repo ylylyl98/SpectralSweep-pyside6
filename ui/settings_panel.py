@@ -46,6 +46,7 @@ class SettingsPanel(QWidget):
     """
 
     notification_configured = Signal(str)
+    mff101_paths_changed = Signal()
 
     def __init__(self, lf6_ctrl=None, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -71,6 +72,7 @@ class SettingsPanel(QWidget):
         self._notifications = NotificationSettings()
         self._notifications.configured.connect(self.notification_configured)
         root.addWidget(self._notifications)
+        root.addWidget(self._build_mff101_group())
         root.addWidget(self._build_lf6_group())
         root.addWidget(self._build_output_group())
         root.addWidget(self._build_filename_group())
@@ -95,6 +97,32 @@ class SettingsPanel(QWidget):
         scroll.setWidget(body)
         outer.addWidget(scroll)
 
+    def _build_mff101_group(self) -> QGroupBox:
+        group = QGroupBox("MFF101 light paths")
+        form = QFormLayout(group)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self._mff101_position1_path = QLineEdit()
+        self._mff101_position2_path = QLineEdit()
+        for position, edit in ((1, self._mff101_position1_path), (2, self._mff101_position2_path)):
+            edit.setObjectName(f"MFF101Position{position}Path")
+            edit.setAccessibleName(f"MFF101 position {position} light path")
+            edit.setPlaceholderText("Light-path name")
+            edit.setToolTip("Name the physical light path for this position; update it when the optics change.")
+            form.addRow(f"Position {position} goes to:", edit)
+        self._mff101_auto_route = QCheckBox("Automatically route the selected measurement setup")
+        form.addRow(self._mff101_auto_route)
+        self._mff101_andor_position = QComboBox()
+        self._mff101_lightfield_position = QComboBox()
+        for name, combo in (("Andor", self._mff101_andor_position), ("LightField / WinSpec", self._mff101_lightfield_position)):
+            combo.addItem("Position 1", 1)
+            combo.addItem("Position 2", 2)
+            combo.setAccessibleName(f"{name} flipper position")
+            form.addRow(f"{name} setup:", combo)
+        note = QLabel("Setup selection and acquisition preflight use the positions above. Names are descriptive. Simulation never moves the flipper. Editing these settings does not move it; use Save config to disk to keep changes.")
+        note.setWordWrap(True)
+        form.addRow(note)
+        return group
+
     def _build_lf6_group(self) -> QGroupBox:
         grp = QGroupBox("Shared Spectrometer Settings")
         form = QFormLayout(grp)
@@ -111,7 +139,8 @@ class SettingsPanel(QWidget):
         form.addRow("Exposure:", self._exposure)
 
         self._center = QDoubleSpinBox()
-        self._center.setRange(200.0, 2000.0)
+        self._center.setRange(0.0, 2000.0)
+        self._center.setToolTip("0 nm selects zero order for imaging / alignment.")
         self._center.setDecimals(1)
         self._center.setSingleStep(1.0)
         self._center.setSuffix(" nm")
@@ -314,6 +343,15 @@ class SettingsPanel(QWidget):
         self._browse_btn.clicked.connect(self._on_browse)
         self._save_btn.clicked.connect(self._on_save)
         self._reset_filename_btn.clicked.connect(self._on_reset_filename_defaults)
+        self._mff101_position1_path.textChanged.connect(
+            lambda text: self._on_mff101_path_changed(1, text)
+        )
+        self._mff101_position2_path.textChanged.connect(
+            lambda text: self._on_mff101_path_changed(2, text)
+        )
+        self._mff101_auto_route.toggled.connect(self._on_mff101_routing_changed)
+        self._mff101_andor_position.currentIndexChanged.connect(self._on_mff101_routing_changed)
+        self._mff101_lightfield_position.currentIndexChanged.connect(self._on_mff101_routing_changed)
 
         # Enable Apply button only when LF6 connects
         if self._ctrl is not None:
@@ -420,6 +458,18 @@ class SettingsPanel(QWidget):
 
     def _load_from_cfg(self):
         """Populate widgets from the current cfg singleton."""
+        for position, edit in ((1, self._mff101_position1_path), (2, self._mff101_position2_path)):
+            value = getattr(cfg.mff101, f"position_{position}_path")
+            edit.setText(value if isinstance(value, str) else "")
+        for widget, value in ((self._mff101_auto_route, cfg.mff101.auto_route),
+                              (self._mff101_andor_position, cfg.mff101.andor_position),
+                              (self._mff101_lightfield_position, cfg.mff101.lightfield_position)):
+            blocked = widget.blockSignals(True)
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
+            else:
+                widget.setCurrentIndex(widget.findData(value))
+            widget.blockSignals(blocked)
         self._exposure.setValue(cfg.lf6.exposure_ms)
         self._center.setValue(cfg.lf6.center_nm)
         self._accum.setValue(cfg.lf6.accumulations)
@@ -462,6 +512,13 @@ class SettingsPanel(QWidget):
     def capture_session_state(self) -> dict:
         """Capture global defaults so edits participate in automatic saving."""
         return {
+            "mff101": {
+                "position_1_path": cfg.mff101.position_1_path,
+                "position_2_path": cfg.mff101.position_2_path,
+                "auto_route": cfg.mff101.auto_route,
+                "andor_position": cfg.mff101.andor_position,
+                "lightfield_position": cfg.mff101.lightfield_position,
+            },
             "lf6": {
                 "exposure_ms": float(self._exposure.value()),
                 "center_nm": float(self._center.value()),
@@ -498,6 +555,8 @@ class SettingsPanel(QWidget):
         }
 
     def restore_session_state(self, state: dict) -> None:
+        # Physical MFF101 routing comes from the global config, not a saved
+        # sample/history snapshot. Capture it above for change observation only.
         if not isinstance(state, dict):
             return
         lf6 = state.get("lf6")
@@ -571,6 +630,17 @@ class SettingsPanel(QWidget):
                 value = andor.get(key)
                 if isinstance(value, str) and combo.findText(value) >= 0:
                     combo.setCurrentText(value)
+
+    def _on_mff101_routing_changed(self, *_args):
+        cfg.mff101.auto_route = self._mff101_auto_route.isChecked()
+        cfg.mff101.andor_position = self._mff101_andor_position.currentData()
+        cfg.mff101.lightfield_position = self._mff101_lightfield_position.currentData()
+        self.mff101_paths_changed.emit()
+
+    @Slot(int, str)
+    def _on_mff101_path_changed(self, position: int, text: str) -> None:
+        setattr(cfg.mff101, f"position_{position}_path", text.strip())
+        self.mff101_paths_changed.emit()
 
     @Slot()
     def _on_apply_lf6(self):

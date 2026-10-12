@@ -15,6 +15,7 @@ from ui import presets_panel as panel
 from tests.test_smu_resilience import _HealthyRunDevice
 from tests import test_smu_resilience as fixtures
 from tests.test_winspec_scans import scan
+from tests.setup_sequence_helpers import set_paired_setup_draft
 from utils.config import cfg
 
 
@@ -64,7 +65,7 @@ def test_recipe_is_editable_and_roundtrips_without_changing_gate_rows():
     widget, restored = panel.PresetsPanel(), panel.PresetsPanel()
     try:
         before = panel._read_batch_table(widget._batch_table).to_dict('records')
-        widget._load_dual_setup_recipe()
+        set_paired_setup_draft(widget)
         assert panel._read_batch_table(widget._batch_table).to_dict('records') == before
         for row, values in enumerate(('PIXIS, WinSpec', '730, 1150', '100, 500', '2, 3')):
             widget._loop_table.item(row, 2).setText(values)
@@ -84,7 +85,7 @@ def test_recipe_is_editable_and_roundtrips_without_changing_gate_rows():
 def test_recipe_checkboxes_refresh_draft_and_preview():
     widget = panel.PresetsPanel()
     try:
-        widget._load_dual_setup_recipe()
+        set_paired_setup_draft(widget)
         widget._on_apply()
         assert not widget._tables_dirty
         widget._loop_table.cellWidget(2, 0).findChild(QCheckBox).setChecked(False)
@@ -100,27 +101,27 @@ def test_preview_uses_recognizable_setup_labels():
     assert _fmt_ctx({'Measurement setup': 'winspec_ingaas', 'Center Wavelength (nm)': 1150}) == 'Setup=WinSpec, CW=1150'
 
 
-def test_loading_recipe_preserves_motion_group_order_and_inner_nesting():
-    widget = panel.PresetsPanel()
-    try:
-        definition = pd.DataFrame([
-            dict(Enable=True, Parameter='Rotation1 Angle (deg)', Values='0, 90', Group=5),
-            dict(Enable=True, Parameter='Stage Position', Values='1, 2', Group=2),
-        ])
-        state = widget.capture_session_state()
-        order = panel._normalize_execution_order(['group:2', 'conditions', 'points', 'group:5'], definition, 'Customized')
-        state.update(draft_loop=definition.to_dict('records'), loop_mode='Customized',
-                     execution_order=order, nested_schedule_enabled=True)
-        widget.restore_session_state(state)
-        widget._load_dual_setup_recipe()
-        updated = widget._execution_order_entries()
-        assert [entry['kind'] for entry in updated] == ['group', 'group', 'conditions', 'points', 'group']
-        assert updated[1]['parameters'] == ['Stage Position']
-        assert updated[-1]['parameters'] == ['Rotation1 Angle (deg)']
-        retained = panel._read_loop_table(widget._loop_table)
-        assert retained.loc[retained.Parameter == 'Rotation1 Angle (deg)', 'Values'].item() == '0, 90'
-    finally:
-        widget.close()
+@pytest.mark.parametrize('backend, label', [
+    ('andor_ingaas', 'Andor InGaAs'),
+    ('andor_si', 'Andor Silicon'),
+])
+def test_andor_recipe_preview_filename_and_connection_check(backend, label):
+    from ui.preview_widget import _fmt_ctx
+    definition = loops()
+    definition.loc[0, 'Values'] = f'PIXIS, {label}'
+    sequence, rows, _ = panel._build_plan(definition, batch(), 'Customized')
+    ctx = sequence[1]
+    assert ctx['Measurement setup'] == backend
+    assert _fmt_ctx(ctx) == f'Setup={label}, CW=1150, Exp=500, EPF=3'
+    base, _, tokens = panel._build_run_filename_base(
+        fixtures.SMUResilienceTests._run_meta(), ctx, rows.iloc[0].to_dict())
+    assert base.endswith(f'_{label}')
+    assert ('setup', label) in tokens
+    schedule = panel._build_nested_execution_schedule(definition, batch(), mode='Customized')
+    assert panel._setup_readiness_issues(SimpleNamespace(connected_backends=('lightfield',)), schedule) == [
+        f'Connect all requested setups before running: {label}']
+    assert not panel._setup_readiness_issues(
+        SimpleNamespace(connected_backends=('lightfield', backend)), schedule)
 
 
 class Device(_HealthyRunDevice):

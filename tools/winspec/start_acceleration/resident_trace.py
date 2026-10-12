@@ -1,7 +1,7 @@
 """One debugger session, explicit per-Start gates, three endpoint breakpoints."""
 import json, os, sys
 from .experiment_trace import ExperimentTrace
-from .resident_protocol import Boundary, publish
+from .resident_protocol import Boundary, PublishedReader, READ_PENDING, publish
 from .winspec_debug_trace import qpc
 
 
@@ -11,6 +11,7 @@ class ResidentTrace(ExperimentTrace):
             raise ValueError('Resident trace requires three frozen endpoints')
         self.boundary=Boundary(config['baseline'],config['pid'],config['modules'],config['frame_limit'],allow_fallback=True)
         self.command_seq=0;self.request_stop=False
+        self.command_reader=PublishedReader()
         ExperimentTrace.__init__(self,config,output)
         self.gate=None
         self.report.update(frames=[],output_stream_observed=False,resident=True)
@@ -30,7 +31,9 @@ class ResidentTrace(ExperimentTrace):
         try:
             path=os.path.join(self.output,'command-%03d.json'%self.command_seq)
             if not os.path.isfile(path):return
-            with open(path,'rb') as handle:command=json.load(handle)
+            command=self.command_reader.read(path)
+            self.report['control_file_read_retries']=self.command_reader.retries
+            if command is READ_PENDING:return
             frame_id=command['frame_id'];op=command['op'];now=qpc()
             if isinstance(frame_id,bool) or not isinstance(frame_id,int):raise ValueError('Invalid frame ID')
             if op=='open':

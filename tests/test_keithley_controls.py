@@ -558,7 +558,10 @@ class KeithleyControlTests(unittest.TestCase):
         manual._target_spn["Vbg"].setValue(1.5)
         state = panel.capture_session_state()
 
-        self.assertEqual(state["manual_smu"], {"step_v": 0.25})
+        self.assertEqual(state["manual_smu"], {
+            "step_v": 0.25,
+            "targets": {"Vbg": 1.5, "Vtg": 0.0, "Vbias": 0.0},
+        })
 
         restored_ctrl = _FakeSMUController()
         restored = InstrumentPanel(smu_ctrl=restored_ctrl)
@@ -576,7 +579,7 @@ class KeithleyControlTests(unittest.TestCase):
             restored_smu._curr_range_by_role["Vbg"].currentData(), 1e-6
         )
         self.assertAlmostEqual(restored_manual._step_spn.value(), 0.25)
-        self.assertAlmostEqual(restored_manual._target_spn["Vbg"].value(), 0.0)
+        self.assertAlmostEqual(restored_manual._target_spn["Vbg"].value(), 1.5)
         self.assertEqual(restored_ctrl.connect_calls, [])
         self.assertEqual(restored_ctrl.manual_calls, [])
 

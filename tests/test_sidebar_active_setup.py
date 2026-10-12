@@ -11,9 +11,12 @@ from ui.instrument_panel import _LF6Section
 
 @pytest.fixture
 def sidebar(scan, monkeypatch):
+    from app.devices import lightfield_optics
+
     controller, winspec, camera, live = scan
     optics = winspec.lightfield
     def configure(**values):
+        lightfield_optics.ensure_output_route(optics, 'front')
         live['wavelength_nm'] = values['center_nm']
         return values
     optics.configure_for_acquisition = configure
@@ -22,11 +25,17 @@ def sidebar(scan, monkeypatch):
     controller._worker._parked['lightfield'] = (
         optics, pixis, {'backend': 'lightfield', 'output_route': 'front'}, [])
     routes = []
-    def route(setup, requested, **_):
-        routes.append(requested)
-        live['output_port'] = 'FrontExit' if requested == 'front' else 'SideExit'
+    def route(setup, requested, *, apply=True, **_):
+        target = 'FrontExit' if requested == 'front' else 'SideExit'
+        if apply:
+            if live['output_port'] != target:
+                routes.append(requested)
+            live['output_port'] = target
+        else:
+            assert live['output_port'] == target
         return dict(live)
     monkeypatch.setattr('app.devices.lightfield_optics.ensure_output_route', route)
+    monkeypatch.setattr('app.devices.winspec_adapter.ensure_output_route', route)
     section = _LF6Section(controller)
     section._on_connected([])
     commands = []
@@ -68,7 +77,7 @@ def test_sidebar_tracks_pixis_and_winspec_while_measurement_lock_stays_held(side
     assert notifications == []
 
 
-def test_failed_switch_keeps_sidebar_on_active_setup(sidebar, monkeypatch):
+def test_failed_preparation_shows_active_setup_and_keeps_measurement_locked(sidebar, monkeypatch):
     controller, section, camera, routes, commands, notifications = sidebar
     def failed(*_args, **_kwargs):
         raise RuntimeError('exit failed')
@@ -76,10 +85,15 @@ def test_failed_switch_keeps_sidebar_on_active_setup(sidebar, monkeypatch):
     with pytest.raises(RuntimeError, match='exit failed'):
         controller.prepare_scan_condition('lightfield', 730., 250., 3, 'device', threading.Event())
     QApplication.processEvents()
-    assert controller.backend == 'winspec_ingaas'
-    assert section._backend.currentData() == 'winspec_ingaas'
-    assert 'Active setup: WinSpec' in section._connections_status.text()
+    # Activation succeeds before preparation checks the physical exit. The
+    # sidebar must reflect that active connection even though it cannot acquire.
+    assert controller.backend == 'lightfield'
+    assert controller._worker._scan_adapter is None
+    assert section._backend.currentData() == 'lightfield'
+    assert 'Active setup: LightField + PIXIS' in section._connections_status.text()
     assert not section._backend.isEnabled()
+    assert controller.switching_locked
+    assert not any(command.startswith('ACQUIRE') for command, _ in camera.calls)
     assert commands == []
     assert notifications == []
 

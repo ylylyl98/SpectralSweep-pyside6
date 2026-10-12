@@ -8,6 +8,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QPushButton
 
 from ui import presets_panel as panel
+from tests.setup_sequence_helpers import set_paired_setup_draft
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -19,7 +20,7 @@ def app():
 @pytest.fixture
 def widget():
     result = panel.PresetsPanel()
-    result._load_dual_setup_recipe()
+    set_paired_setup_draft(result)
     yield result
     result.close()
 
@@ -71,7 +72,7 @@ def test_setup_button_fits_its_row_with_application_stylesheet(app):
     try:
         app.setStyleSheet(_STYLESHEET)
         result = panel.PresetsPanel()
-        result._load_dual_setup_recipe()
+        set_paired_setup_draft(result)
         result.show()
         app.processEvents()
         table = result._loop_table
@@ -105,6 +106,49 @@ def test_cancel_does_not_commit_any_changes(widget):
     open_picker(widget, lambda dialog: choose(dialog.rows[0].combo, 'winspec_ingaas'), accept=False)
     assert widget.capture_session_state()['draft_loop'] == before
     assert not widget._tables_dirty
+
+
+@pytest.mark.parametrize('backend, label', [
+    ('andor_ingaas', 'Andor InGaAs'),
+    ('andor_si', 'Andor Silicon'),
+])
+def test_andor_selection_survives_apply_restore_and_builds_matching_plan(widget, backend, label):
+    def edit(dialog):
+        combo = dialog.rows[1].combo
+        index = combo.findData(backend)
+        assert index >= 0, 'Andor setup must be selectable'
+        combo.setCurrentIndex(index)
+        assert combo.currentText() == label
+    open_picker(widget, edit)
+    assert widget._loop_table.item(0, 2).text() == f'PIXIS, {label}'
+    assert not widget._draft_validation_issues()
+    widget._on_apply()
+    restored = panel.PresetsPanel()
+    try:
+        restored.restore_session_state(widget.capture_session_state())
+        definition = panel._read_loop_table(restored._loop_table)
+        sequence, _, _ = panel._build_plan(definition, panel._DEFAULT_BATCH, 'Customized')
+        assert sequence[1]['Measurement setup'] == backend
+        assert sequence[1]['Center Wavelength (nm)'] == 1100.
+        open_picker(restored, lambda dialog: (
+            pytest.fail('Saved Andor choice did not restore')
+            if dialog.selected_backends() != ['lightfield', backend] else None
+        ), accept=False)
+    finally:
+        restored.close()
+
+
+@pytest.mark.parametrize('saved, backend', [
+    ('andor_ingaas', 'andor_ingaas'),
+    ('andor_si', 'andor_si'),
+    ('Andor Si', 'andor_si'),
+])
+def test_saved_andor_backend_names_are_recognized(widget, saved, backend):
+    widget._loop_table.item(0, 2).setText(f'PIXIS, {saved}')
+    def check(dialog):
+        assert dialog.selected_backends() == ['lightfield', backend]
+        assert dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).isEnabled()
+    open_picker(widget, check, accept=False)
 
 
 def test_accepted_choices_survive_restore_and_discard(widget):

@@ -10,6 +10,8 @@ import logging
 import math
 import weakref
 import uuid
+import copy
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -116,6 +118,8 @@ class LightFieldRecorder:
         self._run = weakref.ref(run)
         self._settings = {}
         self._index = 0
+        self._last_completed_id = None
+        self._last_frame_observation = None
         self.context = {}
         # All backends append to the run's single journal.  ``path`` remains
         # public for legacy integrations and tests.
@@ -127,14 +131,26 @@ class LightFieldRecorder:
         run = self._run()
         return run is not None and not run._terminal
 
+    @contextmanager
+    def _recording_guard(self, event):
+        """Keep storage errors visible even when acquisition callers continue."""
+        try:
+            yield
+        except Exception as exc:
+            run = self._run()
+            marker = getattr(run, "mark_metadata_failure", None) if run is not None else None
+            if callable(marker):
+                marker(exc, event=event)
+            raise
+
     def begin(self, snapshot, frames, purpose):
         run = self._run()
         if run is None:
             return None
-        with run._lock:
+        with run._lock, self._recording_guard("capture_started"):
             if run._terminal:
                 return None
-            snapshot = dict(snapshot)
+            snapshot = copy.deepcopy(snapshot)
             captured = snapshot.pop("captured_utc")
             # WinSpec exposes the preceding frame's timing/guard diagnostics
             # alongside settings. They change on every frame, and must not
@@ -146,49 +162,63 @@ class LightFieldRecorder:
                 snapshot["observed"] = observed
             camera = dict(snapshot.get("camera", {}))
             temperature = camera.pop("temperature_c", None)
+            temperature_status = camera.pop("temperature_status", None)
             snapshot["camera"] = camera
+            if snapshot.get("backend") == "andor_sdk2" or snapshot.get("identity", {}).get("backend") == "andor_sdk2":
+                observed = dict(snapshot.get("observed", {}))
+                temperature = observed.pop("temperature_c", temperature)
+                temperature_status = observed.pop("temperature_status", temperature_status)
+                snapshot["observed"] = observed
             key = json.dumps(snapshot, sort_keys=True, allow_nan=False)
             state = run.metadata.setdefault("observed", {}).setdefault("lightfield", {
                 "schema_version": 1, "settings_snapshots": [],
                 "acquisition_log": self.path.relative_to(run.service.output_root).as_posix(),
                 "index_semantics": "1-based capture attempts, including warmups; not CSV row numbers",
             })
-            if key not in self._settings:
-                settings_id = len(self._settings) + 1
-                self._settings[key] = settings_id
-                # The shared experiment settings table owns the full snapshot;
-                # the LightField compatibility view keeps only a reference.
-                state["settings_snapshots"].append({
-                    "settings_id": settings_id, "first_observed_utc": captured,
-                    "shared_settings_id": None})
-                if hasattr(run, "_register_event_file"):
-                    run._register_event_file(kind="lightfield_acquisitions")
-                else:
-                    run.register_file(self.path, role="metadata", kind="lightfield_acquisitions")
             shared_settings_id = None
             if hasattr(run, "register_settings_snapshot"):
-                try:
-                    shared_settings_id = run.register_settings_snapshot(snapshot, source="lightfield", observed_utc=captured)
-                    run.metadata.setdefault("settings", {}).setdefault("observed", {})[
-                        "lightfield_settings_id"] = shared_settings_id
-                    for item in state.get("settings_snapshots", []):
-                        if item.get("settings_id") == self._settings[key]:
-                            item["shared_settings_id"] = shared_settings_id
-                except Exception as exc:
-                    marker = getattr(run, "mark_metadata_failure", None)
-                    if callable(marker):
-                        marker(exc, event="settings_snapshot")
-                    log.warning("Shared settings snapshot could not be recorded", exc_info=True)
+                shared_settings_id = run.register_settings_snapshot(
+                    snapshot, source="lightfield", observed_utc=captured, persist=False)
+                run.metadata.setdefault("settings", {}).setdefault("observed", {})[
+                    "lightfield_settings_id"] = shared_settings_id
+            if key not in self._settings:
+                snapshots = state.setdefault("settings_snapshots", [])
+                # Compatibility IDs belong to the run, not to an individual
+                # backend recorder. Rebinding can reuse an existing shared link.
+                existing = next((item for item in snapshots
+                                 if shared_settings_id is not None
+                                 and item.get("shared_settings_id") == shared_settings_id), None)
+                if existing is not None:
+                    settings_id = int(existing["settings_id"])
+                else:
+                    settings_id = max((int(item.get("settings_id", 0)) for item in snapshots), default=0) + 1
+                    snapshots.append({"settings_id": settings_id,
+                                      "first_observed_utc": captured,
+                                      "shared_settings_id": shared_settings_id})
+                    run._files_dirty = True
+                self._settings[key] = settings_id
+                if hasattr(run, "_register_event_file"):
+                    run._register_event_file(kind="lightfield_acquisitions", persist=False)
+                else:
+                    run.register_file(self.path, role="metadata", kind="lightfield_acquisitions")
+            # Save the settings, file association and compatibility IDs together.
+            # A failed write keeps the dirty marker so the next attempt can retry.
+            if getattr(run, "_files_dirty", False):
+                run._write()
             self._index += 1
             record = {"event": "capture_started", "acquisition_id": str(self.context.get("acquisition_id") or uuid.uuid4()),
                       "acquisition_index": self._index,
                       "settings_id": shared_settings_id or self._settings[key], "started_utc": captured,
                       "shared_settings_id": shared_settings_id,
                       "temperature_c": temperature, "capture_frames_requested": int(frames),
+                      "temperature_status": temperature_status,
                       "purpose": self.context.get("purpose", purpose),
                       "context": dict(self.context)}
             if previous_frame is not None:
-                record["previous_frame_observation"] = previous_frame
+                if self._last_completed_id is not None and previous_frame == self._last_frame_observation:
+                    record["previous_acquisition_id"] = self._last_completed_id
+                else:
+                    record["previous_frame_observation"] = previous_frame
             appended = self._append(record)
             if appended is None:
                 marker = getattr(run, "mark_metadata_failure", None)
@@ -202,14 +232,17 @@ class LightFieldRecorder:
         run = self._run()
         if run is None:
             return
-        with run._lock:
+        with run._lock, self._recording_guard("capture_failed" if error else "capture_completed"):
             if not run._terminal:
-                self._append({"event": "capture_failed" if error else "capture_completed",
+                appended = self._append({"event": "capture_failed" if error else "capture_completed",
                               "acquisition_index": record["acquisition_index"],
                               "settings_id": record["settings_id"], "finished_utc": timestamp(),
                               "output_dimensions": dimensions, "error": error,
                               **({'frame_observation': frame_observation} if frame_observation is not None else {}),
                               "acquisition_id": record.get("acquisition_id")})
+                if appended is not None and not error and frame_observation is not None:
+                    self._last_completed_id = record.get("acquisition_id")
+                    self._last_frame_observation = copy.deepcopy(frame_observation)
 
     def _append(self, record):
         run = self._run()

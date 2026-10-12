@@ -1,0 +1,112 @@
+{
+  "serial_number": "37862922",
+  "started_utc": "2026-10-11T21:39:04.637777+00:00",
+  "method": "Production MFF101 adapter, Qt controller and sidebar button handlers with real USB hardware",
+  "events": [
+    {
+      "event": "scan_passed",
+      "utc": "2026-10-11T21:39:10.132960+00:00",
+      "devices": [
+        "37862922"
+      ]
+    },
+    {
+      "event": "initial_position_confirmed",
+      "utc": "2026-10-11T21:39:11.058674+00:00",
+      "position": 1,
+      "readbacks": [
+        1,
+        1,
+        1
+      ],
+      "ui_text": "Current position: 1"
+    },
+    {
+      "event": "flip_to_other_endpoint",
+      "utc": "2026-10-11T21:39:11.537801+00:00",
+      "requested_position": 2,
+      "confirmed_position": 2,
+      "elapsed_s": 0.4285,
+      "stable_readbacks": [
+        2,
+        2,
+        2
+      ],
+      "ui_text": "Current position: 2"
+    },
+    {
+      "event": "automatic_poll_confirmed",
+      "utc": "2026-10-11T21:39:12.016989+00:00",
+      "position": 2,
+      "observed_utc": "2026-10-11T21:39:12.006524+00:00"
+    },
+    {
+      "event": "restore_initial_endpoint",
+      "utc": "2026-10-11T21:39:12.478679+00:00",
+      "requested_position": 1,
+      "confirmed_position": 1,
+      "elapsed_s": 0.4107,
+      "stable_readbacks": [
+        1,
+        1,
+        1
+      ],
+      "ui_text": "Current position: 1"
+    },
+    {
+      "event": "automatic_poll_confirmed",
+      "utc": "2026-10-11T21:39:13.005589+00:00",
+      "position": 1,
+      "observed_utc": "2026-10-11T21:39:12.996717+00:00"
+    },
+    {
+      "event": "disconnect_passed",
+      "utc": "2026-10-11T21:39:13.145674+00:00"
+    },
+    {
+      "event": "reconnect_passed",
+      "utc": "2026-10-11T21:39:14.015190+00:00",
+      "position": 1
+    },
+    {
+      "event": "shutdown",
+      "utc": "2026-10-11T21:39:14.103195+00:00",
+      "success": true,
+      "state": {
+        "connected": false,
+        "serial_number": "37862922",
+        "position": null,
+        "busy": false,
+        "operation": "shutdown",
+        "error": "",
+        "observed_utc": null,
+        "closing": true
+      }
+    }
+  ],
+  "passed": true,
+  "identity": {
+    "serial_no": 0,
+    "model_no": "MFF002",
+    "fw_ver": "1.0.3",
+    "hw_type": 16,
+    "hw_ver": 2,
+    "mod_state": 0,
+    "nchannels": 1,
+    "notes": "APT Filter Flipper"
+  },
+  "flipper_parameters": {
+    "transit_time": 0.5,
+    "io1_oper_mode": "in_toggle",
+    "io1_sig_mode": "in_button",
+    "io1_pulse_width": 0.2,
+    "io2_oper_mode": "in_toggle",
+    "io2_sig_mode": "in_button",
+    "io2_pulse_width": 0.2
+  },
+  "initial_position": 1,
+  "final_position": 1,
+  "restored_initial_position": true,
+  "shutdown_ok": true,
+  "finished_utc": "2026-10-11T21:39:14.103862+00:00"
+}

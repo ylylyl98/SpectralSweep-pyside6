@@ -1858,7 +1858,7 @@ class MCD2100Panel(QWidget):
         settings.temperature_stable_s = self.temperature_stable.value()
         settings.temperature_timeout_s = self.temperature_timeout.value()
 
-    def apply_saved_experiment_settings(self, settings: dict) -> dict:
+    def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
         allowed = {
             "point": lambda v: self._point.setText(str(v)),
             "start_field_t": lambda v: self.start_field.setText(str(v)),
@@ -1887,6 +1887,8 @@ class MCD2100Panel(QWidget):
             "temperature_stable_s": lambda v: self.temperature_stable.setValue(float(v)),
             "temperature_timeout_s": lambda v: self.temperature_timeout.setValue(float(v)),
         }
+        if keys_only:
+            return {"supported_keys": list(allowed)}
         skipped = []
         for key, value in dict(settings or {}).items():
             setter = allowed.get(key)

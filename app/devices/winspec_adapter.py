@@ -252,8 +252,8 @@ class WinSpecSetup:
 
         if not self.is_ready or self.is_busy:
             raise RuntimeError('WinSpec/LightField is not ready or is busy')
-        if not math.isfinite(float(center_nm)) or float(center_nm) <= 0 or not math.isfinite(float(exposure_ms)) or float(exposure_ms) <= 0 or int(frames) != frames or int(frames) < 1:
-            raise ValueError('Center, exposure and accumulations must be positive')
+        if not math.isfinite(float(center_nm)) or float(center_nm) < 0 or not math.isfinite(float(exposure_ms)) or float(exposure_ms) <= 0 or int(frames) != frames or int(frames) < 1:
+            raise ValueError('Center must be finite and nonnegative; exposure and accumulations must be positive')
         current = self._read_settings()
         self._validate_geometry(current)
         self._check_temperature(current)

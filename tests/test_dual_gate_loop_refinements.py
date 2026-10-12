@@ -13,6 +13,7 @@ from ui import presets_panel as panel
 from tests.test_dual_gate_multi_setup import loops, batch, Device, Detector
 from tests.test_dual_gate_setup_picker import open_picker, choose
 from tests import test_smu_resilience as fixtures
+from tests.setup_sequence_helpers import set_paired_setup_draft
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -23,7 +24,7 @@ def app():
 @pytest.fixture
 def widget():
     result = panel.PresetsPanel()
-    result._load_dual_setup_recipe()
+    set_paired_setup_draft(result)
     yield result
     result.close()
 

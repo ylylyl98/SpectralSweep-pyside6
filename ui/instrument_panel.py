@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from ui.andor_controls_widget import temperature_summary
+from ui.mff101_section import MFF101Section
 
 from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
@@ -487,6 +488,7 @@ class _LF6Section(QWidget):
         self._backend.setCurrentIndex(max(0, selected))
         self._backend.setToolTip(
             "Choose the detector and spectrograph combination, then connect its required devices. "
+            "Selecting a real setup also routes MFF101 when automatic routing is enabled in Settings. "
             "PIXIS and WinSpec share one LightField session. Switching preserves camera cooling."
         )
         backend_row.addWidget(self._backend, stretch=1)
@@ -734,6 +736,7 @@ class _LF6Section(QWidget):
         self._andor_diagnostics.clicked.connect(self._show_andor_diagnostics)
         self._warm_disconnect_btn.clicked.connect(self._start_warmup_disconnect)
         self._backend.currentIndexChanged.connect(self._update_connection_actions)
+        self._backend.activated.connect(self._on_setup_selected)
         self._mock_chk.toggled.connect(self._update_connection_actions)
         self._lf_route.currentIndexChanged.connect(self._update_connection_actions)
         self._winspec_route.currentIndexChanged.connect(self._update_connection_actions)
@@ -747,6 +750,12 @@ class _LF6Section(QWidget):
         background_signal = getattr(self._ctrl, "backend_temperature_snapshot", None)
         if background_signal is not None:
             background_signal.connect(self._on_background_temperature)
+
+    @Slot(int)
+    def _on_setup_selected(self, _index):
+        route = getattr(self._ctrl, 'select_setup_path', None)
+        if callable(route):
+            route(self._backend.currentData(), use_mock=self._mock_chk.isChecked())
 
     def _on_background_temperature(self, payload):
         backend, snapshot = payload
@@ -3892,6 +3901,7 @@ class InstrumentPanel(QScrollArea):
         imaging_stage_ctrl=None,
         pm_ctrl=None,
         parent: Optional[QWidget] = None,
+        mff101_ctrl=None,
     ):
         super().__init__(parent)
         self.setWidgetResizable(True)
@@ -3946,6 +3956,9 @@ class InstrumentPanel(QScrollArea):
         if pm_ctrl is not None:
             lay.addWidget(_Expander("PM100D Power Meter", _PM100DSection(pm_ctrl)))
 
+        if mff101_ctrl is not None:
+            lay.addWidget(_Expander("MFF101 Flipper", MFF101Section(mff101_ctrl)))
+
         lay.addStretch()
         for expander in container.findChildren(_Expander):
             section = expander._content
@@ -3964,6 +3977,8 @@ class InstrumentPanel(QScrollArea):
                 key = "imaging_stage"
             elif isinstance(section, _PM100DSection):
                 key = "pm100d"
+            elif isinstance(section, MFF101Section):
+                key = "mff101"
             if key:
                 self._sections[key] = section
                 self._expanders[key] = expander
@@ -4028,6 +4043,12 @@ class InstrumentPanel(QScrollArea):
         if section is not None and hasattr(section, "set_external_busy"):
             section.set_external_busy(bool(busy))
 
+    @Slot()
+    def refresh_mff101_paths(self):
+        section = self._sections.get("mff101")
+        if section is not None:
+            section.refresh_path_labels()
+
     def capture_session_state(self) -> dict:
         """Capture connection setup and harmless UI preferences only."""
         state: dict = {
@@ -4037,6 +4058,9 @@ class InstrumentPanel(QScrollArea):
                 for key, expander in self._expanders.items()
             },
         }
+        flipper = self._sections.get("mff101")
+        if flipper is not None:
+            state["mff101"] = flipper.capture_session_state()
         lf6 = self._sections.get("lf6")
         if isinstance(lf6, _LF6Section):
             state["lf6"] = {
@@ -4113,6 +4137,9 @@ class InstrumentPanel(QScrollArea):
 
     def restore_session_state(self, state: dict) -> None:
         """Restore controls without connecting, polling, moving, or setting outputs."""
+        flipper = self._sections.get("mff101")
+        if flipper is not None and isinstance(state, dict) and isinstance(state.get("mff101"), dict):
+            flipper.restore_session_state(state["mff101"])
         if not isinstance(state, dict):
             return
         expanded = state.get("expanded")

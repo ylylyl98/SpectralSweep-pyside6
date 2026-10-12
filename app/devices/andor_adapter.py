@@ -424,6 +424,8 @@ class AndorSDK2Setup:
         """
         camera = self._require_camera()
         spec = self._require_spectrograph()
+        if float(spec.get_wavelength()) == 0.0:
+            return np.arange(int(camera.get_detector_size()[0]), dtype=float)
         spec.setup_pixels_from_camera(camera)
         key = self._stored_calibration_key_on_owner()
         if force or key not in self._stored_calibration_cache:
@@ -506,7 +508,15 @@ class AndorSDK2Setup:
         read("output_flipper_present", lambda: spec.is_flipper_present("output"))
         if snapshot.get("output_flipper_present"):
             read("output_port", lambda: spec.get_flipper_port("output"))
-        if include_calibration:
+        if snapshot.get("wavelength_nm") == 0.0:
+            snapshot.update(spectrograph_mode="zero_order", axis_unit="pixel",
+                            calibration_source="Detector pixels (zero order)")
+            if include_calibration:
+                read("pixel_axis", self._read_stored_calibration_on_owner)
+                pixels = snapshot.get("pixel_axis")
+                if isinstance(pixels, np.ndarray):
+                    snapshot["pixel_axis"] = pixels.tolist()
+        elif include_calibration:
             read("stored_calibration_nm", self._read_stored_calibration_on_owner)
             calibration = snapshot.get("stored_calibration_nm")
             if isinstance(calibration, np.ndarray):
@@ -544,10 +554,7 @@ class AndorSDK2Setup:
                 optics_changed = True
             if "wavelength_nm" in requested:
                 expected = float(requested["wavelength_nm"])
-                result = spec.set_wavelength(expected * 1e-9)
-                actual = float(
-                    result if result is not None else spec.get_wavelength()
-                ) * 1e9
+                actual = self._set_wavelength_on_owner(expected)
                 if abs(actual - expected) > 0.1:
                     raise RuntimeError(
                         f"Wavelength readback {actual:.3f} nm != requested {expected:.3f} nm"
@@ -680,7 +687,9 @@ class AndorSDK2Setup:
 
     @property
     def identity(self) -> dict[str, Any]:
-        return dict(self._identity)
+        return {**self._identity,
+                "axis_unit": "pixel" if self._center_nm == 0.0 else "nm",
+                "spectrograph_mode": "zero_order" if self._center_nm == 0.0 else "wavelength"}
 
     @property
     def is_ready(self) -> bool:
@@ -707,6 +716,19 @@ class AndorSDK2Setup:
     def get_saved_experiments(self) -> list[str]:
         return []
 
+    def _set_wavelength_on_owner(self, center_nm: float) -> float:
+        if not np.isfinite(center_nm) or center_nm < 0:
+            raise ValueError("Andor center must be finite and non-negative")
+        spec = self._require_spectrograph()
+        if center_nm == 0.0:
+            spec.goto_zero_order()
+            if not spec.is_at_zero_order():
+                raise RuntimeError("Zero-order position was not confirmed by the Shamrock")
+            result = None
+        else:
+            result = spec.set_wavelength(center_nm * 1e-9)
+        return float(result if result is not None else spec.get_wavelength()) * 1e9
+
     def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
         center_nm = float(center_nm)
         exposure_ms = float(exposure_ms)
@@ -720,12 +742,7 @@ class AndorSDK2Setup:
             output_port = None
             if self._output_port != "unchanged":
                 output_port = self._ensure_output_port_on_owner(self._output_port)
-            center_result = spec.set_wavelength(center_nm * 1e-9)
-            actual_center_nm = (
-                float(center_result) * 1e9
-                if center_result is not None
-                else center_nm
-            )
+            actual_center_nm = self._set_wavelength_on_owner(center_nm)
             set_read_mode = getattr(camera, "set_read_mode", None)
             if callable(set_read_mode):
                 set_read_mode("fvb")
@@ -769,7 +786,7 @@ class AndorSDK2Setup:
                 "grating": current_grating,
                 "input_slit_width_um": slit_width_um,
                 "output_port": output_port,
-                "calibration_source": "Shamrock stored coefficients",
+                "calibration_source": "Detector pixels (zero order)" if center_nm == 0.0 else "Shamrock stored coefficients",
                 "calibration_pixel_count": int(calibration.size),
             }
 

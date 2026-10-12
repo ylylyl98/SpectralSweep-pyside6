@@ -8,6 +8,8 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLineEdit
 
 from ui.presets_panel import PresetsPanel
+from ui.loop_run_selection import RunSelectionCombo
+from tests.setup_sequence_helpers import set_paired_setup_draft
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -18,7 +20,7 @@ def app():
 @pytest.fixture
 def widget(app):
     result = PresetsPanel()
-    result._load_dual_setup_recipe()
+    set_paired_setup_draft(result)
     result.resize(1500, 1000)
     result.show()
     result.activateWindow()
@@ -71,12 +73,17 @@ def test_committing_values_does_not_block_next_double_click(widget, next_column,
     assert table.item(center_row, next_column).text() == replacement
 
 
-def test_tab_after_values_commit_opens_group_editor(widget):
+def test_tab_after_values_commit_visits_run_selector_then_opens_group_editor(widget):
     table = widget._loop_table
     editor = double_click_cell(table, 1, 2)
     QTest.keyClick(editor, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
     QTest.keyClicks(editor, '735, 1110')
     QTest.keyClick(editor, Qt.Key.Key_Tab)
+    QApplication.processEvents()
+    run_selector = QApplication.focusWidget()
+    assert isinstance(run_selector, RunSelectionCombo)
+    assert table.currentColumn() == 4
+    QTest.keyClick(run_selector, Qt.Key.Key_Tab)
     QApplication.processEvents()
     group_editor = QApplication.focusWidget()
     assert isinstance(group_editor, QLineEdit)

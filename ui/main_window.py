@@ -22,8 +22,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRect, QSettings, QTimer, QObject, QEvent, Slot, Signal
-from PySide6.QtGui  import QCloseEvent, QFont, QAction
+from PySide6.QtCore import Qt, QRect, QSettings, QTimer, QObject, QEvent, Slot, Signal, QUrl
+from PySide6.QtGui  import QCloseEvent, QFont, QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QStatusBar, QApplication,
     QMessageBox, QComboBox, QListWidget, QPushButton, QPlainTextEdit, QLabel,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from app.experiment_metadata import ExperimentHistory, ExperimentMetadataService
 from app.ntfy_notifications import NtfyNotifier
 from app.sample_settings import SampleSettingsStore
+from ui.history_loader import HistoryTaskRunner, load_preview, load_settings
 
 # ── Global stylesheet ──────────────────────────────────────────────────────────
 _STYLESHEET = """
@@ -321,6 +322,7 @@ from controllers.rotation_controller import RotationController
 from controllers.stage_controller    import StageController
 from controllers.esp32_stage_controller import ESP32StageController
 from controllers.pm100d_controller   import PM100DController
+from controllers.mff101_controller import MFF101Controller
 from controllers.magnet_controller   import MagnetController
 
 from ui.instrument_panel import InstrumentPanel
@@ -481,6 +483,8 @@ class MainWindow(QMainWindow):
         self._stg  = StageController(parent=self)
         self._imaging_stg = ESP32StageController(parent=self)
         self._pm   = PM100DController(parent=self)
+        self._mff101 = MFF101Controller(parent=self)
+        self._lf6.set_flipper_controller(self._mff101)
         self._magnet = MagnetController(parent=self)
 
         # ── status bar ────────────────────────────────────────────────────────
@@ -524,6 +528,7 @@ class MainWindow(QMainWindow):
             stage_ctrl=self._stg,
             imaging_stage_ctrl=self._imaging_stg,
             pm_ctrl=self._pm,
+            mff101_ctrl=self._mff101,
         )
 
         # ── main tabs ─────────────────────────────────────────────────────────
@@ -599,6 +604,7 @@ class MainWindow(QMainWindow):
 
         # Settings
         self._settings = SettingsPanel(lf6_ctrl=self._lf6)
+        self._settings.mff101_paths_changed.connect(self._inst_panel.refresh_mff101_paths)
         self._settings.notification_configured.connect(self._ntfy_notifier.set_url)
         self._settings.notification_configured.connect(self.notification_configured)
         self._tabs.addTab(self._settings, "Settings")
@@ -631,9 +637,6 @@ class MainWindow(QMainWindow):
         self._initialize_history_ui()
         self._build_sidebar_splitter()
         self._restore_geometry()
-        # Keep a pristine fallback for a newly named sample.  This snapshot is
-        # captured before restoring the legacy/current profile.
-        self._default_profile_state = deepcopy(self._capture_session())
         legacy_state = {
             "schema_version": cfg.session.schema_version,
             "active_tab": cfg.session.active_tab,
@@ -772,6 +775,9 @@ class MainWindow(QMainWindow):
         self._history_preview_btn = QPushButton("Preview settings")
         self._history_load = QPushButton("Load compatible settings")
         self._history_load.setEnabled(False)
+        self._history_open = QPushButton("Open metadata")
+        self._history_open.setEnabled(False)
+        self._history_open.clicked.connect(self._open_history_metadata)
         self._history_prev = QPushButton("‹")
         self._history_next = QPushButton("›")
         self._history_page_label = QLabel("Page 1")
@@ -783,6 +789,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self._history_page_label)
         buttons.addWidget(self._history_preview_btn)
         buttons.addWidget(self._history_load)
+        buttons.addWidget(self._history_open)
         buttons.addWidget(self._event_prev)
         buttons.addWidget(self._event_next)
         layout.addLayout(buttons)
@@ -795,7 +802,7 @@ class MainWindow(QMainWindow):
         self._history_preview_btn.clicked.connect(self._preview_selected_history)
         self._history_load.clicked.connect(self._load_history_settings)
         self._history_filter.textChanged.connect(self._history_query_changed)
-        self._event_filter.textChanged.connect(lambda: self._preview_history(self._history_list.currentRow()))
+        self._event_filter.textChanged.connect(self._history_event_query_changed)
         self._history_page = 0
         self._event_offset = 0
         self._history_prev.clicked.connect(lambda: self._change_history_page(-1))
@@ -1080,6 +1087,11 @@ class MainWindow(QMainWindow):
                 self._bfp._tabs.setCurrentIndex(index)
         self._refresh_history()
 
+    def _history_tasks(self):
+        if not hasattr(self, "_history_task_runner"):
+            self._history_task_runner = HistoryTaskRunner(self)
+        return self._history_task_runner
+
     def _refresh_history(self) -> None:
         if not hasattr(self, "_history_device"):
             return
@@ -1093,21 +1105,33 @@ class MainWindow(QMainWindow):
         self._history_preview.clear()
         self._history_load.setEnabled(False)
         self._history_preview_btn.setEnabled(False)
+        self._history_tasks().cancel_all()
+        self._history_metadata_path = None
+        if hasattr(self, "_history_open"):
+            self._history_open.setEnabled(False)
+        for name in ("_event_prev", "_event_next", "_history_prev", "_history_next"):
+            if hasattr(self, name):
+                getattr(self, name).setEnabled(False)
         if not device:
             self._history_page_label.setText("Page 1")
             self._history_prev.setEnabled(False)
             self._history_next.setEnabled(False)
             return
-        rows = self._history.query(device, self._history_type.currentText(), limit=500)
-        query = self._history_filter.text().strip().lower()
-        if query:
-            rows = [row for row in rows if query in json.dumps(row, default=str).lower()]
-        page_size = 20
-        total_rows = len(rows)
-        self._history_page = min(max(0, self._history_page), max(0, (total_rows - 1) // page_size))
-        start = self._history_page * page_size
-        rows = rows[start:start + page_size]
-        for row in rows:
+        history = self._history
+        kind, page = self._history_type.currentText(), self._history_page
+        query = self._history_filter.text()
+        self._history_page_label.setText("Loading…")
+        self._history_tasks().submit("list", lambda cancel: history.query_page(
+            device, kind, page=page, filter_text=query, cancel_event=cancel,
+        ), self._history_page_ready)
+
+    def _history_page_ready(self, result, error):
+        if error:
+            self._history_page_label.setText("History unavailable")
+            self._history_preview.setPlainText(str(error))
+            return
+        self._history_page = result["page"]
+        for row in result["rows"]:
             item = QListWidgetItem(
                 f"{row['started_at']} · {row['status']} · {row['experiment_id'][:12]}"
             )
@@ -1116,7 +1140,7 @@ class MainWindow(QMainWindow):
         self._history_preview_btn.setEnabled(self._history_list.count() > 0)
         self._history_page_label.setText(f"Page {self._history_page + 1}")
         self._history_prev.setEnabled(self._history_page > 0)
-        self._history_next.setEnabled(start + page_size < total_rows)
+        self._history_next.setEnabled((self._history_page + 1) * result["page_size"] < result["total"])
 
     def _change_history_page(self, delta: int) -> None:
         self._history_page = max(0, self._history_page + int(delta))
@@ -1124,65 +1148,69 @@ class MainWindow(QMainWindow):
 
     def _history_query_changed(self, _value: str = "") -> None:
         self._history_page = 0
-        self._refresh_history()
+        self._history_tasks().cancel_all()
+        if not hasattr(self, "_history_query_timer"):
+            self._history_query_timer = QTimer(self)
+            self._history_query_timer.setSingleShot(True)
+            self._history_query_timer.setInterval(150)
+            self._history_query_timer.timeout.connect(self._refresh_history)
+        self._history_query_timer.start()
+
+    def _history_event_query_changed(self, _value: str = "") -> None:
+        self._event_offset = 0
+        self._history_tasks().cancel("preview")
+        if not hasattr(self, "_history_event_timer"):
+            self._history_event_timer = QTimer(self)
+            self._history_event_timer.setSingleShot(True)
+            self._history_event_timer.setInterval(150)
+            self._history_event_timer.timeout.connect(self._preview_selected_history)
+        self._history_event_timer.start()
 
     def _change_event_page(self, delta: int) -> None:
         self._event_offset = max(0, self._event_offset + int(delta))
         self._preview_history(self._history_list.currentRow())
 
     def _history_selection_changed(self, _row: int) -> None:
+        self._history_tasks().cancel("preview")
+        self._history_tasks().cancel("load")
         self._event_offset = 0
         self._history_preview.clear()
         self._history_load.setEnabled(False)
         self._history_preview_btn.setEnabled(self._history_list.currentItem() is not None)
+        self._history_metadata_path = None
+        if hasattr(self, "_history_open"):
+            self._history_open.setEnabled(False)
+        for name in ("_event_prev", "_event_next"):
+            if hasattr(self, name):
+                getattr(self, name).setEnabled(False)
 
     def _preview_history(self, _row: int) -> None:
         item = self._history_list.currentItem()
         if item is None:
             return
         row = item.data(Qt.ItemDataRole.UserRole) or {}
-        path = Path(row.get("metadata_path", ""))
-        if not path.exists():
-            matches = list(cfg.base_out.rglob(path.name)) if path.name else []
-            path = matches[0] if matches else path
-        # History stores a portable relative path; resolve it only for local UI preview.
-        metadata = {}
-        if path.exists():
-            try:
-                metadata = ExperimentMetadataService.load_metadata(path)
-                event_info = metadata.get("event_log", {})
-                event_path = event_info.get("path") if isinstance(event_info, dict) else None
-                if event_path:
-                    candidate = path.parent / Path(str(event_path)).name
-                    events = []
-                    if candidate.exists():
-                        event_filter = self._event_filter.text().strip().lower()
-                        matched = 0
-                        with candidate.open(encoding="utf-8") as stream:
-                            for line in stream:
-                                try:
-                                    event = json.loads(line)
-                                except json.JSONDecodeError:
-                                    continue
-                                if event_filter and event_filter not in json.dumps(event, default=str).lower():
-                                    continue
-                                if matched < self._event_offset:
-                                    matched += 1
-                                    continue
-                                events.append(event)
-                                matched += 1
-                                if len(events) >= 20:
-                                    break
-                    metadata["events_preview"] = events
-            except Exception:
-                pass
-        self._history_preview.setPlainText(
-            ExperimentMetadataService.format_history_preview(metadata, event_limit=20)
-            if metadata else "Metadata sidecar could not be read."
-        )
-        self._history_load.setEnabled(bool(metadata))
-        self._event_prev.setEnabled(self._event_offset >= 20)
-        self._event_next.setEnabled(len(metadata.get("events_preview", [])) == 20)
+        raw_path, root = row.get("metadata_path", ""), cfg.base_out
+        event_filter, offset = self._event_filter.text().strip().lower(), self._event_offset
+        self._history_preview.setPlainText("Loading metadata…")
+        self._history_load.setEnabled(False)
+        self._event_prev.setEnabled(False)
+        self._event_next.setEnabled(False)
+        self._history_tasks().submit("preview", lambda cancel: load_preview(
+            raw_path, root, event_filter, offset, cancel,
+        ), self._history_preview_ready)
+
+    def _history_preview_ready(self, result, error):
+        self._history_preview.setPlainText(str(error) if error else result["text"])
+        self._history_load.setEnabled(not bool(error))
+        self._event_prev.setEnabled(not bool(error) and self._event_offset >= 20)
+        self._event_next.setEnabled(not bool(error) and result["has_next"])
+        self._history_metadata_path = None if error else result["path"]
+        self._history_open.setEnabled(not bool(error))
+
+    def _open_history_metadata(self):
+        path = getattr(self, "_history_metadata_path", None)
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _preview_selected_history(self) -> None:
         self._preview_history(self._history_list.currentRow())
@@ -1192,23 +1220,34 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         row = item.data(Qt.ItemDataRole.UserRole) or {}
-        path = Path(row.get("metadata_path", ""))
-        if not path.exists():
-            matches = list(cfg.base_out.rglob(path.name)) if path.name else []
-            path = matches[0] if matches else path
-        try:
-            metadata = json.loads(path.read_text(encoding="utf-8"))
-            settings = metadata.get("settings", {})
-            loadable = settings.get("loadable", {}) if isinstance(settings, dict) else {}
-            current = self._tabs.currentWidget()
-            adapter = self._history_adapters().get(self._history_type.currentText())
+        raw_path, root = row.get("metadata_path", ""), cfg.base_out
+        current, kind = self._tabs.currentWidget(), self._history_type.currentText()
+        adapter = self._history_adapters().get(kind)
+        method = getattr(current, adapter, None) if adapter else None
+        if not callable(method):
+            self._status.showMessage("No compatible settings adapter for this tab", 6000)
+            return
+        supported_keys = method({}, keys_only=True)["supported_keys"]
+        self._history_load.setEnabled(False)
+        def ready(loadable, error):
+            if self._tabs.currentWidget() is not current or self._history_type.currentText() != kind:
+                return
+            self._history_load.setEnabled(True)
+            if error:
+                self._status.showMessage(f"History settings could not be loaded: {error}", 8000)
+                return
+            adapter = self._history_adapters().get(kind)
             if adapter is None or not callable(getattr(current, adapter, None)):
                 self._status.showMessage("No compatible settings adapter for this tab", 6000)
                 return
-            report = getattr(current, adapter)(loadable)
-            self._status.showMessage(f"Loaded compatible settings; skipped: {report.get('skipped', [])}", 8000)
-        except Exception as exc:
-            self._status.showMessage(f"History settings could not be loaded: {exc}", 8000)
+            try:
+                report = getattr(current, adapter)(loadable)
+                self._status.showMessage(f"Loaded compatible settings; skipped: {report.get('skipped', [])}", 8000)
+            except Exception as exc:
+                self._status.showMessage(f"History settings could not be loaded: {exc}", 8000)
+        self._history_tasks().submit("load", lambda cancel: load_settings(
+            raw_path, root, cancel, supported_keys=supported_keys,
+        ), ready)
 
     def _history_adapters(self) -> dict[str, str]:
         return {
@@ -1298,6 +1337,7 @@ class MainWindow(QMainWindow):
         # while connection identities remain global.
         settings = panels.get("settings")
         if isinstance(settings, dict):
+            settings.pop("mff101", None)
             output = settings.get("output")
             if isinstance(output, dict):
                 # Output root is global; temperature/mode/coefficient remain
@@ -1330,6 +1370,9 @@ class MainWindow(QMainWindow):
             imaging = instruments.get("imaging_stage")
             if isinstance(imaging, dict):
                 imaging.pop("port", None)
+            flipper = instruments.get("mff101")
+            if isinstance(flipper, dict):
+                flipper.pop("serial_number", None)
             pm = instruments.get("pm100d")
             if isinstance(pm, dict):
                 pm.pop("device", None)
@@ -1345,9 +1388,8 @@ class MainWindow(QMainWindow):
         profile = self._sample_store.load(sample_id) if sample_id else None
         if profile is not None:
             self._restore_state(self._sample_scoped_state(profile))
-        elif sample_id:
-            self._restore_state(self._sample_scoped_state(self._default_profile_state))
         else:
+            # A sample without its own profile inherits the last session.
             self._restore_state({
                 "active_tab": cfg.session.active_tab,
                 "panels": cfg.session.panels,
@@ -1397,18 +1439,19 @@ class MainWindow(QMainWindow):
         self._sample_restore_in_progress = True
         try:
             profile = self._sample_store.load(target)
-            self._restore_state(
-                self._sample_scoped_state(
-                    profile if profile is not None else self._default_profile_state
-                )
-            )
+            if profile is not None:
+                self._restore_state(self._sample_scoped_state(profile))
+            # Without a saved profile, leave the current controls and drafts
+            # intact; persisting below copies them under the new Sample ID.
             self._sample_id_binder.commit(target)
             self._refresh_sample_selector()
             self._refresh_history()
         finally:
             self._sample_restore_in_progress = False
         self._persist_session()
-        self._status.showMessage(f"Loaded sample settings: {target}", 4000)
+        message = (f"Loaded sample settings: {target}" if profile is not None else
+                   f"No saved settings for {target}; kept current settings")
+        self._status.showMessage(message, 4000)
         return True
 
     def _poll_session_changes(self) -> None:
@@ -1553,6 +1596,15 @@ class MainWindow(QMainWindow):
                 self._status.showMessage("Motion sweep finished — instrument controls unlocked")
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        presets = getattr(self, "_presets", None)
+        thread = getattr(presets, "_run_thread", None)
+        finalizing = getattr(presets, "metadata_finalizing", False)
+        if finalizing or (thread is not None and thread.isRunning()):
+            message = ("Saving experiment metadata; wait before closing." if finalizing else
+                       "Dual Gate is still running; stop the measurement and wait before closing.")
+            self._status.showMessage(message, 5000)
+            event.ignore()
+            return
         try:
             if not self._power_sweep.shutdown():
                 QMessageBox.critical(self, "Motion sweep is still stopping", "The motion sweep worker did not stop within 30 seconds.")
@@ -1673,6 +1725,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Unable to close imaging stage", str(exc))
             event.ignore()
             return
+        if not self._mff101.shutdown():
+            detail = self._mff101.state.get("error") or "Waiting for the flipper operation to finish."
+            QMessageBox.warning(self, "MFF101 could not close", f"{detail}\nPlease close again to retry.")
+            event.ignore()
+            return
         for ctrl in (
             self._magnet,
             self._lf6,
@@ -1685,4 +1742,9 @@ class MainWindow(QMainWindow):
                 ctrl.shutdown()
             except Exception:
                 pass
+        if hasattr(self, "_history_task_runner"):
+            self._history_task_runner.cancel_all()
+        for name in ("_history_query_timer", "_history_event_timer"):
+            if hasattr(self, name):
+                getattr(self, name).stop()
         super().closeEvent(event)
