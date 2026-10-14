@@ -21,6 +21,10 @@ class WinSpecScanAdapter:
     def _context(self):
         return self.setup._calibration_context(winspec_adapter.read_optics(self.setup.lightfield))
 
+    def _require_scans(self):
+        if self.setup.identity.get('supports_scans') is False:
+            raise RuntimeError('Local WinUSB is single-frame only; automated scans are not available in this release')
+
     @staticmethod
     def _resolve(context):
         for record in reversed(cfg.lf6.winspec_wavelength_calibrations):
@@ -43,6 +47,7 @@ class WinSpecScanAdapter:
         )
 
     def validate_scan_centers(self, centers):
+        self._require_scans()
         context = self._context()
         if context is None:
             self._resolve(None)
@@ -50,6 +55,7 @@ class WinSpecScanAdapter:
             self._resolve({**context, 'center_nm': center})
 
     def configure_for_acquisition(self, *, center_nm, exposure_ms, frames, timeout_s=15.0):
+        self._require_scans()
         self._prepared = None
         timeout_s = float(timeout_s)
         if not math.isfinite(timeout_s) or timeout_s <= 0:

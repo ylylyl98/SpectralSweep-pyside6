@@ -65,7 +65,7 @@ class LF6Config:
     backend: str = "lightfield"         # lightfield | andor_si | andor_ingaas
     winspec_host: str = "192.168.170.128"
     winspec_port: int = 5000
-    winspec_acquisition_backend: str = 'winspec'  # winspec | pvcam (same physical detector)
+    winspec_acquisition_backend: str = 'winspec'  # winspec | pvcam | winusb_local (same detector)
     winspec_start_acceleration: bool = False
     winspec_reverse_pixel_display: bool = True
     winspec_pixel_pitch_um: float = 50.0  # Provisional OMA V value, not a wavelength calibration.

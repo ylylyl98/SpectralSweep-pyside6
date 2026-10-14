@@ -535,8 +535,9 @@ class _LF6Section(QWidget):
         self._winspec_acquisition_backend = QComboBox()
         self._winspec_acquisition_backend.addItem('WinSpec', 'winspec')
         self._winspec_acquisition_backend.addItem('PVCAM (experimental)', 'pvcam')
+        self._winspec_acquisition_backend.addItem('Local WinUSB — manual acquisition (experimental)', 'winusb_local')
         self._winspec_acquisition_backend.setCurrentIndex(max(0, self._winspec_acquisition_backend.findData(cfg.lf6.winspec_acquisition_backend)))
-        self._winspec_acquisition_backend.setToolTip('Select the running XP service. Disconnect InGaAs before changing. PVCAM uses software averaging; verify spectra before production measurements.')
+        self._winspec_acquisition_backend.setToolTip('Disconnect InGaAs before changing. WinSpec/PVCAM use the XP service. Local WinUSB uses this PC. Set exposure and accumulations in Spectrum after connecting. Temperature is unverified; no cooling control or scans.')
         acquisition_row.addWidget(self._winspec_acquisition_backend)
         advanced_layout.addLayout(acquisition_row)
         self._winspec_start_acceleration = QCheckBox('Enable WinSpec Start acceleration (experimental)')
@@ -799,8 +800,9 @@ class _LF6Section(QWidget):
         online = tuple(getattr(self._ctrl, "connected_backends", ()))
         self._route_controls.setEnabled(not locked and not any(key in online for key in ('lightfield', 'winspec_ingaas')))
         selected = self._backend.currentData()
-        self._winspec_host.setEnabled(not locked and "winspec_ingaas" not in online)
-        self._winspec_port.setEnabled(not locked and "winspec_ingaas" not in online)
+        local_winusb = self._winspec_acquisition_backend.currentData() == 'winusb_local'
+        self._winspec_host.setEnabled(not locked and "winspec_ingaas" not in online and not local_winusb)
+        self._winspec_port.setEnabled(not locked and "winspec_ingaas" not in online and not local_winusb)
         self._winspec_acquisition_backend.setEnabled(not locked and 'winspec_ingaas' not in online)
         self._winspec_start_acceleration.setEnabled(
             not locked and 'winspec_ingaas' not in online
@@ -842,6 +844,19 @@ class _LF6Section(QWidget):
     def _update_winspec_temperature(self):
         """Refresh only changed temperature fields; never query hardware here."""
         if self._backend.currentData() != 'winspec_ingaas':
+            return
+        identity = getattr(self._ctrl, 'identity', {}) or {}
+        if (identity.get('acquisition_backend') == 'winusb_local'
+                or not getattr(self._ctrl, 'is_connected', False)
+                and self._winspec_acquisition_backend.currentData() == 'winusb_local'):
+            self._temperature.setText('InGaAs temperature: unverified')
+            self._temperature_detail.setText('Cooling is not controlled by the local backend')
+            self._temperature_monitor.setText('Local WinUSB · experimental')
+            self._temperature_refresh.setEnabled(False)
+            recipe = ('manual exposure and accumulation' if identity.get('max_accumulations')
+                      else '100 ms single frame' if getattr(self._ctrl, 'is_connected', False)
+                      else 'manual acquisition')
+            self._acquisition_condition.setText(f'Acquisition: {recipe} · temperature unverified')
             return
         import math
         connected = bool(getattr(self._ctrl, 'is_connected', False)) and self._ctrl.backend == 'winspec_ingaas'
@@ -917,7 +932,7 @@ class _LF6Section(QWidget):
     def _on_connected(self, experiments: list):
         active = getattr(self._ctrl, "backend", "")
         if self._pending_configuration == 'winspec_ingaas' and active == 'lightfield':
-            self._status.setText('LightField connected; connecting XP WinSpec…')
+            self._status.setText('LightField connected; connecting InGaAs…')
             # Other panels queue their initial optics refresh on this signal.
             # Let that request run, then wait for its connection/settings lock.
             QTimer.singleShot(50, self._continue_configuration)
@@ -942,7 +957,7 @@ class _LF6Section(QWidget):
         role = str(identity.get("camera_role", "")).strip()
         detail = ""
         if identity.get("backend") == "winspec_ingaas":
-            acquisition = 'PVCAM' if identity.get('acquisition_backend') == 'pvcam' else 'WinSpec'
+            acquisition = {'pvcam': 'PVCAM', 'winusb_local': 'Local WinUSB'}.get(identity.get('acquisition_backend'), 'WinSpec')
             detail = f" · {acquisition} InGaAs + LightField · Exit: {identity.get('output_route', identity.get('required_output_port', 'unknown'))} · Raw pixel data"
         elif role in {"si", "ingaas"}:
             detail = f" · Shamrock + {role.upper()} CCD"

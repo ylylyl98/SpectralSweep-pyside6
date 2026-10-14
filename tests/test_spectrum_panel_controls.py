@@ -405,15 +405,17 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def test_automatic_capture_settings_are_restored_after_completion():
-    from types import SimpleNamespace
-    from PySide6.QtWidgets import QDoubleSpinBox,QSpinBox,QCheckBox
+def test_automatic_capture_settings_are_restored_after_completion(monkeypatch):
+    from utils.config import AppConfig, cfg
+    monkeypatch.setattr(cfg, 'lf6', AppConfig().lf6)
     app=QApplication.instance() or QApplication([])
-    exposure=QDoubleSpinBox();exposure.setMaximum(100000);exposure.setValue(3000)
-    accum=QSpinBox();accum.setValue(4);nm=QCheckBox()
-    panel=SimpleNamespace(_exposure=exposure,_accumulations=accum,_use_winspec_nm=nm)
-    SpectrumPanel._automatic_calibration_started(panel)
-    assert accum.value()==1
-    exposure.setValue(10000)
-    SpectrumPanel._automatic_calibration_finished(panel,False)
-    assert exposure.value()==3000 and accum.value()==4
+    panel=SpectrumPanel(_FakeSpectrumController())
+    try:
+        panel._exposure.setValue(3000); panel._accumulations.setValue(4)
+        panel._automatic_calibration_started()
+        assert panel._accumulations.value()==1
+        panel._exposure.setValue(10000)
+        panel._automatic_calibration_finished(False)
+        assert panel._exposure.value()==3000 and panel._accumulations.value()==4
+    finally:
+        panel.close()

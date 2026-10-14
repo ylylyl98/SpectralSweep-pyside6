@@ -692,6 +692,8 @@ class SpectrumPanel(QWidget):
             self._winspec_frame_datatype = data.get('winspec_frame_datatype')
             self._winspec_frame_context = copy.deepcopy(data['winspec_frame_context'])
             self._winspec_temperature_guard = copy.deepcopy(data.get('winspec_temperature_guard'))
+            self._winspec_native_capture = copy.deepcopy(data.get('winspec_native_capture'))
+            self._winspec_temperature_verification = copy.deepcopy(data.get('winspec_temperature_verification'))
             self._winspec_intensity_processing = copy.deepcopy(data.get('winspec_intensity_processing'))
             self._winspec_raw_accumulated_counts = copy.deepcopy(data.get('winspec_raw_accumulated_counts'))
             self._winspec_start_acceleration = copy.deepcopy(data.get('winspec_start_acceleration'))
@@ -774,7 +776,8 @@ class SpectrumPanel(QWidget):
             name = "LightField"
         elif backend == "winspec_ingaas":
             axis = 'nm' if identity.get('axis_unit') == 'nm' else 'raw pixels'
-            name = f"WinSpec InGaAs + LightField spectrograph ({axis})"
+            source = 'Local WinUSB' if identity.get('acquisition_backend') == 'winusb_local' else 'WinSpec'
+            name = f"{source} InGaAs + LightField spectrograph ({axis})"
         else:
             name = backend or "Unknown device"
         return name + (" (mock)" if backend.startswith("mock_") else "")
@@ -1292,11 +1295,17 @@ class SpectrumPanel(QWidget):
         self._finish_one_shot()
 
     def _show_stop_result(self, diagnostic=None) -> None:
+        if self._is_local_winusb() and not diagnostic:
+            self._status_lbl.setText('Frame cancelled; waiting for native cleanup')
+            self._status_lbl.setToolTip('Cancellation discards the frame. The helper completes its own STOP and USB cleanup; it is never forcibly terminated.')
+            return
         self._status_lbl.setText(
             f"Acquisition cancelled; detector Stop not confirmed: {diagnostic}" if diagnostic else "Stopped")
         self._status_lbl.setToolTip(str(diagnostic or ""))
 
     def _start_continuous(self, mode: str) -> None:
+        if self._is_local_winusb():
+            return
         if not self._connected or self._continuous_mode is not None:
             return
         if mode == "2d" and not self._supports_2d:
@@ -1363,34 +1372,45 @@ class SpectrumPanel(QWidget):
             pause("spectrum", self._connected and not enabled)
         self._refresh_action_controls()
 
+    def _is_local_winusb(self) -> bool:
+        return (getattr(self._ctrl, 'identity', {}) or {}).get('acquisition_backend') == 'winusb_local'
+
     def _refresh_action_controls(self) -> None:
         # External locks affect presentation without claiming Spectrum ownership
         # or emitting the lock signal again. Keep our own acquisition state.
         blocked = bool(getattr(self._ctrl, 'spectrum_actions_blocked', False))
         enabled = self._connected and self._action_controls_requested and not blocked
-        winspec = (getattr(self._ctrl, 'identity', {}) or {}).get('backend') == 'winspec_ingaas'
+        local_winusb = self._is_local_winusb()
+        variable_local = local_winusb and bool((getattr(self._ctrl, 'identity', {}) or {}).get('max_accumulations'))
+        winspec = (getattr(self._ctrl, 'identity', {}) or {}).get('backend') == 'winspec_ingaas' and not local_winusb
         self._wavelength_calibration_btn.setEnabled(bool(enabled and winspec))
         self._use_winspec_nm.setEnabled(bool(enabled and winspec))
         if self._wavelength_dialog is not None:
+            self._wavelength_dialog.setEnabled(not local_winusb)
             self._wavelength_dialog.capture_button.setEnabled(bool(enabled and winspec))
             for editor in getattr(self._wavelength_dialog, 'capture_editors', []):
                 editor.setEnabled(bool(enabled and winspec))
         self._apply_btn.setEnabled(enabled)
         self._acquire_btn.setEnabled(enabled)
         self._acquire_2d_btn.setEnabled(enabled and self._supports_2d)
-        self._run_1d_btn.setEnabled(enabled)
+        self._run_1d_btn.setEnabled(enabled and not local_winusb)
         self._run_2d_btn.setEnabled(enabled and self._supports_2d)
         self._center.setEnabled(enabled)
         self._energy.setEnabled(enabled and self._center.value() > 0)
         self._enable_optics()
-        self._exposure.setEnabled(enabled)
-        self._accumulations.setEnabled(enabled)
+        self._exposure.setEnabled(enabled and (not local_winusb or variable_local))
+        self._accumulations.setEnabled(enabled and (not local_winusb or variable_local))
         self._add_spectrum_btn.setEnabled(
             not blocked and (bool(enabled) or (self._continuous_mode is not None and self._continuous_frames > 0))
         )
 
     @Slot(list)
     def _on_lf6_connected(self, _experiments):
+        if not self._is_local_winusb() and hasattr(self, '_pre_local_ranges'):
+            low,high,decimals,amin,amax=self._pre_local_ranges
+            self._exposure.setDecimals(decimals);self._exposure.setRange(low,high)
+            self._accumulations.setRange(amin,amax)
+            del self._pre_local_ranges
         if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') == 'winspec_ingaas':
             self._use_winspec_nm.setChecked(any(
                 r.get('kind') == 'physical_grating_model' and
@@ -1422,6 +1442,32 @@ class SpectrumPanel(QWidget):
         self._andor_controls.set_backend_identity(identity)
         if changed and isinstance(self._backend_profiles.get(backend), dict):
             self.restore_session_state(self._backend_profiles[backend])
+        if self._is_local_winusb():
+            if not hasattr(self, '_pre_local_recipe'):
+                self._pre_local_recipe = (self._exposure.value(), self._accumulations.value())
+            if identity.get('max_accumulations'):
+                if not hasattr(self, '_pre_local_ranges'):
+                    self._pre_local_ranges = (self._exposure.minimum(),self._exposure.maximum(),
+                        self._exposure.decimals(),self._accumulations.minimum(),self._accumulations.maximum())
+                self._exposure.setRange(identity['exposure_min_ms'],identity['exposure_max_ms'])
+                self._exposure.setDecimals(0)
+                self._accumulations.setRange(1,identity['max_accumulations'])
+            for control, value in ((self._exposure, 100.0), (self._accumulations, 1)):
+                old = control.blockSignals(True); control.setValue(value); control.blockSignals(old)
+            self._use_winspec_nm.setChecked(False)
+            self._frames_label.setText('Local WinUSB accumulations:')
+            self._frame_help.setText(
+                '10–1000 ms, 1–100 exposures averaged. Exports retain all raw subframes. Changing exposure adds initialization time. Pixel axis; scans unavailable.'
+                if identity.get('max_accumulations') else
+                'Experimental: 100 ms, one raw frame, pixel axis. Continuous acquisition and scans are unavailable.')
+            from app.devices.winusb_ingaas import LOCAL_TEMPERATURE_NOTICE
+            self._winspec_temperature_label.setText(LOCAL_TEMPERATURE_NOTICE)
+        elif backend == 'winspec_ingaas' and hasattr(self, '_pre_local_recipe'):
+            for control, value in zip((self._exposure, self._accumulations), self._pre_local_recipe):
+                old = control.blockSignals(True); control.setValue(value); control.blockSignals(old)
+            del self._pre_local_recipe
+        if identity.get('backend') == 'winspec_ingaas' and not self._is_local_winusb():
+            self._winspec_temperature_label.setText('InGaAs interlock: requires fresh temperature and (Locked or <= -100 C); checked at acquisition')
         self._andor_toggle.setVisible(is_andor)
         self._andor_controls.setVisible(is_andor and self._andor_toggle.isChecked())
         self._status_lbl.setText("Ready")
@@ -1481,6 +1527,12 @@ class SpectrumPanel(QWidget):
         self._last_acquisition_snapshot.setdefault("sample_id", str(getattr(cfg.session, "sample_id", "") or ""))
         self._last_acquisition_snapshot["save_root"] = str(self._spectrum_output_root())
         if self._last_acquisition_snapshot.get('instrument_identity', {}).get('backend') == 'winspec_ingaas':
+            native = getattr(self, '_winspec_native_capture', None)
+            temperature = getattr(self, '_winspec_temperature_verification', None)
+            if native is not None:
+                self._last_acquisition_snapshot['native_capture'] = copy.deepcopy(native)
+                self._last_acquisition_snapshot['temperature_verification'] = copy.deepcopy(temperature)
+            self._winspec_native_capture = self._winspec_temperature_verification = None
             self._last_acquisition_snapshot['intensity_processing'] = copy.deepcopy(getattr(self, '_winspec_intensity_processing', None))
             self._last_acquisition_snapshot['raw_accumulated_counts'] = copy.deepcopy(getattr(self, '_winspec_raw_accumulated_counts', None))
             self._last_acquisition_snapshot['start_acceleration'] = copy.deepcopy(getattr(self, '_winspec_start_acceleration', None))
@@ -1601,21 +1653,24 @@ class SpectrumPanel(QWidget):
                 source.valueChanged.connect(editor.setValue)
                 row.addWidget(editor); page.capture_settings_layout.addLayout(row)
             self._wavelength_dialog = page
+            page.setEnabled(not self._is_local_winusb())
             page.capture_button.setEnabled(self._wavelength_calibration_btn.isEnabled())
             for editor in page.capture_editors:
                 editor.setEnabled(self._wavelength_calibration_btn.isEnabled())
         return self._wavelength_dialog
 
     def _automatic_calibration_started(self):
+        if self._block_local_calibration():
+            return
         self._calibration_previous_nm = self._use_winspec_nm.isChecked()
         self._calibration_previous_capture = (self._exposure.value(), self._accumulations.value())
         self._accumulations.setValue(1)
 
     def _automatic_calibration_finished(self, success):
         previous = getattr(self, "_calibration_previous_capture", None)
-        if previous is not None:
+        if previous is not None and not self._is_local_winusb():
             self._exposure.setValue(previous[0]); self._accumulations.setValue(previous[1])
-            self._calibration_previous_capture = None
+        self._calibration_previous_capture = None
         if self._calibration_previous_nm is not None:
             self._use_winspec_nm.setChecked(bool(success or self._calibration_previous_nm))
         self._calibration_previous_nm = None
@@ -1624,6 +1679,8 @@ class SpectrumPanel(QWidget):
         return [item['index'] for item in getattr(self,'_optics_snapshot',{}).get('grating_infos',[]) if item.get('index') is not None]
 
     def _calibration_switch_grating(self, grating):
+        if self._block_local_calibration():
+            return
         dialog=self._wavelength_dialog.broad_dialog
         if (getattr(self._ctrl,'identity',{}) or {}).get('backend')!='winspec_ingaas':
             dialog.stop_collection('Select connected WinSpec first');return
@@ -1640,10 +1697,14 @@ class SpectrumPanel(QWidget):
         dialog.grating_ready(grating)
 
     def _capture_broad_settings(self, center, exposure):
+        if self._block_local_calibration():
+            return
         self._exposure.setValue(exposure)
         self._capture_broad_center(center)
 
     def _open_wavelength_calibration(self):
+        if self._block_local_calibration():
+            return
         if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') != 'winspec_ingaas':
             return
         from ui.wavelength_calibration_dialog import WavelengthCalibrationDialog
@@ -1664,6 +1725,8 @@ class SpectrumPanel(QWidget):
         self._wavelength_dialog.show(); self._wavelength_dialog.raise_()
 
     def _capture_broad_center(self, center):
+        if self._block_local_calibration():
+            return
         if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') != 'winspec_ingaas' or not self._acquire_btn.isEnabled():
             self._wavelength_dialog.result.setText('Select idle WinSpec first; no center change was sent.')
             if self._wavelength_dialog.broad_dialog is not None:
@@ -1673,6 +1736,8 @@ class SpectrumPanel(QWidget):
         self._capture_calibration_lamp()
 
     def _capture_calibration_lamp(self):
+        if self._block_local_calibration():
+            return
         if (getattr(self._ctrl, 'identity', {}) or {}).get('backend') != 'winspec_ingaas' or not self._acquire_btn.isEnabled():
             self._wavelength_dialog.result.setText('Select idle WinSpec first; PIXIS will not be acquired by this action.')
             return
@@ -1680,7 +1745,20 @@ class SpectrumPanel(QWidget):
         self._calibration_capture_pending = True
         self._on_acquire()
 
+    def _block_local_calibration(self):
+        if not self._is_local_winusb():
+            return False
+        if self._wavelength_dialog is not None:
+            message = 'Wavelength calibration is unavailable for Local WinUSB single-frame capture.'
+            self._wavelength_dialog.result.setText(message)
+            broad = self._wavelength_dialog.broad_dialog
+            if broad is not None and (broad.batch_active or broad.sweep_active):
+                broad.stop_collection(message)
+        return True
+
     def _save_winspec_calibration(self, record):
+        if self._block_local_calibration():
+            return False
         previous = copy.deepcopy(cfg.lf6.winspec_wavelength_calibrations)
         try:
             cfg.lf6.winspec_wavelength_calibrations = previous + [copy.deepcopy(record)]
@@ -2040,13 +2118,16 @@ class SpectrumPanel(QWidget):
         context.update(dict(metadata_context or {}))
         context.setdefault("sample_id", str(effective_sample_id or "") or None)
         context.setdefault("sidebar", {"available": False, "reason": "No sidebar snapshot supplied"})
-        return persist_output_snapshot(
+        metadata_path = persist_output_snapshot(
             output, experiment_type="spectrum_preview", device_id=device_id,
             settings=settings, instruments=inventory, context=context,
             sample_id=str(effective_sample_id or "") or None, kind="spectrum_1d",
             summary={"shape": [int(np.asarray(counts).size)], "source": source},
             reuse_legacy=output_existed,
         )
+        from app.devices.winusb_retention import acknowledge_saved_spectrum
+        acknowledge_saved_spectrum(snapshot, output, metadata_path)
+        return metadata_path
 
     def _capture_readbacks(self) -> dict:
         controller = self._ctrl
@@ -2085,6 +2166,10 @@ class SpectrumPanel(QWidget):
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         }
         if source == 'detector_temperature_snapshot' and (getattr(self._ctrl, 'identity', {}) or {}).get('backend') == 'winspec_ingaas':
+            if self._is_local_winusb():
+                from app.devices.winusb_ingaas import LOCAL_TEMPERATURE_NOTICE
+                self._winspec_temperature_label.setText(LOCAL_TEMPERATURE_NOTICE)
+                return
             self._winspec_temperature_label.setText(
                 f"InGaAs idle readback: {payload.get('temperature_c', 'unavailable')} °C · "
                 f"{payload.get('temperature_status', 'unknown')} · Locked or <= -100 C required (rechecked at acquisition)")

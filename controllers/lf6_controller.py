@@ -261,16 +261,19 @@ class _LF6Worker(QObject):
         self._transition(LightFieldLifecycleState.STARTING)
         try:
             if backend == "winspec_ingaas":
-                from app.devices.winspec_adapter import WinSpecSetup
                 lightfield = self._parked["lightfield"][0]
-                self._setup = WinSpecSetup(
-                    lightfield, host=cfg.lf6.winspec_host, port=cfg.lf6.winspec_port,
-                    pixel_pitch_um=cfg.lf6.winspec_pixel_pitch_um,
-                    acquisition_backend=cfg.lf6.winspec_acquisition_backend,
-                    start_acceleration=(cfg.lf6.winspec_start_acceleration
-                                        and cfg.lf6.winspec_acquisition_backend == 'winspec'),
-                    output_route=cfg.lf6.optical_profiles[cfg.lf6.optical_profile]['winspec_ingaas'],
-                )
+                common = dict(pixel_pitch_um=cfg.lf6.winspec_pixel_pitch_um,
+                              output_route=cfg.lf6.optical_profiles[cfg.lf6.optical_profile]['winspec_ingaas'])
+                if cfg.lf6.winspec_acquisition_backend == 'winusb_local':
+                    from app.devices.winusb_ingaas import LocalWinUSBSetup
+                    self._setup = LocalWinUSBSetup(lightfield, **common)
+                else:
+                    from app.devices.winspec_adapter import WinSpecSetup
+                    self._setup = WinSpecSetup(
+                        lightfield, host=cfg.lf6.winspec_host, port=cfg.lf6.winspec_port,
+                        acquisition_backend=cfg.lf6.winspec_acquisition_backend,
+                        start_acceleration=(cfg.lf6.winspec_start_acceleration
+                                            and cfg.lf6.winspec_acquisition_backend == 'winspec'), **common)
                 self._adapter = self._setup
                 self._identity = self._setup.identity
             elif use_mock:
@@ -402,34 +405,40 @@ class _LF6Worker(QObject):
             )
 
     @Slot()
-    def disconnect_instrument(self) -> None:
-        if self._backend == "lightfield":
-            dependent = self._parked.pop("winspec_ingaas", None)
-            if dependent is not None:
-                dependent[0].close()
+    def disconnect_instrument(self) -> bool:
         setup = self._setup
+        try:
+            if self._backend == "lightfield":
+                dependent = self._parked.get("winspec_ingaas")
+                if dependent is not None:
+                    dependent[0].close()
+                    del self._parked["winspec_ingaas"]
+            close = getattr(setup, "close", None)
+            if callable(close):
+                close()
+        except Exception as exc:
+            # Keep the owner reachable so close can collect delayed cleanup.
+            self.error.emit(f"Spectrometer disconnect incomplete; connection retained: {exc}")
+            return False
         self._setup = None
         self._adapter = None
         self._identity = {}
-        close = getattr(setup, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception as exc:
-                self.error.emit(f"Spectrometer disconnect warning: {exc}")
         self._transition(LightFieldLifecycleState.DISCONNECTED)
         self.disconnected.emit()
+        return True
 
     @Slot()
     def disconnect_all(self):
-        self.disconnect_instrument()
+        if not self.disconnect_instrument():
+            return
         for backend in list(self._parked):
             parked = self._parked.pop(backend, None)
             if parked is None:  # Closing LightField also closes its dependent WinSpec wrapper.
                 continue
             self._setup, self._adapter, self._identity, self._experiments = parked
             self._backend = backend
-            self.disconnect_instrument()
+            if not self.disconnect_instrument():
+                return
 
     def andor_setups(self):
         result = {key: value[0] for key, value in self._parked.items() if key.startswith("andor_")}
@@ -633,6 +642,8 @@ class _LF6Worker(QObject):
                     'winspec_raw_accumulated_counts': frame.get('raw_accumulated_counts'),
                     'winspec_frame_datatype': frame.get('winspec_datatype'),
                     'winspec_temperature_guard': frame.get('temperature_guard'),
+                    'winspec_native_capture': frame.get('native_capture'),
+                    'winspec_temperature_verification': frame.get('temperature_verification'),
                     'winspec_start_acceleration': frame.get('start_acceleration'),
                     'winspec_capture_timing': {
                         'bridge': frame.get('bridge_timing_s'), 'client': frame.get('client_timing_s'),

@@ -6,6 +6,11 @@ The application is intended for lab setups that combine either Princeton Instrum
 
 ## Main Features
 
+For the tested ST133/InGaAs on Windows 11 x64, see the
+[new-PC installation guide (中文)](docs/st133-new-pc-setup.md).
+The source and installer are public; the pinned vendor runtime travels in a
+separate private ZIP. This backend supports experimental manual acquisition.
+
 - PySide6 desktop interface with a docked instrument-control panel and dedicated workflow tabs
 - Live spectrum viewing with selectable LightField, Andor Si CCD, or Andor InGaAs CCD backends
 - Presets-based spectra sweep planning with loop tables, batch conditions, and CSV export

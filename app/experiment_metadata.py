@@ -311,7 +311,11 @@ class ExperimentHistory:
         connection = sqlite3.connect(str(self.path), timeout=2)
         try:
             with self._schema_lock:
-                if not self._schema_ready:
+                if (not self._schema_ready or not connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiments'"
+                ).fetchone()):
+                    # A reusable service can outlive a deleted/replaced optional
+                    # history index. Recreate its schema on this new connection.
                     connection.execute("PRAGMA journal_mode=WAL")
                     connection.execute(
                         """CREATE TABLE IF NOT EXISTS experiments (
@@ -455,7 +459,7 @@ class ExperimentHistory:
 
 
 class ExperimentRun:
-    def __init__(self, service: "ExperimentMetadataService", metadata: dict[str, Any], path: Path, *, allow_post_completion: bool = False):
+    def __init__(self, service: "ExperimentMetadataService", metadata: dict[str, Any], path: Path, *, allow_post_completion: bool = False, index_initial_state: bool = True):
         self.service = service
         self.metadata = metadata
         self.path = path
@@ -495,12 +499,13 @@ class ExperimentRun:
             # through construction, so this insertion cannot race another
             # writer.  The constructor is kept private in practice.
             _OPEN_RUNS[str(self.path)] = self
-        self._write()
+        self._write(index_history=index_initial_state)
 
-    def _write(self) -> None:
+    def _write(self, *, index_history: bool = True) -> None:
         with self._lock:
             _atomic_json(self.path, self.metadata)
-            self.service.history.upsert(self.metadata, local_metadata_path=self.path)
+            if index_history:
+                self.service.history.upsert(self.metadata, local_metadata_path=self.path)
             self._files_dirty = False
             self._events_since_checkpoint = 0
 
@@ -980,9 +985,16 @@ class ExperimentMetadataService:
         device_label: Optional[str] = None,
         sample_id: Optional[str] = None,
         allow_post_completion: bool = False,
+        index_initial_state: bool = True,
         software: Optional[Mapping[str, Any]] = None,
         safety_policy: Optional[Mapping[str, Any]] = None,
     ) -> ExperimentRun:
+        """Persist a new run; optionally defer only its initial history index.
+
+        Already-written exports use ``index_initial_state=False`` to avoid an
+        immediately superseded history row. The running JSON is still written
+        durably, and subsequent writes/finalization update history normally.
+        """
         device_id = str(device_id).strip()
         if not device_id:
             raise ValueError("device_id is required before an experiment starts")
@@ -1002,7 +1014,10 @@ class ExperimentMetadataService:
                 existing._allow_post_completion = bool(existing._allow_post_completion or allow_post_completion)
                 return existing
         if metadata_path is not None and path.exists():
-            return self.open_run(path, allow_post_completion=allow_post_completion)
+            return self.open_run(
+                path, allow_post_completion=allow_post_completion,
+                index_initial_state=index_initial_state,
+            )
         portable_requested = _portable_settings(settings or {}, root)
         requested_plan = {}
         for plan_key in ("plan", "schedule", "acquisition_schedule", "sequence"):
@@ -1069,6 +1084,7 @@ class ExperimentMetadataService:
                 metadata,
                 path,
                 allow_post_completion=allow_post_completion,
+                index_initial_state=index_initial_state,
             )
 
     @staticmethod
@@ -1095,7 +1111,8 @@ class ExperimentMetadataService:
     def query_history(self, device_id: str, experiment_type: str, limit: int = 100) -> list[dict[str, Any]]:
         return self.history.query(device_id, experiment_type, limit)
 
-    def open_run(self, path: str | Path, *, allow_post_completion: bool = False) -> ExperimentRun:
+    def open_run(self, path: str | Path, *, allow_post_completion: bool = False,
+                 index_initial_state: bool = True) -> ExperimentRun:
         """Reopen a sidecar and continue a recoverable partial event journal."""
         sidecar = Path(path).expanduser().resolve()
         metadata = self.load_metadata(sidecar)
@@ -1114,7 +1131,10 @@ class ExperimentMetadataService:
                     existing._allow_post_completion or allow_post_completion
                 )
                 return existing
-            return ExperimentRun(self, metadata, sidecar, allow_post_completion=allow_post_completion)
+            return ExperimentRun(
+                self, metadata, sidecar, allow_post_completion=allow_post_completion,
+                index_initial_state=index_initial_state,
+            )
 
     @staticmethod
     def load_metadata(path: str | Path, *, migrate: bool = True) -> dict[str, Any]:

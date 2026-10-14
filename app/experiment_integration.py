@@ -6,14 +6,23 @@ new output receives the same schema-v1 sidecar and history entry.
 from __future__ import annotations
 
 from pathlib import Path
+from functools import lru_cache
 import json
 import hashlib
 from typing import Any, Iterable, Mapping, Optional
 
 from .experiment_metadata import (
     ExperimentMetadataService, ExperimentRun, METADATA_SCHEMA_VERSION,
-    _jsonable, _portable_settings, _sha256, utc_now,
+    _jsonable, _portable_settings, _sha256, _default_history_path, utc_now,
 )
+
+
+@lru_cache(maxsize=16)
+def _export_service(root: Path, history: Path) -> ExperimentMetadataService:
+    # Reuse schema setup, not live SQLite connections. Each operation still
+    # opens/closes its own connection, so workers never share a SQLite handle.
+    # Both resolved paths are keys: changing history configuration stays isolated.
+    return ExperimentMetadataService(root, history)
 
 
 def _raw_output_paths(metadata: Mapping[str, Any]) -> set[str]:
@@ -38,9 +47,13 @@ def persist_output_snapshot(
     An unchanged export is a no-op. Overwriting the output refreshes its one
     record and journals the new content hash, rather than leaving multiple
     acquisition sidecars claiming to describe the same mutable file.
+
+    Both the initial portable sidecar and the completed sidecar remain durable.
+    Since the data file already exists, only the final state needs an update in
+    the optional history index; a failed finalization remains a running sidecar.
     """
     output = Path(output_file).expanduser().resolve()
-    service = ExperimentMetadataService(output.parent)
+    service = _export_service(output.parent, _default_history_path().expanduser().resolve())
     requested = _portable_settings(settings, output.parent)
     inventory = _jsonable(list(instruments))
     context = _jsonable(dict(context or {}))
@@ -79,7 +92,7 @@ def persist_output_snapshot(
             return sidecar
     run = service.begin(experiment_type, device_id, metadata_path=sidecar,
                         settings=requested, instruments=inventory, sample_id=sample_id,
-                        allow_post_completion=True)
+                        allow_post_completion=True, index_initial_state=False)
     with run._lock:
         run.metadata["metadata_schema"] = METADATA_SCHEMA_VERSION
         run.metadata["device_id"] = device_id

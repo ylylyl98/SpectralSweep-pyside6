@@ -10,3 +10,5 @@ __pycache__/
 config.local.json
 *.log
 /tmp/
+/.runtime/
+/tests/fixtures/winusb-single-frame/

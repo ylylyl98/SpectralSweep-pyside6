@@ -101,7 +101,9 @@ class ExperimentMetadataContractTests(unittest.TestCase):
             self.service.history._connect()
 
         self.assertEqual(first.execute.call_count, 3)
-        second.execute.assert_not_called()
+        # Reuse DDL setup, but detect an index removed while the service lives.
+        second.execute.assert_called_once_with(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='experiments'")
 
     def test_cancelled_and_failed_records_are_retained(self):
         cancelled = self.service.begin("x", "D1")
