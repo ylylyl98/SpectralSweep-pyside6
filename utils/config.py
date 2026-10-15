@@ -154,7 +154,8 @@ class MFF101Config:
     serial_number: str = ""
     position_1_path: str = "Andor"
     position_2_path: str = "LightField"
-    auto_route: bool = True
+    # Opt in on PCs equipped with a flipper; saved choices remain authoritative.
+    auto_route: bool = False
     andor_position: int = 1
     lightfield_position: int = 2
 

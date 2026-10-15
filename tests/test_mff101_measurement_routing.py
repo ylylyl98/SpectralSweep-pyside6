@@ -46,7 +46,7 @@ class Detector:
 
 @pytest.fixture
 def measurement(app, monkeypatch):
-    monkeypatch.setattr(cfg, 'mff101', MFF101Config())
+    monkeypatch.setattr(cfg, 'mff101', MFF101Config(auto_route=True))
     monkeypatch.setattr(cfg.ramp, 'delay_s', 0.)
     usb = Device()
     flipper = MFF101Controller(adapter_factory=usb.open, scan_func=lambda: ['37862922'])
@@ -138,3 +138,24 @@ def test_route_failure_during_measurement_blocks_next_setup(measurement, tmp_pat
         assert 'target' in str(result)
     assert measurement.captures == [('lightfield', 2)] * 2
     assert measurement.flipper.state['position'] is None
+
+
+@pytest.mark.parametrize('flow', ['dual_gate', 'inner_setup', 'maps'])
+def test_measurements_without_flipper_capture_all_setups(measurement, tmp_path, monkeypatch, flow):
+    monkeypatch.setattr(cfg, 'mff101', MFF101Config())
+    measurement.install('andor_si')
+
+    def unavailable():
+        raise ImportError('No flipper driver installed on this PC')
+
+    measurement.flipper._worker._scan = unavailable
+    if flow == 'maps':
+        run_maps(measurement, 'andor_si', tmp_path)
+    else:
+        result = run_dual_gate(measurement, 'andor_si', tmp_path, inner=flow == 'inner_setup')
+        assert result[0], result
+    expected = (['lightfield', 'andor_si'] * 2 if flow == 'inner_setup' else
+                ['lightfield'] * 2 + ['andor_si'] * 2)
+    assert [backend for backend, _ in measurement.captures] == expected
+    assert measurement.usb.calls == []
+    assert not measurement.flipper.state['error']

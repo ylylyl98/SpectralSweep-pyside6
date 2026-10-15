@@ -30,6 +30,16 @@ Measurement records in run history remain associated with their original sample.
 
 ## MFF101 flipper
 
+The MFF101 is optional. Automatic routing is **off by default** on a new PC,
+so setup selection, spectrometer connection, and acquisition work without a
+flipper or its driver. On a PC with a flipper, enable **Settings > MFF101 light
+paths > Use MFF101 automatic routing on this PC** and save the configuration.
+Existing saved routing choices are preserved; on a PC without a flipper, clear
+that checkbox and click **Save config to disk** if routing was previously enabled.
+This choice is stored in the local per-user configuration and is not restored
+from sample or measurement history. Manual flipper controls remain available
+when automatic routing is off.
+
 Expand **MFF101 Flipper** in the Instruments sidebar. Connect the powered
 flipper by USB, click **Scan** (or enter its eight-digit serial number), then
 **Connect**. **Position 1** and **Position 2** move to the two device positions;
@@ -72,8 +82,8 @@ for the internal model identifier. pylablib may print a model-prefix warning for
 this firmware even though the connection is supported.
 
 The app remembers the serial number. Starting the app, loading settings, and
-changing samples do not connect or move the flipper automatically. Explicitly
-selecting a measurement setup routes **Andor Si / InGaAs → position 1** and
+changing samples do not connect or move the flipper automatically. With automatic
+routing enabled, explicitly selecting a measurement setup routes **Andor Si / InGaAs → position 1** and
 **LightField / WinSpec → position 2**. Settings includes an automatic-routing
 checkbox and editable setup-to-position dropdowns, separate from descriptive
 path names. In **Dual Gate Measurement setup** recipes and **2D Sweep optical

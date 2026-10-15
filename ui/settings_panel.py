@@ -109,7 +109,7 @@ class SettingsPanel(QWidget):
             edit.setPlaceholderText("Light-path name")
             edit.setToolTip("Name the physical light path for this position; update it when the optics change.")
             form.addRow(f"Position {position} goes to:", edit)
-        self._mff101_auto_route = QCheckBox("Automatically route the selected measurement setup")
+        self._mff101_auto_route = QCheckBox("Use MFF101 automatic routing on this PC")
         form.addRow(self._mff101_auto_route)
         self._mff101_andor_position = QComboBox()
         self._mff101_lightfield_position = QComboBox()
@@ -118,7 +118,13 @@ class SettingsPanel(QWidget):
             combo.addItem("Position 2", 2)
             combo.setAccessibleName(f"{name} flipper position")
             form.addRow(f"{name} setup:", combo)
-        note = QLabel("Setup selection and acquisition preflight use the positions above. Names are descriptive. Simulation never moves the flipper. Editing these settings does not move it; use Save config to disk to keep changes.")
+        note = QLabel(
+            "Optional; off by default on a new PC. Leave unchecked if this PC has no MFF101: "
+            "setup selection, connection, and acquisition will skip flipper checks. "
+            "When enabled, the flipper must reach the configured position before acquisition. "
+            "Names are descriptive. Simulation never moves the flipper. Editing these settings "
+            "does not move it; use Save config to disk to keep changes on this PC."
+        )
         note.setWordWrap(True)
         form.addRow(note)
         return group
