@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
 )
 
 from app import notification_config
+from ui.workflow_sections import compact_form_rows
 
 
 class NotificationSettings(QGroupBox):
@@ -21,6 +22,7 @@ class NotificationSettings(QGroupBox):
         self.save_button = QPushButton("Save and lock PC name")
         self.save_button.setToolTip("Creates this PC's permanent notification subscription.")
         form.addRow("", self.save_button)
+        compact_form_rows(form, (self.name_edit, self.save_button))
         self.url_edit = QLineEdit()
         self.url_edit.setReadOnly(True)
         self.url_edit.setAccessibleName("ntfy subscription URL")

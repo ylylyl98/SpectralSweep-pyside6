@@ -83,7 +83,7 @@ $st133Instance = 'USB\VID_0BD7&PID_A010\把这里替换为 devices 的实际后�
 
 目前应用中的 InGaAs 配置仍需要 **LightField 管理光谱仪和输出光路**。新电脑若要使用完整界面，需要另行安装该设备匹配的 LightField/光谱仪软件，并创建正确的实验配置；这些不在相机迁移 ZIP 中。
 
-**MFF101 翻转镜是可选设备**，新配置默认关闭其自动光路切换。没有 MFF101 的电脑无需连接翻转镜或安装其驱动；若沿用了已启用自动切换的旧配置，在 **Settings > MFF101 light paths** 取消勾选 **Use MFF101 automatic routing on this PC**，再点击 **Save config to disk**。这不会关闭 LightField 对光谱仪输出光路的管理。
+**MFF101 翻转镜是可选设备**，新配置默认关闭其自动光路切换。没有 MFF101 的电脑无需连接翻转镜或安装其驱动；若沿用了已启用自动切换的旧配置，在 **Settings > Instruments > MFF101 light paths** 取消勾选 **Use MFF101 automatic routing on this PC**，再点击 **Save config to disk**。这不会关闭 LightField 对光谱仪输出光路的管理。
 
 选择 InGaAs + LightField 配置，将 **InGaAs acquisition** 改成 **Local WinUSB — manual acquisition (experimental)**，再连接设备。在 Spectrum 中设定曝光与累积并使用 Acquire 1D / Save current。不要沿用 XP 的远程采集地址。不要复制旧电脑的整个 `config.local.json`，应重新选择本机设备和路径。
 

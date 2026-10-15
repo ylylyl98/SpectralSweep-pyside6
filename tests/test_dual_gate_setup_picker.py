@@ -66,11 +66,11 @@ def test_setup_cell_offers_picker_while_numeric_cells_remain_text(widget):
 
 
 def test_setup_button_fits_its_row_with_application_stylesheet(app):
-    from ui.main_window import _STYLESHEET
+    from ui.application_style import STYLE_PATH, read_style
     previous_style = app.styleSheet()
     result = None
     try:
-        app.setStyleSheet(_STYLESHEET)
+        app.setStyleSheet(read_style(STYLE_PATH))
         result = panel.PresetsPanel()
         set_paired_setup_draft(result)
         result.show()

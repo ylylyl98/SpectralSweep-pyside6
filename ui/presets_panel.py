@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QTextEdit, QSizePolicy, QFormLayout,
     QCheckBox, QAbstractItemView, QComboBox, QFrame, QToolButton,
     QCompleter, QStyledItemDelegate, QMessageBox, QDoubleSpinBox, QSpinBox,
-    QAbstractSpinBox, QMenu, QScrollArea,
+    QAbstractSpinBox, QMenu, QScrollArea, QRadioButton, QButtonGroup,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +61,8 @@ from utils.config import cfg
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.power_reading import power_correction_factor, read_power
+from ui.workflow_sections import divide_grid_fields, inline_divider
+from ui.table_layout import fit_table_columns
 from utils.hardware_incidents import (
     HardwareIncidentRecorder,
     build_hardware_incident,
@@ -181,22 +183,6 @@ BATCH_SCHEMA = [
     "Vbias_start", "Vbias_stop",
 ]
 
-# Batch column widths (px). Keep the label readable, but do not let it
-# dominate the numeric sweep columns.
-_BATCH_COL_WIDTHS = {
-    "Run":             38,
-    "When":            108,
-    "MeasurePower":    82,
-    "condition_label": 144,
-    "repeat":          52,
-    "frames":          52,
-    "Vbg_start":       68,
-    "Vbg_stop":        68,
-    "Vtg_start":       68,
-    "Vtg_stop":        68,
-    "Vbias_start":     72,
-    "Vbias_stop":      72,
-}
 # Source-drain bias columns stay visible; blank values still mean skip.
 _VBIAS_COLUMNS = ("Vbias_start", "Vbias_stop")
 
@@ -204,7 +190,6 @@ _BATCH_BOOL_COLUMNS = {"Run", "MeasurePower"}
 _BATCH_INT_COLUMNS = {"repeat", "frames"}
 _BATCH_FLOAT_COLUMNS = {"Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop", "Vbias_start", "Vbias_stop"}
 
-_BATCH_STRETCH_COLUMNS = {"When", "condition_label"}
 
 # Loop mode labels and their tooltips.
 LOOP_MODES = {
@@ -1881,15 +1866,7 @@ class _SweepLineCalculator(QGroupBox):
         self._multi_preview.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        preview_header = self._multi_preview.horizontalHeader()
-        for column in range(3):
-            preview_header.setSectionResizeMode(
-                column, QHeaderView.ResizeMode.Stretch
-            )
-        preview_header.setSectionResizeMode(
-            3, QHeaderView.ResizeMode.ResizeToContents
-        )
-        preview_header.setMinimumSectionSize(42)
+        fit_table_columns(self._multi_preview, (120, 160, 160, 56))
         for column, tooltip in enumerate(
             (
                 "Generated condition label.",
@@ -3547,14 +3524,17 @@ def _populate_batch_table(table: QTableWidget, df: pd.DataFrame) -> None:
 
 
 def _configure_batch_table_columns(table: QTableWidget) -> None:
-    """Use predictable widths for dense numeric editing and only stretch low-risk text."""
-    hdr = table.horizontalHeader()
-    hdr.setStretchLastSection(False)
-    for c, col in enumerate(BATCH_SCHEMA):
-        hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
-        hdr.resizeSection(c, _BATCH_COL_WIDTHS.get(col, 80))
-    for col_name in _BATCH_STRETCH_COLUMNS:
-        hdr.setSectionResizeMode(BATCH_SCHEMA.index(col_name), QHeaderView.ResizeMode.Stretch)
+    """Keep every batch field visible with explicit, compact headers."""
+    titles = ("Run", "When", "Measure\npower", "Condition", "Repeat", "Frames",
+              "Vbg\nstart (V)", "Vbg\nstop (V)", "Vtg\nstart (V)", "Vtg\nstop (V)",
+              "Vbias\nstart (V)", "Vbias\nstop (V)")
+    for column, title in enumerate(titles):
+        item = table.horizontalHeaderItem(column)
+        if item is not None:
+            item.setText(title)
+            if not item.toolTip():
+                item.setToolTip(BATCH_SCHEMA[column])
+    fit_table_columns(table, (34, 104, 58, 120, 48, 50, 72, 72, 72, 72, 72, 72))
 
 
 def _read_batch_table(table: QTableWidget) -> pd.DataFrame:
@@ -3592,6 +3572,49 @@ def _make_batch_table_item(col: str, val: Any) -> QTableWidgetItem:
 
 def _is_checkable_batch_item(item: Optional[QTableWidgetItem]) -> bool:
     return bool(item and (item.flags() & Qt.ItemFlag.ItemIsUserCheckable))
+
+
+class _MeasurementModeSelector(QWidget):
+    """Visible, exclusive choices with the existing filename-binding interface."""
+
+    currentTextChanged = Signal(str)
+    _modes = ("PL", "Ref")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAccessibleName("Measurement mode")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        for index, mode in enumerate(self._modes):
+            button = QRadioButton(mode)
+            button.setProperty("fluentRole", "modeOption")
+            button.setAccessibleName(f"Measurement mode {mode}")
+            button.setToolTip(f"Use {mode} in measurement filenames.")
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            self._group.addButton(button, index)
+            row.addWidget(button)
+        self._group.button(0).setChecked(True)
+        self.setFocusProxy(self._group.button(0))
+        self._group.buttonToggled.connect(self._on_toggled)
+
+    def _on_toggled(self, button, checked):
+        if checked:
+            self.setFocusProxy(button)
+            self.currentTextChanged.emit(button.text())
+
+    def currentText(self):
+        return self._group.checkedButton().text()
+
+    def findText(self, text):
+        return self._modes.index(text) if text in self._modes else -1
+
+    def setCurrentText(self, text):
+        index = self.findText(text)
+        if index >= 0:
+            self._group.button(index).setChecked(True)
 
 
 # ── Main panel ────────────────────────────────────────────────────────────────
@@ -3681,44 +3704,39 @@ class PresetsPanel(QWidget):
         root.setSpacing(6)
 
         # ── top meta row ───────────────────────────────────────────────────
-        meta = QHBoxLayout()
-        meta.setSpacing(6)
+        meta = QGridLayout()
+        meta.setSpacing(5)
         self._sample_edit    = QLineEdit(); self._sample_edit.setPlaceholderText("Sample ID")
         self._sample_edit.setToolTip("Sample ID — included at the start of saved filenames.")
-        self._sample_edit.setMaximumWidth(120)
+        self._sample_edit.setMinimumWidth(100)
         self._point_edit     = QLineEdit(); self._point_edit.setPlaceholderText("p1")
         self._point_edit.setToolTip("Measurement location (e.g. p1, center, edge) — included in filenames.")
-        self._point_edit.setFixedWidth(72)
+        self._point_edit.setMinimumWidth(80)
         self._tag_edit       = QLineEdit(); self._tag_edit.setPlaceholderText("")
         self._tag_label = QLabel("Run note:")
         self._tag_edit.setToolTip("Short run tag or note — appended to filenames.")
         self._laser_edit     = QLineEdit(); self._laser_edit.setPlaceholderText("Laser nm")
-        self._laser_edit.setFixedWidth(76)
+        self._laser_edit.setMinimumWidth(80)
         self._laser_edit.setToolTip("Excitation laser wavelength in nm — recorded in filename.")
         self._power_edit     = QLineEdit(); self._power_edit.setPlaceholderText("Sample µW")
-        self._power_edit.setFixedWidth(80)
+        self._power_edit.setMinimumWidth(80)
         self._power_edit.setToolTip(
             "Sample power in µW — used directly in the filename.\n"
             "Overwritten by a live PM100D reading when MeasurePower is enabled."
         )
         self._subfolder_edit = QLineEdit(); self._subfolder_edit.setPlaceholderText("Initial Data")
         self._subfolder_edit.setToolTip("Optional subfolder created under the base output directory.")
-        self._subfolder_edit.setMaximumWidth(130)
-        meta.addWidget(QLabel("Sample ID:")); meta.addWidget(self._sample_edit)
-        meta.addWidget(QLabel("Point:"));     meta.addWidget(self._point_edit)
-        meta.addWidget(self._tag_label);      meta.addWidget(self._tag_edit)
-        meta.addWidget(QLabel("Laser:"));  meta.addWidget(self._laser_edit)
-        meta.addWidget(QLabel("Sample power (µW):"));  meta.addWidget(self._power_edit)
-        meta.addWidget(QLabel("Subfolder:")); meta.addWidget(self._subfolder_edit)
+        self._subfolder_edit.setMinimumWidth(100)
+        self._tag_edit.setParent(self)
+        self._tag_label.setParent(self)
         self._temp_edit = QLineEdit()
         self._temp_edit.setPlaceholderText("Temp (K)")
-        self._temp_edit.setFixedWidth(66)
+        self._temp_edit.setMinimumWidth(70)
         self._temp_edit.setText(str(cfg.filename.temperature))
         self._temp_edit.setToolTip("Temperature token used in filenames, for example 6 or 1.8.")
-        self._mode_combo_name = QComboBox()
-        self._mode_combo_name.addItems(["PL", "Ref"])
+        self._mode_combo_name = _MeasurementModeSelector()
         self._mode_combo_name.setCurrentText(str(cfg.filename.measurement_mode or "PL"))
-        self._mode_combo_name.setFixedWidth(60)
+        self._mode_combo_name.setMinimumWidth(64)
         self._mode_combo_name.setToolTip("Measurement mode token used in filenames.")
         self._power_coeff_edit = QLineEdit(self)  # Legacy session compatibility only
         self._power_coeff_edit.setFixedWidth(66)
@@ -3730,19 +3748,28 @@ class PresetsPanel(QWidget):
         self._tag_edit.hide()
         self._tag_label.hide()
         self._subfolder_edit.setText("Initial Data")
-        meta.insertWidget(4, QLabel("Temp:"))
-        meta.insertWidget(5, self._temp_edit)
-        meta.insertWidget(6, QLabel("Mode:"))
-        meta.insertWidget(7, self._mode_combo_name)
+        fields = (
+            ("Sample ID:", self._sample_edit), ("Point:", self._point_edit),
+            ("Temp (K):", self._temp_edit), ("Mode:", self._mode_combo_name),
+            ("Laser (nm):", self._laser_edit), ("Power (µW):", self._power_edit),
+            ("Subfolder:", self._subfolder_edit),
+        )
+        for i, (title, editor) in enumerate(fields):
+            row, column = divmod(i, 4)
+            label = QLabel(title)
+            label.setBuddy(editor)
+            meta.addWidget(label, row, column * 2)
+            meta.addWidget(editor, row, column * 2 + 1, 1, 3 if i == 6 else 1)
+        for column in (1, 3, 5, 7):
+            meta.setColumnStretch(column, 1)
+        divide_grid_fields(meta, 6, (0,))
+        divide_grid_fields(meta, 4, (0, 1))
+        divide_grid_fields(meta, 2, (0, 1))
         self._power_coeff_edit.hide()
 
         # Wrap meta row in a styled frame
         meta_frame = QFrame()
         meta_frame.setFrameShape(QFrame.Shape.NoFrame)
-        meta_frame.setStyleSheet(
-            "QFrame { background: #f5f5f7; border: 1px solid #d8d8d8;"
-            " border-radius: 4px; padding: 2px; }"
-        )
         meta_frame.setLayout(meta)
         root.addWidget(meta_frame)
 
@@ -3880,15 +3907,7 @@ class PresetsPanel(QWidget):
             item = self._loop_table.horizontalHeaderItem(i)
             if item and col in _loop_hdr_tips:
                 item.setToolTip(_loop_hdr_tips[col])
-        # Set column widths
-        self._loop_table.horizontalHeader().resizeSection(0, 55)   # Enable
-        self._loop_table.horizontalHeader().resizeSection(1, 180)  # Parameter
-        self._loop_table.horizontalHeader().resizeSection(2, 120)  # Values
-        self._loop_table.horizontalHeader().resizeSection(3, 55)   # Group
-        self._loop_table.horizontalHeader().resizeSection(4, 145)  # This run
-        self._loop_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.Stretch
-        )
+        fit_table_columns(self._loop_table, (52, 190, 250, 54, 170))
         loop_btn_row = QHBoxLayout()
         loop_btn_row.setSpacing(4)
         self._loop_add_btn = QPushButton("+ Row"); self._loop_add_btn.setFixedWidth(64)
@@ -4134,6 +4153,7 @@ class PresetsPanel(QWidget):
         apply_row.addWidget(self._apply_btn)
 
         self._workflow_scroll = QScrollArea()
+        self._workflow_scroll.setMinimumWidth(520)
         self._workflow_scroll.setObjectName("DualGateWorkflowScroll")
         self._workflow_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._workflow_scroll.setWidgetResizable(True)
@@ -4262,23 +4282,22 @@ class PresetsPanel(QWidget):
         self._voltage_timing_bar.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self._voltage_timing_bar.setStyleSheet(
-            "QFrame#DualGateVoltageTimingBar { background: #FAFBFC;"
-            " border: 1px solid #D7DEE7; border-radius: 5px; }"
-        )
-        timing_row = QGridLayout(self._voltage_timing_bar)
-        timing_row.setContentsMargins(8, 3, 8, 3)
-        timing_row.setSpacing(6)
+        self._voltage_timing_bar.setProperty("fluentRole", "compactBar")
+        timing_row = QHBoxLayout(self._voltage_timing_bar)
+        timing_row.setContentsMargins(6, 3, 6, 3)
+        timing_row.setSpacing(3)
         timing_title = QLabel("Voltage settling")
-        timing_title.setStyleSheet("font-weight: 600; color: #4B5563;")
-        initial_settle_label = QLabel("After first ramp:")
+        timing_title.setProperty("fluentRole", "sectionTitle")
+        initial_settle_label = QLabel("First:")
         self._initial_voltage_settle_spin = QDoubleSpinBox()
+        self._initial_voltage_settle_spin.setAccessibleName("Voltage settling after first ramp")
+        initial_settle_label.setBuddy(self._initial_voltage_settle_spin)
         self._initial_voltage_settle_spin.setRange(0.0, 3600.0)
         self._initial_voltage_settle_spin.setDecimals(3)
         self._initial_voltage_settle_spin.setSingleStep(0.5)
         self._initial_voltage_settle_spin.setValue(float(cfg.ramp.settle_s))
         self._initial_voltage_settle_spin.setSuffix(" s")
-        self._initial_voltage_settle_spin.setFixedWidth(88)
+        self._initial_voltage_settle_spin.setFixedWidth(96)
         self._initial_voltage_settle_spin.setMaximumHeight(26)
         self._initial_voltage_settle_spin.setToolTip(
             "Wait after ramping from the previous voltage to the first point of "
@@ -4288,14 +4307,16 @@ class PresetsPanel(QWidget):
         initial_settle_label.setToolTip(
             self._initial_voltage_settle_spin.toolTip()
         )
-        point_settle_label = QLabel("After later steps:")
+        point_settle_label = QLabel("Next:")
         self._voltage_settle_spin = QDoubleSpinBox()
+        self._voltage_settle_spin.setAccessibleName("Voltage settling after each later step")
+        point_settle_label.setBuddy(self._voltage_settle_spin)
         self._voltage_settle_spin.setRange(0.0, 3600.0)
         self._voltage_settle_spin.setDecimals(3)
         self._voltage_settle_spin.setSingleStep(0.1)
         self._voltage_settle_spin.setValue(float(cfg.ramp.settle_s))
         self._voltage_settle_spin.setSuffix(" s")
-        self._voltage_settle_spin.setFixedWidth(88)
+        self._voltage_settle_spin.setFixedWidth(96)
         self._voltage_settle_spin.setMaximumHeight(26)
         self._voltage_settle_spin.setToolTip(
             "Wait after each subsequent Vbg, Vtg, and optional Vbias sweep step "
@@ -4306,12 +4327,13 @@ class PresetsPanel(QWidget):
         timing_title.setToolTip(
             "Separate settling delays for the larger initial ramp and later sweep steps."
         )
-        timing_row.addWidget(timing_title, 0, 0)
-        timing_row.addWidget(initial_settle_label, 0, 1)
-        timing_row.addWidget(self._initial_voltage_settle_spin, 0, 2)
-        timing_row.addWidget(point_settle_label, 1, 1)
-        timing_row.addWidget(self._voltage_settle_spin, 1, 2)
-        timing_row.setColumnStretch(3, 1)
+        timing_row.addWidget(timing_title)
+        timing_row.addWidget(initial_settle_label)
+        timing_row.addWidget(self._initial_voltage_settle_spin)
+        timing_row.addWidget(inline_divider())
+        timing_row.addWidget(point_settle_label)
+        timing_row.addWidget(self._voltage_settle_spin)
+        timing_row.addStretch(1)
         lay_right.addWidget(self._voltage_timing_bar)
 
         file_grp = QGroupBox("Filename preview")
@@ -4320,9 +4342,7 @@ class PresetsPanel(QWidget):
         self._filename_parts_table.setHorizontalHeaderLabels(["Use", "Part", "Preview"])
         self._filename_parts_table.verticalHeader().setVisible(False)
         self._filename_parts_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self._filename_parts_table.horizontalHeader().resizeSection(0, 40)
-        self._filename_parts_table.horizontalHeader().resizeSection(1, 108)
-        self._filename_parts_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        fit_table_columns(self._filename_parts_table, (40, 108, 230))
         self._filename_parts_table.setMaximumHeight(200)
         self._filename_parts_table.setAlternatingRowColors(True)
         self._filename_parts_table.hide()
@@ -4509,7 +4529,7 @@ class PresetsPanel(QWidget):
         self._results_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
-        self._results_scroll.setMinimumWidth(430)
+        self._results_scroll.setMinimumWidth(380)
         self._results_scroll.setWidget(right)
         results_pane = QWidget()
         results_lay = QVBoxLayout(results_pane)
@@ -4522,6 +4542,9 @@ class PresetsPanel(QWidget):
         splitter.setStretchFactor(0, 11)
         splitter.setStretchFactor(1, 7)
         splitter.setSizes([880, 500])
+        self._results_pane = results_pane
+        fit_table_columns(self._execution_order_table, (180, 180, 110))
+        QTimer.singleShot(0, self._fit_workflow_layout)
 
         # ── wire ──────────────────────────────────────────────────────────
         self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
@@ -4605,9 +4628,29 @@ class PresetsPanel(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self._fit_workflow_layout()
         # Other pages edit the shared defaults even without applying hardware
         # settings. Recheck those defaults whenever this page becomes visible.
         self._refresh_detector_wavelength_advice()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_workflow_layout()
+
+    def _fit_workflow_layout(self):
+        if not hasattr(self, "_results_pane"):
+            return
+        # Dense batch tables need the page width at ordinary desktop sizes.
+        horizontal = self.width() >= 1320
+        target = Qt.Orientation.Horizontal if horizontal else Qt.Orientation.Vertical
+        self._workflow_scroll.setMinimumWidth(850 if horizontal else 0)
+        self._results_scroll.setMinimumWidth(380 if horizontal else 0)
+        self._workflow_scroll.setMinimumHeight(0 if horizontal else 260)
+        self._results_pane.setMinimumHeight(0 if horizontal else 240)
+        if self._splitter.orientation() != target:
+            self._splitter.setOrientation(target)
+            extent = self._splitter.width() if horizontal else self._splitter.height()
+            self._splitter.setSizes([int(extent * .62), int(extent * .38)])
 
     @staticmethod
     def _session_records(df: pd.DataFrame) -> List[dict]:
@@ -4675,6 +4718,7 @@ class PresetsPanel(QWidget):
                 "condition_label": calc._condition_edit.text(),
             },
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
+            "splitter_orientation": self._splitter.orientation().name,
             "preview_splitter_sizes": [int(v) for v in self._preview_splitter.sizes()],
         }
 
@@ -4904,7 +4948,10 @@ class PresetsPanel(QWidget):
             self._sweep_calc._recalculate()
 
         sizes = state.get("splitter_sizes")
-        if isinstance(sizes, list) and len(sizes) == 2:
+        self._fit_workflow_layout()
+        saved_orientation = state.get("splitter_orientation", "Horizontal")
+        if (saved_orientation == self._splitter.orientation().name
+                and isinstance(sizes, list) and len(sizes) == 2):
             try:
                 self._splitter.setSizes([max(0, int(v)) for v in sizes])
             except (TypeError, ValueError):

@@ -267,17 +267,19 @@ class SweepLinePanelTests(unittest.TestCase):
 
     def test_dual_gate_safety_control_is_a_compact_single_row(self):
         panel = PresetsPanel()
+        self.addCleanup(panel.close)
         self.assertEqual(panel._safety_bar.maximumHeight(), 36)
         self.assertEqual(panel._safe_jump_spin.width(), 96)
-        # Settling controls occupy separate rows so scaled text fits the pane.
-        timing_layout = panel._voltage_timing_bar.layout()
-        initial_row = timing_layout.getItemPosition(timing_layout.indexOf(panel._initial_voltage_settle_spin))[0]
-        later_row = timing_layout.getItemPosition(timing_layout.indexOf(panel._voltage_settle_spin))[0]
-        self.assertLess(initial_row, later_row)
+        panel.show()
+        self.app.processEvents()
+        self.assertEqual(
+            panel._initial_voltage_settle_spin.geometry().center().y(),
+            panel._voltage_settle_spin.geometry().center().y(),
+        )
         self.assertEqual(panel._initial_voltage_settle_spin.maximum(), 3600.0)
         self.assertEqual(panel._voltage_settle_spin.maximum(), 3600.0)
-        self.assertEqual(panel._initial_voltage_settle_spin.width(), 88)
-        self.assertEqual(panel._voltage_settle_spin.width(), 88)
+        self.assertEqual(panel._initial_voltage_settle_spin.width(), 96)
+        self.assertEqual(panel._voltage_settle_spin.width(), 96)
         self.assertAlmostEqual(
             panel._initial_voltage_settle_spin.value(), cfg.ramp.settle_s
         )

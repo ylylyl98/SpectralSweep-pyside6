@@ -302,7 +302,8 @@ def test_connection_panel_configuration_and_advanced_hierarchy(monkeypatch):
         assert panel._advanced_content.isHidden()
         assert 'LightField spectrograph' in panel._connections_status.text()
         assert 'XP WinSpec' in panel._connections_status.text()
-        assert 'Connect required' in panel._connect_btn.text()
+        assert panel._connect_btn.text() == 'Connect'
+        assert 'required' in panel._connect_btn.toolTip()
         panel._mock_chk.setChecked(False)
         controller.connect_instrument = Mock()
         panel._on_connect()

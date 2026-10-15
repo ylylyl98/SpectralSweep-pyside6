@@ -2,22 +2,40 @@ from __future__ import annotations
 
 import os
 import unittest
+from pathlib import Path
 
 import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QWheelEvent
+from PySide6.QtGui import QFont, QFontDatabase, QWheelEvent
 from PySide6.QtWidgets import QApplication, QAbstractSpinBox
 
 from ui.megasweep_panel import CoordSystem, MegaSweepPanel, _PreviewPlot
+from ui.application_style import STYLE_PATH, read_style
 
 
 class MegaSweepLayoutTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        cls._original_font = cls.app.font()
+        cls._original_style = cls.app.styleSheet()
+        # Windows' offscreen plugin may have no font database until fonts are
+        # registered. Use the app's real font metrics for layout assertions.
+        for filename in ("segoeui.ttf", "segoeuib.ttf"):
+            path = Path("C:/Windows/Fonts") / filename
+            if path.is_file():
+                QFontDatabase.addApplicationFont(str(path))
+        if "Segoe UI" in QFontDatabase.families():
+            cls.app.setFont(QFont("Segoe UI", 9))
+        cls.app.setStyleSheet(read_style(STYLE_PATH))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.app.setFont(cls._original_font)
+        cls.app.setStyleSheet(cls._original_style)
 
     def _show_panel(self, width: int, height: int) -> MegaSweepPanel:
         panel = MegaSweepPanel()
@@ -106,16 +124,16 @@ class MegaSweepLayoutTests(unittest.TestCase):
                 widget.parentWidget().rect().right(),
             )
 
-    def test_settings_cards_reflow_between_wide_and_narrow_panes(self):
+    def test_aligned_axis_fields_reflow_without_changing_the_recipe(self):
         panel = self._show_panel(1500, 760)
-
-        self.assertTrue(panel._settings_two_column)
-        self.assertEqual(panel._axis_a.y(), panel._axis_b.y())
-        self.assertGreater(panel._axis_b.x(), panel._axis_a.x())
-        self.assertEqual(
-            panel._fixed_widget.y(),
-            panel._safety_widget.y(),
-        )
+        state = panel.capture_session_state()
+        self.assertTrue(panel._axis_a._single_row)
+        self.assertEqual(panel._axis_a._start.y(), panel._axis_a._step.y())
+        self.assertEqual(panel._axis_a.x(), panel._axis_b.x())
+        self.assertEqual(panel._coord_widget._raw.y(), panel._coord_widget._physical.y())
+        self.assertEqual(panel._axis_selector._outer.y(), panel._axis_selector._inner.y())
+        for name in ("_start", "_stop", "_step", "_mode"):
+            self.assertEqual(getattr(panel._axis_a, name).x(), getattr(panel._axis_b, name).x())
         self.assertLessEqual(
             panel._settings_content.minimumSizeHint().width(),
             panel._settings_scroll.viewport().width(),
@@ -126,7 +144,8 @@ class MegaSweepLayoutTests(unittest.TestCase):
         panel._refresh_settings_scroll_range()
         self.app.processEvents()
 
-        self.assertFalse(panel._settings_two_column)
+        self.assertFalse(panel._axis_a._single_row)
+        self.assertGreater(panel._axis_a._step.y(), panel._axis_a._start.y())
         self.assertEqual(panel._axis_a.x(), panel._axis_b.x())
         self.assertGreater(
             panel._axis_b.y(),
@@ -141,12 +160,14 @@ class MegaSweepLayoutTests(unittest.TestCase):
         self.app.processEvents()
         panel._refresh_settings_scroll_range()
         self.app.processEvents()
-        self.assertTrue(panel._settings_two_column)
-        self.assertEqual(panel._axis_a.y(), panel._axis_b.y())
+        self.assertTrue(panel._axis_a._single_row)
+        self.assertEqual(panel._axis_a._start.y(), panel._axis_a._step.y())
+        for key in ("outer_config", "inner_config", "ratio", "fixed", "safety"):
+            self.assertEqual(panel.capture_session_state()[key], state[key])
 
     def test_numeric_editors_stay_compact(self):
         panel = self._show_panel(1500, 760)
-        spins = panel._settings_content.findChildren(QAbstractSpinBox)
+        spins = panel.findChildren(QAbstractSpinBox)
 
         self.assertGreaterEqual(len(spins), 21)
         for spin in spins:
@@ -173,14 +194,14 @@ class MegaSweepLayoutTests(unittest.TestCase):
         )
 
     def test_narrow_layout_stacks_settings_above_preview(self):
-        panel = self._show_panel(900, 700)
+        panel = self._show_panel(850, 850)
 
         self.assertEqual(
             panel._splitter.orientation(),
             Qt.Orientation.Vertical,
         )
-        self.assertGreaterEqual(panel._settings_scroll.height(), 220)
-        self.assertGreaterEqual(panel._right_panel.height(), 300)
+        self.assertGreaterEqual(panel._settings_scroll.height(), 100)
+        self.assertGreaterEqual(panel._right_panel.height(), 200)
         self.assertGreaterEqual(panel._splitter.handle(1).height(), 8)
 
     def test_compact_height_is_not_forced_below_the_usable_screen(self):
@@ -189,7 +210,7 @@ class MegaSweepLayoutTests(unittest.TestCase):
         self.assertEqual(panel.height(), 450)
         self.assertEqual(
             panel._splitter.orientation(),
-            Qt.Orientation.Vertical,
+            Qt.Orientation.Horizontal,
         )
         self.assertGreater(
             panel._settings_scroll.verticalScrollBar().maximum(),
@@ -270,7 +291,7 @@ class MegaSweepLayoutTests(unittest.TestCase):
         self.app.processEvents()
         panel._refresh_settings_scroll_range()
 
-        spins = panel._settings_content.findChildren(QAbstractSpinBox)
+        spins = panel.findChildren(QAbstractSpinBox)
         expected = [
             panel._coord_widget._ratio_spin,
             panel._axis_a._start,
@@ -339,7 +360,7 @@ class MegaSweepLayoutTests(unittest.TestCase):
 
     def test_touchpad_wheel_cannot_change_numeric_values(self):
         panel = self._show_panel(1000, 500)
-        scrollbar = panel._settings_scroll.verticalScrollBar()
+        scrollbar = panel._optical_scroll.verticalScrollBar()
         spin = panel._frames_spin
         spin.setValue(37)
         spin.setFocus()

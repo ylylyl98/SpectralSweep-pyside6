@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QLabel,QPushButto
     QTableWidget,QTableWidgetItem,QComboBox,QDoubleSpinBox,QPlainTextEdit,
     QWidget,QTabWidget,QScrollArea,QHeaderView,QToolButton)
 from app.wavelength_calibration import fit_calibration, reference_lines, valid_context
+from ui.table_layout import fit_table_columns
 
 REFERENCE = Path(__file__).resolve().parents[1]/'calibrations/ingaas-2026-09-26/LightField-SourceSpectra.xml'
 
@@ -118,6 +119,7 @@ class WavelengthCalibrationDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        fit_table_columns(self.table, (100, 170, 210))
         review.addWidget(self.table); review.addWidget(add)
         advanced = QWidget(); advanced_layout = QVBoxLayout(advanced)
         options.setParent(None); advanced_layout.addLayout(options)

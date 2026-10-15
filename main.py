@@ -22,45 +22,36 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon
 from PySide6.QtCore    import Qt
 from PySide6.QtCore import QTimer
 
-_APP_NAME = "SpectralSweep"
-_APP_ID = "SpectralSweep.SpectralSweep.Desktop"
-
-
-def _resource_path(*parts: str) -> Path:
-    """Return a source-tree or PyInstaller runtime resource path."""
-    base = Path(getattr(sys, "_MEIPASS", _ROOT))
-    return base.joinpath(*parts)
-
-
-def _set_windows_app_user_model_id() -> None:
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_APP_ID)
-    except Exception:
-        # Older Windows shells or restricted runtimes can ignore this safely.
-        pass
-
-
-def _load_app_icon() -> QIcon:
-    icon_path = _resource_path("assets", "icons", "spectralsweep.ico")
-    return QIcon(str(icon_path)) if icon_path.exists() else QIcon()
+from ui.application_identity import (
+    APP_NAME as _APP_NAME,
+    configure_window_taskbar,
+    load_app_icon as _load_app_icon,
+    set_windows_app_user_model_id as _set_windows_app_user_model_id,
+)
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="SpectralSweep PySide6")
     p.add_argument("--mock", action="store_true",
                    help="Use mock LF6 (no hardware required)")
+    p.add_argument("--watch-styles", action="store_true",
+                   help="Reload application.qss automatically when edited")
+    p.add_argument("--preview-spectrum", action="store_true",
+                   help="Open an isolated Spectrum preview with synthetic data")
+    p.add_argument("--preview-child", action="store_true", help=argparse.SUPPRESS)
     return p.parse_args()
 
 
 def main():
     args = _parse_args()
+
+    # Branch before importing config, notifications, watchdogs or controllers.
+    if args.preview_spectrum or args.preview_child:
+        from app.ui_preview import run_preview, run_preview_child
+        sys.exit(run_preview_child() if args.preview_child else run_preview())
 
     from app.ntfy_notifications import NtfyNotifier
     from app.runtime_exception_reporting import install as install_exception_reporting
@@ -100,10 +91,11 @@ def main():
     install_input_wheel_guard(app)
 
     from ui.main_window import MainWindow
-    win = MainWindow(notifier=notifier)
+    win = MainWindow(notifier=notifier, watch_styles=args.watch_styles)
     win.notification_configured.connect(watchdog.enable)
     if not icon.isNull():
         win.setWindowIcon(icon)
+    configure_window_taskbar(win)
     win.show()
 
     try:

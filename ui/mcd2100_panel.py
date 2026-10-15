@@ -13,14 +13,16 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QDialog, QGroupBox, QHBoxLayout, QLabel, QHeaderView, QLineEdit, QPlainTextEdit,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTableWidget,
-    QTableWidgetItem, QTabWidget, QVBoxLayout, QGridLayout, QSplitter, QWidget,
+    QTableWidgetItem, QTabWidget, QVBoxLayout, QGridLayout, QSplitter, QWidget, QBoxLayout,
 )
+from ui.workflow_sections import bind_log_toggle, compact_form_rows, inline_divider
+from ui.table_layout import fit_table_columns
 
 from app.engine.mcd2100_worker import MCD2100Worker
 from app.engine.magnet_preparation import (
@@ -249,6 +251,7 @@ class _RampTablesDialog(QDialog):
             grid.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
             grid.horizontalHeader().resizeSections(QHeaderView.ResizeMode.ResizeToContents)
             grid.horizontalHeader().setStretchLastSection(True)
+            fit_table_columns(grid, (75, 100, 100, 100, 100))
             for row_index, row in enumerate(table.rows):
                 values = (
                     str(report.channel), str(row.index),
@@ -408,6 +411,7 @@ class MCD2100Panel(QWidget):
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         layout.addWidget(self._splitter, 1)
         scroll = QScrollArea()
+        self._settings_scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setMinimumWidth(560)
@@ -461,7 +465,7 @@ class MCD2100Panel(QWidget):
         connection_layout.addLayout(telemetry)
         self.telemetry_note.setWordWrap(True)
         connection_layout.addWidget(self.telemetry_note)
-        buttons = QHBoxLayout()
+        buttons = QGridLayout()
         self.connect_btn = QPushButton("Connect")
         self.disconnect_btn = QPushButton("Disconnect")
         self.refresh_btn = QPushButton("Refresh telemetry")
@@ -471,11 +475,9 @@ class MCD2100Panel(QWidget):
         )
         self.view_ramp_tables_btn = QPushButton("View ramp tables")
         self.view_ramp_tables_btn.setToolTip("View the last cached ramp-table report without communicating")
-        buttons.addWidget(self.connect_btn)
-        buttons.addWidget(self.disconnect_btn)
-        buttons.addWidget(self.refresh_btn)
-        buttons.addWidget(self.read_ramp_tables_btn)
-        buttons.addWidget(self.view_ramp_tables_btn)
+        for index, button in enumerate((self.connect_btn, self.disconnect_btn,
+                self.refresh_btn, self.read_ramp_tables_btn, self.view_ramp_tables_btn)):
+            buttons.addWidget(button, index // 3, index % 3)
         connection_layout.addLayout(buttons)
         self.ramp_tables_status = QLabel("Ramp tables not read")
         self.ramp_tables_status.setWordWrap(True)
@@ -509,6 +511,7 @@ class MCD2100Panel(QWidget):
         self._compact(self._point, 80, 160)
         sample_form.addWidget(QLabel("Sample ID"))
         sample_form.addWidget(self._sample_id, 1)
+        sample_form.addWidget(inline_divider())
         sample_form.addWidget(QLabel("Point / Location"))
         sample_form.addWidget(self._point)
         workflow_layout.addWidget(sample_group)
@@ -527,6 +530,7 @@ class MCD2100Panel(QWidget):
         sweep_form.addRow("Start field (T)", self.start_field)
         sweep_form.addRow("Stop field (T)", self.stop_field)
         sweep_form.addRow("Sweep", self.round_trip_notice)
+        compact_form_rows(sweep_form, (self.start_field, self.stop_field))
 
         rotation_group = QGroupBox("Rotation")
         self._rotation_group = rotation_group
@@ -547,8 +551,10 @@ class MCD2100Panel(QWidget):
         self.rotator.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         rotation_form.addRow("Angles", self.angles)
         rotation_form.addRow("Rotator", self.rotator)
+        compact_form_rows(rotation_form, (self.angles, self.rotator))
 
         field_rotation_row = QHBoxLayout()
+        self._field_rotation_row = field_rotation_row
         field_rotation_row.setSpacing(6)
         field_rotation_row.addWidget(sweep_group, 1)
         field_rotation_row.addWidget(rotation_group, 1)
@@ -586,6 +592,7 @@ class MCD2100Panel(QWidget):
         temperature_form.addRow("Target", self.sample_target)
         temperature_form.addRow(self.apply_temperature_btn)
         temperature_form.addRow("Apply status", self.temperature_apply_status)
+        compact_form_rows(temperature_form, (self.sample_target, self.apply_temperature_btn))
         # These remain persisted compatibility/settings attributes and retain
         # the existing stabilization semantics, but are intentionally not
         # exposed in the routine fixed-temperature workflow.
@@ -634,6 +641,7 @@ class MCD2100Panel(QWidget):
         lightfield_form.addRow("Center", self.lf_center)
         lightfield_form.addRow("Exposure", self.lf_exposure)
         lightfield_form.addRow("Frames / accums", self.lf_frames)
+        compact_form_rows(lightfield_form, (self.lf_center, self.lf_exposure, self.lf_frames), labels_above=True)
 
         gate_group = QGroupBox("Gate / SMU")
         self._gate_group = gate_group
@@ -691,20 +699,22 @@ class MCD2100Panel(QWidget):
         for legacy_widget in (self.vtg, self.vbg, self.vbias):
             legacy_widget.setVisible(False)
         ratio_row = QHBoxLayout()
+        ratio_row.setSpacing(6)
         ratio_row.addWidget(QLabel("Weighting"))
         ratio_row.addWidget(QLabel("TG"))
         ratio_row.addWidget(self.gate_vtg_factor)
-        ratio_row.addSpacing(6)
+        ratio_row.addWidget(inline_divider())
         ratio_row.addWidget(QLabel("BG"))
         ratio_row.addWidget(self.gate_vbg_factor)
         ratio_row.addWidget(self.gate_ratio_value)
         ratio_row.addStretch(1)
         gate_form.addRow(ratio_row)
         settle_row = QHBoxLayout()
+        settle_row.setSpacing(6)
         settle_row.addWidget(QLabel("Settle"))
         settle_row.addWidget(QLabel("First"))
         settle_row.addWidget(self.initial_voltage_settle)
-        settle_row.addSpacing(8)
+        settle_row.addWidget(inline_divider())
         settle_row.addWidget(QLabel("Later"))
         settle_row.addWidget(self.voltage_settle)
         settle_row.addStretch(1)
@@ -762,17 +772,9 @@ class MCD2100Panel(QWidget):
              "E-field", "Input A", "Input B"]
         )
         self._condition_table.verticalHeader().setVisible(False)
-        header = self._condition_table.horizontalHeader()
-        header.setStretchLastSection(False)
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        for column, width in enumerate((38, 28, 120, 82, 82, 82, 82, 82)):
-            self._condition_table.setColumnWidth(column, width)
-        # Give spare width to the descriptive mode column, never to the final
-        # numeric E-field column.  This keeps full labels readable without
-        # recreating the oversized last-column layout.
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._condition_table.setColumnHidden(8, True)
         self._condition_table.setColumnHidden(9, True)
+        fit_table_columns(self._condition_table, (38, 24, 140, 54, 54, 54, 64, 64, 80, 80))
         self._condition_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._condition_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._condition_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -826,6 +828,7 @@ class MCD2100Panel(QWidget):
         gate_form.addRow(preview_group)
 
         temperature_lightfield_row = QHBoxLayout()
+        self._temperature_lightfield_row = temperature_lightfield_row
         temperature_lightfield_row.setSpacing(6)
         temperature_lightfield_row.addWidget(temperature_group, 1)
         temperature_lightfield_row.addWidget(lightfield_group, 1)
@@ -871,7 +874,8 @@ class MCD2100Panel(QWidget):
         controls.addWidget(self.start_btn)
         controls.addWidget(self.prepare_magnet_btn)
         controls.addWidget(self.stop_btn)
-        content_layout.addWidget(run_group)
+        self._run_footer = run_group
+        layout.addWidget(run_group)
 
         status_group = QGroupBox("Status / Progress / Log")
         status_layout = QVBoxLayout(status_group)
@@ -906,13 +910,14 @@ class MCD2100Panel(QWidget):
         self.error_display.setMaximumHeight(120)
         self.error_display.setVisible(False)
         status_layout.addWidget(self.error_display)
-        content_layout.addWidget(status_group)
         content_layout.addStretch(1)
 
         display = QWidget()
         display_layout = QVBoxLayout(display)
         display_layout.setContentsMargins(8, 6, 8, 6)
         display_layout.setSpacing(6)
+        display.setMinimumWidth(340)
+        display_layout.addWidget(status_group)
         display_header = QHBoxLayout()
         live_title = QLabel("Live spectrum")
         live_title.setStyleSheet("font-weight: 700;")
@@ -920,19 +925,23 @@ class MCD2100Panel(QWidget):
         self.run_activity.setStyleSheet("color: #6b7280;")
         self.spectrum_activity = QLabel("Spectrum 0 · no spectrum yet")
         display_header.addWidget(live_title)
-        display_header.addWidget(self.run_activity)
-        display_header.addWidget(self.spectrum_activity)
+        self.run_activity.setWordWrap(True)
+        self.spectrum_activity.setWordWrap(True)
         display_header.addStretch(1)
         self._clear_log_btn = QPushButton("Clear log")
+        self._show_log_chk = QCheckBox("Show log")
+        display_header.addWidget(self._show_log_chk)
         display_header.addWidget(self._clear_log_btn)
         display_layout.addLayout(display_header)
+        display_layout.addWidget(self.run_activity)
+        display_layout.addWidget(self.spectrum_activity)
         self._plot = pg.PlotWidget()
         self._plot.setMinimumHeight(180)
         self._plot.setLabel("bottom", "Wavelength", units="nm")
         self._plot.setLabel("left", "Intensity", units="counts")
         self._plot_overlay = pg.TextItem("No spectrum yet", color="#4b5563", anchor=(0, 0))
         self._plot_overlay.setPos(0, 0)
-        self._plot.addItem(self._plot_overlay)
+        self._plot.addItem(self._plot_overlay, ignoreBounds=True)
         self._curve_a = self._plot.plot(pen=pg.mkPen("#2374c6", width=1.5), name="A")
         self._curve_b = self._plot.plot(pen=pg.mkPen("#c06020", width=1.5), name="B")
         self._plot.addLegend()
@@ -944,11 +953,16 @@ class MCD2100Panel(QWidget):
         self._plot_log_splitter.addWidget(self._log)
         self._plot_log_splitter.setStretchFactor(0, 1)
         self._plot_log_splitter.setStretchFactor(1, 1)
+        self._plot_log_splitter.setSizes([520, 140])
+        bind_log_toggle(self._show_log_chk, self._plot_log_splitter, self._log)
         display_layout.addWidget(self._plot_log_splitter, 1)
         self._splitter.addWidget(display)
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
-        self._splitter.setSizes([680, 520])
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setSizes([560, 440])
+        scroll.viewport().installEventFilter(self)
+        self._apply_responsive_layout()
         self._activity_timer = QTimer(self)
         self._activity_timer.setInterval(500)
         self._activity_timer.timeout.connect(self._refresh_activity)
@@ -996,6 +1010,18 @@ class MCD2100Panel(QWidget):
         widget.setMaximumWidth(int(maximum))
         widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         return widget
+
+    def _apply_responsive_layout(self):
+        stacked = self._settings_scroll.viewport().width() < 700
+        for row in (self._field_rotation_row, self._temperature_lightfield_row):
+            row.setDirection(QBoxLayout.Direction.TopToBottom if stacked else QBoxLayout.Direction.LeftToRight)
+            row.setStretch(0, 0 if stacked else 1)
+            row.setStretch(1, 0 if stacked else 1)
+
+    def eventFilter(self, watched, event):
+        if watched is self._settings_scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._apply_responsive_layout()
+        return super().eventFilter(watched, event)
 
     @Slot()
     def _browse_output(self):
@@ -1496,7 +1522,7 @@ class MCD2100Panel(QWidget):
     def _mode_combo(self, row: int, mode: str) -> QComboBox:
         combo = QComboBox()
         labels = {
-            MODE_DIRECT: ("Direct Vtg / Vbg", "Enter Vtg and Vbg directly."),
+            MODE_DIRECT: ("Vtg / Vbg", "Enter Vtg and Vbg directly."),
             MODE_DOPING_EFIELD: (
                 "Doping / E-field",
                 "Enter Doping and E-field; Vtg and Vbg are calculated from the gate weighting.",
@@ -1513,6 +1539,7 @@ class MCD2100Panel(QWidget):
             combo.addItem(labels[key][0], key)
             combo.setItemData(combo.count() - 1, labels[key][1], Qt.ItemDataRole.ToolTipRole)
         combo.setCurrentIndex(max(0, combo.findData(mode)))
+        combo.setToolTip(labels[mode][1])
         combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         combo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         return combo
@@ -1947,6 +1974,7 @@ class MCD2100Panel(QWidget):
             "gate_entry_expansion": self._gate_entry_expansion.currentData(),
             "splitter_sizes": [int(value) for value in self._splitter.sizes()],
             "plot_log_sizes": [int(value) for value in self._plot_log_splitter.sizes()],
+            "log_visible": self._show_log_chk.isChecked(),
         }
         return state
 
@@ -2047,6 +2075,9 @@ class MCD2100Panel(QWidget):
                     splitter.setSizes([int(sizes[0]), int(sizes[1])])
                 except (TypeError, ValueError):
                     pass
+        self._show_log_chk.setChecked(bool(state.get("log_visible", False)))
+        if self._show_log_chk.isChecked() and self._plot_log_splitter.sizes()[1] < 80:
+            self._plot_log_splitter.setSizes([520, 140])
 
     def set_externally_busy(self, busy: bool):
         self._externally_busy = bool(busy)
@@ -2949,6 +2980,7 @@ class MCD2100Panel(QWidget):
 
     @Slot(str)
     def _show_error(self, message):
+        self._show_log_chk.setChecked(True)
         self.error_display.setPlainText(str(message))
         self.error_display.setVisible(True)
         if hasattr(self, "_log"):
