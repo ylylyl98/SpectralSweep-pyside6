@@ -297,7 +297,12 @@ class MagnetConfig:
     maximum_current_a: float = 44.27
     maximum_rate_a_per_s: float = 0.0343
     mcd_max_field_t: float = 8.0
+    # Retained config key: manual moves ending Driven use this limit.
     safe_control_max_field_t: float = 8.0
+    # Guarded moves ending Persistent may temporarily ramp above the driven limit.
+    persistent_control_max_field_t: float = 9.0
+    # Use the stored RATE 5 only for cooled, verified heater-off lead operations.
+    fast_leads_enabled: bool = True
     heater_warm_s: float = 60.0
     heater_cool_s: float = 120.0
     current_match_tolerance_a: float = 0.01

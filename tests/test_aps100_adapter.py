@@ -96,7 +96,7 @@ class _FakeAPS100Resource:
             self.heater = 1
         elif upper == "PSHTR OFF":
             self.heater = 0
-        elif upper == "SWEEP PAUSE":
+        elif upper.startswith("SWEEP PAUSE"):
             self.sweep = self.pause_response
             self.status &= ~1
         elif upper.startswith("SWEEP UP"):
@@ -135,7 +135,7 @@ class _InstantSweepAPS100Resource(_FakeAPS100Resource):
                 self.field_kg = self.output_kg
             self.sweep = "pause"
             self.status &= ~1
-        elif upper == "SWEEP ZERO":
+        elif upper.startswith("SWEEP ZERO"):
             self.output_kg = 0.0
             if self.heater:
                 self.field_kg = 0.0
@@ -382,7 +382,7 @@ class APS100AdapterTests(unittest.TestCase):
 
         match_index = fake.commands.index("SWEEP UP SLOW")
         heater_on_index = fake.commands.index("PSHTR ON")
-        zero_index = fake.commands.index("SWEEP ZERO")
+        zero_index = fake.commands.index("SWEEP ZERO SLOW")
         heater_off_index = fake.commands.index("PSHTR OFF")
         self.assertLess(match_index, heater_on_index)
         self.assertLess(heater_on_index, zero_index)
