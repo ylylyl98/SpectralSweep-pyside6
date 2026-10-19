@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
 )
 
 from utils.config import cfg
+from app.devices.aps100_field_policy import APS100FieldLimits
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from utils.filename_builder import (
@@ -235,6 +236,14 @@ def build_mcd_filename_base(params: dict) -> str:
     )
 
 
+def _mcd_field_limit(adapter=None) -> float:
+    limit = APS100FieldLimits.from_config(cfg.magnet).mcd_limit
+    hardware_limit = float(getattr(adapter, "maximum_field_t", limit))
+    if not math.isfinite(hardware_limit) or hardware_limit <= 0:
+        raise ValueError("APS100 hardware field limit must be finite and positive")
+    return min(limit, hardware_limit)
+
+
 class _ContinuousMCDWorker(QObject):
     log = Signal(str)
     progress = Signal(float, float, int, int)  # field, percentage, condition_index, count
@@ -332,7 +341,7 @@ class _ContinuousMCDWorker(QObject):
             if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
                 raise RuntimeError(f"APS100 returned non-finite {name} telemetry")
         field_t = float(snapshot.field_t)
-        maximum = float(getattr(self._magnet_ctrl.adapter, "maximum_field_t", 9.0))
+        maximum = _mcd_field_limit(self._magnet_ctrl.adapter)
         if abs(field_t) > maximum + 1e-9:
             raise RuntimeError(
                 f"APS100 field telemetry {field_t:g} T exceeds configured ±{maximum:g} T"
@@ -361,7 +370,7 @@ class _ContinuousMCDWorker(QObject):
         field_t = float(field_t)
         if not math.isfinite(field_t):
             raise RuntimeError("APS100 returned non-finite field telemetry")
-        maximum = float(getattr(self._magnet_ctrl.adapter, "maximum_field_t", 9.0))
+        maximum = _mcd_field_limit(self._magnet_ctrl.adapter)
         if abs(field_t) > maximum + 1e-9:
             raise RuntimeError(
                 f"APS100 field telemetry {field_t:g} T exceeds configured ±{maximum:g} T"
@@ -463,6 +472,11 @@ class _ContinuousMCDWorker(QObject):
     def _run(self) -> dict:
         p = self._p
         magnet = self._magnet_ctrl.adapter
+        maximum = _mcd_field_limit(magnet)
+        for name in ("start_t", "stop_t"):
+            target = float(p[name])
+            if not math.isfinite(target) or abs(target) > maximum:
+                raise ValueError(f"MCD fields are limited to ±{maximum:g} T in Driven mode")
         sweep_mode = str(p.get("sweep_mode", "one_way")).strip().lower()
         if sweep_mode == "round_trip":
             legs = [p["stop_t"], p["start_t"]]
@@ -1204,6 +1218,7 @@ class MCDPanel(QWidget):
         self._worker: Optional[_ContinuousMCDWorker] = None
         self._externally_busy = False
         self._safe_magnet_operation_active = False
+        self._safe_move_incomplete = ""
         self._last_snapshot = None
         self._updating_table = False
         self._syncing_gate_ratio = False
@@ -1396,26 +1411,27 @@ class MCDPanel(QWidget):
         safe_form.setContentsMargins(8, 6, 8, 6)
         safe_form.setVerticalSpacing(4)
         self._safe_target = self._double_spin(
-            -cfg.magnet.safe_control_max_field_t,
-            cfg.magnet.safe_control_max_field_t,
+            -APS100FieldLimits.from_config(cfg.magnet).manual_limit("persistent"),
+            APS100FieldLimits.from_config(cfg.magnet).manual_limit("persistent"),
             0.0,
             4,
             " T",
         )
         self._safe_target.setToolTip(
-            "Requested final magnet field. The normal 1000 MCD operating guard "
-            f"limits this control to ±{cfg.magnet.safe_control_max_field_t:g} T."
+            "Requested final magnet field. The limit follows the selected final mode. "
+            "A move ending Persistent may use a temporary driven ramp above the "
+            "continuous driven limit."
         )
         self._safe_rate = QLabel("Stored APS100 RATE 0–4 profile — connect to read")
         self._safe_rate.setWordWrap(True)
         self._safe_rate.setToolTip(
-            "Read-only policy: lead matching and magnet motion use the range-dependent "
-            "RATE 0–4 values already stored in the APS100. This application never "
-            "changes them, and FAST/RATE 5 is never used."
+            "Field ramps use stored RATE 0–4. Cooled, heater-off lead matching and "
+            "zeroing start SLOW, then may use stored RATE 5 after zero magnet voltage "
+            "is verified during lead movement. No rate-table values are changed."
         )
         self._safe_rates_refresh_btn = QPushButton("Refresh stored rates")
         self._safe_rates_refresh_btn.setToolTip(
-            "Read RANGE 0–4, RATE 0–4, and VLIM from the APS100 without changing them."
+            "Read RANGE 0–4, RATE 0–5 (including Fast), and VLIM without changing them."
         )
         vmag_limit = cfg.magnet.persistent_zero_max_magnet_voltage_v
         self._safe_vmag_limit = QLabel(
@@ -1435,6 +1451,10 @@ class MCDPanel(QWidget):
             "Persistent traps the target field and can zero the leads. Driven "
             "keeps the heater ON and is required for field-sweep MCD."
         )
+        self._safe_limit = QLabel()
+        self._safe_limit.setWordWrap(True)
+        self._safe_final_mode.currentIndexChanged.connect(self._update_safe_target_limit)
+        self._update_safe_target_limit()
         self._safe_settle = self._double_spin(0.0, 300.0, 2.0, 1, " s")
         self._safe_settle.setToolTip(
             "Time the magnet field must remain within tolerance after the ramp "
@@ -1463,6 +1483,7 @@ class MCDPanel(QWidget):
         safe_form.addRow("", self._safe_rates_refresh_btn)
         safe_form.addRow("Lead-zero VMAG limit", self._safe_vmag_limit)
         safe_form.addRow("Final mode", self._safe_final_mode)
+        safe_form.addRow("Field limit", self._safe_limit)
         safe_form.addRow("Field stability", self._safe_settle)
         safe_form.addRow(safe_actions)
         safe_form.addRow("Safe operation", self._safe_state)
@@ -1491,11 +1512,11 @@ class MCDPanel(QWidget):
         magnet_form.setContentsMargins(8, 6, 8, 6)
         magnet_form.setVerticalSpacing(3)
         magnet_form.setHorizontalSpacing(8)
-        self._start_t = self._double_spin(-cfg.magnet.mcd_max_field_t, cfg.magnet.mcd_max_field_t, cfg.mcd.start_field_t, 4, " T")
+        self._start_t = self._double_spin(-_mcd_field_limit(), _mcd_field_limit(), cfg.mcd.start_field_t, 4, " T")
         self._start_t.setToolTip(
             "Field where the MCD run begins. The app moves here first and settles."
         )
-        self._stop_t = self._double_spin(-cfg.magnet.mcd_max_field_t, cfg.magnet.mcd_max_field_t, cfg.mcd.stop_field_t, 4, " T")
+        self._stop_t = self._double_spin(-_mcd_field_limit(), _mcd_field_limit(), cfg.mcd.stop_field_t, 4, " T")
         self._stop_t.setToolTip("End target of the continuous sweep.")
         self._start_settle = self._double_spin(0.0, 120.0, 3.0, 1, " s")
         self._start_settle.setToolTip(
@@ -2219,7 +2240,13 @@ class MCDPanel(QWidget):
         heater_text = "ON — driven" if snapshot.heater_on else "OFF — persistent"
         self._heater.setText(f"{heater_text} · {operating_mode}")
         self._sweep.setText(snapshot.sweep_state)
-        if snapshot.heater_on:
+        if not math.isfinite(snapshot.field_t) or abs(snapshot.field_t) > _mcd_field_limit():
+            self._mode_notice.setText(
+                f"MCD unavailable — return within ±{_mcd_field_limit():g} T using "
+                "Safe Magnet Control before enabling continuous Driven operation."
+            )
+            self._mode_notice.setStyleSheet("color:#a82020; font-weight:600;")
+        elif snapshot.heater_on:
             self._mode_notice.setText(
                 "MCD ready — magnet in driven mode (heater ON)."
             )
@@ -2240,7 +2267,15 @@ class MCDPanel(QWidget):
         if snapshot.status.menu_locked:
             faults.append("MENU LOCK")
         self._fault.setText(", ".join(faults) if faults else "None")
-        if not self._safe_magnet_operation_active and not faults:
+        if self._safe_move_incomplete:
+            mode_name = "Driven" if snapshot.heater_on else "Persistent"
+            self._safe_state.setText(
+                f"INCOMPLETE — {self._safe_move_incomplete}\n"
+                f"Observed: {mode_name} {snapshot.field_t:+.6f} T; "
+                "requested final state was not verified."
+            )
+            self._safe_state.setStyleSheet("color:#a82020; font-weight:600;")
+        elif not self._safe_magnet_operation_active and not faults:
             mode_name = "Driven" if snapshot.heater_on else "Persistent"
             lead_note = (
                 " · leads zeroed"
@@ -2248,7 +2283,7 @@ class MCDPanel(QWidget):
                 else ""
             )
             self._safe_state.setText(
-                f"READY — {mode_name} {snapshot.field_t:+.6f} T{lead_note}"
+                f"Observed — {mode_name} {snapshot.field_t:+.6f} T{lead_note}"
             )
             self._safe_state.setStyleSheet("color:#1d7a3e; font-weight:600;")
 
@@ -2266,6 +2301,16 @@ class MCDPanel(QWidget):
             )
             lower = float(upper)
         voltage = (payload or {}).get("voltage_limit_v")
+        fast_rate = (payload or {}).get("fast_rate_a_per_s")
+        fast_error = (payload or {}).get("fast_rate_error")
+        if fast_rate is not None and math.isfinite(float(fast_rate)) and float(fast_rate) > 0:
+            lines.append(f"FAST leads: {float(fast_rate):g} A/s (heater OFF only)")
+        else:
+            lines.append("FAST leads: unavailable — using SLOW")
+        if not (payload or {}).get("fast_leads_enabled", cfg.magnet.fast_leads_enabled):
+            lines.append("FAST lead operation disabled — using SLOW")
+        if fast_error:
+            self._append_log(f"APS100 Fast-rate read failed; leads will use SLOW: {fast_error}")
         if voltage is not None:
             lines.append(f"VLIM: {float(voltage):g} V")
         self._safe_rate.setText("\n".join(lines) or "Stored APS100 rates unavailable")
@@ -2290,15 +2335,18 @@ class MCDPanel(QWidget):
 
     @Slot(str, float)
     def _on_transition(self, label: str, remaining: float) -> None:
+        # Lead phases include the actual speed without changing the units of
+        # their progress value (output-current equivalent in tesla).
+        base_label = label.partition(" (")[0]
         field_steps = {
             "matching leads",
             "zeroing leads",
             "ramping field",
             "entering driven mode",
         }
-        if label in field_steps and not math.isfinite(float(remaining)):
+        if base_label in field_steps and not math.isfinite(float(remaining)):
             text = f"{label}: telemetry unavailable"
-        elif label in field_steps:
+        elif base_label in field_steps:
             text = f"{label}: {remaining:+.6f} T"
         else:
             text = f"{label}: {remaining:.1f} s remaining"
@@ -2306,19 +2354,19 @@ class MCDPanel(QWidget):
         # These are values already read and verified by the guarded adapter
         # operation. Updating the display here avoids concurrent APS100 queries
         # while normal polling is suspended by exclusive ownership.
-        if label in field_steps and math.isfinite(float(remaining)):
+        if base_label in field_steps and math.isfinite(float(remaining)):
             field_t = float(remaining)
             output_text = (
                 f"{field_t:+.6f} T "
                 f"({field_t / cfg.magnet.coil_constant_t_per_a:+.5f} A)"
             )
-            if label == "ramping field":
+            if base_label == "ramping field":
                 self._field.setText(f"{field_t:+.6f} T")
                 self._field_caption.setText("Magnet field (live)")
                 self._current_field.setText(f"{field_t:+.6f} T")
                 self._output.setText(output_text)
                 self._sweep.setText("ramping")
-            elif label in {"matching leads", "zeroing leads"}:
+            elif base_label in {"matching leads", "zeroing leads"}:
                 self._field_caption.setText("Magnet field (stored)")
                 self._output.setText(output_text)
                 self._sweep.setText(label)
@@ -2341,6 +2389,7 @@ class MCDPanel(QWidget):
     def _on_magnet_operation(self, operation: str) -> None:
         self._append_log(f"APS100 operation completed: {operation}")
         if operation.startswith("safe_move:"):
+            self._safe_move_incomplete = ""
             parts = operation.split(":", 2)
             mode = parts[1].capitalize() if len(parts) > 1 else "Verified"
             target = parts[2] if len(parts) > 2 else "target"
@@ -2378,7 +2427,8 @@ class MCDPanel(QWidget):
         self._append_log(f"ERROR: {message}")
         self._run_status.setText("Magnet error")
         if self._safe_magnet_operation_active:
-            self._safe_state.setText(f"STOPPED — {message}")
+            self._safe_move_incomplete = message
+            self._safe_state.setText(f"INCOMPLETE — {message}; final state not verified")
             self._safe_state.setStyleSheet("color:#a82020; font-weight:600;")
             self._release_safe_magnet_operation()
 
@@ -2755,6 +2805,18 @@ class MCDPanel(QWidget):
             return
         self._begin_safe_magnet_move(self._last_snapshot.field_t, "driven")
 
+    def _update_safe_target_limit(self, *_args) -> None:
+        mode = str(self._safe_final_mode.currentData())
+        limit = APS100FieldLimits.from_config(cfg.magnet).manual_limit(mode)
+        previous = self._safe_target.value()
+        self._safe_target.setRange(-limit, limit)
+        text = f"{mode.capitalize()}: ±{limit:g} T; continuous MCD: ±{_mcd_field_limit():g} T"
+        if mode == "persistent":
+            text += ". Includes temporary driven ramp, then persistent-switch cooling."
+        if previous != self._safe_target.value():
+            text += f" Target adjusted to {self._safe_target.value():+g} T for this mode."
+        self._safe_limit.setText(text)
+
     @Slot()
     def _enter_persistent(self) -> None:
         if self._last_snapshot is None:
@@ -2779,6 +2841,11 @@ class MCDPanel(QWidget):
 
     def _begin_safe_magnet_move(self, target_t: float, final_mode: str) -> None:
         if self._safe_magnet_operation_active or self._worker is not None:
+            return
+        try:
+            target_t = APS100FieldLimits.from_config(cfg.magnet).validate_target(target_t, final_mode)
+        except (TypeError, ValueError) as exc:
+            QMessageBox.warning(self, "APS100 field limit", str(exc))
             return
         if not self._magnet.is_connected:
             QMessageBox.warning(self, "APS100", "Connect the APS100 first.")
@@ -2844,14 +2911,19 @@ class MCDPanel(QWidget):
             )
             return
         self._safe_magnet_operation_active = True
+        self._safe_move_incomplete = ""
         self._safe_move_btn.setEnabled(False)
         self._safe_zero_btn.setEnabled(False)
+        self._driven_btn.setEnabled(False)
+        self._persistent_btn.setEnabled(False)
+        self._disconnect_btn.setEnabled(False)
         self._run_btn.setEnabled(False)
         self._safe_state.setText("Starting guarded magnet sequence…")
         self._safe_state.setStyleSheet("color:#9a6200; font-weight:600;")
         self._append_log(
             f"Safe magnet move requested: target={target_t:+.6f} T, final={final_mode}, "
-            f"rate=stored APS100 RATE 0–4, zero_leads={self._zero_leads.isChecked()}"
+            f"field rate=stored RATE 0–4, guarded FAST leads={cfg.magnet.fast_leads_enabled}, "
+            f"zero_leads={self._zero_leads.isChecked()}"
         )
         self._magnet.safe_move_to_field(
             target_t,
@@ -2872,6 +2944,9 @@ class MCDPanel(QWidget):
         idle = self._worker is None
         self._safe_move_btn.setEnabled(idle)
         self._safe_zero_btn.setEnabled(idle)
+        self._driven_btn.setEnabled(idle)
+        self._persistent_btn.setEnabled(idle)
+        self._disconnect_btn.setEnabled(idle)
         self._run_btn.setEnabled(idle and not self._externally_busy)
 
     @Slot()
@@ -2904,9 +2979,9 @@ class MCDPanel(QWidget):
         stop = self._stop_t.value()
         if math.isclose(start, stop, abs_tol=1e-12):
             raise ValueError("Start and stop fields must be different")
-        if abs(start) > cfg.magnet.mcd_max_field_t or abs(stop) > cfg.magnet.mcd_max_field_t:
+        if not all(math.isfinite(value) and abs(value) <= _mcd_field_limit() for value in (start, stop)):
             raise ValueError(
-                f"MCD fields are limited to ±{cfg.magnet.mcd_max_field_t:g} T"
+                f"MCD fields are limited to ±{_mcd_field_limit():g} T in Driven mode"
             )
         sample_id = self._sample_id.text().strip()
         if require_sample and not sample_id:
@@ -2981,7 +3056,7 @@ class MCDPanel(QWidget):
 
     @Slot()
     def _start_run(self) -> None:
-        if self._worker is not None:
+        if self._worker is not None or self._safe_magnet_operation_active:
             return
         if self._externally_busy:
             self._run_status.setText(
@@ -3009,6 +3084,13 @@ class MCDPanel(QWidget):
             return
         if self._last_snapshot is None or not self._last_snapshot.heater_on:
             QMessageBox.warning(self, "APS100", "The magnet must be in driven mode.")
+            return
+        if (not math.isfinite(self._last_snapshot.field_t)
+                or abs(self._last_snapshot.field_t) > _mcd_field_limit()):
+            QMessageBox.warning(
+                self, "APS100 field limit",
+                f"Return within ±{_mcd_field_limit():g} T using Safe Magnet Control before MCD.",
+            )
             return
         if not self._magnet.acquire_exclusive("mcd"):
             QMessageBox.warning(
@@ -3184,12 +3266,12 @@ class MCDPanel(QWidget):
         self._set_running(False)
 
     def _set_running(self, running: bool) -> None:
-        self._run_btn.setEnabled(not running and not self._externally_busy)
-        self._stop_btn.setEnabled(running)
-        self._disconnect_btn.setEnabled(not running)
-        self._driven_btn.setEnabled(not running)
-        self._persistent_btn.setEnabled(not running)
         safe_enabled = not running and not self._safe_magnet_operation_active
+        self._run_btn.setEnabled(safe_enabled and not self._externally_busy)
+        self._stop_btn.setEnabled(running)
+        self._disconnect_btn.setEnabled(safe_enabled)
+        self._driven_btn.setEnabled(safe_enabled)
+        self._persistent_btn.setEnabled(safe_enabled)
         self._safe_move_btn.setEnabled(safe_enabled)
         self._safe_zero_btn.setEnabled(safe_enabled)
         self.run_state_changed.emit(bool(running))
@@ -3197,7 +3279,8 @@ class MCDPanel(QWidget):
     def set_externally_busy(self, busy: bool) -> None:
         """Narrow integration hook for cross-MCD shared-instrument exclusion."""
         self._externally_busy = bool(busy)
-        self._run_btn.setEnabled(self._worker is None and not self._externally_busy)
+        self._run_btn.setEnabled(self._worker is None and not self._externally_busy
+                                 and not self._safe_magnet_operation_active)
 
     def _append_log(self, message: str) -> None:
         self._log.appendPlainText(str(message))
@@ -3373,6 +3456,9 @@ class MCDPanel(QWidget):
             self._start_settle.setValue(float(state.get("start_settle_s", self._start_settle.value())))
         except (TypeError, ValueError):
             pass
+        mode_index = self._safe_final_mode.findData(state.get("safe_final_mode"))
+        if mode_index >= 0:
+            self._safe_final_mode.setCurrentIndex(mode_index)
         try:
             self._safe_target.setValue(
                 float(state.get("safe_target_t", self._safe_target.value()))
@@ -3382,9 +3468,6 @@ class MCDPanel(QWidget):
             )
         except (TypeError, ValueError):
             pass
-        mode_index = self._safe_final_mode.findData(state.get("safe_final_mode"))
-        if mode_index >= 0:
-            self._safe_final_mode.setCurrentIndex(mode_index)
         if isinstance(state.get("safe_zero_leads"), bool):
             self._zero_leads.setChecked(state["safe_zero_leads"])
         gate_mode = state.get("gate_entry_mode")

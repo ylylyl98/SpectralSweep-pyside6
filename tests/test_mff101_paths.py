@@ -62,7 +62,7 @@ def test_edit_updates_sidebar_without_motion_or_new_readback_timestamp(app):
         assert device.calls == calls
         assert settings.capture_session_state()["mff101"] == {
             "position_1_path": "LightField", "position_2_path": "Andor",
-            "auto_route": True, "andor_position": 1, "lightfield_position": 2,
+            "auto_route": False, "andor_position": 1, "lightfield_position": 2,
         }
     finally:
         sidebar.close()
@@ -70,7 +70,8 @@ def test_edit_updates_sidebar_without_motion_or_new_readback_timestamp(app):
         assert ctrl.shutdown()
 
 
-def test_settings_save_and_reopen_keeps_custom_names(app, tmp_path, monkeypatch):
+@pytest.mark.parametrize('auto_route', [False, True])
+def test_settings_save_and_reopen_keeps_custom_names_and_routing(app, tmp_path, monkeypatch, auto_route):
     import utils.config as config_module
     from ui.settings_panel import SettingsPanel
 
@@ -81,6 +82,8 @@ def test_settings_save_and_reopen_keeps_custom_names(app, tmp_path, monkeypatch)
     try:
         settings._mff101_position1_path.setText("Camera A")
         settings._mff101_position2_path.setText("Camera B")
+        assert not settings._mff101_auto_route.isChecked()
+        settings._mff101_auto_route.setChecked(auto_route)
         settings._save_btn.click()
         loaded = AppConfig()
         loaded.load(path)
@@ -88,6 +91,8 @@ def test_settings_save_and_reopen_keeps_custom_names(app, tmp_path, monkeypatch)
         reopened = SettingsPanel()
         assert reopened._mff101_position1_path.text() == "Camera A"
         assert reopened._mff101_position2_path.text() == "Camera B"
+        assert reopened._mff101_auto_route.isChecked() is auto_route
+        assert cfg.mff101.auto_route is auto_route
     finally:
         settings.close()
         if reopened is not None:
@@ -103,7 +108,9 @@ def test_sample_and_history_restore_do_not_replace_physical_mapping(app):
         settings._mff101_position1_path.setText("Camera A")
         settings.restore_session_state({"mff101": {
             "position_1_path": "Old path", "position_2_path": "Old camera",
+            "auto_route": True,
         }})
+        assert not cfg.mff101.auto_route
         assert cfg.mff101.position_1_path == "Camera A"
         assert settings._mff101_position1_path.text() == "Camera A"
         profile = MainWindow._sample_scoped_state({"panels": {"settings": settings.capture_session_state()}})

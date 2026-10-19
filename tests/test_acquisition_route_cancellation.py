@@ -19,7 +19,7 @@ from utils.config import MFF101Config, cfg
 @pytest.fixture
 def acquisition(monkeypatch):
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(cfg, "mff101", MFF101Config())
+    monkeypatch.setattr(cfg, "mff101", MFF101Config(auto_route=True))
     usb = Device()
     usb.position = 2
     route_started = threading.Event()

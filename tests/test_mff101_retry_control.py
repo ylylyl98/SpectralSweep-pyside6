@@ -15,7 +15,7 @@ from utils.config import MFF101Config, cfg
 
 @pytest.fixture
 def hardware(app, monkeypatch):
-    monkeypatch.setattr(cfg, 'mff101', MFF101Config())
+    monkeypatch.setattr(cfg, 'mff101', MFF101Config(auto_route=True))
     driver = _Flipper()
     driver.commands = []
     driver.started = threading.Event()

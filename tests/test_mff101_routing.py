@@ -11,7 +11,7 @@ from utils.config import AppConfig, MFF101Config, cfg
 @pytest.fixture
 def routing(app, monkeypatch):
     from controllers.mff101_controller import MFF101Controller
-    monkeypatch.setattr(cfg, 'mff101', MFF101Config())
+    monkeypatch.setattr(cfg, 'mff101', MFF101Config(auto_route=True))
     device = Device()
     ctrl = MFF101Controller(adapter_factory=device.open, scan_func=lambda: ['37862922'])
     yield ctrl, device
@@ -25,17 +25,97 @@ def moves(device):
     return [action for action, _ in device.calls if isinstance(action, tuple) and action[0] == 'move']
 
 
-def test_mapping_defaults_and_round_trip(tmp_path):
+@pytest.mark.parametrize('auto_route', [False, True])
+def test_mapping_defaults_and_round_trip(tmp_path, auto_route):
     config = AppConfig()
-    assert config.mff101.auto_route
+    assert not config.mff101.auto_route
     assert config.mff101.andor_position == 1
     assert config.mff101.lightfield_position == 2
+    config.mff101.auto_route = auto_route
     config.mff101.andor_position, config.mff101.lightfield_position = 2, 1
     path = tmp_path / 'config.json'
     config.save(path)
     loaded = AppConfig()
     loaded.load(path)
+    assert loaded.mff101.auto_route is auto_route
     assert (loaded.mff101.andor_position, loaded.mff101.lightfield_position) == (2, 1)
+
+
+@pytest.mark.parametrize('source', ['missing', 'project', 'legacy'])
+def test_new_pc_and_legacy_configs_do_not_require_flipper(tmp_path, monkeypatch, source):
+    import utils.config as config_module
+
+    path = tmp_path / 'user' / 'config.json'
+    monkeypatch.setattr(config_module, '_CONFIG_FILE', path)
+    if source != 'project':
+        monkeypatch.setattr(config_module, '_PROJECT_CONFIG_FILE', tmp_path / 'missing.json')
+    if source == 'legacy':
+        path.parent.mkdir()
+        path.write_text('{"mff101": {"serial_number": "37862922"}}', encoding='utf-8')
+    config = AppConfig()
+    config.load()
+    assert not config.mff101.auto_route
+
+
+@pytest.fixture
+def no_flipper(app, monkeypatch):
+    from controllers.mff101_controller import MFF101Controller
+
+    monkeypatch.setattr(cfg, 'mff101', MFF101Config())
+    calls = []
+
+    def unavailable(*args):
+        calls.append(args)
+        raise ImportError('No flipper driver installed on this PC')
+
+    ctrl = MFF101Controller(adapter_factory=unavailable, scan_func=unavailable)
+    try:
+        yield ctrl, calls
+    finally:
+        assert ctrl.shutdown()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('backend', ['lightfield', 'winspec_ingaas', 'andor_si', 'andor_ingaas'])
+def test_default_setup_selection_and_preflight_never_access_flipper(app, no_flipper, backend):
+    ctrl, calls = no_flipper
+    assert ctrl.route_for_setup(backend, use_mock=False)
+    wait_for(app, lambda: not ctrl.is_busy)
+    ctrl.ensure_setup_position(backend, use_mock=False)
+    assert calls == []
+    assert not ctrl.state['error']
+    assert not ctrl.is_connected
+
+
+def test_real_spectrometer_connection_and_capture_without_flipper(app, no_flipper, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    import numpy as np
+    from app.devices import lf6_adapter
+    from controllers.lf6_controller import LF6Controller
+
+    flipper, calls = no_flipper
+    setup = SimpleNamespace(close=lambda: None)
+    adapter = SimpleNamespace(acquire=lambda: (np.array([730.]), np.array([1.])))
+    monkeypatch.setitem(sys.modules, 'lf6_automation', SimpleNamespace(LF6Setup=lambda: setup))
+    monkeypatch.setattr(lf6_adapter, 'SpectrometerLF6', lambda _: adapter)
+    spec = LF6Controller()
+    spec.set_flipper_controller(flipper)
+    errors, spectra = [], []
+    spec.error.connect(errors.append)
+    spec.spectrum_ready.connect(lambda *data: spectra.append(data))
+    try:
+        spec.connect_instrument(use_mock=False, backend='lightfield')
+        wait_for(app, lambda: spec.is_connected or bool(errors))
+        assert not errors
+        assert spec.is_connected
+        spec.acquire_single()
+        wait_for(app, lambda: bool(spectra) or bool(errors))
+        assert not errors
+        assert len(spectra) == 1
+        assert calls == []
+    finally:
+        spec.shutdown()
 
 
 def test_selection_autoconnects_routes_and_verifies_without_redundant_move(app, routing):

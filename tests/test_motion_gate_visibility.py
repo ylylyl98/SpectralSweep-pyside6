@@ -31,21 +31,22 @@ class MotionGateVisibilityTests(unittest.TestCase):
         )
         self.assertFalse(hasattr(panel, "_ramp_step_spin"))
         self.assertFalse(hasattr(panel, "_settle_spin"))
-        self.assertEqual([field.isHidden() for field in panel._gate_voltage_spins], [False, False, False])
+        # Compact fields inherit visibility from their row and group containers.
+        self.assertEqual([field.isVisibleTo(panel) for field in panel._gate_voltage_spins], [True, True, True])
 
         panel._conditions_grp.setChecked(True)
         self.app.processEvents()
-        self.assertEqual([field.isHidden() for field in panel._gate_voltage_spins], [True, True, True])
+        self.assertEqual([field.isVisibleTo(panel) for field in panel._gate_voltage_spins], [False, False, False])
         self.assertEqual(
-            [field.isHidden() for field in (
+            [field.isVisibleTo(panel) for field in (
                 panel._motion_settle_spin,
                 panel._apply_gates_chk, panel._return_zero_chk,
             )],
-            [False, False, False],
+            [True, True, True],
         )
         panel._conditions_grp.setChecked(False)
         self.app.processEvents()
-        self.assertEqual([field.isHidden() for field in panel._gate_voltage_spins], [False, False, False])
+        self.assertEqual([field.isVisibleTo(panel) for field in panel._gate_voltage_spins], [True, True, True])
 
     def test_run_defaults_freeze_shared_ramp_values_and_return_zero_is_independent(self):
         with patch.object(cfg.ramp, "step_V", 0.23), patch.object(cfg.ramp, "delay_s", 0.17), \

@@ -16,6 +16,7 @@ from app.devices.aps100_attodry1000_adapter import (
     MockAPS100Adapter,
 )
 from utils.config import cfg
+from app.devices.aps100_field_policy import APS100FieldLimits
 
 
 class _MagnetWorker(QObject):
@@ -51,11 +52,14 @@ class _MagnetWorker(QObject):
                 timeout_ms=cfg.magnet.timeout_ms,
                 coil_constant_t_per_a=cfg.magnet.coil_constant_t_per_a,
                 maximum_field_t=cfg.magnet.maximum_field_t,
+                driven_max_field_t=cfg.magnet.safe_control_max_field_t,
+                persistent_max_field_t=cfg.magnet.persistent_control_max_field_t,
                 maximum_current_a=cfg.magnet.maximum_current_a,
                 maximum_rate_a_per_s=cfg.magnet.maximum_rate_a_per_s,
                 heater_warm_s=cfg.magnet.heater_warm_s,
                 heater_cool_s=cfg.magnet.heater_cool_s,
                 current_match_tolerance_a=cfg.magnet.current_match_tolerance_a,
+                fast_leads_enabled=cfg.magnet.fast_leads_enabled,
             )
             identity = self.adapter.connect()
             self.connected.emit(identity)
@@ -107,9 +111,17 @@ class _MagnetWorker(QObject):
         if self.adapter is None:
             return
         try:
+            fast_rate, fast_error = None, ""
+            try:
+                fast_rate = self.adapter.get_fast_rate_a_per_s()
+            except Exception as exc:
+                fast_error = str(exc)
             self.rates_updated.emit(
                 {
                     "rates": self.adapter.get_rates(),
+                    "fast_rate_a_per_s": fast_rate,
+                    "fast_rate_error": fast_error,
+                    "fast_leads_enabled": cfg.magnet.fast_leads_enabled,
                     "voltage_limit_v": self.adapter.get_voltage_limit_v(),
                 }
             )
@@ -133,6 +145,8 @@ class _MagnetWorker(QObject):
         self._stop_event.clear()
         try:
             self.adapter.enter_driven_mode(
+                stop_event=self._stop_event,
+                max_magnet_voltage_v=cfg.magnet.persistent_zero_max_magnet_voltage_v,
                 progress=lambda label, remaining: self.transition_progress.emit(
                     label, remaining
                 )
@@ -150,6 +164,7 @@ class _MagnetWorker(QObject):
         self._stop_event.clear()
         try:
             self.adapter.enter_persistent_mode(
+                stop_event=self._stop_event,
                 zero_leads=bool(zero_leads),
                 max_magnet_voltage_v=cfg.magnet.persistent_zero_max_magnet_voltage_v,
                 progress=lambda label, remaining: self.transition_progress.emit(
@@ -184,11 +199,15 @@ class _MagnetWorker(QObject):
         voltage_limit_v = None
         outcome = "failed"
         failure = ""
+        move_started = False
         try:
+            adapter.lead_ramp_history = []
+            APS100FieldLimits.from_config(cfg.magnet).validate_target(target_t, final_mode)
             starting_snapshot = adapter.read_snapshot()
             stored_rates = adapter.get_rates()
             voltage_limit_v = adapter.get_voltage_limit_v()
             adapter.command_observer = commands.append
+            move_started = True
             snapshot = adapter.safe_move_to_field(
                 float(target_t),
                 final_mode=str(final_mode),
@@ -210,12 +229,20 @@ class _MagnetWorker(QObject):
             )
         except Exception as exc:
             failure = str(exc)
-            self.error.emit(f"Safe magnet move failed: {exc}")
             snapshot = None
+            if move_started:
+                try:
+                    # Stop a ramp on failure; never guess the final heater mode.
+                    adapter.pause()
+                except Exception as pause_exc:
+                    failure += f"; pause could not be verified: {pause_exc}"
             try:
                 snapshot = adapter.read_snapshot()
             except Exception:
                 pass
+            self.error.emit(f"Safe magnet move incomplete: {failure}")
+            if snapshot is not None:
+                self.snapshot_updated.emit(snapshot)
         finally:
             adapter.command_observer = previous_observer
             self.safe_move_audit.emit(
@@ -237,6 +264,7 @@ class _MagnetWorker(QObject):
                         "vmag_limit_v": cfg.magnet.persistent_zero_max_magnet_voltage_v,
                     },
                     "stored_rates": stored_rates,
+                    "lead_ramps": list(adapter.lead_ramp_history),
                     "aps_voltage_limit_v": voltage_limit_v,
                     "starting_snapshot": (
                         asdict(starting_snapshot) if starting_snapshot is not None else None
@@ -400,11 +428,10 @@ class MagnetController(QObject):
         if not cfg.magnet.allow_remote_heater_control:
             self.error.emit("Remote heater control is disabled in configuration")
             return
-        if abs(float(target_t)) > cfg.magnet.safe_control_max_field_t:
-            self.error.emit(
-                "Safe magnet target exceeds the configured "
-                f"±{cfg.magnet.safe_control_max_field_t:g} T control limit"
-            )
+        try:
+            target_t = APS100FieldLimits.from_config(cfg.magnet).validate_target(target_t, final_mode)
+        except (TypeError, ValueError) as exc:
+            self.error.emit(str(exc))
             return
         self._safe_move_requested.emit(
             float(target_t),
