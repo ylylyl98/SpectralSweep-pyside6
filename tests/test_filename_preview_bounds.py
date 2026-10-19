@@ -52,7 +52,7 @@ def _preview_double():
 
 
 @pytest.mark.parametrize("batch_enabled", [True, False])
-def test_huge_cartesian_draft_defers_before_entering_full_planner(batch_enabled):
+def test_huge_cartesian_draft_is_rejected_before_entering_full_planner(batch_enabled):
     # Four 100-value rows represent 100,000,000 contexts. Intercept allocation
     # at the planner boundary while keeping the real preview path/validation.
     fake = _preview_double()
@@ -63,9 +63,9 @@ def test_huge_cartesian_draft_defers_before_entering_full_planner(batch_enabled)
          patch.object(panel, "_build_plan", side_effect=AssertionError("unbounded planner entered")) as build:
         panel.PresetsPanel._refresh_filename_preview(fake)
     assert build.call_count == 0
-    assert "apply" in fake._filename_preview_lbl.value.lower()
-    assert "invalid" not in fake._filename_preview_lbl.value.lower()
-    assert "apply" in fake._upcoming_preview.value.lower()
+    assert "invalid" in fake._filename_preview_lbl.value.lower()
+    assert "100,000" in fake._filename_preview_lbl.value
+    assert not fake._upcoming_preview.value
 
 
 def test_many_gate_points_defer_before_resolving_nested_vectors():
@@ -151,7 +151,7 @@ def test_small_panel_preview_uses_first_when_match_of_selected_paired_values(wid
 
 
 @pytest.mark.parametrize("batch_enabled", [True, False])
-def test_large_panel_draft_keeps_apply_available_without_preview_expansion(widget, batch_enabled):
+def test_over_budget_panel_draft_disables_apply_without_preview_expansion(widget, batch_enabled):
     applied = widget._acquisition_schedule
     blocked = widget._loop_table.blockSignals(True)
     try:
@@ -166,9 +166,9 @@ def test_large_panel_draft_keeps_apply_available_without_preview_expansion(widge
     with patch.object(panel, "_build_plan", side_effect=AssertionError("unbounded planner entered")):
         widget._on_draft_edited()
         widget._refresh_filename_preview()
-    assert "apply to preview large draft" in widget._tree._last_plan["preview_state"]
-    assert "apply" in widget._filename_preview_lbl.text().lower()
-    assert widget._apply_btn.isEnabled()
+    assert "draft unavailable" in widget._tree._last_plan["preview_state"]
+    assert "100,000" in widget._filename_preview_lbl.text()
+    assert not widget._apply_btn.isEnabled()
     assert widget._acquisition_schedule is applied
 
 

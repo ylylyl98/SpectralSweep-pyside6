@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import csv
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -1324,15 +1326,13 @@ class MCDPanel(QWidget):
         self._pause_btn.setToolTip(
             "Immediately pause the sweep / hold the field. Also stops an active MCD run."
         )
-        self._pause_btn.setStyleSheet(
-            "QPushButton { background:#a82020; color:white; font-weight:700; min-height:34px; }"
-        )
+        set_style_role(self._pause_btn, 'dangerAction')
         conn_buttons.addWidget(self._pause_btn, 1, 1, 1, 2)
         conn_form.addRow(conn_buttons)
 
         def caption(text: str) -> QLabel:
             label = QLabel(text)
-            label.setStyleSheet("color:#5b6b7f;")
+            set_style_role(label, 'text', tone='secondary')
             return label
 
         status_widget = QWidget()
@@ -1736,7 +1736,7 @@ class MCDPanel(QWidget):
         )
         self._gate_entry_expansion.setMaximumWidth(120)
         self._gate_entry_add = QPushButton("Add 1 row")
-        self._gate_entry_add.setStyleSheet("font-weight: 700;")
+        set_style_role(self._gate_entry_add, 'text', strong=True)
         self._gate_entry_add.setMaximumWidth(130)
         self._gate_entry_status = QLabel()
         self._gate_entry_status.setWordWrap(True)
@@ -1984,7 +1984,7 @@ class MCDPanel(QWidget):
         )
         self._mode_notice = QLabel("Connect the APS100 — MCD requires driven mode.")
         self._mode_notice.setWordWrap(True)
-        self._mode_notice.setStyleSheet("color:#8b96a5;")
+        set_style_role(self._mode_notice, 'text', tone='muted')
         self._mode_notice.setToolTip(
             "MCD sweep requires driven mode (persistent heater ON). "
             "Use the advanced transition controls if the heater is OFF."
@@ -2034,7 +2034,7 @@ class MCDPanel(QWidget):
         display_layout.addLayout(status_row)
         header = QHBoxLayout()
         title = QLabel("Live spectrum")
-        title.setStyleSheet("font-weight:700;")
+        set_style_role(title, 'text', strong=True)
         title.setWordWrap(True)
         title.setMinimumWidth(0)
         self._show_spectrum_chk = QCheckBox("Show spectrum")
@@ -2223,7 +2223,7 @@ class MCDPanel(QWidget):
         self._mode_notice.setText(
             "Connect the APS100 — MCD requires driven mode."
         )
-        self._mode_notice.setStyleSheet("color:#8b96a5;")
+        set_style_role(self._mode_notice, 'text', tone='muted')
 
     @Slot(object)
     def _on_snapshot(self, snapshot) -> None:
@@ -2245,18 +2245,18 @@ class MCDPanel(QWidget):
                 f"MCD unavailable — return within ±{_mcd_field_limit():g} T using "
                 "Safe Magnet Control before enabling continuous Driven operation."
             )
-            self._mode_notice.setStyleSheet("color:#a82020; font-weight:600;")
+            set_style_role(self._mode_notice, 'text', tone='danger', strong=True)
         elif snapshot.heater_on:
             self._mode_notice.setText(
                 "MCD ready — magnet in driven mode (heater ON)."
             )
-            self._mode_notice.setStyleSheet("color:#1d7a3e;")
+            set_style_role(self._mode_notice, 'text', tone='success')
         else:
             self._mode_notice.setText(
                 "MCD sweep requires driven mode — persistent heater is OFF. "
                 "Use \"Enter Driven Mode\" first."
             )
-            self._mode_notice.setStyleSheet("color:#a82020; font-weight:600;")
+            set_style_role(self._mode_notice, 'text', tone='danger', strong=True)
         faults = []
         if operating_mode.lower() != "manual":
             faults.append(f"unexpected {operating_mode} mode")
@@ -2274,7 +2274,7 @@ class MCDPanel(QWidget):
                 f"Observed: {mode_name} {snapshot.field_t:+.6f} T; "
                 "requested final state was not verified."
             )
-            self._safe_state.setStyleSheet("color:#a82020; font-weight:600;")
+            set_style_role(self._safe_state, 'text', tone='danger', strong=True)
         elif not self._safe_magnet_operation_active and not faults:
             mode_name = "Driven" if snapshot.heater_on else "Persistent"
             lead_note = (
@@ -2285,7 +2285,7 @@ class MCDPanel(QWidget):
             self._safe_state.setText(
                 f"Observed — {mode_name} {snapshot.field_t:+.6f} T{lead_note}"
             )
-            self._safe_state.setStyleSheet("color:#1d7a3e; font-weight:600;")
+            set_style_role(self._safe_state, 'text', tone='success', strong=True)
 
     @Slot(object)
     def _on_rates_updated(self, payload) -> None:
@@ -2383,7 +2383,7 @@ class MCDPanel(QWidget):
         self._transition_status.setText(text)
         if self._safe_magnet_operation_active:
             self._safe_state.setText(text)
-            self._safe_state.setStyleSheet("color:#9a6200; font-weight:600;")
+            set_style_role(self._safe_state, 'text', tone='warning', strong=True)
 
     @Slot(str)
     def _on_magnet_operation(self, operation: str) -> None:
@@ -2396,7 +2396,7 @@ class MCDPanel(QWidget):
             self._safe_state.setText(
                 f"READY — {mode} {target} T · final state verified"
             )
-            self._safe_state.setStyleSheet("color:#1d7a3e; font-weight:600;")
+            set_style_role(self._safe_state, 'text', tone='success', strong=True)
             self._transition_status.setText("Safe magnet move completed")
             self._release_safe_magnet_operation()
             return
@@ -2407,7 +2407,7 @@ class MCDPanel(QWidget):
             self._mode_notice.setText(
                 "MCD ready — driven mode confirmed, persistent heater is ON."
             )
-            self._mode_notice.setStyleSheet("color:#1d7a3e; font-weight:600;")
+            set_style_role(self._mode_notice, 'text', tone='success', strong=True)
             self._append_log(
                 "DRIVEN MODE ACTIVE: persistent heater is ON; field sweeping is enabled."
             )
@@ -2429,7 +2429,7 @@ class MCDPanel(QWidget):
         if self._safe_magnet_operation_active:
             self._safe_move_incomplete = message
             self._safe_state.setText(f"INCOMPLETE — {message}; final state not verified")
-            self._safe_state.setStyleSheet("color:#a82020; font-weight:600;")
+            set_style_role(self._safe_state, 'text', tone='danger', strong=True)
             self._release_safe_magnet_operation()
 
     @Slot(bool)
@@ -2448,7 +2448,7 @@ class MCDPanel(QWidget):
             finally:
                 self._syncing_gate_ratio = False
         self.gate_ratio_value.setText(f"r = {value:.6g}")
-        self.gate_ratio_value.setStyleSheet("")
+        set_style_role(self.gate_ratio_value, '')
         self._update_condition_editable()
         self._update_coordinates_and_filename()
         if hasattr(self, "_gate_entry_mode"):
@@ -2464,7 +2464,7 @@ class MCDPanel(QWidget):
             )
         except ValueError as exc:
             self.gate_ratio_value.setText(str(exc))
-            self.gate_ratio_value.setStyleSheet("color: #a40000;")
+            set_style_role(self.gate_ratio_value, 'text', tone='danger')
             return
         self._syncing_gate_ratio = True
         try:
@@ -2472,7 +2472,7 @@ class MCDPanel(QWidget):
         finally:
             self._syncing_gate_ratio = False
         self.gate_ratio_value.setText(f"r = {ratio:.6g}")
-        self.gate_ratio_value.setStyleSheet("")
+        set_style_role(self.gate_ratio_value, '')
         self._update_condition_editable()
         self._update_coordinates_and_filename()
         if hasattr(self, "_gate_entry_mode"):
@@ -2557,7 +2557,7 @@ class MCDPanel(QWidget):
         except ValueError as exc:
             self._gate_entry_rows = []
             self._gate_entry_status.setText(str(exc))
-            self._gate_entry_status.setStyleSheet("color: #a40000;")
+            set_style_role(self._gate_entry_status, 'text', tone='danger')
             self._gate_entry_add.setEnabled(False)
             self._gate_entry_add.setText("Add rows")
             return
@@ -2565,7 +2565,7 @@ class MCDPanel(QWidget):
         count = len(rows)
         self._gate_entry_add.setText(f"Add {count} row{'s' if count != 1 else ''}")
         self._gate_entry_add.setEnabled(True)
-        self._gate_entry_status.setStyleSheet("")
+        set_style_role(self._gate_entry_status, '')
         def _preview(values: list[float]) -> str:
             shown = ", ".join(f"{value:.6g}" for value in values[:4])
             return f"[{shown}{', …' if len(values) > 4 else ''}]"
@@ -2919,7 +2919,7 @@ class MCDPanel(QWidget):
         self._disconnect_btn.setEnabled(False)
         self._run_btn.setEnabled(False)
         self._safe_state.setText("Starting guarded magnet sequence…")
-        self._safe_state.setStyleSheet("color:#9a6200; font-weight:600;")
+        set_style_role(self._safe_state, 'text', tone='warning', strong=True)
         self._append_log(
             f"Safe magnet move requested: target={target_t:+.6f} T, final={final_mode}, "
             f"field rate=stored RATE 0–4, guarded FAST leads={cfg.magnet.fast_leads_enabled}, "

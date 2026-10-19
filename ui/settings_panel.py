@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import sys
 from pathlib import Path
 from typing import Optional
@@ -35,6 +37,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from utils.config import cfg
 from ui.notification_settings import NotificationSettings
 from ui.workflow_sections import compact_form_rows, inline_divider
+from ui.signal_connections import SignalConnections
 
 
 class SettingsPanel(QWidget):
@@ -49,12 +52,37 @@ class SettingsPanel(QWidget):
     notification_configured = Signal(str)
     mff101_paths_changed = Signal()
 
-    def __init__(self, lf6_ctrl=None, parent: Optional[QWidget] = None):
+    def __init__(self, lf6_ctrl=None, parent: Optional[QWidget] = None, *, bind_controller=True):
         super().__init__(parent)
         self._ctrl = lf6_ctrl
+        self._controller_connections = SignalConnections(self)
+        self._controller_bound = False
         self._build()
-        self._wire()
+        # Populate before connecting editing callbacks: staging a replacement
+        # page must not clamp or otherwise change the shared configuration.
         self._load_from_cfg()
+        self._wire()
+        if bind_controller:
+            self.bind_controller_signals()
+
+    def bind_controller_signals(self):
+        if self._controller_bound or self._ctrl is None:
+            return
+        connections = self._controller_connections
+        try:
+            connections.connect(self._ctrl.connected, lambda *_: self._apply_btn.setEnabled(True))
+            connections.connect(self._ctrl.disconnected, lambda: self._apply_btn.setEnabled(False))
+            connections.connect(self._ctrl.settings_applied, lambda: self._lf6_status.setText("Applied ✓"))
+            connections.connect(self._ctrl.error, lambda msg: self._lf6_status.setText(f"Error: {msg[:50]}"))
+        except Exception:
+            connections.clear()
+            raise
+        self._apply_btn.setEnabled(bool(getattr(self._ctrl, "is_connected", False)))
+        self._controller_bound = True
+
+    def unbind_controller_signals(self):
+        self._controller_connections.clear()
+        self._controller_bound = False
 
     # ── build ─────────────────────────────────────────────────────────────────
 
@@ -170,7 +198,7 @@ class SettingsPanel(QWidget):
         form.addRow("", self._apply_btn)
 
         self._lf6_status = QLabel("")
-        self._lf6_status.setStyleSheet("font-size: 11px;")
+        set_style_role(self._lf6_status, 'text', size='status')
         form.addRow("", self._lf6_status)
 
         self._andor_sdk_dir = QLineEdit()
@@ -348,7 +376,7 @@ class SettingsPanel(QWidget):
             "These values are the defaults used by the structured filename builder in the Dual Gate tab."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888888; font-size: 10px;")
+        set_style_role(hint, 'text', tone='muted', size='caption')
         form.addRow("", hint)
 
         self._reset_filename_btn = QPushButton("Reset filename defaults")
@@ -372,21 +400,6 @@ class SettingsPanel(QWidget):
         self._mff101_auto_route.toggled.connect(self._on_mff101_routing_changed)
         self._mff101_andor_position.currentIndexChanged.connect(self._on_mff101_routing_changed)
         self._mff101_lightfield_position.currentIndexChanged.connect(self._on_mff101_routing_changed)
-
-        # Enable Apply button only when LF6 connects
-        if self._ctrl is not None:
-            self._ctrl.connected.connect(
-                lambda _: self._apply_btn.setEnabled(True)
-            )
-            self._ctrl.disconnected.connect(
-                lambda: self._apply_btn.setEnabled(False)
-            )
-            self._ctrl.settings_applied.connect(
-                lambda: self._lf6_status.setText("Applied ✓")
-            )
-            self._ctrl.error.connect(
-                lambda msg: self._lf6_status.setText(f"Error: {msg[:50]}")
-            )
 
         # Keep cfg in sync as user edits widgets (without saving)
         self._exposure.valueChanged.connect(
@@ -687,7 +700,7 @@ class SettingsPanel(QWidget):
     def _on_save(self):
         cfg.save()
         self._status_lbl.setText("Saved to config.json ✓")
-        self._status_lbl.setStyleSheet("color: green;")
+        set_style_role(self._status_lbl, 'text', tone='success')
 
     @Slot()
     def _on_reset_filename_defaults(self):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import math
 import sys
 import threading
@@ -161,7 +163,7 @@ class _OpticalSequenceWidget(QWidget):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
         )
-        caption.setStyleSheet("color: #5f6b78; font-size: 10px;")
+        set_style_role(caption, 'text', tone='secondary', size='caption')
         layout.addWidget(caption)
 
         self._table = QTableWidget(0, 7)
@@ -532,26 +534,7 @@ class _CollapsibleSection(QFrame):
         self._content.setVisible(expanded)
         self._header.toggled.connect(self._on_toggled)
 
-        self.setStyleSheet(
-            "QFrame#MegaSweepDisclosure {"
-            " background: #ffffff;"
-            " border: 1px solid #d9e0e9;"
-            " border-radius: 7px;"
-            "}"
-            "QToolButton#MegaSweepDisclosureHeader {"
-            " min-height: 24px;"
-            " border: none;"
-            " border-radius: 6px;"
-            " padding: 4px 7px;"
-            " color: #29384c;"
-            " font-weight: 600;"
-            " text-align: left;"
-            " background: transparent;"
-            "}"
-            "QToolButton#MegaSweepDisclosureHeader:hover {"
-            " background: #f0f5fb;"
-            "}"
-        )
+        set_style_role(self, 'sweepDisclosure')
 
     @Slot(bool)
     def _on_toggled(self, expanded: bool) -> None:
@@ -1145,7 +1128,7 @@ class _CoordSystemWidget(QGroupBox):
         lay.addLayout(coord_row)
 
         self._formula = QLabel("D = Vtg + r·Vbg    F = Vtg − r·Vbg\nVtg = (D+F)/2    Vbg = (D−F)/(2r)")
-        self._formula.setStyleSheet("color: #6a6a6a; font-size: 10px;")
+        set_style_role(self._formula, 'text', tone='muted', size='caption')
         self._formula.setWordWrap(True)
         lay.addWidget(self._formula)
 
@@ -1160,7 +1143,7 @@ class _CoordSystemWidget(QGroupBox):
         return float(self._ratio_spin.value())
 
     def set_ratio_invalid(self, invalid: bool):
-        self._ratio_spin.setStyleSheet("border: 1px solid red;" if invalid else "")
+        set_style_role(self._ratio_spin, "invalid" if invalid else "")
 
 
 class _AxisSelectorWidget(QGroupBox):
@@ -1413,7 +1396,7 @@ class _FixedParamsWidget(QGroupBox):
                 row_lay.setSpacing(6)
                 badge = QLabel("N/A")
                 badge.setToolTip("No usable Vbias Keithley channel is connected.")
-                badge.setStyleSheet("color: #ad6700;")
+                set_style_role(badge, 'text', tone='warning')
                 row_lay.addWidget(spin)
                 row_lay.addWidget(badge)
                 row_lay.addStretch(1)
@@ -1439,7 +1422,7 @@ class _SafetyWidget(QGroupBox):
         min_header = QLabel("Minimum")
         max_header = QLabel("Maximum")
         for header in (min_header, max_header):
-            header.setStyleSheet("color: #6a6a6a; font-size: 10px;")
+            set_style_role(header, 'text', tone='muted', size='caption')
         grid.addWidget(min_header, 0, 1)
         grid.addWidget(max_header, 0, 2)
         self._spins: dict[str, QDoubleSpinBox] = {}
@@ -1541,7 +1524,7 @@ class _TimingWidget(QGroupBox):
         self._step_delay_ms.setSuffix(" ms")
         _set_compact_editor(self._step_delay_ms)
         self._rate = QLabel("")
-        self._rate.setStyleSheet("color: #6a6a6a;")
+        set_style_role(self._rate, 'text', tone='muted')
         step_label = QLabel("Ramp step")
         delay_label = QLabel("Step delay")
         step_label.setBuddy(self._ramp_step)
@@ -2594,14 +2577,7 @@ class MegaSweepPanel(QWidget):
         splitter.setChildrenCollapsible(False)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setStyleSheet(
-            "QSplitter::handle {"
-            " background: #d7e0ea;"
-            " border-left: 1px solid #c7d2df;"
-            " border-right: 1px solid #c7d2df;"
-            "}"
-            "QSplitter::handle:hover { background: #afc6dd; }"
-        )
+        set_style_role(splitter, 'settingsSplitter')
         splitter.setSizes([480, 720])
         splitter.splitterMoved.connect(self._on_splitter_moved)
 
@@ -2675,10 +2651,7 @@ class MegaSweepPanel(QWidget):
         )
 
         self._raw_link_label = QLabel()
-        self._raw_link_label.setStyleSheet(
-            "color: #6a6a6a; font-size: 10px;"
-            " padding: 1px 6px 2px 6px;"
-        )
+        set_style_role(self._raw_link_label, 'rawLink')
         self._raw_link_label.setWordWrap(True)
 
         self._settings_grid = QGridLayout()
@@ -2723,11 +2696,7 @@ class MegaSweepPanel(QWidget):
         font = QFont("Consolas", 9)
         font.setStyleHint(QFont.Monospace)
         self._summary.setFont(font)
-        self._summary.setStyleSheet(
-            "QTextEdit { color: #444444; background: #f5f5f7;"
-            " border: 1px solid #dedede; border-radius: 3px;"
-            " padding: 4px 6px; }"
-        )
+        set_style_role(self._summary, 'summary')
         self._summary_compact = QLabel()
         self._summary_compact.setWordWrap(True)
         self._summary_compact.setMinimumWidth(0)
@@ -2741,32 +2710,12 @@ class MegaSweepPanel(QWidget):
         self._run_btn = QPushButton("▶  Run Sweep")
         self._run_btn.setMinimumHeight(32)
         self._run_btn.setMinimumWidth(120)
-        self._run_btn.setStyleSheet(
-            "QPushButton { font-weight: 700; font-size: 12px;"
-            " border-color: #5a9060; color: #1a4020;"
-            " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #d8f0d8, stop:1 #b8e0b8); }"
-            "QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #e8f8e8, stop:1 #c8ecc8); }"
-            "QPushButton:pressed { background: #a8d8a8; }"
-            "QPushButton:disabled { color: #aaaaaa; border-color: #d0d0d0;"
-            " background: #f0f0f0; }"
-        )
+        set_style_role(self._run_btn, 'runAction')
         self._stop_btn = QPushButton("■  Stop")
         self._stop_btn.setMinimumHeight(32)
         self._stop_btn.setMinimumWidth(90)
         self._stop_btn.setEnabled(False)
-        self._stop_btn.setStyleSheet(
-            "QPushButton { font-weight: 700; font-size: 12px;"
-            " border-color: #a05050; color: #6a1010;"
-            " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #f8dada, stop:1 #eec0c0); }"
-            "QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #ffe8e8, stop:1 #f4cccc); }"
-            "QPushButton:pressed { background: #e0a8a8; }"
-            "QPushButton:disabled { color: #aaaaaa; border-color: #d0d0d0;"
-            " background: #f0f0f0; }"
-        )
+        set_style_role(self._stop_btn, 'stopAction')
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
         self._status_lbl = QLabel("Ready")
@@ -2774,7 +2723,7 @@ class MegaSweepPanel(QWidget):
         self._status_lbl.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self._status_lbl.setStyleSheet("color: #707070; font-size: 11px;")
+        set_style_role(self._status_lbl, 'text', tone='muted', size='status')
         controls.addWidget(self._run_btn)
         controls.addWidget(self._stop_btn)
         controls.addStretch(1)
@@ -2786,11 +2735,7 @@ class MegaSweepPanel(QWidget):
         self._log_edit.setReadOnly(True)
         self._log_edit.setMaximumHeight(160)
         self._log_edit.setMinimumHeight(70)
-        self._log_edit.setStyleSheet(
-            "QTextEdit { font-family: 'Consolas', 'Courier New', monospace;"
-            " font-size: 11px; background: #fafafa; border: 1px solid #d0d0d0;"
-            " border-radius: 3px; }"
-        )
+        set_style_role(self._log_edit, 'log')
         self._log_section = DisclosureSection("Run log", self._log_edit)
         right_lay.addWidget(self._log_section)
         # The optical recipe spans the page so setup and reduction are visible.
@@ -3477,16 +3422,8 @@ class MegaSweepPanel(QWidget):
             return f"~{mins} min {secs} sec"
         return f"~{secs} sec"
 
-    def _set_summary_text(self, text: str, color: str = "#444444"):
-        self._summary.setStyleSheet(
-            "QTextEdit {"
-            f" color: {color};"
-            " background: #f5f5f7;"
-            " border: 1px solid #dedede;"
-            " border-radius: 3px;"
-            " padding: 4px 6px;"
-            "}"
-        )
+    def _set_summary_text(self, text: str, tone: str = "secondary"):
+        set_style_role(self._summary, "summary", tone=tone)
         self._summary.setPlainText(str(text))
         self._summary.setToolTip(str(text))
         lines = str(text).splitlines()
@@ -3518,7 +3455,7 @@ class MegaSweepPanel(QWidget):
         try:
             data = self._resolve_preview_data()
         except Exception as exc:
-            self._set_summary_text(f"Warning: {exc}", "#b42318")
+            self._set_summary_text(f"Warning: {exc}", 'danger')
             self._preview.clear()
             self._last_drawn_preview = None
             return
@@ -3604,20 +3541,20 @@ class MegaSweepPanel(QWidget):
             f"({len(conditions)} complete gate map(s), with a zero ramp between maps)",
             f"Run output cadence: flush every {_FLUSH_EVERY_POINTS} pts, plot every {_PLOT_UPDATE_EVERY_POINTS} pts, UI log every {_UI_LOG_EVERY_POINTS} pts",
         ]
-        color = "#5a5a5a"
+        tone = 'secondary'
         if not conditions:
-            color = "#b42318"
+            tone = 'danger'
             lines.append("Warning: Enable at least one optical condition.")
         elif len(valid_points) == 0:
-            color = "#b42318"
+            tone = 'danger'
             lines.append("Warning: No points within the safety limits.")
         elif len(all_points) > 0 and len(valid_points) < max(1, int(0.1 * len(all_points))):
-            color = "#ad6700"
+            tone = 'warning'
             lines.append(f"Warning: {skipped} of {len(all_points)} planned points are out of bounds.")
         elif est_s > 3600:
-            color = "#ad6700"
+            tone = 'warning'
             lines.append(f"Warning: Estimated sweep time is {self._format_duration(est_s)}.")
-        self._set_summary_text("\n".join(lines), color)
+        self._set_summary_text("\n".join(lines), tone)
 
     def _collect_params(self) -> dict:
         data = dict(self._last_preview)
@@ -3740,7 +3677,7 @@ class MegaSweepPanel(QWidget):
     @Slot()
     def _on_run(self):
         if bool(getattr(self._lf6, "switching_locked", False)):
-            self._set_status("Wait for the current device operation to finish", "#707070")
+            self._set_status("Wait for the current device operation to finish", 'muted')
             return
         self._refresh_preview()
         params = self._collect_params()
@@ -3772,7 +3709,7 @@ class MegaSweepPanel(QWidget):
         self._run_failed = False
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
-        self._set_status("Running...", "#b26a00")
+        self._set_status("Running...", 'warning')
         self._run_inner_count = max(1, len(params.get("axis_b_vals", [])))
         self._worker = _MegaSweepWorker(params, self._smu, self._lf6, self._experiment_run)
         self._thread = QThread()
@@ -3794,7 +3731,7 @@ class MegaSweepPanel(QWidget):
         if self._worker is not None:
             self._worker.request_stop()
         self._stop_btn.setEnabled(False)
-        self._set_status("Stopping...", "#b26a00")
+        self._set_status("Stopping...", 'warning')
 
     @Slot(str)
     def _on_log(self, msg: str):
@@ -3824,7 +3761,7 @@ class MegaSweepPanel(QWidget):
             self._set_status(
                 f"Map {self._current_map_index}/{self._map_count} | Current map remaining: "
                 f"{self._format_duration(remaining)} ({seconds_per_point:.2f} s/point)",
-                "#b26a00",
+                'warning',
             )
 
     @Slot(int, int, str)
@@ -3840,7 +3777,7 @@ class MegaSweepPanel(QWidget):
         self._preview.clear_progress()
         self._set_status(
             f"Map {map_index}/{map_count}",
-            "#b26a00",
+            'warning',
         )
         self._status_lbl.setToolTip(description)
 
@@ -3863,11 +3800,11 @@ class MegaSweepPanel(QWidget):
         self._run_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         if self._run_failed:
-            self._set_status("Error", "#b42318")
+            self._set_status("Error", 'danger')
         elif worker is not None and worker._stop.is_set():
-            self._set_status("Stopped", "#707070")
+            self._set_status("Stopped", 'muted')
         else:
-            self._set_status("Done", "#1f7a1f")
+            self._set_status("Done", 'success')
         run = getattr(self, "_experiment_run", None)
         if run is not None:
             try:
@@ -3894,7 +3831,7 @@ class MegaSweepPanel(QWidget):
         self._update_ratio_validation()
         self._schedule_preview()
 
-    def _set_status(self, text: str, color: str):
+    def _set_status(self, text: str, tone: str):
         self._status_lbl.setText(text)
         self._status_lbl.setToolTip(text)
-        self._status_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")
+        set_style_role(self._status_lbl, tone=tone, size="status")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import re
 import sys
 import time
@@ -523,7 +525,7 @@ class _BgPanel(QGroupBox):
         self._tol_spin.setSuffix(" nm")
         lay.addRow("Lambda tol:", self._tol_spin)
         self._status_lbl = QLabel("")
-        self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._status_lbl, 'text', tone='muted', size='caption')
         lay.addRow("", self._status_lbl)
         self._bg_data: Optional[np.ndarray] = None
         self._bg_wls = np.array([])
@@ -548,12 +550,12 @@ class _BgPanel(QGroupBox):
                 self._bg_data = full.image
                 self._bg_wls = full.wl
             self._status_lbl.setText(f"Loaded: {Path(path).name}")
-            self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
+            set_style_role(self._status_lbl, 'text', tone='success', size='caption')
         except Exception as exc:
             self._bg_data = None
             self._bg_wls = np.array([])
             self._status_lbl.setText(f"Error: {exc}")
-            self._status_lbl.setStyleSheet("color: red; font-size: 10px;")
+            set_style_role(self._status_lbl, 'text', tone='danger', size='caption')
 
     def apply_to(self, data: np.ndarray, wls: np.ndarray) -> tuple[bool, np.ndarray, str]:
         if not self._enable_chk.isChecked() or self._bg_data is None:
@@ -1347,7 +1349,7 @@ class BFPPanel(QWidget):
         name_form.addRow("Run #:", self._run_idx_spin)
         name_form.addRow("", self._auto_inc_chk)
         self._stem_lbl = QLabel("")
-        self._stem_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._stem_lbl, 'text', tone='muted', size='caption')
         name_form.addRow("Preview:", self._stem_lbl)
         compact_form_rows(name_form, (self._point_edit, self._exp_type_combo), labels_above=True)
         compact_form_rows(name_form, (self._run_idx_spin, self._auto_inc_chk))
@@ -1374,7 +1376,7 @@ class BFPPanel(QWidget):
         self._warmup_chk = QCheckBox("Warm-up shot before acquire")
         self._warmup_chk.setChecked(True)
         self._est_lbl = QLabel("")
-        self._est_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._est_lbl, 'text', tone='muted', size='caption')
         acq_form.addRow("ROI mode:", self._roi_combo)
         acq_form.addRow("Center Lambda:", self._center_spin)
         acq_form.addRow("Exposure:", self._exp_spin)
@@ -1413,7 +1415,7 @@ class BFPPanel(QWidget):
         left_lay.addLayout(load_row)
 
         self._status_lbl = QLabel("Disconnected")
-        self._status_lbl.setStyleSheet("color: gray;")
+        set_style_role(self._status_lbl, 'text', tone='muted')
 
         self._bg_panel = _BgPanel()
         left_lay.addWidget(self._bg_panel)
@@ -1740,13 +1742,13 @@ class BFPPanel(QWidget):
     def _on_lf6_connected(self, _experiments):
         self._acquire_btn.setEnabled(True)
         self._status_lbl.setText("Connected")
-        self._status_lbl.setStyleSheet("color: green;")
+        set_style_role(self._status_lbl, 'text', tone='success')
 
     @Slot()
     def _on_lf6_disconnected(self):
         self._acquire_btn.setEnabled(False)
         self._status_lbl.setText("Disconnected")
-        self._status_lbl.setStyleSheet("color: gray;")
+        set_style_role(self._status_lbl, 'text', tone='muted')
 
     @Slot()
     def _on_acquire(self):
@@ -1760,7 +1762,7 @@ class BFPPanel(QWidget):
         device_id = self._dev_edit.text().strip()
         if not device_id:
             self._status_lbl.setText("Sample ID is required before acquisition")
-            self._status_lbl.setStyleSheet("color: red;")
+            set_style_role(self._status_lbl, 'text', tone='danger')
             return
         try:
             self._experiment_run = ExperimentMetadataService(self._out_dir()).begin(
@@ -1776,11 +1778,11 @@ class BFPPanel(QWidget):
             bind_lightfield_metadata(self._ctrl, self._experiment_run)
         except Exception as exc:
             self._status_lbl.setText(f"Metadata error; acquisition blocked: {exc}")
-            self._status_lbl.setStyleSheet("color: red;")
+            set_style_role(self._status_lbl, 'text', tone='danger')
             return
         self._acquire_btn.setEnabled(False)
         self._status_lbl.setText("Acquiring...")
-        self._status_lbl.setStyleSheet("color: orange;")
+        set_style_role(self._status_lbl, 'text', tone='warning')
         self._worker = _AcquireWorker(
             lf6_ctrl=self._ctrl,
             roi_mode=self._roi_combo.currentText(),
@@ -1817,14 +1819,14 @@ class BFPPanel(QWidget):
                 # recorded below; saving the CSV must not close its journal.
                 csv_path = self._save_record_csv(record, finalize=False)
                 self._status_lbl.setText(f"Acquired and auto-saved -> {csv_path.name}")
-                self._status_lbl.setStyleSheet("color: green;")
+                set_style_role(self._status_lbl, 'text', tone='success')
             except Exception as exc:
                 self._status_lbl.setText(f"Auto-save error: {exc}")
-                self._status_lbl.setStyleSheet("color: red;")
+                set_style_role(self._status_lbl, 'text', tone='danger')
                 self._on_acquire_error(f"auto-save: {exc}")
         else:
             self._status_lbl.setText("Acquisition complete")
-            self._status_lbl.setStyleSheet("color: green;")
+            set_style_role(self._status_lbl, 'text', tone='success')
         run = getattr(self, "_experiment_run", None)
         if run is not None and not self._acquire_error:
             # The worker freezes the successful measurement UUIDs at capture
@@ -1842,7 +1844,7 @@ class BFPPanel(QWidget):
                 run.complete({"mode": record.mode})
             except Exception as exc:
                 self._status_lbl.setText(f"Metadata finalization error: {exc}")
-                self._status_lbl.setStyleSheet("color: red;")
+                set_style_role(self._status_lbl, 'text', tone='danger')
                 self._on_acquire_error(f"metadata finalization: {exc}")
         self._tabs.setCurrentIndex(0)
 
@@ -1855,7 +1857,7 @@ class BFPPanel(QWidget):
                     run.fail(self._acquire_error)
                 except Exception as exc:
                     self._status_lbl.setText(f"Metadata failure: {exc}")
-                    self._status_lbl.setStyleSheet("color: red;")
+                    set_style_role(self._status_lbl, 'text', tone='danger')
             self._acquire_terminalized = True
         elif not self._acquire_result_received and not self._acquire_terminalized:
             run = getattr(self, "_experiment_run", None)
@@ -1864,7 +1866,7 @@ class BFPPanel(QWidget):
                     run.fail("acquisition ended without a result")
                 except Exception as exc:
                     self._status_lbl.setText(f"Metadata failure: {exc}")
-                    self._status_lbl.setStyleSheet("color: red;")
+                    set_style_role(self._status_lbl, 'text', tone='danger')
             self._acquire_terminalized = True
         self._acquire_btn.setEnabled(self._ctrl is not None and self._ctrl.is_connected)
         if self._thread is not None:
@@ -1880,7 +1882,7 @@ class BFPPanel(QWidget):
     def _on_acquire_error(self, message: str):
         self._acquire_error = str(message)
         self._status_lbl.setText(f"Error: {self._acquire_error[:80]}")
-        self._status_lbl.setStyleSheet("color: red;")
+        set_style_role(self._status_lbl, 'text', tone='danger')
 
     @Slot()
     def _on_clear(self):
@@ -1889,7 +1891,7 @@ class BFPPanel(QWidget):
         for btn in (self._save_csv_btn, self._save_png_btn, self._apply_bg_btn, self._use_sample_btn, self._use_bg_btn):
             btn.setEnabled(False)
         self._status_lbl.setText("Cleared")
-        self._status_lbl.setStyleSheet("color: gray;")
+        set_style_role(self._status_lbl, 'text', tone='muted')
 
     @Slot()
     def _on_apply_bg(self):
@@ -1898,10 +1900,10 @@ class BFPPanel(QWidget):
         ok, out, msg = self._bg_panel.apply_to(self._record.data, self._record.wls)
         if ok:
             self._display.update_data(out, self._record.wls, y_axis=self._record.y_axis)
-            self._status_lbl.setStyleSheet("color: green;")
+            set_style_role(self._status_lbl, 'text', tone='success')
         else:
             self._display.update_data(self._record.data, self._record.wls, y_axis=self._record.y_axis)
-            self._status_lbl.setStyleSheet("color: orange;")
+            set_style_role(self._status_lbl, 'text', tone='warning')
         self._status_lbl.setText(msg)
 
     def _next_base_path(self) -> Path:
@@ -1935,10 +1937,10 @@ class BFPPanel(QWidget):
         try:
             csv_path = self._save_record_csv(self._record)
             self._status_lbl.setText(f"Saved -> {csv_path.name}")
-            self._status_lbl.setStyleSheet("color: green;")
+            set_style_role(self._status_lbl, 'text', tone='success')
         except Exception as exc:
             self._status_lbl.setText(f"Save error: {exc}")
-            self._status_lbl.setStyleSheet("color: red;")
+            set_style_role(self._status_lbl, 'text', tone='danger')
 
     @Slot()
     def _on_save_png(self):
@@ -1953,10 +1955,10 @@ class BFPPanel(QWidget):
                 raise RuntimeError("Acquisition metadata record is missing")
             run.register_file(png_path, "figure")
             self._status_lbl.setText(f"Saved -> {png_path.name}")
-            self._status_lbl.setStyleSheet("color: green;")
+            set_style_role(self._status_lbl, 'text', tone='success')
         except Exception as exc:
             self._status_lbl.setText(f"PNG error: {exc}")
-            self._status_lbl.setStyleSheet("color: red;")
+            set_style_role(self._status_lbl, 'text', tone='danger')
 
     def _use_as_sample(self):
         if self._record is None:

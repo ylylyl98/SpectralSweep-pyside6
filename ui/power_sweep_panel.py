@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import ast
 import csv
 import json
@@ -1490,21 +1492,7 @@ class PowerSweepPanel(QWidget):
         scroll.setMinimumWidth(420)
         left = QWidget()
         left.setObjectName("MotionSweepControls")
-        left.setStyleSheet("""
-            QWidget#MotionSweepControls QGroupBox {
-                margin-top: 10px; padding: 3px 4px 4px 4px;
-            }
-            QWidget#MotionSweepControls QLineEdit,
-            QWidget#MotionSweepControls QComboBox,
-            QWidget#MotionSweepControls QDoubleSpinBox,
-            QWidget#MotionSweepControls QSpinBox {
-                min-height: 20px; padding: 1px 4px;
-            }
-            QWidget#MotionSweepControls QPushButton {
-                min-height: 22px; padding: 2px 7px;
-            }
-            QWidget#MotionSweepControls QCheckBox { min-height: 18px; }
-        """)
+        set_style_role(left, 'motionControls')
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(4, 4, 4, 4)
         left_lay.setSpacing(3)
@@ -1533,7 +1521,7 @@ class PowerSweepPanel(QWidget):
             button = QPushButton(label)
             button.setCheckable(True)
             button.setToolTip(f"Sweep {_MOTION_SPECS[key]['label']} at every measurement point")
-            button.setStyleSheet("QPushButton:checked { background: #dceafb; color: #174f8a; border: 1px solid #6497d0; font-weight: bold; }")
+            set_style_role(button, 'modeAction')
             self._motion_button_group.addButton(button)
             self._motion_buttons[key] = button
             button.clicked.connect(lambda checked=False, axis=key: self._motion_combo.setCurrentIndex(self._motion_combo.findData(axis)))
@@ -1609,18 +1597,18 @@ class PowerSweepPanel(QWidget):
         self._freeze_positions_lbl = QLabel("Generated list:")
         pos_form.addRow(self._freeze_positions_lbl, self._freeze_positions_btn)
         self._pos_preview_lbl = QLabel("")
-        self._pos_preview_lbl.setStyleSheet("color: #444; font-size: 10px;")
+        set_style_role(self._pos_preview_lbl, 'text', tone='secondary', size='caption')
         self._pos_preview_lbl.setTextInteractionFlags(
             Qt.TextSelectableByMouse
         )
         self._pos_preview_lbl.setWordWrap(True)
         pos_form.addRow("Parsed:", self._pos_preview_lbl)
         self._pos_count_lbl = QLabel("")
-        self._pos_count_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._pos_count_lbl, 'text', tone='muted', size='caption')
         pos_form.addRow("", self._pos_count_lbl)
         self._power_preview_lbl = QLabel("")
         self._power_preview_lbl.setWordWrap(True)
-        self._power_preview_lbl.setStyleSheet("color: #444; font-size: 10px;")
+        set_style_role(self._power_preview_lbl, 'text', tone='secondary', size='caption')
         pos_form.addRow("Power preview:", self._power_preview_lbl)
         self._motion_settle_spin = QDoubleSpinBox()
         self._motion_settle_spin.setRange(0.0, 60.0)
@@ -1775,13 +1763,11 @@ class PowerSweepPanel(QWidget):
         meta_form.addWidget(QLabel("Subfolder:"), 1, 2)
         meta_form.addWidget(self._subfolder_edit, 1, 3)
         self._filename_lbl = QLabel("")
-        self._filename_lbl.setStyleSheet(
-            "color: #555; font-size: 10px;"
-        )
+        set_style_role(self._filename_lbl, 'text', tone='secondary', size='caption')
         self._filename_lbl.setWordWrap(True)
         meta_form.addWidget(self._filename_lbl, 2, 0, 1, 4)
         self._est_lbl = QLabel("")
-        self._est_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._est_lbl, 'text', tone='muted', size='caption')
         meta_form.addWidget(self._est_lbl, 3, 0, 1, 4)
         meta_form.setColumnStretch(1, 1)
         meta_form.setColumnStretch(3, 1)
@@ -1800,34 +1786,29 @@ class PowerSweepPanel(QWidget):
         hw_form.setContentsMargins(6, 4, 6, 4)
         hw_form.setSpacing(2)
         self._stage_status = QLabel("○ Not connected")
-        self._stage_status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._stage_status, 'text', tone='muted', strong=True)
         hw_form.addRow("Stage:", self._stage_status)
         self._rot1_status = QLabel("○ Not connected")
-        self._rot1_status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._rot1_status, 'text', tone='muted', strong=True)
         hw_form.addRow("Rot1:", self._rot1_status)
         self._rot2_status = QLabel("○ Not connected")
-        self._rot2_status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._rot2_status, 'text', tone='muted', strong=True)
         hw_form.addRow("Rot2:", self._rot2_status)
         self._pm_status = QLabel("○ Not connected (optional)")
-        self._pm_status.setStyleSheet(
-            "color: #9a6700; font-weight: bold;"
-        )
+        set_style_role(self._pm_status, 'text', tone='warning', strong=True)
         hw_form.addRow("PM:", self._pm_status)
         self._pm_notice_lbl = QLabel(
             "PM100D is not connected. The sweep can still run, but no "
             "optical power values will be saved."
         )
         self._pm_notice_lbl.setWordWrap(True)
-        self._pm_notice_lbl.setStyleSheet(
-            "color: #9a6700; background: #fff8c5; border: 1px solid #d4a72c;"
-            " border-radius: 3px; padding: 4px; font-size: 10px;"
-        )
+        set_style_role(self._pm_notice_lbl, 'notice')
         hw_form.addRow("", self._pm_notice_lbl)
         self._lf6_status = QLabel("○ Not connected")
-        self._lf6_status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._lf6_status, 'text', tone='muted', strong=True)
         hw_form.addRow("LF6:", self._lf6_status)
         self._smu_status = QLabel("○ Not connected")
-        self._smu_status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._smu_status, 'text', tone='muted', strong=True)
         hw_form.addRow("SMU:", self._smu_status)
         hw_body.setVisible(False)
         hw_grp.toggled.connect(hw_body.setVisible)
@@ -1855,11 +1836,7 @@ class PowerSweepPanel(QWidget):
         self._log.setReadOnly(True)
         self._log.setMaximumHeight(130)
         self._log.setMinimumHeight(80)
-        self._log.setStyleSheet(
-            "QTextEdit { font-family: 'Consolas', 'Courier New', monospace;"
-            " font-size: 11px; background: #fafafa;"
-            " border: 1px solid #d0d0d0; border-radius: 3px; }"
-        )
+        set_style_role(self._log, 'log')
         self._log_section = DisclosureSection("Run log", self._log)
 
         # Spectrum plot
@@ -1893,36 +1870,16 @@ class PowerSweepPanel(QWidget):
         self._run_btn = QPushButton("▶  Run Motion Sweep")
         self._run_btn.setMinimumHeight(32)
         self._run_btn.setMinimumWidth(150)
-        self._run_btn.setStyleSheet(
-            "QPushButton { font-weight: 700; font-size: 12px;"
-            " border-color: #5a9060; color: #1a4020;"
-            " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #d8f0d8, stop:1 #b8e0b8); }"
-            "QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #e8f8e8, stop:1 #c8ecc8); }"
-            "QPushButton:pressed { background: #a8d8a8; }"
-            "QPushButton:disabled { color: #aaaaaa; border-color: #d0d0d0;"
-            " background: #f0f0f0; }"
-        )
+        set_style_role(self._run_btn, 'runAction')
         self._stop_btn = QPushButton("■  Stop")
         self._stop_btn.setMinimumHeight(32)
         self._stop_btn.setMinimumWidth(90)
         self._stop_btn.setEnabled(False)
-        self._stop_btn.setStyleSheet(
-            "QPushButton { font-weight: 700; font-size: 12px;"
-            " border-color: #a05050; color: #6a1010;"
-            " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #f8dada, stop:1 #eec0c0); }"
-            "QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #ffe8e8, stop:1 #f4cccc); }"
-            "QPushButton:pressed { background: #e0a8a8; }"
-            "QPushButton:disabled { color: #aaaaaa; border-color: #d0d0d0;"
-            " background: #f0f0f0; }"
-        )
+        set_style_role(self._stop_btn, 'stopAction')
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
         self._status_lbl = QLabel("Ready")
-        self._status_lbl.setStyleSheet("color: #707070; font-size: 11px;")
+        set_style_role(self._status_lbl, 'text', tone='muted', size='status')
         ctrl_row.addWidget(self._run_btn)
         ctrl_row.addWidget(self._stop_btn)
         ctrl_row.addWidget(self._progress, stretch=1)
@@ -2501,11 +2458,11 @@ class PowerSweepPanel(QWidget):
             self._positions = np.array([], dtype=float)
             self._target_powers = None
             self._clear_calibration_plot(clear_curve=True)
-            self._pos_preview_lbl.setText(f"⚠ {exc}"); self._pos_preview_lbl.setStyleSheet("color: #b42318; font-size: 10px;")
+            self._pos_preview_lbl.setText(f"⚠ {exc}"); set_style_role(self._pos_preview_lbl, 'text', tone='danger', size='caption')
             self._pos_count_lbl.setText(""); self._est_lbl.setText(""); self._power_preview_lbl.setText(f"⚠ {exc}")
             self._update_condition_preview()
             return
-        self._pos_preview_lbl.setText(_describe_positions(self._positions)); self._pos_preview_lbl.setStyleSheet("color: #444; font-size: 10px;")
+        self._pos_preview_lbl.setText(_describe_positions(self._positions)); set_style_role(self._pos_preview_lbl, 'text', tone='secondary', size='caption')
         n = len(self._positions); self._pos_count_lbl.setText(f"{n} value{'s' if n != 1 else ''}")
         try:
             cal = cfg.nd_calibration
@@ -2635,32 +2592,24 @@ class PowerSweepPanel(QWidget):
             self._filename_lbl.setText(
                 f"{base}.csv\n→ {folder}"
             )
-            self._filename_lbl.setStyleSheet(
-                "color: #555; font-size: 10px;"
-            )
+            set_style_role(self._filename_lbl, 'text', tone='secondary', size='caption')
         except Exception as exc:
             self._filename_lbl.setText(f"⚠ {exc}")
-            self._filename_lbl.setStyleSheet(
-                "color: #b42318; font-size: 10px;"
-            )
+            set_style_role(self._filename_lbl, 'text', tone='danger', size='caption')
 
     # ── status lamp slots ─────────────────────────────────────────────────────
 
     @Slot(str)
     def _on_stage_connected(self, _key: str = ""):
         self._stage_status.setText("● Connected")
-        self._stage_status.setStyleSheet(
-            "color: green; font-weight: bold;"
-        )
+        set_style_role(self._stage_status, 'text', tone='success', strong=True)
         if self._motion_combo.currentData() == "stage":
             self._on_motion_changed()
 
     @Slot()
     def _on_stage_disconnected(self):
         self._stage_status.setText("○ Not connected")
-        self._stage_status.setStyleSheet(
-            "color: gray; font-weight: bold;"
-        )
+        set_style_role(self._stage_status, 'text', tone='muted', strong=True)
 
     def _set_rotation_status(self, slot: str, connected: bool):
         label = {
@@ -2670,9 +2619,7 @@ class PowerSweepPanel(QWidget):
         if label is None:
             return
         label.setText("● Connected" if connected else "○ Not connected")
-        label.setStyleSheet(
-            f"color: {'green' if connected else 'gray'}; font-weight: bold;"
-        )
+        set_style_role(label, tone="success" if connected else "muted", strong=True)
 
     @Slot(str, str)
     def _on_rotation_connected(self, slot: str, _backend: str):
@@ -2685,39 +2632,29 @@ class PowerSweepPanel(QWidget):
     @Slot()
     def _on_pm_connected(self):
         self._pm_status.setText("● Connected")
-        self._pm_status.setStyleSheet(
-            "color: green; font-weight: bold;"
-        )
+        set_style_role(self._pm_status, 'text', tone='success', strong=True)
         self._pm_notice_lbl.setVisible(False)
 
     @Slot()
     def _on_pm_disconnected(self):
         self._pm_status.setText("○ Not connected (optional)")
-        self._pm_status.setStyleSheet(
-            "color: #9a6700; font-weight: bold;"
-        )
+        set_style_role(self._pm_status, 'text', tone='warning', strong=True)
         self._pm_notice_lbl.setVisible(True)
 
     @Slot(list)
     def _on_lf6_connected(self, _experiments=None):
         self._lf6_status.setText("● Connected")
-        self._lf6_status.setStyleSheet(
-            "color: green; font-weight: bold;"
-        )
+        set_style_role(self._lf6_status, 'text', tone='success', strong=True)
 
     @Slot()
     def _on_lf6_disconnected(self):
         self._lf6_status.setText("○ Not connected")
-        self._lf6_status.setStyleSheet(
-            "color: gray; font-weight: bold;"
-        )
+        set_style_role(self._lf6_status, 'text', tone='muted', strong=True)
 
     @Slot(list)
     def _on_smu_connected(self, _opened=None):
         self._smu_status.setText("● Connected")
-        self._smu_status.setStyleSheet(
-            "color: green; font-weight: bold;"
-        )
+        set_style_role(self._smu_status, 'text', tone='success', strong=True)
         self._gate_grp.setEnabled(True)
         has_vb = getattr(self._smu, "has_vbias", False)
         self._vbias_spin.setEnabled(has_vb)
@@ -2725,9 +2662,7 @@ class PowerSweepPanel(QWidget):
     @Slot()
     def _on_smu_disconnected(self):
         self._smu_status.setText("○ Not connected")
-        self._smu_status.setStyleSheet(
-            "color: gray; font-weight: bold;"
-        )
+        set_style_role(self._smu_status, 'text', tone='muted', strong=True)
         self._gate_grp.setEnabled(False)
 
     # ── gate snapshot ──────────────────────────────────────────────────────────
@@ -3006,7 +2941,7 @@ class PowerSweepPanel(QWidget):
         self._condition_editor.setEnabled(False)
         self._condition_preview_btn.setEnabled(False)
         self._motion_grp.setEnabled(False); self._stop_btn.setEnabled(True); self._progress.setValue(0)
-        self._log.clear(); self._status_lbl.setText("Running…"); self._status_lbl.setStyleSheet("color: #b26a00; font-size: 11px;")
+        self._log.clear(); self._status_lbl.setText("Running…"); set_style_role(self._status_lbl, 'text', tone='warning', size='status')
         self._worker = _PowerSweepWorker(params, self._stg, self._rot, self._pm, self._lf6, self._smu, self._experiment_run)
         self._thread = QThread()
         self._worker.moveToThread(self._thread); self._thread.started.connect(self._worker.run)
@@ -3072,7 +3007,7 @@ class PowerSweepPanel(QWidget):
             self._worker.request_stop()
         self._stop_btn.setEnabled(False)
         self._status_lbl.setText("Stopping…")
-        self._status_lbl.setStyleSheet("color: #b26a00; font-size: 11px;")
+        set_style_role(self._status_lbl, 'text', tone='warning', size='status')
 
     @Slot(str)
     def _on_log(self, msg: str):
@@ -3099,7 +3034,7 @@ class PowerSweepPanel(QWidget):
         self._log_section.set_expanded(True)
         self._log.append(f"ERROR: {msg}")
         self._status_lbl.setText("Error")
-        self._status_lbl.setStyleSheet("color: red; font-size: 11px;")
+        set_style_role(self._status_lbl, 'text', tone='danger', size='status')
         self._run_failed = True
         self._positions = np.array([], dtype=float)
         self._target_powers = None
@@ -3115,9 +3050,7 @@ class PowerSweepPanel(QWidget):
         self._stop_btn.setEnabled(False)
         if self._status_lbl.text() not in ("Error", "Stopping…"):
             self._status_lbl.setText("Ready")
-            self._status_lbl.setStyleSheet(
-                "color: #707070; font-size: 11px;"
-            )
+            set_style_role(self._status_lbl, 'text', tone='muted', size='status')
         if self._thread:
             thread = self._thread
             thread.quit()

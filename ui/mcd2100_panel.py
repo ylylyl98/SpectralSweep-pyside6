@@ -1,6 +1,8 @@
 """Dedicated continuous attoDRY2100 MCD panel."""
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import math
 import threading
 import time
@@ -741,7 +743,7 @@ class MCD2100Panel(QWidget):
         self._gate_entry_expansion.addItem("Match by position", "paired")
         self._gate_entry_expansion.addItem("Every combination", "grid")
         self._gate_entry_add = QPushButton("Add 1 row")
-        self._gate_entry_add.setStyleSheet("font-weight: 700;")
+        set_style_role(self._gate_entry_add, 'text', strong=True)
         self._gate_entry_status = QLabel()
         self._gate_entry_status.setWordWrap(True)
         self._gate_edit_row: Optional[int] = None
@@ -798,7 +800,7 @@ class MCD2100Panel(QWidget):
         preview_layout.setContentsMargins(8, 6, 8, 6)
         preview_layout.setSpacing(3)
         self._condition_summary = QLabel("1 total · 1 enabled")
-        self._condition_summary.setStyleSheet("font-weight: 700;")
+        set_style_role(self._condition_summary, 'text', strong=True)
         self._condition_summary.setWordWrap(True)
         self._condition_summary.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
@@ -869,8 +871,8 @@ class MCD2100Panel(QWidget):
         self.stop_btn = QPushButton("Stop / Cancel")
         for button in (self.start_btn, self.stop_btn):
             button.setMinimumHeight(36)
-        self.start_btn.setStyleSheet("font-weight: 700; background: #e6f3e8;")
-        self.stop_btn.setStyleSheet("font-weight: 700; background: #f9e5e5;")
+        set_style_role(self.start_btn, 'runAction')
+        set_style_role(self.stop_btn, 'stopAction')
         controls.addWidget(self.start_btn)
         controls.addWidget(self.prepare_magnet_btn)
         controls.addWidget(self.stop_btn)
@@ -920,9 +922,9 @@ class MCD2100Panel(QWidget):
         display_layout.addWidget(status_group)
         display_header = QHBoxLayout()
         live_title = QLabel("Live spectrum")
-        live_title.setStyleSheet("font-weight: 700;")
+        set_style_role(live_title, 'text', strong=True)
         self.run_activity = QLabel("● Idle")
-        self.run_activity.setStyleSheet("color: #6b7280;")
+        set_style_role(self.run_activity, 'text', tone='muted')
         self.spectrum_activity = QLabel("Spectrum 0 · no spectrum yet")
         display_header.addWidget(live_title)
         self.run_activity.setWordWrap(True)
@@ -1619,10 +1621,10 @@ class MCD2100Panel(QWidget):
         try:
             ratio = self._gate_ratio()
             self.gate_ratio_value.setText(f"r = {ratio:.6g}")
-            self.gate_ratio_value.setStyleSheet("")
+            set_style_role(self.gate_ratio_value, '')
         except ValueError as exc:
             self.gate_ratio_value.setText(str(exc))
-            self.gate_ratio_value.setStyleSheet("color: #a40000;")
+            set_style_role(self.gate_ratio_value, 'text', tone='danger')
         self._update_condition_editable()
         if hasattr(self, "_gate_entry_mode"):
             self._update_gate_entry()
@@ -1634,7 +1636,7 @@ class MCD2100Panel(QWidget):
             ratio = self._gate_ratio()
         except ValueError as exc:
             self.gate_ratio_value.setText(str(exc))
-            self.gate_ratio_value.setStyleSheet("color: #a40000;")
+            set_style_role(self.gate_ratio_value, 'text', tone='danger')
             self._update_condition_editable()
             return
         self._syncing_gate_ratio = True
@@ -1643,7 +1645,7 @@ class MCD2100Panel(QWidget):
         finally:
             self._syncing_gate_ratio = False
         self.gate_ratio_value.setText(f"r = {ratio:.6g}")
-        self.gate_ratio_value.setStyleSheet("")
+        set_style_role(self.gate_ratio_value, '')
         self._update_condition_editable()
         if hasattr(self, "_gate_entry_mode"):
             self._update_gate_entry()
@@ -1684,7 +1686,7 @@ class MCD2100Panel(QWidget):
         except ValueError as exc:
             self._gate_entry_rows = []
             self._gate_entry_status.setText(str(exc))
-            self._gate_entry_status.setStyleSheet("color: #a40000;")
+            set_style_role(self._gate_entry_status, 'text', tone='danger')
             self._gate_entry_add.setEnabled(False)
             self._gate_entry_add.setText("Add rows")
             return
@@ -1693,7 +1695,7 @@ class MCD2100Panel(QWidget):
         action = "Replace selected with" if self._gate_edit_row is not None else "Add"
         self._gate_entry_add.setText(f"{action} {count} row{'s' if count != 1 else ''}")
         self._gate_entry_add.setEnabled(True)
-        self._gate_entry_status.setStyleSheet("")
+        set_style_role(self._gate_entry_status, '')
         def _preview(values: list[float]) -> str:
             shown = ", ".join(f"{value:.6g}" for value in values[:4])
             return f"[{shown}{', …' if len(values) > 4 else ''}]"
@@ -3372,23 +3374,23 @@ class MCD2100Panel(QWidget):
         ))
         if preparation is not None:
             self.run_activity.setText("● Preparing magnet")
-            self.run_activity.setStyleSheet("color: #b45309; font-weight: 700;")
+            set_style_role(self.run_activity, 'text', tone='warning', strong=True)
         elif running and since_spectrum is not None and since_spectrum < 1.5:
             self.run_activity.setText("● New spectrum")
-            self.run_activity.setStyleSheet("color: #15803d; font-weight: 700;")
+            set_style_role(self.run_activity, 'text', tone='success', strong=True)
         elif running and self._settle_deadline is not None:
             remaining = max(0, int(math.ceil(self._settle_deadline - now)))
             self.run_activity.setText(f"● Settling · {remaining} s remaining")
-            self.run_activity.setStyleSheet("color: #b45309; font-weight: 700;")
+            set_style_role(self.run_activity, 'text', tone='warning', strong=True)
         elif running and waiting:
             self.run_activity.setText("● Setup / waiting")
-            self.run_activity.setStyleSheet("color: #b45309; font-weight: 700;")
+            set_style_role(self.run_activity, 'text', tone='warning', strong=True)
         elif running:
             self.run_activity.setText("● Running")
-            self.run_activity.setStyleSheet("color: #2563eb; font-weight: 700;")
+            set_style_role(self.run_activity, 'text', tone='info', strong=True)
         else:
             self.run_activity.setText(f"● {self._terminal_status}")
-            self.run_activity.setStyleSheet("color: #6b7280;")
+            set_style_role(self.run_activity, 'text', tone='muted')
 
         if since_spectrum is None and not running:
             text = "Spectrum 0 · no spectrum yet"
@@ -3406,9 +3408,9 @@ class MCD2100Panel(QWidget):
         reference_age = phase_age if since_spectrum is None else min(since_spectrum, phase_age)
         if expecting and reference_age > expected_interval:
             text += " · no recent spectrum"
-            self.spectrum_activity.setStyleSheet("color: #b91c1c; font-weight: 700;")
+            set_style_role(self.spectrum_activity, 'text', tone='danger', strong=True)
         else:
-            self.spectrum_activity.setStyleSheet("color: #4b5563;")
+            set_style_role(self.spectrum_activity, 'text', tone='secondary')
         self.spectrum_activity.setText(text)
 
     @Slot(str)

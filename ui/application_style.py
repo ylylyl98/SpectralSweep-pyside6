@@ -1,7 +1,7 @@
 """Reload the existing application QSS without replacing widgets or controllers.
 
 This is a loading boundary for the legacy light theme, not a new theme system.
-Panel-local styles are deliberately left intact for incremental migration.
+Widget appearances live in QSS; per-reference data-color swatches stay local.
 """
 from __future__ import annotations
 

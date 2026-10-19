@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import sys
 import threading
 import copy
@@ -105,7 +107,7 @@ class _ESP32ImagingStageSection(QWidget):
         self._goto_zero.clicked.connect(lambda: self._goto_absolute(0.0))
         self._goto_maximum.clicked.connect(self._goto_saved_maximum)
         lay.addWidget(self._goto_zero); lay.addWidget(self._goto_maximum)
-        self._stop = QPushButton("STOP — position becomes unknown"); self._stop.setStyleSheet("background:#b3261e;color:white;font-weight:bold;"); self._stop.clicked.connect(self._ctrl.stop); lay.addWidget(self._stop)
+        self._stop = QPushButton("STOP — position becomes unknown"); set_style_role(self._stop, 'dangerAction'); self._stop.clicked.connect(self._ctrl.stop); lay.addWidget(self._stop)
         self._position = QLabel("Estimated distance from imaging end: unknown"); self._position.setToolTip("Open-loop estimate from firmware pulses; manually re-seat and set zero after a stall, power loss, or STOP."); lay.addWidget(self._position)
         self._reference = QLabel("Reference: unknown"); self._limit = QLabel("Maximum: unknown"); self._frequency_readout = QLabel("Speed: unknown"); lay.addWidget(self._reference); lay.addWidget(self._limit); lay.addWidget(self._frequency_readout)
         self._advanced_btn = QToolButton(); self._advanced_btn.setText("Advanced setup"); self._advanced_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon); self._advanced_btn.setCheckable(True); self._advanced_btn.setChecked(False); self._advanced_btn.setArrowType(Qt.RightArrow); self._advanced_btn.toggled.connect(self._toggle_advanced); lay.addWidget(self._advanced_btn)
@@ -357,9 +359,9 @@ class _VisaScanWorker(QObject):
         self.finished.emit(resources)
 
 
-def _status_label(text: str, color: str) -> QLabel:
+def _status_label(text: str, tone: str) -> QLabel:
     lbl = QLabel(text)
-    lbl.setStyleSheet(f"color: {color}; font-weight: bold;")
+    set_style_role(lbl, tone=tone, strong=True)
     return lbl
 
 
@@ -574,7 +576,7 @@ class _LF6Section(QWidget):
         btn_row.addWidget(self._disconnect_btn)
         lay.addLayout(btn_row)
 
-        self._status = _status_label("Disconnected", "gray")
+        self._status = _status_label("Disconnected", 'muted')
         self._status.setWordWrap(True)
         lay.addWidget(self._status)
         self._connections_status = QLabel("Online: none")
@@ -931,7 +933,7 @@ class _LF6Section(QWidget):
             and cfg.lf6.winspec_acquisition_backend == 'winspec')
         cfg.save()
         self._status.setText("Connecting…")
-        self._status.setStyleSheet("color: orange; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='warning', strong=True)
         self._connect_btn.setEnabled(False)
         self._backend.setEnabled(False)
         self._mock_chk.setEnabled(False)
@@ -994,7 +996,7 @@ class _LF6Section(QWidget):
             self._status.setToolTip("\n".join(str(item) for item in warnings))
         else:
             self._status.setToolTip("")
-        self._status.setStyleSheet("color: green; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='success', strong=True)
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._backend.setEnabled(False)
@@ -1047,7 +1049,7 @@ class _LF6Section(QWidget):
     def _on_disconnected(self):
         self._pending_configuration = None
         self._status.setText("Disconnected")
-        self._status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='muted', strong=True)
         self._status.setToolTip("")
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
@@ -1076,7 +1078,7 @@ class _LF6Section(QWidget):
         self._pending_configuration = None
         first_line = str(message).splitlines()[0]
         self._status.setText(f"Error: {first_line[:80]}")
-        self._status.setStyleSheet("color: #b91c1c; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='danger', strong=True)
         self._status.setToolTip(str(message))
         connected = bool(getattr(self._ctrl, "is_connected", False))
         self._connect_btn.setEnabled(not connected)
@@ -1326,11 +1328,11 @@ class _LF6Section(QWidget):
             details = "\n".join(f"{key}: {value}" for key, value in errors.items())
             self._status.setText("Connected · Andor status has readback warnings")
             self._status.setToolTip(details)
-            self._status.setStyleSheet("color: #92400e; font-weight: bold;")
+            set_style_role(self._status, 'text', tone='warning', strong=True)
         else:
             self._status.setText("Connected · Andor controls verified")
             self._status.setToolTip("")
-            self._status.setStyleSheet("color: green; font-weight: bold;")
+            set_style_role(self._status, 'text', tone='success', strong=True)
 
     @Slot(object)
     def _on_andor_controls_applied(self, snapshot: object) -> None:
@@ -1475,7 +1477,7 @@ class _SMUSection(QWidget):
         lay.addLayout(visa_row)
 
         self._scan_status = QLabel("")
-        self._scan_status.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._scan_status, 'text', tone='muted', size='caption')
         lay.addWidget(self._scan_status)
 
         # Role mapping + per-address compliance. The stacked rows fit the
@@ -1557,7 +1559,7 @@ class _SMUSection(QWidget):
             limit_status.setAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
-            limit_status.setStyleSheet("color: #6B7280; font-size: 10px;")
+            set_style_role(limit_status, 'text', tone='muted', size='caption')
             self._curr_comp_by_role[role] = curr
             self._volt_comp_by_role[role] = volt
             self._curr_range_by_role[role] = current_range
@@ -1575,7 +1577,7 @@ class _SMUSection(QWidget):
             limit_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
             limit_header = QHBoxLayout()
             role_label = QLabel(role)
-            role_label.setStyleSheet("font-weight: 600;")
+            set_style_role(role_label, 'text', strong=True)
             limit_header.addWidget(role_label)
             limit_header.addStretch()
             limit_header.addWidget(limit_status)
@@ -1633,7 +1635,7 @@ class _SMUSection(QWidget):
         btn_row.addWidget(self._disconnect_btn)
         lay.addLayout(btn_row)
 
-        self._status = _status_label("Disconnected", "gray")
+        self._status = _status_label("Disconnected", 'muted')
         lay.addWidget(self._status)
 
         limits_group = QGroupBox("Compliance and ranges")
@@ -1769,9 +1771,7 @@ class _SMUSection(QWidget):
         self._limit_status_by_role[role].setToolTip(
             "The displayed limits differ from the instrument. Click Apply."
         )
-        self._limit_status_by_role[role].setStyleSheet(
-            "color: #92400E; font-size: 10px;"
-        )
+        set_style_role(self._limit_status_by_role[role], 'text', tone='warning', size='caption')
         self._apply_limits_by_role[role].setEnabled(
             bool(getattr(self._ctrl, "is_connected", False))
         )
@@ -1800,26 +1800,26 @@ class _SMUSection(QWidget):
         if not bool(getattr(self._ctrl, "is_connected", False)):
             status.setText("Connect first")
             status.setToolTip("Connect the assigned Keithley before applying limits.")
-            status.setStyleSheet("color: #991B1B; font-size: 10px;")
+            set_style_role(status, 'text', tone='danger', size='caption')
             return
         self._sync_current_range_for_role(role)
         error = self._validate_role_limits(role)
         if error:
             status.setText("Invalid value")
             status.setToolTip(error)
-            status.setStyleSheet("color: #991B1B; font-size: 10px;")
+            set_style_role(status, 'text', tone='danger', size='caption')
             return
         apply_method = getattr(self._ctrl, "apply_smu_limits", None)
         if not callable(apply_method):
             status.setText("Unavailable")
             status.setToolTip("Controller does not support live limit changes.")
-            status.setStyleSheet("color: #991B1B; font-size: 10px;")
+            set_style_role(status, 'text', tone='danger', size='caption')
             return
         self._remember_role_compliance(role)
         values = self._compliance_by_addr[address]
         status.setText("Applying...")
         status.setToolTip("Applying and reading back the requested limits.")
-        status.setStyleSheet("color: #92400E; font-size: 10px;")
+        set_style_role(status, 'text', tone='warning', size='caption')
         self._apply_limits_by_role[role].setEnabled(False)
         apply_method(
             address,
@@ -1877,11 +1877,7 @@ class _SMUSection(QWidget):
             label = self._limit_status_by_role[role]
             label.setText("Applied" if action == "apply" else "Read back")
             label.setToolTip(details)
-            label.setStyleSheet(
-                "color: #166534; font-size: 10px;"
-                if action == "apply"
-                else "color: #92400E; font-size: 10px;"
-            )
+            set_style_role(label, tone="success" if action == "apply" else "warning", size="caption")
             self._apply_limits_by_role[role].setEnabled(True)
 
     @Slot(str, str, str)
@@ -1892,7 +1888,7 @@ class _SMUSection(QWidget):
             label = self._limit_status_by_role[role]
             label.setText("Apply failed" if action == "apply" else "Read failed")
             label.setToolTip(str(message))
-            label.setStyleSheet("color: #991B1B; font-size: 10px;")
+            set_style_role(label, 'text', tone='danger', size='caption')
             self._apply_limits_by_role[role].setEnabled(True)
 
     def compliance_by_addr(self) -> dict[str, dict[str, float]]:
@@ -2019,7 +2015,7 @@ class _SMUSection(QWidget):
         self._pending_role_map = role_map.copy()
         self._pending_termination_text = term_text
         self._status.setText("Connecting…")
-        self._status.setStyleSheet("color: orange; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='warning', strong=True)
         self._connect_btn.setEnabled(False)
         self._ctrl.connect_instrument(
             visa_addrs, role_map, termination, compliance
@@ -2035,7 +2031,7 @@ class _SMUSection(QWidget):
         # Full diagnostics (PRIMARY FAILURE / POST-FAILURE DIAGNOSTICS) stay
         # available on hover; nothing is truncated from the message.
         self._status.setToolTip(full)
-        self._status.setStyleSheet("color: red; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='danger', strong=True)
         if not self._ctrl.is_connected:
             self._connect_btn.setEnabled(True)
             self._disconnect_btn.setEnabled(False)
@@ -2043,7 +2039,7 @@ class _SMUSection(QWidget):
     @Slot(list)
     def _on_connected(self, opened: list):
         self._status.setText(f"Connected: {', '.join(opened)}")
-        self._status.setStyleSheet("color: green; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='success', strong=True)
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         opened_set = {str(address) for address in opened}
@@ -2057,9 +2053,7 @@ class _SMUSection(QWidget):
                 self._limit_status_by_role[role].setToolTip(
                     "Connected; applying and reading back the default limits."
                 )
-                self._limit_status_by_role[role].setStyleSheet(
-                    "color: #92400E; font-size: 10px;"
-                )
+                set_style_role(self._limit_status_by_role[role], 'text', tone='warning', size='caption')
         role_map = self._pending_role_map or {}
         cfg.smu.vbg_resource = role_map.get("Vbg") or ""
         cfg.smu.vtg_resource = role_map.get("Vtg") or ""
@@ -2086,7 +2080,7 @@ class _SMUSection(QWidget):
     @Slot()
     def _on_disconnected(self):
         self._status.setText("Disconnected")
-        self._status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='muted', strong=True)
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._apply_all_limits_btn.setEnabled(False)
@@ -2094,9 +2088,7 @@ class _SMUSection(QWidget):
             self._apply_limits_by_role[role].setEnabled(False)
             self._limit_status_by_role[role].setText("Not connected")
             self._limit_status_by_role[role].setToolTip("")
-            self._limit_status_by_role[role].setStyleSheet(
-                "color: #6B7280; font-size: 10px;"
-            )
+            set_style_role(self._limit_status_by_role[role], 'text', tone='muted', size='caption')
 
 
 # ── Manual Control (Keithley) ─────────────────────────────────────────────────
@@ -2280,7 +2272,7 @@ class _ManualControlSection(QWidget):
         lay.addLayout(global_row)
 
         self._status_lbl = QLabel("Idle — connect SMU first.")
-        self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._status_lbl, 'text', tone='muted', size='caption')
         self._status_lbl.setWordWrap(True)
         lay.addWidget(self._status_lbl)
 
@@ -2344,7 +2336,7 @@ class _ManualControlSection(QWidget):
             return
         self._busy = True
         self._set_controls_enabled()
-        self._status_lbl.setStyleSheet("color: orange; font-size: 10px;")
+        set_style_role(self._status_lbl, 'text', tone='warning', size='caption')
         if action == "read_role":
             self._status_lbl.setText(f"Reading {role} voltage and current...")
         elif action == "step":
@@ -2423,7 +2415,7 @@ class _ManualControlSection(QWidget):
         if role not in self._pending_order:
             self._pending_order.append(role)
         self._voltage_lbl[role].setText(f"Voltage: {target:+.3f} V")
-        self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
+        set_style_role(self._status_lbl, 'text', tone='success', size='caption')
         self._status_lbl.setText(f"{role} target: {target:+.3f} V")
         self._dispatch_next_fast()
 
@@ -2566,7 +2558,7 @@ class _ManualControlSection(QWidget):
         self._background_read_active = None
         self._busy = False
         self._set_controls_enabled()
-        self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._status_lbl, 'text', tone='muted', size='caption')
         self._status_lbl.setText("Connected — live readings shown above.")
 
     @Slot()
@@ -2589,7 +2581,7 @@ class _ManualControlSection(QWidget):
             self._current_lbl[role].setText("Current: —")
             self._set_target_value(role, 0.0)
         self._set_controls_enabled()
-        self._status_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._status_lbl, 'text', tone='muted', size='caption')
         self._status_lbl.setText("Idle — connect SMU first.")
 
     @Slot(str, str, float)
@@ -2606,7 +2598,7 @@ class _ManualControlSection(QWidget):
                     self._confirmed_voltage[role] = voltage
                 self._fast_active_role = None
                 self._fast_active_target = None
-            self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
+            set_style_role(self._status_lbl, 'text', tone='success', size='caption')
             if voltage is not None:
                 self._status_lbl.setText(f"{role} set to {voltage:+.3f} V")
             else:
@@ -2622,7 +2614,7 @@ class _ManualControlSection(QWidget):
         was_busy = self._busy
         self._busy = False
         self._set_controls_enabled()
-        self._status_lbl.setStyleSheet("color: green; font-size: 10px;")
+        set_style_role(self._status_lbl, 'text', tone='success', size='caption')
         if action == "ramp_to":
             voltage = self._finite_float(_voltage)
             self._ramp_active_role = None
@@ -2660,7 +2652,7 @@ class _ManualControlSection(QWidget):
     def _on_manual_error(self, message: str) -> None:
         if self._background_read_active is not None:
             self._background_read_active = None
-            self._status_lbl.setStyleSheet("color: red; font-size: 10px;")
+            set_style_role(self._status_lbl, 'text', tone='danger', size='caption')
             self._status_lbl.setText(f"Read error: {str(message)[:155]}")
             self._dispatch_next_background_read()
             return
@@ -2680,7 +2672,7 @@ class _ManualControlSection(QWidget):
             self._confirmed_voltage.pop(failed_role, None)
             self._requested_voltage.pop(failed_role, None)
         self._set_controls_enabled()
-        self._status_lbl.setStyleSheet("color: red; font-size: 10px;")
+        set_style_role(self._status_lbl, 'text', tone='danger', size='caption')
         self._status_lbl.setText(f"Error: {str(message)[:160]}")
 
 
@@ -2851,12 +2843,12 @@ class _RotationBlock(QWidget):
         btn_row.addWidget(self._disconnect_btn)
         lay.addLayout(btn_row)
 
-        self._status = _status_label("Disconnected", "gray")
+        self._status = _status_label("Disconnected", 'muted')
         lay.addWidget(self._status)
 
         self._mapping_hint = QLabel("")
         self._mapping_hint.setWordWrap(True)
-        self._mapping_hint.setStyleSheet("color: #666666; font-size: 10px;")
+        set_style_role(self._mapping_hint, 'text', tone='muted', size='caption')
         lay.addWidget(self._mapping_hint)
 
         self._profile_group = QGroupBox("ESP300 per-axis motion profile")
@@ -2904,7 +2896,7 @@ class _RotationBlock(QWidget):
         pos_row = QHBoxLayout()
         pos_row.addWidget(QLabel("Angle:"))
         self._pos_lbl = QLabel("— °")
-        self._pos_lbl.setStyleSheet("color: gray;")
+        set_style_role(self._pos_lbl, 'text', tone='muted')
         self._pos_lbl.setToolTip("Last read angle. Click Read to refresh.")
         self._pos_lbl.setMinimumWidth(72)
         pos_row.addWidget(self._pos_lbl)
@@ -3052,7 +3044,7 @@ class _RotationBlock(QWidget):
     @Slot(float)
     def _on_position(self, pos: float):
         self._pos_lbl.setText(f"{pos:+.3f} °")
-        self._pos_lbl.setStyleSheet("color: black;")
+        set_style_role(self._pos_lbl, 'text', tone='primary')
         self._target_spn.setValue(pos)
         _record_spectrum_readback(self, "rotation_" + self._slot, {"position_deg": float(pos)})
 
@@ -3089,7 +3081,7 @@ class _RotationBlock(QWidget):
                        else ("GPIB", "USB")
             self._refresh_btn.setEnabled(False)
             self._status.setText("Scanning VISA…")
-            self._status.setStyleSheet("color: orange; font-weight: bold;")
+            set_style_role(self._status, 'text', tone='warning', strong=True)
             self._rot_scan_worker = _VisaScanWorker(prefixes)
             self._rot_scan_thread = QThread()
             self._rot_scan_worker.moveToThread(self._rot_scan_thread)
@@ -3112,7 +3104,7 @@ class _RotationBlock(QWidget):
         self._apply_saved_address()
         self._refresh_btn.setEnabled(True)
         self._status.setText("Disconnected")
-        self._status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='muted', strong=True)
 
     @Slot()
     def _on_scan_axes(self):
@@ -3182,7 +3174,7 @@ class _RotationBlock(QWidget):
             self._status.setText("Select type and address first.")
             return
         self._status.setText("Connecting…")
-        self._status.setStyleSheet("color: orange; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='warning', strong=True)
         if t == "Thorlabs Elliptec":
             self._cfg.com_port = addr
             self._ctrl.connect_elliptec(self._slot, addr)
@@ -3217,7 +3209,7 @@ class _RotationBlock(QWidget):
             )
         else:
             self._status.setText(f"Connected ({adapter_type})")
-        self._status.setStyleSheet("color: green; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='success', strong=True)
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._set_ctrl_enabled(True)
@@ -3234,12 +3226,12 @@ class _RotationBlock(QWidget):
         if slot != self._slot:
             return
         self._status.setText("Disconnected")
-        self._status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='muted', strong=True)
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._set_ctrl_enabled(False)
         self._pos_lbl.setText("— °")
-        self._pos_lbl.setStyleSheet("color: gray;")
+        set_style_role(self._pos_lbl, 'text', tone='muted')
         self._set_profile_enabled(False)
 
     @Slot()
@@ -3339,12 +3331,12 @@ class _StageSection(QWidget):
         btn_row.addWidget(self._disconnect_btn)
         lay.addLayout(btn_row)
 
-        self._status = _status_label("Disconnected", "gray")
+        self._status = _status_label("Disconnected", 'muted')
         lay.addWidget(self._status)
 
         self._range_hint = QLabel("")
         self._range_hint.setWordWrap(True)
-        self._range_hint.setStyleSheet("color: #666666; font-size: 10px;")
+        set_style_role(self._range_hint, 'text', tone='muted', size='caption')
         lay.addWidget(self._range_hint)
 
         lay.addWidget(_separator())
@@ -3352,7 +3344,7 @@ class _StageSection(QWidget):
         pos_row = QHBoxLayout()
         pos_row.addWidget(QLabel("Position:"))
         self._pos_lbl = QLabel("-")
-        self._pos_lbl.setStyleSheet("color: gray;")
+        set_style_role(self._pos_lbl, 'text', tone='muted')
         self._pos_lbl.setToolTip("Last read stage position. Click Read to refresh.")
         self._pos_lbl.setMinimumWidth(72)
         pos_row.addWidget(self._pos_lbl)
@@ -3480,10 +3472,10 @@ class _StageSection(QWidget):
         unit = self._current_profile().position_unit
         if value is None:
             self._pos_lbl.setText(f"- {unit}".strip())
-            self._pos_lbl.setStyleSheet("color: gray;")
+            set_style_role(self._pos_lbl, 'text', tone='muted')
             return
         self._pos_lbl.setText(f"{float(value):.3f} {unit}".strip())
-        self._pos_lbl.setStyleSheet("color: black;")
+        set_style_role(self._pos_lbl, 'text', tone='primary')
 
     def _launch_stage(self, mode: str, target: float = 0.0):
         if self._stage_thread and self._stage_thread.isRunning():
@@ -3568,7 +3560,7 @@ class _StageSection(QWidget):
             self._status.setText("Select a VISA resource first.")
             return
         self._status.setText("Scanning axes...")
-        self._status.setStyleSheet("color: orange; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='warning', strong=True)
         self._ctrl.scan_axes(visa_resource)
 
     @Slot(list)
@@ -3577,7 +3569,7 @@ class _StageSection(QWidget):
         self._load_axis_options(axes)
         self._apply_stage_profile()
         self._status.setText(f"Axes found: {', '.join(map(str, axes))}")
-        self._status.setStyleSheet("color: green; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='success', strong=True)
 
     @Slot()
     def _on_axis_changed(self):
@@ -3598,7 +3590,7 @@ class _StageSection(QWidget):
         self._apply_stage_profile()
         if self._ctrl.is_connected:
             self._status.setText("Controller changed. Reconnect to apply.")
-            self._status.setStyleSheet("color: orange; font-weight: bold;")
+            set_style_role(self._status, 'text', tone='warning', strong=True)
 
     @Slot()
     def _on_connect(self):
@@ -3610,7 +3602,7 @@ class _StageSection(QWidget):
             )
             return
         self._status.setText("Connecting...")
-        self._status.setStyleSheet("color: orange; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='warning', strong=True)
         cfg.stage.backend = backend
         if backend == "esp300":
             cfg.stage.visa_resource = address
@@ -3627,7 +3619,7 @@ class _StageSection(QWidget):
         if backend_key == "esp300":
             extra = f" on axis {int(self._axis_combo.currentData() or cfg.stage.esp300_axis or 3)}"
         self._status.setText(f"Connected: {profile.display_name}{extra}")
-        self._status.setStyleSheet("color: green; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='success', strong=True)
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._set_ctrl_enabled(True)
@@ -3640,7 +3632,7 @@ class _StageSection(QWidget):
     @Slot()
     def _on_disconnected(self):
         self._status.setText("Disconnected")
-        self._status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='muted', strong=True)
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._set_ctrl_enabled(False)
@@ -3681,7 +3673,7 @@ class _PM100DSection(QWidget):
         btn_row.addWidget(self._disconnect_btn)
         lay.addLayout(btn_row)
 
-        self._status = _status_label("Disconnected", "gray")
+        self._status = _status_label("Disconnected", 'muted')
         lay.addWidget(self._status)
 
         lay.addWidget(_separator())
@@ -3725,7 +3717,7 @@ class _PM100DSection(QWidget):
 
         pwr_row = QHBoxLayout()
         self._pwr_lbl = QLabel("— W")
-        self._pwr_lbl.setStyleSheet("color: gray; font-weight: bold; font-size: 13px;")
+        set_style_role(self._pwr_lbl, 'text', tone='muted', size='heading', strong=True)
         self._pwr_lbl.setToolTip("Corrected sample power from the last meter reading.")
         self._pwr_lbl.setMinimumWidth(110)
         pwr_row.addWidget(self._pwr_lbl)
@@ -3863,9 +3855,7 @@ class _PM100DSection(QWidget):
         else:
             txt = f"{p_w:.4g} W"
         self._pwr_lbl.setText(txt)
-        self._pwr_lbl.setStyleSheet(
-            "color: darkgreen; font-weight: bold; font-size: 13px;"
-        )
+        set_style_role(self._pwr_lbl, 'text', tone='success', size='heading', strong=True)
 
         _record_spectrum_readback(self, "power_meter", {"power_w": float(p_w)})
 
@@ -3881,13 +3871,13 @@ class _PM100DSection(QWidget):
             self._status.setText("Scan devices first.")
             return
         self._status.setText("Connecting…")
-        self._status.setStyleSheet("color: orange; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='warning', strong=True)
         self._ctrl.connect_instrument(name)
 
     @Slot()
     def _on_connected(self):
         self._status.setText("Connected")
-        self._status.setStyleSheet("color: green; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='success', strong=True)
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._set_ctrl_enabled(True)
@@ -3906,12 +3896,12 @@ class _PM100DSection(QWidget):
             self._pm_worker = None
         self._auto_chk.setChecked(False)
         self._status.setText("Disconnected")
-        self._status.setStyleSheet("color: gray; font-weight: bold;")
+        set_style_role(self._status, 'text', tone='muted', strong=True)
         self._connect_btn.setEnabled(True)
         self._disconnect_btn.setEnabled(False)
         self._set_ctrl_enabled(False)
         self._pwr_lbl.setText("— W")
-        self._pwr_lbl.setStyleSheet("color: gray; font-weight: bold; font-size: 13px;")
+        set_style_role(self._pwr_lbl, 'text', tone='muted', size='heading', strong=True)
 
     @Slot(bool)
     def set_external_busy(self, busy: bool):

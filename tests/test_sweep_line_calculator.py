@@ -250,10 +250,12 @@ class SweepLinePanelTests(unittest.TestCase):
         panel = PresetsPanel()
         self.assertEqual(panel._loop_group.title(), "LOOP VARIABLES")
         self.assertEqual(panel._batch_group.title(), "BATCH SWEEP ROWS")
-        self.assertIn("#7C3AED", panel._loop_group.styleSheet())
-        self.assertIn("#2563EB", panel._batch_group.styleSheet())
-        self.assertIn("#EDE9FE", panel._loop_table.styleSheet())
-        self.assertIn("#DBEAFE", panel._batch_table.styleSheet())
+        self.assertEqual(panel._loop_group.property("spectralRole"), "loopSection")
+        self.assertEqual(panel._batch_group.property("spectralRole"), "batchSection")
+        self.assertEqual(panel._loop_table.property("spectralRole"), "loopTable")
+        self.assertEqual(panel._batch_table.property("spectralRole"), "batchTable")
+        for widget in (panel._loop_group, panel._batch_group, panel._loop_table, panel._batch_table):
+            self.assertEqual(widget.styleSheet(), "")
 
         panel._set_acquisition_grouping("loop_first")
         panel._on_acquisition_order_changed()

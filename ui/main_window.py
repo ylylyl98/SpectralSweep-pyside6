@@ -11,7 +11,7 @@
 #
 # Rules:
 #   - All instrument state lives in controllers only.
-#   - importlib.reload() safe for ui/ modules.
+#   - Only registered pages are replaced transactionally while idle.
 # ──────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from PySide6.QtGui  import QCloseEvent, QFont, QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QStatusBar, QApplication,
     QMessageBox, QComboBox, QListWidget, QPushButton, QPlainTextEdit, QLabel,
-    QLineEdit,
+    QLineEdit, QToolButton, QDialogButtonBox,
     QVBoxLayout, QHBoxLayout, QListWidgetItem, QSplitter, QDialog,
     QInputDialog,
 )
@@ -140,6 +140,14 @@ class _SharedSampleIdBinder(QObject):
         value = str(value).strip()
         self.set_value(value)
         return value
+
+    def replace_edit(self, old, new) -> None:
+        """Replace a view without committing its unfinished Sample ID text."""
+        index = self._edits.index(old)
+        callback = self._on_deferred_text_changed if self._commit_on_edit else self._on_text_changed
+        old.textChanged.disconnect(callback)
+        self._edits[index] = new
+        new.textChanged.connect(callback)
 
 
 class _SessionChangeWatcher(QObject):
@@ -336,9 +344,7 @@ class MainWindow(QMainWindow):
 
         # Settings
         self._settings = SettingsPanel(lf6_ctrl=self._lf6)
-        self._settings.mff101_paths_changed.connect(self._inst_panel.refresh_mff101_paths)
-        self._settings.notification_configured.connect(self._ntfy_notifier.set_url)
-        self._settings.notification_configured.connect(self.notification_configured)
+        self._bind_settings_signals(self._settings)
         self._tabs.addTab(self._settings, "Settings")
 
         self._session_panels = {
@@ -405,6 +411,7 @@ class MainWindow(QMainWindow):
             app.installEventFilter(self._session_change_watcher)
         self._tabs.currentChanged.connect(self._schedule_session_observation)
         self._session_poll_timer.start()
+        self._initialize_source_tracking()
 
     def _initialize_style_actions(self) -> None:
         # Keep the Python wrappers alive too (PySide6 menu-bar ownership).
@@ -423,9 +430,22 @@ class MainWindow(QMainWindow):
             self._styles_failed(self._application_style.last_error)
         page_reload = menu.addAction("Reload Spectrum page")
         page_reload.setObjectName("ReloadSpectrumPage")
-        page_reload.setShortcut("Ctrl+Alt+U")
         page_reload.setStatusTip("Load Spectrum UI changes while idle; keep instrument connections and spectra")
         page_reload.triggered.connect(self._reload_spectrum_page)
+        current_reload = menu.addAction("Reload current page")
+        current_reload.setObjectName("ReloadCurrentPage")
+        current_reload.setShortcut("Ctrl+Alt+U")
+        current_reload.setStatusTip("Reload a supported page while idle, preserving its state and instrument connections")
+        current_reload.triggered.connect(self._reload_current_page)
+        dual_reload = menu.addAction("Reload Dual Gate page")
+        dual_reload.setObjectName("ReloadDualGatePage")
+        dual_reload.triggered.connect(lambda: self._reload_registered_page("dual_gate"))
+        settings_reload = menu.addAction("Reload Settings page")
+        settings_reload.setObjectName("ReloadSettingsPage")
+        settings_reload.triggered.connect(lambda: self._reload_registered_page("settings"))
+        source_status = menu.addAction("Code update status…")
+        source_status.setObjectName("SourceChangeStatus")
+        source_status.triggered.connect(self._show_source_changes)
         self._show_calibration_action = menu.addAction("Show experimental Calibration page")
         self._show_calibration_action.setObjectName("ShowExperimentalCalibration")
         self._show_calibration_action.setCheckable(True)
@@ -437,24 +457,151 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _reload_spectrum_page(self) -> None:
+        self._reload_registered_page("spectrum")
+
+    @Slot()
+    def _reload_current_page(self) -> None:
+        self._reload_registered_page(self._active_tab_id())
+
+    def _reload_registered_page(self, page_id: str) -> None:
+        from ui.page_reload import PAGE_RELOAD_REGISTRY, reload_page
+        spec = PAGE_RELOAD_REGISTRY.get(page_id)
+        if spec is None:
+            self._status.showMessage("This page needs an application restart. See View > Code update status.", 10000)
+            return
+        title = spec.title
         if getattr(self, "_page_reload_in_progress", False):
             return
         if self._acquisition_active() or any(
             bool(getattr(panel, "_metadata_finalizing", False))
             for panel in self._session_panels.values()
         ):
-            self._status.showMessage("Wait for acquisition and saving to finish before reloading Spectrum", 10000)
+            self._status.showMessage(f"Wait for acquisition and saving to finish before reloading {title}", 10000)
             return
-        from ui.page_reload import reload_spectrum_page
+        tracker = getattr(self, "_source_changes", None)
+        snapshot = tracker.snapshot(tracker.groups.get(page_id, ())) if tracker else {}
         self._page_reload_in_progress = True
         try:
-            reload_spectrum_page(self)
+            reload_page(self, page_id)
         except Exception as exc:
-            self._status.showMessage(f"Spectrum unchanged — reload failed: {type(exc).__name__}: {exc}", 15000)
+            self._status.showMessage(f"{title} unchanged — reload failed: {type(exc).__name__}: {exc}", 15000)
         else:
-            self._status.showMessage("Spectrum page reloaded — connections and data preserved", 8000)
+            if tracker:
+                tracker.mark_page_applied(page_id, snapshot)
+            self._status.showMessage(f"{title} page reloaded — connections and data preserved", 8000)
         finally:
             self._page_reload_in_progress = False
+
+    def _rebind_reloaded_page(self, page_id, old, new) -> None:
+        if page_id == "dual_gate" and hasattr(self, "_sample_id_binder"):
+            self._sample_id_binder.replace_edit(old._sample_edit, new._sample_edit)
+            connection = self._sample_edit_connections.pop(old._sample_edit, None)
+            if connection is not None:
+                QObject.disconnect(connection)
+            edit = new._sample_edit
+            self._sample_edit_connections[edit] = edit.editingFinished.connect(
+                lambda edit=edit: self._commit_sample_id_edit(edit))
+        elif page_id == "settings":
+            connections = getattr(self, "_settings_connections", None)
+            if connections is not None:
+                connections.clear()
+            self._bind_settings_signals(new)
+
+    def _bind_settings_signals(self, panel) -> None:
+        from ui.signal_connections import SignalConnections
+        if not hasattr(self, "_settings_connections"):
+            self._settings_connections = SignalConnections(self)
+        connections = self._settings_connections
+        connections.connect(panel.mff101_paths_changed, self._inst_panel.refresh_mff101_paths)
+        connections.connect(panel.notification_configured, self._ntfy_notifier.set_url)
+        connections.connect(panel.notification_configured, self.notification_configured.emit)
+
+    def _initialize_source_tracking(self) -> None:
+        if getattr(sys, "frozen", False):
+            return
+        from ui.page_reload import PAGE_RELOAD_REGISTRY
+        from ui.source_changes import SourceChangeTracker
+        groups = {key: tuple(name.replace(".", "/") + ".py" for name in spec.modules)
+                  for key, spec in PAGE_RELOAD_REGISTRY.items()}
+        self._source_changes = SourceChangeTracker(
+            _PROJECT_ROOT, groups,
+            shared=("ui/spectrum_plot.py", "ui/andor_controls_widget.py"), parent=self)
+        self._source_changes.mark_styles_applied(self._application_style._last_source or "")
+        self._source_status = QToolButton(self)
+        self._source_status.setObjectName("SourceChangeStatusButton")
+        self._source_status.setAccessibleName("Code update status")
+        self._source_status.clicked.connect(self._show_source_changes)
+        self._status.addPermanentWidget(self._source_status)
+        self._source_changes.changed.connect(self._update_source_status)
+        self._update_source_status()
+
+    def _update_source_status(self) -> None:
+        pending = self._source_changes.pending()
+        if any(item["restart"] for item in pending):
+            text = "Code: restart required"
+        elif pending:
+            text = "Code: reload available"
+        else:
+            text = "Code: up to date"
+        self._source_status.setText(text)
+        self._source_status.setToolTip(self._source_changes_text())
+        details = getattr(self, "_source_details", None)
+        if details is not None:
+            details.setPlainText(self._source_changes_text())
+
+    def _source_changes_text(self) -> str:
+        from ui.page_reload import PAGE_RELOAD_REGISTRY
+        tracker = getattr(self, "_source_changes", None)
+        if tracker is None:
+            return "Source tracking is available when running from a source checkout."
+        pending = tracker.pending()
+        if not pending:
+            return "No source changes pending since startup or the last successful page/style reload."
+        lines = []
+        for item in pending:
+            if item["styles"]:
+                action = "Reload styles (Ctrl+Alt+R)"
+            else:
+                pages = ", ".join(PAGE_RELOAD_REGISTRY[key].title for key in item["pages"])
+                action = f"Reload {pages}" if pages else "Restart application when idle"
+                if item["restart"] and pages:
+                    action += "; other users of this shared module still require restart"
+                if item["path"] in {"launch.bat", "tools/launch_app.py"}:
+                    action = "Applies on the next launch.bat start"
+                elif item["path"] == "requirements.txt":
+                    action = "Restart through launch.bat to check updated dependencies"
+            lines.append(f"{item['path']}\n  {action}")
+        return "\n\n".join(lines)
+
+    @Slot()
+    def _show_source_changes(self) -> None:
+        tracker = getattr(self, "_source_changes", None)
+        if tracker is not None:
+            tracker.refresh()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Code update status")
+        dialog.resize(720, 460)
+        layout = QVBoxLayout(dialog)
+        explanation = QLabel("Reload supported pages while idle. Instrument connections stay open. "
+                             "Changes to shared code, controllers and drivers require a safe restart.")
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+        details = QPlainTextEdit(self._source_changes_text())
+        details.setReadOnly(True)
+        layout.addWidget(details, 1)
+        self._source_details = details
+        refresh = QPushButton("Check again")
+        refresh.clicked.connect(lambda: (tracker.refresh() if tracker else None,
+                                         details.setPlainText(self._source_changes_text())))
+        layout.addWidget(refresh)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        try:
+            dialog.exec()
+        finally:
+            self._source_details = None
+            dialog.deleteLater()
 
     @Slot(bool)
     def _set_calibration_visible(self, visible: bool) -> None:
@@ -475,6 +622,9 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _styles_reloaded(self, _path: str) -> None:
+        tracker = getattr(self, "_source_changes", None)
+        if tracker is not None and self._application_style._last_source is not None:
+            tracker.mark_styles_applied(self._application_style._last_source)
         self._status.showMessage("Styles reloaded", 4000)
 
     @Slot(str)
@@ -551,8 +701,10 @@ class MainWindow(QMainWindow):
             parent=self,
             commit_on_edit=True,
         )
+        self._sample_edit_connections = {}
         for edit in edits_by_panel.values():
-            edit.editingFinished.connect(lambda edit=edit: self._commit_sample_id_edit(edit))
+            self._sample_edit_connections[edit] = edit.editingFinished.connect(
+                lambda edit=edit: self._commit_sample_id_edit(edit))
 
     def _commit_sample_id_edit(self, edit) -> None:
         """Commit on Enter or focus loss, never while restoring controls."""

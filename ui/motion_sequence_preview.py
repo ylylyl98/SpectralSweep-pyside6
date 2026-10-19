@@ -1,6 +1,8 @@
 """Full, selectable preview of an expanded motion sweep sequence."""
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import copy
 import math
 from collections.abc import Mapping, Sequence
@@ -88,7 +90,7 @@ class MotionSequencePreviewDialog(QDialog):
 
         self._status = QLabel()
         self._status.setWordWrap(True)
-        self._status.setStyleSheet("color: #b3261e;")
+        set_style_role(self._status, 'text', tone='danger')
         self.status_label = self._status
         root.addWidget(self._status)
 

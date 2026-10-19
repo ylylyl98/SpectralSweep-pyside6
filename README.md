@@ -28,6 +28,30 @@ and unapplied drafts, then saves an independent profile for the new sample.
 At startup, a sample without its own profile uses the last saved session.
 Measurement records in run history remain associated with their original sample.
 
+## Dual Gate numeric inputs
+
+Sweep Line Calculator constants and numeric Loop **Values** use the same syntax:
+
+- `4`: one value.
+- `-4,0,4` or `[-4,0,4]`: an explicit list; order and duplicates are kept.
+- `linspace(-4,4,5)` or `(-4,4,5)`: five evenly spaced points including both
+  endpoints, giving `[-4,-2,0,2,4]`. The third argument is a point count (an
+  integer of at least two).
+- `-4:2:4`: a `start:step:stop` range. It includes the stop only when the step
+  lands on it. Lists and sequences can be mixed, such as `-4:2:0,3,5`.
+
+Constants remain limited to 500 values within -200 to 200 V. Loop rows allow
+up to 100,000 values in the selected parameter's units. Wavelength and exposure
+must be positive, accumulations must be positive integers, and stage positions
+must fit the active stage's travel range. Measurement setup continues to use
+setup names. Rows in the same group must resolve to the same number of points.
+
+Old sample profiles retain their original resolved Loop values and **This run**
+selections. Before this change, only Stage Position expanded `linspace` or its
+parenthesized shorthand; other numeric rows treated the arguments as individual
+values. Those old expressions are restored as explicit lists so their scan
+meaning is preserved. Newly entered expressions use the shared syntax above.
+
 ## MFF101 flipper
 
 The MFF101 is optional. Automatic routing is **off by default** on a new PC,
@@ -162,6 +186,12 @@ For Windows lab machines, the supported launcher is:
 launch.bat
 ```
 
+The launcher installs dependencies on first use and when `requirements.txt`
+changes; successful installs are cached for the selected Python environment.
+Ordinary launches then skip `pip`. Use `launch.bat --install` to install/check
+dependencies without opening the app, or `launch.bat --update-deps` to upgrade
+dependencies before launching. Other arguments are forwarded to `main.py`.
+
 To force mock LF6 mode:
 
 ```bash
@@ -178,6 +208,10 @@ step/read/zero buttons, and Read All/All to zero actions visible when expanded.
 After restarting once to load this feature, use **View > Reload styles**
 (`Ctrl+Alt+R`) to reapply `ui/styles/application.qss` to the running app.
 This retains existing widgets, field values, plots and instrument controllers.
+Common button, status, table and text appearances are defined in this QSS;
+Python widgets select semantic roles through `ui/style_roles.py`. Reference
+swatches retain their individual data colors. Edit QSS for visual changes rather
+than adding panel-local style sheets.
 For automatic stylesheet refresh during development, start with:
 
 ```powershell
@@ -203,19 +237,32 @@ Preview scratch files are deleted when the preview closes. Use an explicitly
 chosen export location if you want to keep synthetic output. The preview is a
 UI development aid, not validation of hardware timing or driver behavior.
 
-**View > Reload Spectrum page** (`Ctrl+Alt+U`) also reloads Python changes in
-`ui/spectrum_panel.py`, `ui/spectrum_plot.py` and `ui/andor_controls_widget.py`.
-It rebuilds only Spectrum while retaining the same instrument controllers,
-connections, cooling, acquired 1D/2D data, reference spectra (including unsaved
-ones), display ranges and editable settings. It preserves and rebinds the
-existing Calibration editor, including its unsaved work. Acquisition, settings
-operations, calibration analysis and saving must finish first; reload never
-aborts them. Syntax, construction or state-transfer errors retain the old page
-and report the failure in the status bar. Reload is explicit, not a file watcher.
-UI constructors/restorers must remain free of instrument commands and event-loop
-pumping. Driver/controller changes, other pages, dependencies and the reload
-infrastructure itself still require a safe restart. A running version without
-this menu needs one initial safe restart to install it.
+**View > Reload current page** (`Ctrl+Alt+U`) replaces a supported page while
+retaining its instrument controllers and connections. The View menu also has
+explicit Spectrum, Dual Gate and Settings reload actions.
+
+| Page | Python modules loaded | State retained |
+| --- | --- | --- |
+| Spectrum | `spectrum_panel`, `spectrum_plot`, `andor_controls_widget` | Acquired 1D/2D data, unsaved reference spectra, display ranges, settings and the existing Calibration editor |
+| Dual Gate | `presets_panel`, `preview_widget`, `loop_run_selection`, `setup_sequence_editor` | Separate drafts/applied plans, run selections, execution order, undo history, logs, completed-run progress and the spectrum viewer |
+| Settings | `settings_panel` | Editable values, notification-name draft, selected category and status messages |
+
+These modules are under `ui/`. Acquisition, instrument operations, calibration
+analysis and saving must finish first; reload never aborts them. Syntax,
+construction, state-transfer or binding failures retain the old page. A Dual
+Gate change that would reinterpret the applied plan is rejected rather than
+silently changing the next measurement. Reload is explicit; source watching
+only reports pending changes and never automatically replaces Python code.
+
+The status bar's **Code** button and **View > Code update status…** show files
+changed since startup, the page/style reload that can apply them, and files that
+still require restart. A successful reload clears only the code applied to that
+page. Shared Spectrum plot/control modules may still have old instances on
+other pages, so their changes remain marked for a full restart. Other pages,
+shared helpers, controllers, drivers and the reload infrastructure require a
+safe restart. Constructors and restorers must remain free of instrument commands
+and event-loop pumping. A running older version needs one initial safe restart
+to load these development actions.
 
 Calibration is unfinished and hidden from the main navigation by default.
 **View > Show experimental Calibration page** reveals it for development;
@@ -593,6 +640,15 @@ is deferred until Apply; both preview views explicitly identify the displayed
 applied sequence. Filename previews use the same limit and ask for Apply rather
 than expanding a large draft while typing. Resolved previews are reused when
 their loop definitions, selections, and batch settings still match.
+All entry points (Apply, restored sessions and Run) also enforce a separate total
+planning budget: at most **100,000 loop contexts**, **100,000 potential spectra**
+and **100,000 candidate planning steps**. Frames and repeats count toward this
+budget; `When` filters do not bypass it because rejected candidates still cost
+planning work. Oversized drafts remain editable, cannot replace the applied
+plan and must be reduced using This run selections or split into smaller runs.
+An oversized restored plan remains editable but cannot run. Valid plans between
+the 20,000 live-preview threshold and the total budget can still be applied.
+Apply reuses its resolved plan instead of constructing the full sequence twice.
 Drag the divider between execution order and preview to adjust their space;
 the Apply/Discard and Run controls remain outside the scrolling content.
 

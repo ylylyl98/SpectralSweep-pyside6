@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import sys
 import time
 import csv
@@ -356,7 +358,7 @@ class SpectrumPanel(QWidget):
         self._status_lbl     = QLabel("Disconnected")
         self._status_lbl.setWordWrap(True)
         self._status_lbl.setMaximumWidth(260)
-        self._status_lbl.setStyleSheet("")
+        set_style_role(self._status_lbl, '')
         btn_row.addWidget(self._acquire_btn)
         btn_row.addWidget(self._acquire_2d_btn)
         btn_row.addWidget(self._abort_btn)
@@ -1725,7 +1727,7 @@ class SpectrumPanel(QWidget):
         self._andor_controls.setVisible(is_andor and self._andor_toggle.isChecked())
         self._compact_frame_label()
         self._status_lbl.setText("Ready")
-        self._status_lbl.setStyleSheet("")
+        set_style_role(self._status_lbl, '')
         if identity.get("backend") in {"lightfield", "winspec_ingaas"}:
             refresh = getattr(self._ctrl, "lightfield_optics", None)
             if callable(refresh):
@@ -1758,7 +1760,7 @@ class SpectrumPanel(QWidget):
         self._andor_controls.set_backend_identity({})
         self._set_action_controls_enabled(False)
         self._status_lbl.setText("Disconnected")
-        self._status_lbl.setStyleSheet("")
+        set_style_role(self._status_lbl, '')
 
     @Slot(object, object)
     def _on_spectrum_ready(self, wl: np.ndarray, cts: np.ndarray):

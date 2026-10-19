@@ -2,7 +2,6 @@
 setlocal
 cd /d %~dp0
 
-set "REQ=%~dp0requirements.txt"
 set "PY="
 set "BOOTSTRAP="
 set "PYVER="
@@ -28,7 +27,7 @@ if "%PYVER%"=="" py -3.12 --version >nul 2>&1 && set "PYVER=3.12" && set "PYTAG=
 if "%PYVER%"=="" py -3.11 --version >nul 2>&1 && set "PYVER=3.11" && set "PYTAG=311"
 if not "%PYVER%"=="" (
     set "VENV=%~dp0.venv-pyside6-%PYTAG%"
-    set "PY=%VENV%\Scripts\python.exe"
+    set "PY=%~dp0.venv-pyside6-%PYTAG%\Scripts\python.exe"
     set "BOOTSTRAP=py -%PYVER%"
     goto :managed_python
 )
@@ -43,19 +42,9 @@ if errorlevel 1 (
 )
 
 echo Python found on PATH. Using it directly without creating a managed venv.
-echo Installing dependencies from:
-echo   %REQ%
-python -m pip install --disable-pip-version-check --no-input -r "%REQ%"
-if errorlevel 1 (
-    echo [ERROR] pip install failed.
-    pause
-    exit /b 1
-)
-echo.
-echo Launching SpectralSweep...
 set "PYTHONPATH=%~dp0"
-python main.py %*
-goto :eof
+python "%~dp0tools\launch_app.py" %*
+exit /b %errorlevel%
 
 :managed_python
 echo Python %PYVER% selected.
@@ -70,18 +59,6 @@ if not exist "%PY%" (
     )
 )
 
-echo Installing dependencies from:
-echo   %REQ%
-"%PY%" -m pip install --disable-pip-version-check --no-input -r "%REQ%"
-if errorlevel 1 (
-    echo [ERROR] pip install failed.
-    pause
-    exit /b 1
-)
-
-echo.
-echo Launching SpectralSweep...
 set "PYTHONPATH=%~dp0"
-"%PY%" main.py %*
-
-endlocal
+"%PY%" "%~dp0tools\launch_app.py" %*
+exit /b %errorlevel%

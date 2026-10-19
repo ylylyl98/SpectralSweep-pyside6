@@ -1,6 +1,8 @@
 """Small, hardware independent editor for a batch of gate conditions."""
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import copy
 import math
 from typing import Any, Mapping
@@ -215,7 +217,7 @@ class MotionConditionsWidget(QWidget):
         root.addWidget(self.table)
         self._status_label = QLabel()
         self._status_label.setWordWrap(True)
-        self._status_label.setStyleSheet("color: #b3261e;")
+        set_style_role(self._status_label, 'text', tone='danger')
         root.addWidget(self._status_label)
 
     def _connect_signals(self) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -145,7 +146,9 @@ class SessionStateTests(unittest.TestCase):
         mega_restored.restore_session_state(mega_state)
         self.assertEqual(mega_restored._optical_widget._table.item(0, 1).text(), "   ")
 
+    @patch.object(cfg.lf6, "center_nm", 800.0)
     def test_bfp_state_is_per_workflow_and_display_preferences_restore(self):
+        # This round-trip checks workflow state, independent of local config.
         original_default = cfg.lf6.center_nm
         panel = BFPPanel()
         panel._center_spin.setValue(original_default + 11)

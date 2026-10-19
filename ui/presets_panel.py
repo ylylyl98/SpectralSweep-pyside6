@@ -25,6 +25,8 @@
 
 from __future__ import annotations
 
+from ui.style_roles import set_style_role
+
 import itertools
 import json
 import re
@@ -58,11 +60,15 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
+from utils.numeric_sequences import (
+    MAX_SEQUENCE_VALUES, NUMERIC_SEQUENCE_HELP, parse_numeric_sequence,
+)
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.power_reading import power_correction_factor, read_power
 from ui.workflow_sections import divide_grid_fields, inline_divider
 from ui.table_layout import fit_table_columns
+from ui.signal_connections import SignalConnections
 from utils.hardware_incidents import (
     HardwareIncidentRecorder,
     build_hardware_incident,
@@ -115,6 +121,8 @@ LOOP_PARAMS = [
 ]
 _SETUP_PARAM = "Measurement setup"
 _LIVE_DRAFT_SPECTRA_LIMIT = 20_000
+_PLAN_CONTEXT_LIMIT = 100_000
+_PLAN_TASK_LIMIT = 100_000
 _SETUP_LABELS = {
     "lightfield": "PIXIS",
     "winspec_ingaas": "WinSpec",
@@ -153,11 +161,6 @@ def _validate_setup_group(active: pd.DataFrame) -> None:
         values = _parse_values(str(row["Values"]), str(row["Parameter"]))
         if not values:
             raise ValueError(f"Enter values for {row['Parameter']} in the setup recipe.")
-        if row["Parameter"] != _SETUP_PARAM:
-            if any(not np.isfinite(v) or v <= 0 for v in values):
-                raise ValueError(f"{row['Parameter']} requires finite positive values.")
-            if row["Parameter"] == "Accumulations (EPF)" and any(not float(v).is_integer() for v in values):
-                raise ValueError("Accumulations (EPF) requires positive integers.")
 
 
 def _setup_readiness_issues(controller, schedule, requested=None) -> List[str]:
@@ -280,6 +283,45 @@ def _parse_values(s: str, param: str = "") -> Optional[List[Any]]:
     raw = str(s).strip()
     if param == _SETUP_PARAM:
         return [_setup_backend(value) for value in raw.replace(';', ',').split(',')]
+    values = parse_numeric_sequence(raw)
+    if param in _SPECTROMETER_PARAMS and any(value <= 0 for value in values):
+        raise ValueError(f"{param} requires finite positive values.")
+    if param == "Accumulations (EPF)" and any(not value.is_integer() for value in values):
+        raise ValueError("Accumulations (EPF) requires positive integers.")
+    return values
+
+
+_NUMERIC_VALUES_VERSION = 1
+
+
+def _migrate_legacy_loop_values(state: dict) -> dict:
+    """Keep old Loop point arrays intact when loading unversioned recipes."""
+    if state.get("numeric_values_version"):
+        return state
+    state = deepcopy(state)
+    for key in ("draft_loop", "applied_loop"):
+        records = state.get(key)
+        if not isinstance(records, list):
+            continue
+        for row in records:
+            if not isinstance(row, dict) or row.get("Parameter") == _SETUP_PARAM:
+                continue
+            raw = str(row.get("Values", "")).strip()
+            previous = _legacy_numeric_loop_values(raw, str(row.get("Parameter", "")))
+            if not previous or not all(np.isfinite(value) for value in previous):
+                continue  # Keep incomplete/invalid drafts available for repair.
+            try:
+                current = parse_numeric_sequence(raw)
+            except ValueError:
+                current = None
+            if current != previous:
+                row["Values"] = json.dumps(previous, allow_nan=False)
+    state["numeric_values_version"] = _NUMERIC_VALUES_VERSION
+    return state
+
+
+def _legacy_numeric_loop_values(raw: str, param: str) -> Optional[List[float]]:
+    """Read the pre-versioned syntax only for migration, never for new input."""
     raw_lower = raw.lower()
     paren_linspace = raw.startswith("(") and raw.endswith(")")
     linspace_mode = paren_linspace
@@ -295,7 +337,10 @@ def _parse_values(s: str, param: str = "") -> Optional[List[Any]]:
     if str(param).startswith("Stage Position") and linspace_mode and len(nums) == 3:
         a, b, n = nums
         if float(n).is_integer() and int(n) >= 2:
-            return np.linspace(a, b, int(n)).tolist()
+            if n > MAX_SEQUENCE_VALUES:
+                return None
+            with np.errstate(over="ignore", invalid="ignore"):
+                return np.linspace(a, b, int(n)).tolist()
     return nums
 
 
@@ -358,6 +403,46 @@ def _validate_stage_position_value(value: Any) -> float:
     return pos
 
 
+def _plan_context_count(groups: Sequence[Dict[str, Any]]) -> int:
+    count = 1
+    for group in groups:
+        count *= len(group["contexts"])
+    return count
+
+
+def _validate_plan_budget(
+    context_count: int,
+    batch_df: pd.DataFrame,
+    *,
+    nested: bool = False,
+) -> Dict[str, int]:
+    """Bound planning work before products, repeat options or vectors allocate.
+
+    When expressions are deliberately not evaluated: even rejected candidates
+    cost planning time. Nested execution also visits the longest point range
+    for every condition, including conditions with fewer actual points.
+    """
+    advice = "Reduce loop values, frames or repeats, or split the plan into smaller runs."
+    if context_count > _PLAN_CONTEXT_LIMIT:
+        raise ValueError(
+            f"Combined plan has {context_count:,} loop contexts; the total limit is "
+            f"{_PLAN_CONTEXT_LIMIT:,} (separate from the per-row value limit). {advice}"
+        )
+    rows = [row for row in batch_df.to_dict("records") if _to_bool(row.get("Run", True))]
+    counts = [(_sweep_point_count(row), max(int(row.get("repeat", 1) or 1), 1)) for row in rows]
+    spectra = context_count * sum(frames * repeats for frames, repeats in counts)
+    candidates = context_count * (
+        sum(repeats for _, repeats in counts) * max((frames for frames, _ in counts), default=0)
+        if nested else len(rows)
+    )
+    if spectra > _PLAN_TASK_LIMIT or candidates > _PLAN_TASK_LIMIT:
+        raise ValueError(
+            f"Combined plan may require {spectra:,} spectra and {candidates:,} planning steps "
+            f"before When filtering; each total is limited to {_PLAN_TASK_LIMIT:,}. {advice}"
+        )
+    return {"contexts": context_count, "potential_spectra": spectra, "candidate_steps": candidates}
+
+
 def _build_plan(
     loop_df: pd.DataFrame,
     batch_df: pd.DataFrame,
@@ -365,9 +450,10 @@ def _build_plan(
     *,
     acquisition_grouping: str = "loop_first",
     parameter_order: Optional[Sequence[str]] = None,
+    include_schedule: bool = False,
 ):
     """
-    Return (final_sequence, enabled_df_batch, total_acq).
+    Return (final_sequence, enabled_df_batch, total_acq), optionally with schedule.
 
     mode:
       "Synchronize" – each enabled row = its own Level (Cartesian product,
@@ -376,6 +462,9 @@ def _build_plan(
       "Customized"  – use the Group column as Level.
     """
     groups = _loop_group_combinations(loop_df, mode)
+    batch = _normalize_batch(batch_df)
+    batch = batch[batch["Run"]].reset_index(drop=True)
+    _validate_plan_budget(_plan_context_count(groups), batch)
     if mode == "Synchronize" and parameter_order:
         priority = {parameter: index for index, parameter in enumerate(parameter_order)}
         groups.sort(key=lambda group: priority.get(group["parameters"][0], len(priority)))
@@ -391,9 +480,6 @@ def _build_plan(
                 ctx.update(d)
             final_sequence.append(ctx)
 
-    batch = _normalize_batch(batch_df)
-    batch = batch[batch["Run"]].reset_index(drop=True)
-
     schedule = _build_acquisition_schedule(
         final_sequence,
         batch,
@@ -404,7 +490,33 @@ def _build_plan(
         for task in schedule
     )
 
-    return final_sequence, batch, max(total_acq, 0)
+    result = (final_sequence, batch, max(total_acq, 0))
+    return (*result, schedule) if include_schedule else result
+
+
+def _resolve_execution_plan(
+    loop_df: pd.DataFrame,
+    batch_df: pd.DataFrame,
+    *,
+    mode: str,
+    acquisition_grouping: str,
+    parameter_order: Optional[Sequence[str]] = None,
+    execution_order: Optional[Sequence[Any]] = None,
+):
+    """Build one reusable result for Apply and session restoration."""
+    if execution_order:
+        groups = _loop_group_combinations(loop_df, mode)
+        _validate_plan_budget(_plan_context_count(groups), _normalize_batch(batch_df), nested=True)
+    seq, batch, total, schedule = _build_plan(
+        loop_df, batch_df, mode=mode, acquisition_grouping=acquisition_grouping,
+        parameter_order=parameter_order, include_schedule=True,
+    )
+    if execution_order:
+        schedule = _build_nested_execution_schedule(
+            loop_df, batch_df, mode=mode, execution_order=execution_order,
+        )
+        total = _count_logical_streams(schedule)
+    return seq, batch, total, schedule
 
 
 def _build_acquisition_schedule(
@@ -414,14 +526,16 @@ def _build_acquisition_schedule(
     acquisition_grouping: str = "loop_first",
 ) -> List[Dict[str, Any]]:
     """Flatten loop contexts and batch rows into their exact execution order."""
-    sequence = [dict(ctx) for ctx in final_sequence]
     batch = _normalize_batch(batch_df)
     batch = batch[batch["Run"]].reset_index(drop=True)
+    _validate_plan_budget(len(final_sequence), batch)
+    sequence = [dict(ctx) for ctx in final_sequence]
+    batch_rows = batch.to_dict("records")
     schedule: List[Dict[str, Any]] = []
 
     def append_if_applicable(seq_i: int, row_i: int) -> None:
         ctx = sequence[seq_i]
-        row = batch.iloc[row_i].to_dict()
+        row = dict(batch_rows[row_i])
         if not _when_ok(row.get("When", ""), _outer_ctx(ctx)):
             return
         schedule.append(
@@ -608,8 +722,9 @@ def _build_nested_execution_schedule(
     unchanged and is used unless the panel explicitly enables this schedule.
     """
     groups = _loop_group_combinations(loop_df, mode)
-    order = _normalize_execution_order(execution_order, loop_df, mode)
     batch = _normalize_batch(batch_df)
+    _validate_plan_budget(_plan_context_count(groups), batch, nested=True)
+    order = _normalize_execution_order(execution_order, loop_df, mode)
     enabled_rows = [
         (int(i), row.to_dict())
         for i, row in batch.iterrows()
@@ -1182,56 +1297,8 @@ def _compute_frames_from_step(vbg_start: float, vbg_stop: float, vbg_step: float
 
 
 def _parse_sweep_constants(text: str, *, max_values: int = 500) -> List[float]:
-    """Parse one constant, a comma list, or inclusive start:step:stop ranges."""
-    expression = str(text).strip()
-    if not expression:
-        raise ValueError("Enter a constant or an array of constants.")
-    if expression.startswith("[") or expression.endswith("]"):
-        if not (expression.startswith("[") and expression.endswith("]")):
-            raise ValueError("Array brackets must include both '[' and ']'.")
-        expression = expression[1:-1].strip()
-    if not expression:
-        raise ValueError("The constant array is empty.")
-
-    values: List[float] = []
-    for raw_token in expression.split(","):
-        token = raw_token.strip()
-        if not token:
-            raise ValueError("Remove the empty item between commas.")
-        if ":" not in token:
-            try:
-                value = float(token)
-            except ValueError as exc:
-                raise ValueError(f"'{token}' is not a number.") from exc
-            if not np.isfinite(value):
-                raise ValueError(f"'{token}' must be a finite number.")
-            values.append(value)
-        else:
-            parts = [part.strip() for part in token.split(":")]
-            if len(parts) != 3 or any(not part for part in parts):
-                raise ValueError(
-                    f"'{token}' must use the range form start:step:stop."
-                )
-            try:
-                start, step, stop = (float(part) for part in parts)
-            except ValueError as exc:
-                raise ValueError(f"'{token}' contains a non-numeric range value.") from exc
-            if not all(np.isfinite(value) for value in (start, step, stop)):
-                raise ValueError(f"'{token}' must contain only finite numbers.")
-            if abs(step) < 1e-15:
-                raise ValueError(f"'{token}' has a zero step.")
-            if start != stop and (stop - start) * step < 0:
-                raise ValueError(
-                    f"'{token}' steps away from its stop value; reverse the step sign."
-                )
-            span = (stop - start) / step
-            count = 1 if start == stop else int(np.floor(span + 1e-12)) + 1
-            if len(values) + count > max_values:
-                raise ValueError(f"At most {max_values} constants can be calculated at once.")
-            values.extend(start + index * step for index in range(count))
-        if len(values) > max_values:
-            raise ValueError(f"At most {max_values} constants can be calculated at once.")
-
+    """Apply the calculator's size and voltage limits to shared numeric syntax."""
+    values = parse_numeric_sequence(text, max_values=max_values)
     for value in values:
         if value < -200.0 or value > 200.0:
             raise ValueError("Constants must be between -200 and 200 V.")
@@ -1573,31 +1640,7 @@ class _SweepLineCalculator(QGroupBox):
 
     def _build(self):
         self.setObjectName("SweepLineCalculator")
-        self.setStyleSheet(
-            "QGroupBox#SweepLineCalculator {"
-            "  background: #f6f8fb; border: 1px solid #d8dee8;"
-            "  border-radius: 9px; }"
-            "QFrame#SweepCalcCard {"
-            "  background: #ffffff; border: 1px solid #e1e6ee;"
-            "  border-radius: 7px; }"
-            "QLabel#SweepCalcSectionTitle {"
-            "  color: #26364a; font-weight: 600; font-size: 12px; border: none; }"
-            "QDoubleSpinBox, QSpinBox, QComboBox, QLineEdit {"
-            "  min-height: 24px; background: #ffffff; color: #202936;"
-            "  border: 1px solid #cbd3df; border-radius: 5px; padding: 0 5px; }"
-            "QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus, QLineEdit:focus {"
-            "  border: 1px solid #2878d0; }"
-            "QPushButton#SweepCalcPrimary {"
-            "  min-height: 30px; color: white; background: #1769c2;"
-            "  border: 1px solid #1769c2; border-radius: 6px;"
-            "  padding: 2px 14px; font-weight: 600; }"
-            "QPushButton#SweepCalcPrimary:hover { background: #0f5bab; }"
-            "QPushButton#SweepCalcPrimary:pressed { background: #0b4d93; }"
-            "QPushButton#SweepCalcPrimary:disabled {"
-            "  color: #8994a3; background: #e8ecf1; border-color: #d6dce5; }"
-            "QToolButton { border: none; border-radius: 5px; background: #e5edf7; }"
-            "QToolButton:hover { background: #d7e5f5; }"
-        )
+        set_style_role(self, 'sweepCalculator')
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 7, 8, 8)
         root.setSpacing(6)
@@ -1611,7 +1654,7 @@ class _SweepLineCalculator(QGroupBox):
         self._toggle.setFixedSize(24, 22)
         hdr.addWidget(self._toggle)
         title = QLabel("Sweep Line Calculator")
-        title.setStyleSheet("font-weight: 600;")
+        set_style_role(title, 'text', strong=True)
         hdr.addWidget(title)
         hdr.addStretch()
         root.addLayout(hdr)
@@ -1657,7 +1700,7 @@ class _SweepLineCalculator(QGroupBox):
         cond_lbl = QLabel("Condition:")
         cond_lbl.setFixedWidth(64)
         tg_lbl = QLabel("TG")
-        tg_lbl.setStyleSheet("font-weight: 600;")
+        set_style_role(tg_lbl, 'text', strong=True)
         self._op_combo = QComboBox()
         self._op_combo.addItems(["−", "+"])
         self._op_combo.setMinimumWidth(48)
@@ -1671,21 +1714,16 @@ class _SweepLineCalculator(QGroupBox):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         bg_lbl = QLabel("× BG =")
-        bg_lbl.setStyleSheet("font-weight: 600;")
+        set_style_role(bg_lbl, 'text', strong=True)
         self._constant_edit = QLineEdit("0")
-        self._constant_edit.setPlaceholderText("0  or  [-4, 0, 4]  or  -4:2:4")
+        self._constant_edit.setPlaceholderText("0  or  [-4, 0, 4]  or  linspace(-4, 4, 5)")
         self._constant_edit.setMinimumWidth(150)
         self._constant_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._constant_edit.setToolTip(
-            "Enter one or more condition constants:\n"
-            "  Single value:  4\n"
-            "  Array:  [-4, -2, 0, 2, 4]\n"
-            "  Comma list:  -4, -2, 0, 2, 4\n"
-            "  Range:  -4:2:4  (start:step:stop)\n"
-            "Ranges include the stop when the step lands on it. Lists and ranges "
-            "can be mixed, for example: -4:2:0, 3, 5."
+            "Condition constants (V), between -200 and 200; at most 500 values.\n"
+            + NUMERIC_SEQUENCE_HELP
         )
         eq.addWidget(cond_lbl, 0, 0)
         eq.addWidget(tg_lbl, 0, 1)
@@ -1702,7 +1740,7 @@ class _SweepLineCalculator(QGroupBox):
             "E-field F = TG − r·BG\n"
             "The condition row holds either D or F constant."
         )
-        hint.setStyleSheet("color: #777777; font-size: 10px;")
+        set_style_role(hint, 'text', tone='muted', size='caption')
         eq.addWidget(hint, 1, 1, 1, 5)
         left_layout.addLayout(eq)
 
@@ -1730,7 +1768,7 @@ class _SweepLineCalculator(QGroupBox):
         voltage_title = QLabel("Voltage limits  (min → max)")
         physical_title = QLabel("Physical limits  (min → max)")
         for label in (voltage_title, physical_title):
-            label.setStyleSheet("color: #666666; font-size: 10px; font-weight: 600;")
+            set_style_role(label, 'text', tone='muted', size='caption', strong=True)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         limits_grid.addWidget(voltage_title, 0, 0, 1, 3)
         limits_grid.addWidget(physical_title, 0, 4, 1, 3)
@@ -1788,7 +1826,7 @@ class _SweepLineCalculator(QGroupBox):
         self._include_vbias_chk.setToolTip("Include this fixed source-drain bias in the batch row.")
         self._vbias_badge = QLabel("Vbias unavailable")
         self._vbias_badge.setToolTip("No usable Vbias Keithley channel is connected.")
-        self._vbias_badge.setStyleSheet("color: #b86300; font-size: 10px;")
+        set_style_role(self._vbias_badge, 'text', tone='warning', size='caption')
         vb_row.addWidget(vb_lbl)
         vb_row.addWidget(self._vbias_spin)
         vb_row.addWidget(self._include_vbias_chk)
@@ -1823,7 +1861,7 @@ class _SweepLineCalculator(QGroupBox):
         stop_title = QLabel("Stop")
         for label in (start_title, stop_title):
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setStyleSheet("color: #777777; font-size: 10px;")
+            set_style_role(label, 'text', tone='muted', size='caption')
         results_grid.addWidget(start_title, 0, 1)
         results_grid.addWidget(stop_title, 0, 2)
 
@@ -1845,7 +1883,7 @@ class _SweepLineCalculator(QGroupBox):
 
         self._derived_range_lbl = QLabel("D  —    F  —")
         self._derived_range_lbl.setToolTip("Derived doping D and E-field F at the start and stop points.")
-        self._derived_range_lbl.setStyleSheet("color: #666666; font-size: 10px;")
+        set_style_role(self._derived_range_lbl, 'text', tone='muted', size='caption')
         self._derived_range_lbl.setWordWrap(True)
         self._derived_range_lbl.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
@@ -1908,8 +1946,8 @@ class _SweepLineCalculator(QGroupBox):
         row_c.addWidget(self._repeat_spin)
         self._vtg_step_lbl = QLabel("ΔVtg 0.0000 V")
         self._vbg_step_lbl = QLabel("ΔVbg 0.0000 V")
-        self._vtg_step_lbl.setStyleSheet("color: #555555; font-size: 10px;")
-        self._vbg_step_lbl.setStyleSheet("color: #555555; font-size: 10px;")
+        set_style_role(self._vtg_step_lbl, 'text', tone='secondary', size='caption')
+        set_style_role(self._vbg_step_lbl, 'text', tone='secondary', size='caption')
         row_c.addWidget(self._vtg_step_lbl)
         row_c.addWidget(self._vbg_step_lbl)
         row_c.addStretch()
@@ -1983,9 +2021,9 @@ class _SweepLineCalculator(QGroupBox):
         self._label_auto = False
         self._schedule_recalc()
 
-    def _set_status(self, text: str = "", color: str = "#666666"):
+    def _set_status(self, text: str = "", tone: str = "muted"):
         self._status_lbl.setText(text)
-        self._status_lbl.setStyleSheet(f"color: {color};")
+        set_style_role(self._status_lbl, tone=tone)
         self._status_lbl.setVisible(bool(text))
 
     def _update_result(self, result_tuple, frames: int):
@@ -2073,7 +2111,7 @@ class _SweepLineCalculator(QGroupBox):
         self._update_result_step_labels()
         error = self._calculated_row_error()
         if error:
-            self._set_status(f"✗ {error}", "#b42318")
+            self._set_status(f"✗ {error}", 'danger')
             self._add_btn.setEnabled(False)
         else:
             self._set_status("")
@@ -2101,7 +2139,7 @@ class _SweepLineCalculator(QGroupBox):
         except ValueError as exc:
             self._calculated_rows = []
             self._multi_preview.hide()
-            self._set_status(f"✗ {exc}", "#b42318")
+            self._set_status(f"✗ {exc}", 'danger')
             self._add_btn.setText("Add to Batch Table")
             self._add_btn.setEnabled(False)
             return
@@ -2117,19 +2155,19 @@ class _SweepLineCalculator(QGroupBox):
         efield_max = float(self._efield_max_spin.value())
 
         if vtg_min >= vtg_max:
-            self._set_status("✗ Vtg limit: min must be less than max.", "#b42318")
+            self._set_status("✗ Vtg limit: min must be less than max.", 'danger')
             self._add_btn.setEnabled(False)
             return
         if vbg_min >= vbg_max:
-            self._set_status("✗ Vbg limit: min must be less than max.", "#b42318")
+            self._set_status("✗ Vbg limit: min must be less than max.", 'danger')
             self._add_btn.setEnabled(False)
             return
         if doping_min >= doping_max:
-            self._set_status("✗ Doping limit: min must be less than max.", "#b42318")
+            self._set_status("✗ Doping limit: min must be less than max.", 'danger')
             self._add_btn.setEnabled(False)
             return
         if efield_min >= efield_max:
-            self._set_status("✗ E-field limit: min must be less than max.", "#b42318")
+            self._set_status("✗ E-field limit: min must be less than max.", 'danger')
             self._add_btn.setEnabled(False)
             return
 
@@ -2165,25 +2203,25 @@ class _SweepLineCalculator(QGroupBox):
         )
         if result is None:
             if ratio < 1e-9 and not (vtg_min <= constant <= vtg_max):
-                self._set_status(f"✗ Vtg = {constant:.4f} V is outside the Vtg limits.", "#b42318")
+                self._set_status(f"✗ Vtg = {constant:.4f} V is outside the Vtg limits.", 'danger')
             else:
                 self._set_status(
                     "✗ No valid segment satisfies the Vtg, Vbg, doping, and E-field limits.",
-                    "#b42318",
+                    'danger',
                 )
             self._add_btn.setEnabled(False)
             return
 
         frames = _compute_frames_from_step(result[0], result[1], vbg_step)
         if frames < 2:
-            self._set_status("✗ Segment too short for one step: reduce Vbg step or widen limits.", "#b42318")
+            self._set_status("✗ Segment too short for one step: reduce Vbg step or widen limits.", 'danger')
             self._add_btn.setEnabled(False)
             return
 
         self._update_result(result, frames)
         endpoint_error = self._calculated_row_error()
         if endpoint_error:
-            self._set_status(f"✗ {endpoint_error}", "#b42318")
+            self._set_status(f"✗ {endpoint_error}", 'danger')
             self._add_btn.setEnabled(False)
             return
         if self._label_auto:
@@ -2196,33 +2234,33 @@ class _SweepLineCalculator(QGroupBox):
         vbg_step_actual = abs(self._vbg_stop_spin.value() - self._vbg_start_spin.value()) / max(frames_now - 1, 1)
         safe_jump = float(self._safe_jump_spin.value()) if self._safe_jump_spin is not None else float("inf")
         msg = ""
-        color = "#666666"
+        tone = 'muted'
         if ratio < 1e-9:
             msg = f"ℹ Ratio ≈ 0: sweeping Vbg across limits at fixed Vtg = {constant:.4f} V."
         elif not np.isfinite(vtg_step) or not np.isfinite(vbg_step_actual):
             msg = "✗ Calculation produced invalid values — check inputs."
-            color = "#b42318"
+            tone = 'danger'
             self._add_btn.setEnabled(False)
-            self._set_status(msg, color)
+            self._set_status(msg, tone)
             return
         elif vtg_step > safe_jump + 1e-12:
             max_vbg = safe_jump / max(ratio, 1e-12)
             msg = f"⚠ Vtg step ≈ {vtg_step:.4f} V exceeds safe jump {safe_jump:.3f} V. Reduce Vbg step to ≤ {max_vbg:.4f} V."
-            color = "#c26a00"
+            tone = 'warning'
         elif vbg_step_actual > safe_jump + 1e-12:
             needed = int(np.ceil(abs(self._vbg_stop_spin.value() - self._vbg_start_spin.value()) / safe_jump)) + 1
             msg = f"⚠ Vbg step ≈ {vbg_step_actual:.4f} V exceeds safe jump {safe_jump:.3f} V. Increase frames to ≥ {needed}."
-            color = "#c26a00"
+            tone = 'warning'
         elif frames_now > 10000:
             msg = f"⚠ Large sweep: {frames_now} points."
-            color = "#c26a00"
+            tone = 'warning'
         elif abs(self._vbg_stop_spin.value() - self._vbg_start_spin.value()) < 2.0 * vbg_step:
             msg = f"⚠ Only {frames_now} point(s) will be sampled. Reduce step size."
-            color = "#c26a00"
+            tone = 'warning'
         elif self._include_vbias_chk.isChecked() and not self._vbias_available():
             msg = f"⚠ Vbias set to {self._vbias_spin.value():.4f} V, but its Keithley channel is unavailable."
-            color = "#c26a00"
-        self._set_status(msg, color)
+            tone = 'warning'
+        self._set_status(msg, tone)
         displayed_result = (
             self._vbg_start_spin.value(),
             self._vbg_stop_spin.value(),
@@ -2382,7 +2420,7 @@ class _SweepLineCalculator(QGroupBox):
             self._calculated_rows = []
             self._set_status(
                 f"✗ {invalid_count} of {total} constants are invalid. {first_error}",
-                "#b42318",
+                'danger',
             )
             self._add_btn.setText(f"Add {total} Rows to Batch Table")
             self._add_btn.setEnabled(False)
@@ -2393,15 +2431,15 @@ class _SweepLineCalculator(QGroupBox):
         if warnings:
             self._set_status(
                 f"⚠ Calculated {total} rows; {len(warnings)} exceed the configured safe jump.",
-                "#c26a00",
+                'warning',
             )
         elif self._include_vbias_chk.isChecked() and not self._vbias_available():
             self._set_status(
                 f"⚠ Calculated {total} rows with Vbias, but its Keithley channel is unavailable.",
-                "#c26a00",
+                'warning',
             )
         else:
-            self._set_status(f"✓ Calculated {total} sweep rows.", "#23642c")
+            self._set_status(f"✓ Calculated {total} sweep rows.", 'success')
         self._add_btn.setEnabled(True)
 
     def _on_add_clicked(self):
@@ -2417,7 +2455,7 @@ class _SweepLineCalculator(QGroupBox):
             )
             error = self._endpoint_error(displayed_result)
             if error:
-                self._set_status(f"✗ {error}", "#b42318")
+                self._set_status(f"✗ {error}", 'danger')
                 self._add_btn.setEnabled(False)
                 return
             self._calculated_rows = [
@@ -3632,8 +3670,11 @@ class PresetsPanel(QWidget):
         lf6_ctrl=None, smu_ctrl=None,
         rotation_ctrl=None, stage_ctrl=None, pm_ctrl=None,
         parent: Optional[QWidget] = None,
+        *, bind_controller: bool = True, initialize_plan: bool = True,
     ):
         super().__init__(parent)
+        self._controller_connections = SignalConnections(self)
+        self._viewer_connections = SignalConnections(self)
         self._lf6   = lf6_ctrl
         self._smu   = smu_ctrl
         self._rot   = rotation_ctrl
@@ -3693,8 +3734,11 @@ class PresetsPanel(QWidget):
 
         self._build()
         self._refresh_tables()
-        self._update_plan()
-        self._refresh_draft_state()
+        if initialize_plan:
+            self._update_plan()
+            self._refresh_draft_state()
+        if bind_controller:
+            self.bind_controller_signals()
 
     # ── build UI ──────────────────────────────────────────────────────────────
 
@@ -3789,15 +3833,7 @@ class PresetsPanel(QWidget):
         # Loop table group
         loop_grp = QGroupBox("LOOP VARIABLES")
         loop_grp.setObjectName("DualGateLoopSection")
-        loop_grp.setStyleSheet(
-            "QGroupBox#DualGateLoopSection {"
-            " background: #FAF8FF; border: 1px solid #C4B5FD;"
-            " border-left: 4px solid #7C3AED; border-radius: 7px;"
-            " margin-top: 9px; }"
-            "QGroupBox#DualGateLoopSection::title {"
-            " color: #6D28D9; font-weight: 700; subcontrol-origin: margin;"
-            " left: 9px; padding: 0 4px; }"
-        )
+        set_style_role(loop_grp, 'loopSection')
         self._loop_group = loop_grp
         loop_lay = QVBoxLayout(loop_grp)
         loop_lay.setContentsMargins(6, 8, 6, 6)
@@ -3821,7 +3857,7 @@ class PresetsPanel(QWidget):
             )
         self._mode_combo.setToolTip(LOOP_MODES["Synchronize"])
         self._mode_hint = QLabel("")
-        self._mode_hint.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._mode_hint, 'text', tone='muted', size='caption')
         self._mode_hint.setWordWrap(True)
         mode_row.addWidget(self._mode_combo)
         mode_row.addStretch()
@@ -3851,10 +3887,7 @@ class PresetsPanel(QWidget):
         self._measurement_order_indicator = QLabel()
         self._measurement_order_indicator.setTextFormat(Qt.TextFormat.RichText)
         self._measurement_order_indicator.setWordWrap(True)
-        self._measurement_order_indicator.setStyleSheet(
-            "background: #FFFFFF; border: 1px solid #E5E7EB;"
-            "border-radius: 4px; padding: 4px 7px; color: #374151;"
-        )
+        set_style_role(self._measurement_order_indicator, 'orderIndicator')
         self._measurement_order_indicator.setToolTip(
             "The left item is the outer group that stays fixed while the right item is traversed."
         )
@@ -3869,13 +3902,7 @@ class PresetsPanel(QWidget):
         # Loop table itself
         self._loop_table = QTableWidget(0, len(LOOP_SCHEMA) + 1)
         self._loop_table.setObjectName("DualGateLoopTable")
-        self._loop_table.setStyleSheet(
-            "QTableWidget#DualGateLoopTable { background: #FFFFFF; gridline-color: #DDD6FE; }"
-            "QTableWidget#DualGateLoopTable::item { padding: 2px 4px; }"
-            "QHeaderView::section { background: #EDE9FE; color: #5B21B6;"
-            " font-weight: 600; border: 0; border-right: 1px solid #DDD6FE;"
-            " border-bottom: 1px solid #C4B5FD; padding: 4px; }"
-        )
+        set_style_role(self._loop_table, 'loopTable')
         self._loop_table.setMinimumHeight(80)
         self._loop_table.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -3892,10 +3919,9 @@ class PresetsPanel(QWidget):
             "Enable":    "Check to include this row in the sweep.",
             "Parameter": "Instrument parameter to sweep over.",
             "Values":    (
-                "Values to step through — comma-separated, e.g.  830, 860, 890\n"
-                "Linspace shorthand: (start, stop, n)  e.g.  (830, 890, 7)\n"
-                "  → generates n evenly-spaced values (linspace only supported\n"
-                "    for Stage Position). Example: (0,50,51) or linspace(0,50,51)"
+                "Numeric values use the selected parameter's units; at most 100,000 per row.\n"
+                + NUMERIC_SEQUENCE_HELP
+                + "\nMeasurement setup: choose setup names from the picker."
             ),
             "Group":     (
                 "Customized mode only.\n"
@@ -3927,11 +3953,7 @@ class PresetsPanel(QWidget):
             button.setEnabled(False)
             loop_btn_row.addWidget(button)
         for button in (self._loop_add_btn, self._loop_del_btn):
-            button.setStyleSheet(
-                "QPushButton { color: #5B21B6; background: #F5F3FF;"
-                " border: 1px solid #C4B5FD; border-radius: 4px; padding: 4px; }"
-                "QPushButton:hover { background: #EDE9FE; }"
-            )
+            set_style_role(button, 'loopAction')
         loop_btn_row.addStretch()
         loop_lay.addWidget(self._loop_table)
         loop_lay.addLayout(loop_btn_row)
@@ -3958,15 +3980,7 @@ class PresetsPanel(QWidget):
         # Batch table group
         batch_grp = QGroupBox("BATCH SWEEP ROWS")
         batch_grp.setObjectName("DualGateBatchSection")
-        batch_grp.setStyleSheet(
-            "QGroupBox#DualGateBatchSection {"
-            " background: #F8FBFF; border: 1px solid #93C5FD;"
-            " border-left: 4px solid #2563EB; border-radius: 7px;"
-            " margin-top: 9px; }"
-            "QGroupBox#DualGateBatchSection::title {"
-            " color: #1D4ED8; font-weight: 700; subcontrol-origin: margin;"
-            " left: 9px; padding: 0 4px; }"
-        )
+        set_style_role(batch_grp, 'batchSection')
         self._batch_group = batch_grp
         batch_lay = QVBoxLayout(batch_grp)
         batch_lay.setContentsMargins(6, 8, 6, 6)
@@ -3981,13 +3995,7 @@ class PresetsPanel(QWidget):
         self._batch_table.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self._batch_table.setStyleSheet(
-            "QTableWidget#DualGateBatchTable { background: #FFFFFF; gridline-color: #BFDBFE; }"
-            "QTableWidget#DualGateBatchTable::item { padding: 2px 4px; }"
-            "QHeaderView::section { background: #DBEAFE; color: #1E40AF;"
-            " font-weight: 600; border: 0; border-right: 1px solid #BFDBFE;"
-            " border-bottom: 1px solid #93C5FD; padding: 4px; }"
-        )
+        set_style_role(self._batch_table, 'batchTable')
         # Batch column header tooltips
         _batch_hdr_tips = {
             "Run":             "Check to include this row in the batch.",
@@ -4131,22 +4139,16 @@ class PresetsPanel(QWidget):
         self._apply_btn.setToolTip(
             "Apply all pending loop, gate-condition and execution-order edits, and rebuild the run plan preview."
         )
-        self._apply_btn.setStyleSheet(
-            "QPushButton { font-weight: 600; border-color: #90a8c0; }"
-            "QPushButton:hover { border-color: #5a82a8; }"
-        )
+        set_style_role(self._apply_btn, 'applyAction')
         self._discard_btn = QPushButton("Discard")
         self._discard_btn.setMinimumHeight(26)
         self._discard_btn.setToolTip("Revert the tables to the last applied state.")
         self._draft_badge = QLabel("Plan applied")
         self._draft_badge.setObjectName("DualGateDraftBadge")
-        self._draft_badge.setStyleSheet(
-            "padding: 3px 8px; border-radius: 8px; color: #23642c; "
-            "background: #e6f4e8; border: 1px solid #b9ddbe;"
-        )
+        set_style_role(self._draft_badge, 'badge', tone='success')
         apply_row.addWidget(self._draft_badge)
         self._draft_detail_lbl = QLabel("")
-        self._draft_detail_lbl.setStyleSheet("color: #8a5200; font-size: 10px;")
+        set_style_role(self._draft_detail_lbl, 'text', tone='warning', size='caption')
         self._draft_detail_lbl.setWordWrap(True)
         apply_row.addStretch()
         apply_row.addWidget(self._discard_btn)
@@ -4197,7 +4199,7 @@ class PresetsPanel(QWidget):
             "The first row changes slowest; acquisition stays last."
         )
         execution_note.setWordWrap(True)
-        execution_note.setStyleSheet("color: #4B5563; font-size: 10px;")
+        set_style_role(execution_note, 'text', tone='secondary', size='caption')
         reset_order = QPushButton("Reset order")
         reset_order.setToolTip("Rebuild the order from the current loop groups. Review the result and Apply it.")
         reset_order.clicked.connect(self._reset_execution_order)
@@ -4234,7 +4236,7 @@ class PresetsPanel(QWidget):
         self._execution_order_hint = QLabel(
             "↳ Gate points remain inside Gate conditions · Acquire spectrum is always last"
         )
-        self._execution_order_hint.setStyleSheet("color: #6B7280; font-size: 10px;")
+        set_style_role(self._execution_order_hint, 'text', tone='muted', size='caption')
         self._execution_order_hint.setWordWrap(True)
         execution_lay.addWidget(self._execution_order_hint)
         self._readiness_lbl = QLabel("")
@@ -4247,15 +4249,12 @@ class PresetsPanel(QWidget):
         self._safety_bar.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self._safety_bar.setStyleSheet(
-            "QFrame#DualGateSafetyBar { background: #FAFBFC;"
-            " border: 1px solid #D7DEE7; border-radius: 5px; }"
-        )
+        set_style_role(self._safety_bar, 'safetyBar')
         safety_row = QHBoxLayout(self._safety_bar)
         safety_row.setContentsMargins(8, 3, 8, 3)
         safety_row.setSpacing(6)
         safety_title = QLabel("Safety")
-        safety_title.setStyleSheet("font-weight: 600; color: #4B5563;")
+        set_style_role(safety_title, 'text', tone='secondary', strong=True)
         safety_label = QLabel("Max jump / step:")
         self._safe_jump_spin = QDoubleSpinBox()
         self._safe_jump_spin.setRange(0.01, 100.0)
@@ -4350,18 +4349,18 @@ class PresetsPanel(QWidget):
         self._filename_preview_lbl.setWordWrap(True)
         self._filename_preview_lbl.setMinimumWidth(0)
         self._filename_preview_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self._filename_preview_lbl.setStyleSheet("font-family: monospace;")
+        set_style_role(self._filename_preview_lbl, 'monospace')
         self._save_path_preview_lbl = QLabel("Folder: -")
         self._save_path_preview_lbl.setWordWrap(True)
         self._save_path_preview_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self._save_path_preview_lbl.setStyleSheet("color: gray;")
+        set_style_role(self._save_path_preview_lbl, 'text', tone='muted')
         self._preview_note_lbl = QLabel("")
         self._preview_note_lbl.setWordWrap(True)
-        self._preview_note_lbl.setStyleSheet("color: gray; font-size: 10px;")
+        set_style_role(self._preview_note_lbl, 'text', tone='muted', size='caption')
         self._upcoming_preview = QTextEdit()
         self._upcoming_preview.setReadOnly(True)
         self._upcoming_preview.setMaximumHeight(72)
-        self._upcoming_preview.setStyleSheet("font-family: monospace; font-size: 11px;")
+        set_style_role(self._upcoming_preview, 'monospace', size='status')
         file_lay.addWidget(self._filename_preview_lbl)
         self._filename_details_toggle = QToolButton()
         self._filename_details_toggle.setText("Filename details")
@@ -4384,7 +4383,7 @@ class PresetsPanel(QWidget):
         lay_right.addWidget(file_grp)
 
         sequence_title = QLabel("Measurement sequence preview")
-        sequence_title.setStyleSheet("font-weight: 600;")
+        set_style_role(sequence_title, 'text', strong=True)
         sequence_title.setWordWrap(True)
         sequence_title.setToolTip(
             "Shows loop inputs, batch-row gate sweeps, the exact acquisition order, "
@@ -4433,7 +4432,7 @@ class PresetsPanel(QWidget):
         footer_lay.addWidget(self._progress)
 
         self._status_lbl = QLabel("Idle")
-        self._status_lbl.setStyleSheet("color: #707070; font-size: 11px;")
+        set_style_role(self._status_lbl, 'text', tone='muted', size='status')
         footer_lay.addWidget(self._status_lbl)
 
         run_row = QHBoxLayout()
@@ -4441,17 +4440,7 @@ class PresetsPanel(QWidget):
         self._run_btn  = QPushButton("▶  Run")
         self._run_btn.setMinimumHeight(32)
         self._run_btn.setMinimumWidth(110)
-        self._run_btn.setStyleSheet(
-            "QPushButton { font-weight: 700; font-size: 12px;"
-            " border-color: #5a9060; color: #1a4020;"
-            " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #d8f0d8, stop:1 #b8e0b8); }"
-            "QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #e8f8e8, stop:1 #c8ecc8); }"
-            "QPushButton:pressed { background: #a8d8a8; }"
-            "QPushButton:disabled { color: #aaaaaa; border-color: #d0d0d0;"
-            " background: #f0f0f0; }"
-        )
+        set_style_role(self._run_btn, 'runAction')
         self._run_btn.setToolTip(
             "Start the sweep.\n"
             "Click Apply first to lock in any table edits."
@@ -4459,17 +4448,7 @@ class PresetsPanel(QWidget):
         self._stop_btn = QPushButton("■  Stop")
         self._stop_btn.setMinimumHeight(32)
         self._stop_btn.setMinimumWidth(90)
-        self._stop_btn.setStyleSheet(
-            "QPushButton { font-weight: 700; font-size: 12px;"
-            " border-color: #a05050; color: #6a1010;"
-            " background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #f8dada, stop:1 #eec0c0); }"
-            "QPushButton:hover { background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            " stop:0 #ffe8e8, stop:1 #f4cccc); }"
-            "QPushButton:pressed { background: #e0a8a8; }"
-            "QPushButton:disabled { color: #aaaaaa; border-color: #d0d0d0;"
-            " background: #f0f0f0; }"
-        )
+        set_style_role(self._stop_btn, 'stopAction')
         self._stop_btn.setToolTip(
             "Request a graceful stop after the current acquisition finishes.\n"
             "Voltages are ramped back to zero before the run exits."
@@ -4493,11 +4472,7 @@ class PresetsPanel(QWidget):
         self._log_text.setReadOnly(True)
         self._log_text.setMaximumHeight(190)
         self._log_text.setMinimumHeight(80)
-        self._log_text.setStyleSheet(
-            "QTextEdit { font-family: 'Consolas', 'Courier New', monospace;"
-            " font-size: 11px; background: #fafafa; border: 1px solid #d0d0d0;"
-            " border-radius: 3px; }"
-        )
+        set_style_role(self._log_text, 'log')
         clear_log_btn = QPushButton("Clear")
         clear_log_btn.setFixedWidth(55)
         clear_log_btn.clicked.connect(self._log_text.clear)
@@ -4544,7 +4519,7 @@ class PresetsPanel(QWidget):
         splitter.setSizes([880, 500])
         self._results_pane = results_pane
         fit_table_columns(self._execution_order_table, (180, 180, 110))
-        QTimer.singleShot(0, self._fit_workflow_layout)
+        QTimer.singleShot(0, self, self._fit_workflow_layout)
 
         # ── wire ──────────────────────────────────────────────────────────
         self._mode_combo.currentTextChanged.connect(self._on_mode_changed)
@@ -4602,29 +4577,44 @@ class PresetsPanel(QWidget):
         self._sweep_calc._safe_jump_spin = self._safe_jump_spin
         self._sweep_calc._recalculate()
         self._update_batch_row_buttons()
+
+    def bind_controller_signals(self) -> None:
+        """Own only this page's subscriptions; never reconnect instruments."""
+        self.unbind_controller_signals()
+        connect = self._controller_connections.connect
         if self._smu is not None:
-            self._smu.connected.connect(
+            connect(self._smu.connected,
                 lambda *_: self._sweep_calc.set_vbias_available(self._smu.has_vbias)
             )
-            self._smu.connected.connect(self._on_smu_reconnected)
-            self._smu.disconnected.connect(lambda: self._sweep_calc.set_vbias_available(False))
-            self._smu.connected.connect(self._refresh_readiness)
-            self._smu.disconnected.connect(self._refresh_readiness)
+            connect(self._smu.connected, self._on_smu_reconnected)
+            connect(self._smu.disconnected, lambda: self._sweep_calc.set_vbias_available(False))
+            connect(self._smu.connected, self._refresh_readiness)
+            connect(self._smu.disconnected, self._refresh_readiness)
             if hasattr(self._smu, "limits_result"):
-                self._smu.limits_result.connect(self._refresh_readiness)
+                connect(self._smu.limits_result, self._refresh_readiness)
             if hasattr(self._smu, "limits_error"):
-                self._smu.limits_error.connect(self._refresh_readiness)
+                connect(self._smu.limits_error, self._refresh_readiness)
             if hasattr(self._smu, "limits_state_changed"):
-                self._smu.limits_state_changed.connect(self._refresh_readiness)
+                connect(self._smu.limits_state_changed, self._refresh_readiness)
         if self._lf6 is not None:
-            self._lf6.connected.connect(self._refresh_readiness)
-            self._lf6.disconnected.connect(self._refresh_readiness)
+            connect(self._lf6.connected, self._refresh_readiness)
+            connect(self._lf6.disconnected, self._refresh_readiness)
             if hasattr(self._lf6, 'settings_applied'):
-                self._lf6.settings_applied.connect(self._refresh_detector_wavelength_advice)
+                connect(self._lf6.settings_applied, self._refresh_detector_wavelength_advice)
         if self._pm is not None:
-            self._pm.connected.connect(self._refresh_readiness)
-            self._pm.disconnected.connect(self._refresh_readiness)
-            self._pm.power_ready.connect(self._cache_preview_power)
+            connect(self._pm.connected, self._refresh_readiness)
+            connect(self._pm.disconnected, self._refresh_readiness)
+            connect(self._pm.power_ready, self._cache_preview_power)
+
+    def unbind_controller_signals(self) -> None:
+        self._controller_connections.clear()
+
+    def dispose_reloaded_page(self) -> None:
+        """Stop local presentation work after an idle page has been replaced."""
+        self.unbind_controller_signals()
+        self._viewer_connections.clear()
+        self._preview_timer.stop()
+        self._sweep_calc._calc_timer.stop()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -4661,6 +4651,7 @@ class PresetsPanel(QWidget):
         """Capture both the edited draft and last applied Dual Gate recipe."""
         calc = self._sweep_calc
         return {
+            "numeric_values_version": _NUMERIC_VALUES_VERSION,
             "metadata": {
                 "sample_id": self._sample_edit.text(),
                 "point": self._point_edit.text(),
@@ -4747,6 +4738,7 @@ class PresetsPanel(QWidget):
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
             return
+        state = _migrate_legacy_loop_values(state)
         metadata = state.get("metadata")
         if isinstance(metadata, dict):
             for key, edit in (
@@ -5043,7 +5035,7 @@ class PresetsPanel(QWidget):
                 for button in (up, down):
                     # The application button padding/minimum height is intended
                     # for full-size forms, not controls embedded in table rows.
-                    button.setStyleSheet("QPushButton { min-height: 0px; padding: 2px 4px; }")
+                    set_style_role(button, 'tableAction')
                     button.ensurePolished()
                     button.setFixedSize(
                         max(38, button.sizeHint().width()),
@@ -5156,6 +5148,7 @@ class PresetsPanel(QWidget):
         self._workflow_scroll.viewport().update()
         QTimer.singleShot(
             0,
+            self,
             lambda expanded=bool(expanded): self._finish_workflow_reflow(expanded),
         )
 
@@ -5548,7 +5541,10 @@ class PresetsPanel(QWidget):
         try:
             # Validate the independent groups without expanding their Cartesian
             # product on every keystroke. The preview resolves a valid draft once.
-            _loop_group_combinations(loop_df, self._mode_combo.currentText())
+            groups = _loop_group_combinations(loop_df, self._mode_combo.currentText())
+            _validate_plan_budget(
+                _plan_context_count(groups), batch_df, nested=self._nested_schedule_enabled,
+            )
             if self._nested_schedule_enabled:
                 _normalize_execution_order(
                     self._execution_order, loop_df, self._mode_combo.currentText()
@@ -5556,11 +5552,9 @@ class PresetsPanel(QWidget):
         except Exception as exc:
             issues.append(f"Plan: {exc}")
             if getattr(self, "_execution_order_error", ""):
-                self._execution_order_hint.setStyleSheet(
-                    "color: #9f1239; font-size: 10px;"
-                )
+                set_style_role(self._execution_order_hint, 'text', tone='danger', size='caption')
         else:
-            self._execution_order_hint.setStyleSheet("color: #6B7280; font-size: 10px;")
+            set_style_role(self._execution_order_hint, 'text', tone='muted', size='caption')
         return issues
 
     def _draft_is_different(self) -> bool:
@@ -5623,11 +5617,8 @@ class PresetsPanel(QWidget):
             self._draft_badge.setText("Invalid draft")
             self._draft_detail_lbl.setText(validation_issues[0])
             self._draft_detail_lbl.setToolTip("\n".join(validation_issues))
-            self._draft_detail_lbl.setStyleSheet("color: #9b1c15; font-size: 10px;")
-            self._draft_badge.setStyleSheet(
-                "padding: 3px 8px; border-radius: 8px; color: #9b1c15; "
-                "background: #fde8e7; border: 1px solid #efb7b3;"
-            )
+            set_style_role(self._draft_detail_lbl, 'text', tone='danger', size='caption')
+            set_style_role(self._draft_badge, 'badge', tone='danger')
         elif self._tables_dirty:
             reasons = self._draft_change_reasons()
             reason_text = "Pending: " + " · ".join(reasons or ["Plan changed"])
@@ -5636,19 +5627,13 @@ class PresetsPanel(QWidget):
             self._draft_badge.setText("Unapplied changes")
             self._draft_detail_lbl.setText(reason_text)
             self._draft_detail_lbl.setToolTip(reason_text)
-            self._draft_detail_lbl.setStyleSheet("color: #8a5200; font-size: 10px;")
-            self._draft_badge.setStyleSheet(
-                "padding: 3px 8px; border-radius: 8px; color: #8a5200; "
-                "background: #fff3d6; border: 1px solid #ead097;"
-            )
+            set_style_role(self._draft_detail_lbl, 'text', tone='warning', size='caption')
+            set_style_role(self._draft_badge, 'badge', tone='warning')
         else:
             self._draft_badge.setText("Plan applied")
             self._draft_detail_lbl.setText("")
             self._draft_detail_lbl.setToolTip("")
-            self._draft_badge.setStyleSheet(
-                "padding: 3px 8px; border-radius: 8px; color: #23642c; "
-                "background: #e6f4e8; border: 1px solid #b9ddbe;"
-            )
+            set_style_role(self._draft_badge, 'badge', tone='success')
         self._draft_detail_lbl.setVisible(bool(self._draft_detail_lbl.text()))
         running = bool(self._run_thread and self._run_thread.isRunning())
         self._apply_btn.setEnabled(self._tables_dirty and not validation_issues and not running)
@@ -5875,10 +5860,7 @@ class PresetsPanel(QWidget):
         running = bool(self._run_thread and self._run_thread.isRunning())
         if running:
             self._readiness_lbl.setText("Running the applied plan.")
-            self._readiness_lbl.setStyleSheet(
-                "padding: 6px 8px; color: #765000; background: #fff5d9; "
-                "border: 1px solid #ecd69c; border-radius: 6px;"
-            )
+            set_style_role(self._readiness_lbl, 'message', tone='warning')
             self._run_btn.setEnabled(False)
             self._apply_btn.setEnabled(False)
             self._readiness_lbl.setToolTip("Edits remain a draft until this run finishes.")
@@ -5895,10 +5877,7 @@ class PresetsPanel(QWidget):
                 "Cannot start the sweep:\n"
                 + "\n".join(f"• {issue}" for issue in issues)
             )
-            self._readiness_lbl.setStyleSheet(
-                "padding: 6px 8px; color: #8f2019; background: #fff0ef; "
-                "border: 1px solid #efc1bd; border-radius: 6px;"
-            )
+            set_style_role(self._readiness_lbl, 'message', tone='danger')
             self._run_btn.setEnabled(False)
         else:
             required_roles = _required_smu_roles(
@@ -5919,10 +5898,7 @@ class PresetsPanel(QWidget):
                 "Start the applied sweep plan.\n"
                 f"Keithley safety check passed: {role_status}."
             )
-            self._readiness_lbl.setStyleSheet(
-                "padding: 6px 8px; color: #24652d; background: #edf8ee; "
-                "border: 1px solid #bedfc2; border-radius: 6px;"
-            )
+            set_style_role(self._readiness_lbl, 'message', tone='success')
             self._run_btn.setEnabled(True)
 
     def _connect_loop_param_signals(self):
@@ -6219,9 +6195,8 @@ class PresetsPanel(QWidget):
         ):
             return loop_df, batch_df, visible_plan["final_sequence"], cached_batch
 
-        context_count = 1
-        for group in _loop_group_combinations(loop_df, mode):
-            context_count *= len(group["contexts"])
+        context_count = _plan_context_count(_loop_group_combinations(loop_df, mode))
+        _validate_plan_budget(context_count, batch_df, nested=self._nested_schedule_enabled)
         potential_spectra = context_count * sum(
             max(int(row["repeat"]), 1) * max(int(row["frames"]), 1)
             for _, row in enabled_batch.iterrows()
@@ -6268,6 +6243,7 @@ class PresetsPanel(QWidget):
         # the authoritative experiment record rather than UI-only state.
         if getattr(self, "_final_seq", None):
             meta["executed_plan"] = {
+                "numeric_values_version": _NUMERIC_VALUES_VERSION,
                 "sequence": list(self._final_seq),
                 "batch_table": getattr(self, "_df_batch", pd.DataFrame()),
                 "batch_definition": getattr(self, "_batch_src", pd.DataFrame()),
@@ -6411,8 +6387,16 @@ class PresetsPanel(QWidget):
 
     def _validate_before_run(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         self._refresh_draft_state()
+        if self._draft_issues:
+            return None, self._draft_issues[0]
         if self._tables_dirty:
             return None, "Apply or discard the plan changes before running (tables or execution order)."
+        try:
+            _validate_plan_budget(
+                len(self._final_seq), self._df_batch, nested=bool(self._applied_execution_order),
+            )
+        except ValueError as exc:
+            return None, str(exc)
         when_errors = self._validate_when_rows(self._loop_src, self._batch_src)
         if when_errors:
             row, error = when_errors[0]
@@ -7100,7 +7084,7 @@ class PresetsPanel(QWidget):
             self._summary_lbl.setText(
                 f"Cannot apply: batch row {row + 1} has an invalid When condition."
             )
-            self._summary_lbl.setStyleSheet("color: #b42318;")
+            set_style_role(self._summary_lbl, 'text', tone='danger')
             self._summary_lbl.show()
             self._refresh_draft_state()
             QMessageBox.warning(
@@ -7112,29 +7096,24 @@ class PresetsPanel(QWidget):
         mode = self._mode_combo.currentText()
         acquisition_grouping = self._current_acquisition_grouping()
         try:
-            _build_plan(
+            execution_order = (
+                _normalize_execution_order(self._execution_order, loop_draft, mode)
+                if self._nested_schedule_enabled else None
+            )
+            resolved_plan = _resolve_execution_plan(
                 loop_draft,
                 batch_draft,
                 mode=mode,
                 acquisition_grouping=acquisition_grouping,
                 parameter_order=self._legacy_loop_order if not self._nested_schedule_enabled else None,
+                execution_order=execution_order,
             )
         except ValueError as exc:
             self._summary_lbl.setText(f"Cannot apply: {exc}")
-            self._summary_lbl.setStyleSheet("color: #b42318;")
+            set_style_role(self._summary_lbl, 'text', tone='danger')
             self._summary_lbl.show()
             QMessageBox.warning(self, "Invalid sweep plan", str(exc))
             return
-        if self._nested_schedule_enabled:
-            try:
-                _normalize_execution_order(self._execution_order, loop_draft, mode)
-            except ValueError as exc:
-                self._summary_lbl.setText(f"Cannot apply: {exc}")
-                self._summary_lbl.setStyleSheet("color: #b42318;")
-                self._summary_lbl.show()
-                QMessageBox.warning(self, "Invalid execution order", str(exc))
-                return
-
         self._loop_src = loop_draft
         self._applied_loop_run_selections = self._loop_run_selections.export()
         self._batch_src = batch_draft
@@ -7142,11 +7121,7 @@ class PresetsPanel(QWidget):
         self._applied_acquisition_grouping = acquisition_grouping
         self._applied_legacy_loop_order = list(self._legacy_loop_order)
         if self._nested_schedule_enabled:
-            self._execution_order = _normalize_execution_order(
-                self._execution_order,
-                loop_draft,
-                mode,
-            )
+            self._execution_order = execution_order
             self._applied_execution_order = [dict(item) for item in self._execution_order]
         else:
             self._execution_order = None
@@ -7156,7 +7131,7 @@ class PresetsPanel(QWidget):
         cfg.filename.measurement_mode = self._mode_combo_name.currentText()
         coeff = _safe_float(self._power_coeff_edit.text())
         cfg.filename.power_coefficient = coeff if coeff is not None else 1.0
-        self._update_plan()
+        self._update_plan(resolved_plan=resolved_plan)
         jump_issues = _validate_safe_jumps(
             self._final_seq,
             self._df_batch,
@@ -7170,7 +7145,7 @@ class PresetsPanel(QWidget):
         self._refresh_draft_state()
         self._refresh_filename_preview()
 
-    def _update_plan(self):
+    def _update_plan(self, resolved_plan=None):
         if self._run_thread and self._run_thread.isRunning():
             return
         self._draft_preview_key = None
@@ -7178,30 +7153,19 @@ class PresetsPanel(QWidget):
         mode = self._applied_mode
         grouping = self._applied_acquisition_grouping
         try:
-            seq, batch, total = _build_plan(
-                self._loop_src,
-                self._batch_src,
-                mode=mode,
-                acquisition_grouping=grouping,
-                parameter_order=self._applied_legacy_loop_order if not self._applied_execution_order else None,
-            )
-            if self._applied_execution_order:
-                schedule = _build_nested_execution_schedule(
+            if resolved_plan is None:
+                resolved_plan = _resolve_execution_plan(
                     self._loop_src,
                     self._batch_src,
                     mode=mode,
+                    acquisition_grouping=grouping,
+                    parameter_order=self._applied_legacy_loop_order if not self._applied_execution_order else None,
                     execution_order=self._applied_execution_order,
                 )
-                total = _count_logical_streams(schedule)
-            else:
-                schedule = _build_acquisition_schedule(
-                    seq,
-                    batch,
-                    acquisition_grouping=grouping,
-                )
+            seq, batch, total, schedule = resolved_plan
         except ValueError as exc:
             self._summary_lbl.setText(f"Plan error: {exc}")
-            self._summary_lbl.setStyleSheet("color: red;")
+            set_style_role(self._summary_lbl, 'text', tone='danger')
             self._summary_lbl.show()
             self._applied_plan_details = ""
             self._full_sequence_btn.setToolTip("")
@@ -7214,7 +7178,7 @@ class PresetsPanel(QWidget):
             self._progress.setValue(0)
             self._refresh_readiness()
             return
-        self._summary_lbl.setStyleSheet("")
+        set_style_role(self._summary_lbl, '')
         self._summary_lbl.hide()
         self._final_seq    = seq
         self._df_batch     = batch
@@ -7258,7 +7222,10 @@ class PresetsPanel(QWidget):
         )
         self._update_filename_preview()
         self._refresh_readiness()
-        self._refresh_sequence_preview()
+
+        # Apply/restore refresh draft state after installing this result. Doing
+        # it here would rebuild the just-applied draft while its dirty flag is
+        # still set, discarding the benefit of reusing the validated plan.
 
     def _refresh_plan_timing(self, *_args):
         """Timing edits change the estimate, not the resolved task order."""
@@ -7396,7 +7363,7 @@ class PresetsPanel(QWidget):
         self._initial_voltage_settle_spin.setEnabled(False)
         self._voltage_settle_spin.setEnabled(False)
         self._status_lbl.setText("Running…")
-        self._status_lbl.setStyleSheet("color: orange;")
+        set_style_role(self._status_lbl, 'text', tone='warning')
         self._on_progress(0, self._total_acq)
         pause = getattr(self._lf6, "set_temperature_monitor_paused", None)
         if callable(pause):
@@ -7411,7 +7378,7 @@ class PresetsPanel(QWidget):
             return
         if self._spectrum_viewer is None:
             self._spectrum_viewer = DualGateSpectrumViewer(self)
-            self._spectrum_viewer.visibility_changed.connect(
+            self._viewer_connections.connect(self._spectrum_viewer.visibility_changed,
                 self._on_spectrum_viewer_visibility_changed
             )
         self._preview_event.set()
@@ -7475,7 +7442,7 @@ class PresetsPanel(QWidget):
             return
         self._hardware_incident_active = False
         self._status_lbl.setText("SMUs reconnected - ready")
-        self._status_lbl.setStyleSheet("color: green;")
+        set_style_role(self._status_lbl, 'text', tone='success')
         self._log("SMUs reconnected and reinitialized; the hardware fault lock is cleared.")
 
     @Slot(int, int)
@@ -7567,7 +7534,7 @@ class PresetsPanel(QWidget):
     def _on_finalizing(self):
         self._stop_btn.setEnabled(False)
         self._status_lbl.setText("Saving experiment metadata...")
-        self._status_lbl.setStyleSheet("color: orange;")
+        set_style_role(self._status_lbl, 'text', tone='warning')
 
     @Slot(bool, str)
     def _on_finished(self, success: bool, message: str):
@@ -7580,11 +7547,11 @@ class PresetsPanel(QWidget):
         if self._hardware_incident_active:
             self._run_outcome = "failed"
             self._status_lbl.setText("Hardware fault - reconnect SMUs")
-            self._status_lbl.setStyleSheet("color: red;")
+            set_style_role(self._status_lbl, 'text', tone='danger')
         elif getattr(self._run_worker, "metadata_failed", False):
             self._run_outcome = "failed"
             self._status_lbl.setText("Metadata error")
-            self._status_lbl.setStyleSheet("color: red;")
+            set_style_role(self._status_lbl, 'text', tone='danger')
         elif success:
             self._run_outcome = "completed"
             self._done_acq = self._total_acq
@@ -7592,15 +7559,15 @@ class PresetsPanel(QWidget):
             self._progress.setMaximum(max(self._total_points, 1))
             self._progress.setValue(self._total_points)
             self._status_lbl.setText("Completed")
-            self._status_lbl.setStyleSheet("color: green;")
+            set_style_role(self._status_lbl, 'text', tone='success')
         elif self._stop_event.is_set():
             self._run_outcome = "stopped"
             self._status_lbl.setText("Stopped")
-            self._status_lbl.setStyleSheet("color: gray;")
+            set_style_role(self._status_lbl, 'text', tone='muted')
         else:
             self._run_outcome = "failed"
             self._status_lbl.setText("Failed")
-            self._status_lbl.setStyleSheet("color: red;")
+            set_style_role(self._status_lbl, 'text', tone='danger')
         self._tree.update_plan(
             self._final_seq,
             self._df_batch,
@@ -7619,7 +7586,7 @@ class PresetsPanel(QWidget):
             loop_mode=self._applied_mode,
             run_outcome=self._run_outcome,
         )
-        QTimer.singleShot(50, self._refresh_readiness)
+        QTimer.singleShot(50, self, self._refresh_readiness)
 
     @Slot(object)
     def _on_hardware_incident(self, incident: object):
@@ -7629,7 +7596,7 @@ class PresetsPanel(QWidget):
         summary = incident_display_text(incident)
         report_path = incident.get("report_path")
         self._status_lbl.setText("Hardware fault - reconnect SMUs")
-        self._status_lbl.setStyleSheet("color: red;")
+        set_style_role(self._status_lbl, 'text', tone='danger')
 
         text = (
             f"{summary}\n\n"
