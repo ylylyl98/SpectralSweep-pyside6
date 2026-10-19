@@ -158,6 +158,65 @@ To force mock LF6 mode:
 python main.py --mock
 ```
 
+The instrument sidebar keeps the current Sample ID and save status above the
+device controls. Use **Hide**, **View > Show sidebar**, or `Ctrl+Alt+B` to toggle
+it. Manual Keithley controls keep the step size, per-channel target/Ramp,
+step/read/zero buttons, and Read All/All to zero actions visible when expanded.
+
+## Faster UI iteration
+
+After restarting once to load this feature, use **View > Reload styles**
+(`Ctrl+Alt+R`) to reapply `ui/styles/application.qss` to the running app.
+This retains existing widgets, field values, plots and instrument controllers.
+For automatic stylesheet refresh during development, start with:
+
+```powershell
+python main.py --watch-styles
+```
+
+Use **View > Open Spectrum preview…**, or launch the preview directly:
+
+```powershell
+launch.bat --preview-spectrum
+```
+
+The preview displays the real Spectrum panel with synthetic spectra and a
+simulated controller. It uses a separate process, temporary configuration,
+history index and default output folder; it does not start instrument
+controllers, notifications or the experiment watchdog. **F5 / Reload preview**
+restarts only the preview process to pick up Python/layout changes, resetting
+the displayed scene. QSS edits refresh automatically without resetting it.
+The simulated connection toggle, sample error action, 1D/2D acquisition and
+continuous acquisition can be used to inspect different UI states.
+
+Preview scratch files are deleted when the preview closes. Use an explicitly
+chosen export location if you want to keep synthetic output. The preview is a
+UI development aid, not validation of hardware timing or driver behavior.
+
+**View > Reload Spectrum page** (`Ctrl+Alt+U`) also reloads Python changes in
+`ui/spectrum_panel.py`, `ui/spectrum_plot.py` and `ui/andor_controls_widget.py`.
+It rebuilds only Spectrum while retaining the same instrument controllers,
+connections, cooling, acquired 1D/2D data, reference spectra (including unsaved
+ones), display ranges and editable settings. It preserves and rebinds the
+existing Calibration editor, including its unsaved work. Acquisition, settings
+operations, calibration analysis and saving must finish first; reload never
+aborts them. Syntax, construction or state-transfer errors retain the old page
+and report the failure in the status bar. Reload is explicit, not a file watcher.
+UI constructors/restorers must remain free of instrument commands and event-loop
+pumping. Driver/controller changes, other pages, dependencies and the reload
+infrastructure itself still require a safe restart. A running version without
+this menu needs one initial safe restart to install it.
+
+Calibration is unfinished and hidden from the main navigation by default.
+**View > Show experimental Calibration page** reveals it for development;
+saved calibration records and their use by Spectrum remain available. Restoring
+a session/sample does not reveal the hidden page.
+
+Missing/empty or structurally incomplete QSS leaves the previous
+style in place; Qt still validates supported properties and selectors. The
+existing light appearance is retained; this feature does not add a dark theme.
+When packaging, include `ui/styles/application.qss` at the same relative path.
+
 ## Per-PC ntfy subscriptions
 
 Open **Settings > PC Notifications**, enter a descriptive name such as

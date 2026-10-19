@@ -17,7 +17,9 @@ from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QThread, Qt, Signal, Slot
+from ui.workflow_sections import CompactRow, bind_log_toggle, compact_form_rows, inline_divider
+from ui.table_layout import fit_table_columns
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
@@ -1212,7 +1214,7 @@ class MCDPanel(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
-        root.addWidget(self._splitter)
+        root.addWidget(self._splitter, 1)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -1464,6 +1466,7 @@ class MCDPanel(QWidget):
         safe_form.addRow("Field stability", self._safe_settle)
         safe_form.addRow(safe_actions)
         safe_form.addRow("Safe operation", self._safe_state)
+        compact_form_rows(safe_form, (self._safe_target, self._safe_settle))
         transition_form.addRow(safe_group)
         self._transition_widget.setVisible(False)
         conn_form.addRow(self._advanced_toggle)
@@ -1502,6 +1505,7 @@ class MCDPanel(QWidget):
         start_stop_row.setSpacing(6)
         start_stop_row.addWidget(QLabel("Start"))
         start_stop_row.addWidget(self._start_t, 1)
+        start_stop_row.addWidget(inline_divider())
         start_stop_row.addWidget(QLabel("Stop"))
         start_stop_row.addWidget(self._stop_t, 1)
         magnet_form.addRow(start_stop_row)
@@ -1526,6 +1530,7 @@ class MCDPanel(QWidget):
             "Round trip: sweep start -> stop, then reverse back to start once."
         )
         magnet_form.addRow("Sweep mode", self._sweep_mode)
+        compact_form_rows(magnet_form, (self._start_settle, self._sweep_mode))
 
         rotation_group = QGroupBox("Rotation")
         rotation_group.setToolTip(
@@ -1557,6 +1562,8 @@ class MCDPanel(QWidget):
         rotation_form.addRow("Angle A", self._angle_a)
         rotation_form.addRow("Angle B", self._angle_b)
         rotation_form.addRow("Rotation settle", self._rotation_settle)
+        compact_form_rows(rotation_form, (self._angle_a, self._angle_b))
+        compact_form_rows(rotation_form, (self._rotator, self._rotation_settle))
 
         lightfield_group = QGroupBox("LightField")
         lightfield_group.setToolTip(
@@ -1584,6 +1591,7 @@ class MCDPanel(QWidget):
         lightfield_form.addRow("Center", self._center)
         lightfield_form.addRow("Exposure", self._exposure)
         lightfield_form.addRow("Frames/accums", self._frames)
+        compact_form_rows(lightfield_form, (self._center, self._exposure, self._frames), labels_above=True)
 
         voltages = QGroupBox("Gate / SMU")
         voltages.setToolTip(
@@ -1642,6 +1650,7 @@ class MCDPanel(QWidget):
         ratio_row.addWidget(QLabel("Weighting"))
         ratio_row.addWidget(QLabel("TG"))
         ratio_row.addWidget(self.gate_vtg_factor)
+        ratio_row.addWidget(inline_divider())
         ratio_row.addWidget(QLabel("BG"))
         ratio_row.addWidget(self.gate_vbg_factor)
         ratio_row.addWidget(self.gate_ratio_value)
@@ -1669,6 +1678,7 @@ class MCDPanel(QWidget):
         settle_row.addWidget(QLabel("Settle"))
         settle_row.addWidget(QLabel("First"))
         settle_row.addWidget(self._initial_voltage_settle)
+        settle_row.addWidget(inline_divider())
         settle_row.addWidget(QLabel("Later"))
         settle_row.addWidget(self._voltage_settle)
         settle_row.addStretch(1)
@@ -1734,9 +1744,7 @@ class MCDPanel(QWidget):
         )
         self._condition_table.setMinimumWidth(0)
         self._condition_table.verticalHeader().setVisible(False)
-        self._condition_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
+        fit_table_columns(self._condition_table, (40, 90, 90, 90, 90, 90))
         self._condition_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
         )
@@ -1841,6 +1849,7 @@ class MCDPanel(QWidget):
         sample_row.setSpacing(6)
         sample_row.addWidget(QLabel("Sample ID"))
         sample_row.addWidget(self._sample_id, 1)
+        sample_row.addWidget(inline_divider())
         sample_row.addWidget(QLabel("Point / Location"))
         sample_row.addWidget(self._point)
         sample_row.addStretch(1)
@@ -1863,14 +1872,12 @@ class MCDPanel(QWidget):
         metadata_form.setContentsMargins(8, 2, 0, 2)
         metadata_form.setVerticalSpacing(3)
         metadata_form.addRow("Condition", self._condition)
-        optical_tokens = QHBoxLayout()
-        optical_tokens.setSpacing(6)
-        optical_tokens.addWidget(self._mode)
-        optical_tokens.addWidget(self._laser, 1)
-        optical_tokens.addWidget(self._power, 1)
+        optical_tokens = CompactRow([
+            ("Mode", self._mode), ("Laser (nm)", self._laser), ("Power (µW)", self._power),
+        ], labels_above=True)
         self._power_coefficient.setParent(self)
         self._power_coefficient.hide()
-        metadata_form.addRow("Mode / laser / sample power", optical_tokens)
+        metadata_form.addRow(optical_tokens)
         self._metadata_widget.setVisible(False)
         sample_form.addRow(self._metadata_toggle)
         sample_form.addRow(self._metadata_widget)
@@ -1974,19 +1981,22 @@ class MCDPanel(QWidget):
         run_layout.addWidget(self._mode_notice)
         run_buttons = QHBoxLayout()
         run_buttons.setSpacing(8)
-        for button in (self._run_btn, self._stop_btn):
+        for button in (self._run_btn, self._stop_btn, self._pause_btn):
             button.setMinimumHeight(36)
             run_buttons.addWidget(button)
         run_layout.addLayout(run_buttons)
 
         workflow_layout.addWidget(filename_group)
-        controls_layout.addWidget(run_group)
+        self._run_footer = run_group
+        run_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        root.addWidget(run_group)
         controls_layout.addStretch()
 
         display = QGroupBox("Status / Progress / Log")
         display_layout = QVBoxLayout(display)
         display_layout.setContentsMargins(8, 6, 8, 6)
         display_layout.setSpacing(6)
+        display.setMinimumWidth(340)
         display_layout.addWidget(self._progress)
         self._current_field = QLabel("N/A")
         self._current_field.setToolTip(
@@ -2013,9 +2023,11 @@ class MCDPanel(QWidget):
         )
         self._clear_log_btn = QPushButton("Clear log")
         self._clear_log_btn.setToolTip("Clear the run/event log text.")
-        header.addWidget(title)
-        header.addStretch()
+        display_layout.addWidget(title)
         header.addWidget(self._show_spectrum_chk)
+        self._show_log_chk = QCheckBox("Show log")
+        header.addWidget(self._show_log_chk)
+        header.addStretch()
         header.addWidget(self._clear_log_btn)
         display_layout.addLayout(header)
         self._plot = pg.PlotWidget()
@@ -2041,15 +2053,23 @@ class MCDPanel(QWidget):
         self._plot_log_splitter.addWidget(self._log)
         self._plot_log_splitter.setStretchFactor(0, 1)
         self._plot_log_splitter.setStretchFactor(1, 1)
-        self._plot_log_splitter.setSizes([260, 220])
+        self._plot_log_splitter.setSizes([520, 140])
+        bind_log_toggle(self._show_log_chk, self._plot_log_splitter, self._log)
         display_layout.addWidget(self._plot_log_splitter, stretch=1)
         self._splitter.addWidget(display)
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
-        self._splitter.setSizes([760, 440])
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setSizes([560, 440])
         self._update_gate_entry()
         self._update_coordinates_and_filename()
         self._apply_responsive_layout()
+        self._scroll.viewport().installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if watched is self._scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._apply_responsive_layout()
+        return super().eventFilter(watched, event)
 
     def _apply_responsive_layout(self) -> None:
         stacked = self._scroll.viewport().width() < 700
@@ -2354,6 +2374,7 @@ class MCDPanel(QWidget):
 
     @Slot(str)
     def _on_magnet_error(self, message: str) -> None:
+        self._show_log_chk.setChecked(True)
         self._append_log(f"ERROR: {message}")
         self._run_status.setText("Magnet error")
         if self._safe_magnet_operation_active:
@@ -2364,6 +2385,8 @@ class MCDPanel(QWidget):
     @Slot(bool)
     def _set_spectrum_visible(self, visible: bool) -> None:
         self._plot.setVisible(bool(visible))
+        if not visible:
+            self._show_log_chk.setChecked(True)
 
     @Slot(float)
     def _on_gate_ratio_changed(self, value: float) -> None:
@@ -3114,6 +3137,7 @@ class MCDPanel(QWidget):
 
     @Slot(str)
     def _on_run_error(self, message: str) -> None:
+        self._show_log_chk.setChecked(True)
         self._append_log(f"ERROR: {message}")
         self._run_status.setText("Error — APS100 pause requested")
 
@@ -3253,6 +3277,7 @@ class MCDPanel(QWidget):
             "start_settle_s": self._start_settle.value(),
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
             "plot_log_sizes": [int(v) for v in self._plot_log_splitter.sizes()],
+            "log_visible": self._show_log_chk.isChecked(),
             "spectrum_visible": bool(self._show_spectrum_chk.isChecked()),
             "conditions": self._condition_rows_raw(),
             "safe_target_t": self._safe_target.value(),
@@ -3394,6 +3419,9 @@ class MCDPanel(QWidget):
                 )
             except (TypeError, ValueError):
                 pass
+        self._show_log_chk.setChecked(bool(state.get("log_visible", not self._show_spectrum_chk.isChecked())))
+        if self._show_log_chk.isChecked() and self._plot_log_splitter.sizes()[1] < 80:
+            self._plot_log_splitter.setSizes([520, 140])
 
     def shutdown(self, timeout_ms: int = 30_000) -> bool:
         """Stop an active run and wait until its worker no longer owns hardware."""

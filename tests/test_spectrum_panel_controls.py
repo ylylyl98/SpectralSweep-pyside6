@@ -221,7 +221,7 @@ class SpectrumPanelControlTests(unittest.TestCase):
         panel = SpectrumPanel(controller)
         controller.connected.emit([])
         self.assertIn("Andor Si", panel._device_status.text())
-        self.assertEqual(panel._frames_label.text(), "Frames to average:")
+        self.assertEqual(panel._frames_label.text(), "Frames (avg):")
         controller.shamrock_connection_changed.emit(False)
         self.assertIn("disconnected", panel._device_status.text())
         message = "ShamrockGetFlipperMirror failed: " + "details " * 25 + "20201\nCOMMUNICATION ERROR"
@@ -238,6 +238,11 @@ class SpectrumPanelControlTests(unittest.TestCase):
         old = panel._source_label.text()
         controller.backend = "lightfield"
         controller.identity = {"backend": "lightfield"}
+        controller.connected.emit([])
+        self.assertIn("No acquisition", panel._source_label.text())
+        self.assertFalse(panel._save_btn.isEnabled())
+        controller.backend = "andor_si"
+        controller.identity = {"backend": "andor_sdk2", "camera_role": "si", "camera_serial": "123"}
         controller.connected.emit([])
         self.assertEqual(panel._source_label.text(), old)
         panel.close()

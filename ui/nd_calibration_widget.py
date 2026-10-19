@@ -9,6 +9,7 @@ from typing import Optional
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QWidget
+from ui.workflow_sections import compact_form_rows
 
 from app.nd_calibration import save_calibration
 from app.power_reading import power_correction_factor, power_reading_lock, read_power
@@ -163,6 +164,8 @@ class NDCalibrationWidget(QWidget):
         self.status_label.setWordWrap(True)
         self._inputs = [self.positions_edit, self.profile_edit, self.settle_spin, self.averages_spin, self.wavelength_spin, self.reference_position_edit, self.scan_button, self.reference_button]
         for label, widget in (("Positions", self.positions_edit), ("Profile", self.profile_edit), ("Settle", self.settle_spin), ("Averages", self.averages_spin), ("PM wavelength", self.wavelength_spin), ("Reference position", self.reference_position_edit)): form.addRow(label + ":", widget)
+        compact_form_rows(form, (self.settle_spin, self.averages_spin))
+        compact_form_rows(form, (self.wavelength_spin, self.reference_position_edit), labels_above=True)
         row = QHBoxLayout(); row.addWidget(self.scan_button); row.addWidget(self.stop_button); form.addRow(row); form.addRow(self.reference_button); form.addRow("Status:", self.status_label)
         self.scan_button.clicked.connect(self.start_scan); self.reference_button.clicked.connect(self.measure_reference); self.stop_button.clicked.connect(self.stop); self.wavelength_spin.valueChanged.connect(self._on_wavelength_changed)
         for controller in (stage_ctrl, pm_ctrl):

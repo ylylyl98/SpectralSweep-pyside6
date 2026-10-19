@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 from datetime import datetime
+from copy import deepcopy
 
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
@@ -23,6 +24,8 @@ from PySide6.QtWidgets import (
 )
 
 from utils.config import cfg
+from ui.signal_connections import SignalConnections
+from ui.workflow_sections import compact_form_rows, inline_divider
 
 
 def temperature_summary(data: dict) -> str:
@@ -46,9 +49,10 @@ class AndorControlsWidget(QWidget):
 
     status_changed = Signal(str)
 
-    def __init__(self, controller=None, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, controller=None, parent: Optional[QWidget] = None, *, bind_controller=True) -> None:
         super().__init__(parent)
         self._ctrl = controller
+        self._controller_connections = SignalConnections(self)
         self.optics_managed_externally = False
         self._identity: dict[str, Any] = {}
         self._snapshot: dict[str, Any] = {}
@@ -62,6 +66,8 @@ class AndorControlsWidget(QWidget):
         self._build()
         self._wire()
         self.set_backend_identity({})
+        if bind_controller:
+            self.bind_controller_signals()
 
     def _build(self) -> None:
         root = QGridLayout(self)
@@ -158,9 +164,12 @@ class AndorControlsWidget(QWidget):
         self.vbin.setRange(1, 32)
         bin_row.addWidget(QLabel("H"))
         bin_row.addWidget(self.hbin)
+        bin_row.addWidget(inline_divider())
         bin_row.addWidget(QLabel("V"))
         bin_row.addWidget(self.vbin)
         form.addRow("Binning:", bin_row)
+        compact_form_rows(form, (self.temperature_target, self.cooler), labels_above=True)
+        compact_form_rows(form, (self.fan, self.read_mode), labels_above=True)
         return group
 
     @staticmethod
@@ -208,27 +217,56 @@ class AndorControlsWidget(QWidget):
         self.refresh_button.clicked.connect(self.refresh)
         self.diagnostics_button.clicked.connect(self.show_diagnostics)
         self.shamrock_button.clicked.connect(self._toggle_shamrock_connection)
+
+    def bind_controller_signals(self) -> None:
+        self.unbind_controller_signals()
         if self._ctrl is None:
             return
-        status_signal = getattr(self._ctrl, "andor_status_ready", None)
-        if status_signal is not None:
-            status_signal.connect(self._on_status)
-        applied_signal = getattr(self._ctrl, "andor_controls_applied", None)
-        if applied_signal is not None:
-            applied_signal.connect(self._on_applied)
-        self._ctrl.error.connect(self._on_error)
-        connection_signal = getattr(self._ctrl, "shamrock_connection_changed", None)
-        if connection_signal is not None:
-            connection_signal.connect(self._on_shamrock_connection)
-        lock_signal = getattr(self._ctrl, "switching_lock_changed", None)
-        if lock_signal is not None:
-            lock_signal.connect(lambda _locked: self._update_enabled())
-        temperature_signal = getattr(self._ctrl, "temperature_snapshot_ready", None)
-        if temperature_signal is not None:
-            temperature_signal.connect(self._on_temperature_snapshot)
-        monitor_signal = getattr(self._ctrl, "temperature_monitor_state", None)
-        if monitor_signal is not None:
-            monitor_signal.connect(self._on_temperature_monitor_state)
+        for name, slot in (
+            ("andor_status_ready", self._on_status),
+            ("andor_controls_applied", self._on_applied),
+            ("error", self._on_error),
+            ("shamrock_connection_changed", self._on_shamrock_connection),
+            ("switching_lock_changed", lambda _locked: self._update_enabled()),
+            ("temperature_snapshot_ready", self._on_temperature_snapshot),
+            ("temperature_monitor_state", self._on_temperature_monitor_state),
+        ):
+            signal = getattr(self._ctrl, name, None)
+            if signal is not None:
+                self._controller_connections.connect(signal, slot)
+
+    def unbind_controller_signals(self) -> None:
+        self._controller_connections.clear()
+
+    def capture_reload_state(self) -> dict:
+        return deepcopy({
+            "identity": self._identity, "snapshot": self._snapshot,
+            "controls": self.capture_session_state(), "locked": self._locked,
+            "shamrock_connected": self._shamrock_connected,
+            "temperature_stable": self._temperature_stable,
+            "cooling_status": self.cooling_status.text(),
+            "cooling_tooltip": self.cooling_status.toolTip(),
+            "monitor": self.cooling_monitor.text(),
+        })
+
+    def restore_reload_state(self, state: dict) -> None:
+        # Rebuild from cached readbacks; set_backend_identity would query hardware.
+        self._identity = state["identity"]
+        self._available = self._identity.get("backend") == "andor_sdk2"
+        self._shamrock_connected = state["shamrock_connected"]
+        self._locked = state["locked"]
+        self._temperature_stable = state["temperature_stable"]
+        self.shamrock_button.setText("Disconnect spectrograph only" if self._shamrock_connected else "Reconnect spectrograph")
+        self._snapshot = state["snapshot"]
+        if self._snapshot:
+            self._populate_spectrograph(self._snapshot)
+            self._populate_detector(self._snapshot)
+            self._populate_status(self._snapshot)
+        self.restore_session_state(state["controls"])
+        self.cooling_status.setText(state["cooling_status"])
+        self.cooling_status.setToolTip(state["cooling_tooltip"])
+        self.cooling_monitor.setText(state["monitor"])
+        self._update_enabled()
 
     @Slot()
     def _toggle_shamrock_connection(self) -> None:

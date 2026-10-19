@@ -25,7 +25,7 @@ from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
     QDoubleSpinBox, QSpinBox, QLineEdit, QFileDialog, QFormLayout, QComboBox,
-    QSizePolicy, QCheckBox, QScrollArea,
+    QSizePolicy, QCheckBox, QScrollArea, QTabWidget,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +34,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from utils.config import cfg
 from ui.notification_settings import NotificationSettings
+from ui.workflow_sections import compact_form_rows, inline_divider
 
 
 class SettingsPanel(QWidget):
@@ -59,43 +60,42 @@ class SettingsPanel(QWidget):
 
     def _build(self):
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; }")
-        body = QWidget()
-        root = QVBoxLayout(body)
-        root.setAlignment(Qt.AlignmentFlag.AlignTop)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(10)
-
+        outer.setContentsMargins(6, 6, 6, 6)
+        self._categories = QTabWidget()
+        outer.addWidget(self._categories, 1)
         self._notifications = NotificationSettings()
         self._notifications.configured.connect(self.notification_configured)
-        root.addWidget(self._notifications)
-        root.addWidget(self._build_mff101_group())
-        root.addWidget(self._build_lf6_group())
-        root.addWidget(self._build_output_group())
-        root.addWidget(self._build_filename_group())
+        for title, widgets in (
+            ("Instruments", (self._build_lf6_group(), self._build_mff101_group())),
+            ("Saving / filenames", (self._build_output_group(), self._build_filename_group())),
+            ("Notifications", (self._notifications,)),
+        ):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            body = QWidget()
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(8, 8, 8, 8)
+            body_layout.setSpacing(10)
+            for widget in widgets:
+                body_layout.addWidget(widget)
+            body_layout.addStretch(1)
+            scroll.setWidget(body)
+            self._categories.addTab(scroll, title)
 
         # Save config button
         self._save_btn = QPushButton("Save config to disk")
         self._save_btn.setToolTip("Persists all settings to config.json")
         self._save_btn.setMinimumHeight(28)
         self._save_btn.setMaximumWidth(200)
-        self._save_btn.setStyleSheet(
-            "QPushButton { font-weight: 600; border-color: #90a8c0; }"
-            "QPushButton:hover { border-color: #5a82a8; }"
-        )
-        root.addWidget(self._save_btn)
+        footer = QHBoxLayout()
+        footer.addWidget(self._save_btn)
 
         self._status_lbl = QLabel("")
         self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._status_lbl.setStyleSheet("font-size: 11px;")
-        root.addWidget(self._status_lbl)
-
-        root.addStretch()
-        scroll.setWidget(body)
-        outer.addWidget(scroll)
+        self._status_lbl.setWordWrap(True)
+        footer.addWidget(self._status_lbl, 1)
+        outer.addLayout(footer)
 
     def _build_mff101_group(self) -> QGroupBox:
         group = QGroupBox("MFF101 light paths")
@@ -121,14 +121,20 @@ class SettingsPanel(QWidget):
         note = QLabel("Setup selection and acquisition preflight use the positions above. Names are descriptive. Simulation never moves the flipper. Editing these settings does not move it; use Save config to disk to keep changes.")
         note.setWordWrap(True)
         form.addRow(note)
+        compact_form_rows(form, (self._mff101_andor_position, self._mff101_lightfield_position))
+        compact_form_rows(form, (self._mff101_position1_path, self._mff101_position2_path))
         return group
 
     def _build_lf6_group(self) -> QGroupBox:
-        grp = QGroupBox("Shared Spectrometer Settings")
+        grp = QGroupBox("Spectrometer defaults & device setup")
         form = QFormLayout(grp)
         form.setContentsMargins(8, 10, 8, 8)
         form.setSpacing(6)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        note = QLabel("These are shared settings, not live readbacks. Apply sends exposure, centre wavelength and accumulations to the connected spectrometer; Save config keeps settings on disk.")
+        note.setWordWrap(True)
+        form.addRow(note)
 
         self._exposure = QDoubleSpinBox()
         self._exposure.setRange(1.0, 600_000.0)
@@ -155,7 +161,6 @@ class SettingsPanel(QWidget):
 
         self._apply_btn = QPushButton("Apply to spectrometer")
         self._apply_btn.setEnabled(False)
-        self._apply_btn.setMaximumWidth(130)
         form.addRow("", self._apply_btn)
 
         self._lf6_status = QLabel("")
@@ -276,6 +281,14 @@ class SettingsPanel(QWidget):
         self._andor_discard_first = QCheckBox("Discard first frame")
         form.addRow("Acquisition:", self._andor_discard_first)
 
+        compact_form_rows(form, (self._exposure, self._center, self._accum, self._apply_btn))
+        compact_form_rows(form, (self._andor_shutter, self._andor_shamrock_shutter))
+        compact_form_rows(form, (self._andor_spec_index, self._andor_grating, self._andor_slit))
+        si_operating.insertWidget(2, inline_divider())
+        si_operating.insertWidget(5, inline_divider())
+        ingaas_operating.insertWidget(2, inline_divider())
+        ingaas_operating.insertWidget(5, inline_divider())
+
         return grp
 
     def _build_output_group(self) -> QGroupBox:
@@ -311,6 +324,7 @@ class SettingsPanel(QWidget):
         self._measurement_mode.addItems(["PL", "Ref"])
         self._measurement_mode.setFixedWidth(130)
         form.addRow("Mode:", self._measurement_mode)
+        compact_form_rows(form, (self._temp_edit, self._measurement_mode))
 
         self._power_coeff = QDoubleSpinBox(self)  # Legacy session compatibility only
         self._power_coeff.setRange(0.000001, 1_000_000.0)

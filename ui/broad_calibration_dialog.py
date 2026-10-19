@@ -5,6 +5,7 @@ from PySide6.QtCore import Signal, QTimer, QObject
 from PySide6.QtWidgets import QDialog,QVBoxLayout,QLabel,QComboBox,QPushButton,QTableWidget,QCheckBox,QDoubleSpinBox,QHBoxLayout
 from app.wavelength_calibration import fit_broad_calibration
 from utils.config import cfg
+from ui.table_layout import fit_table_columns
 
 class _AnalysisSignals(QObject):
     progress=Signal(str)
@@ -40,6 +41,7 @@ class BroadCalibrationDialog(QDialog):
         sweep.clicked.connect(self.start_collection);layout.addWidget(sweep)
         stop=QPushButton('Stop after current exposure');stop.clicked.connect(self.stop_collection);layout.addWidget(stop)
         self.table=QTableWidget(0,2);self.table.setHorizontalHeaderLabels(['Role','Saved local calibration']);self.table.horizontalHeader().setStretchLastSection(True)
+        fit_table_columns(self.table, (100, 500))
         layout.addWidget(self.table)
         refresh=QPushButton('Refresh saved local calibrations');refresh.clicked.connect(self.refresh);layout.addWidget(refresh)
         self.tolerance=QDoubleSpinBox();self.tolerance.setRange(.001,10);self.tolerance.setDecimals(3);self.tolerance.setValue(.2)

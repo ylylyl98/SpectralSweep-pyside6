@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from utils.config import cfg
+from ui.table_layout import fit_table_columns
 from utils.mcd_common import (
     MODE_DOPING_EFIELD, MODE_DIRECT, mcd_coordinates, parse_numeric_spec,
     validate_gate_conditions, vtg_vbg_from_doping_efield,
@@ -209,12 +210,7 @@ class MotionConditionsWidget(QWidget):
         self._table.setMinimumWidth(0)
         self._table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._table.setAlternatingRowColors(True)
-        header = self._table.horizontalHeader()
-        header.setStretchLastSection(False)
-        for column, width in ((0, 34), (1, 70), (2, 42), (3, 42), (4, 50), (5, 50), (6, 50)):
-            header.setSectionResizeMode(column, header.ResizeMode.Interactive)
-            self._table.setColumnWidth(column, width)
-        header.setSectionResizeMode(1, header.ResizeMode.Stretch)
+        fit_table_columns(self._table, (40, 80, 48, 48, 54, 54, 54))
         self.table = self._table
         root.addWidget(self.table)
         self._status_label = QLabel()

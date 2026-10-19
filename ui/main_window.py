@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QWidget, QStatusBar, QApplication,
     QMessageBox, QComboBox, QListWidget, QPushButton, QPlainTextEdit, QLabel,
     QLineEdit,
-    QVBoxLayout, QHBoxLayout, QListWidgetItem, QSplitter, QToolBar, QDialog,
+    QVBoxLayout, QHBoxLayout, QListWidgetItem, QSplitter, QDialog,
     QInputDialog,
 )
 from app.experiment_metadata import ExperimentHistory, ExperimentMetadataService
@@ -36,281 +36,8 @@ from app.ntfy_notifications import NtfyNotifier
 from app.sample_settings import SampleSettingsStore
 from ui.history_loader import HistoryTaskRunner, load_preview, load_settings
 
-# ── Global stylesheet ──────────────────────────────────────────────────────────
-_STYLESHEET = """
-/* Application surfaces */
-QWidget {
-    color: #202936;
-    selection-background-color: #2a75c7;
-    selection-color: #ffffff;
-}
-QMainWindow, QDialog {
-    background: #f3f6fa;
-}
-QToolTip {
-    color: #202936;
-    background: #ffffff;
-    border: 1px solid #cfd7e3;
-    border-radius: 5px;
-    padding: 5px 7px;
-}
+from ui.application_style import application_style
 
-/* Cards and sections */
-QGroupBox {
-    background: #ffffff;
-    font-weight: 600;
-    border: 1px solid #d9e0e9;
-    border-radius: 8px;
-    margin-top: 14px;
-    padding: 9px 8px 8px 8px;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    left: 10px;
-    top: 1px;
-    padding: 0 5px;
-    color: #29384c;
-    background: #ffffff;
-}
-QFrame[frameShape="4"], QFrame[frameShape="5"] {
-    color: #dce2ea;
-}
-
-/* Inputs */
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox,
-QDateEdit, QDateTimeEdit, QTimeEdit {
-    min-height: 24px;
-    color: #202936;
-    background: #ffffff;
-    border: 1px solid #cbd4e0;
-    border-radius: 5px;
-    padding: 2px 7px;
-}
-QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover,
-QDateEdit:hover, QDateTimeEdit:hover, QTimeEdit:hover {
-    border-color: #9caabd;
-}
-QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus,
-QDateEdit:focus, QDateTimeEdit:focus, QTimeEdit:focus {
-    border: 1px solid #2574c7;
-}
-QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
-QComboBox:disabled, QDateEdit:disabled, QDateTimeEdit:disabled,
-QTimeEdit:disabled {
-    color: #8b96a5;
-    background: #eef1f5;
-    border-color: #dde2e9;
-}
-QComboBox::drop-down {
-    width: 24px;
-    border: none;
-    border-left: 1px solid #e1e6ed;
-}
-QComboBox QAbstractItemView {
-    background: #ffffff;
-    border: 1px solid #cbd4e0;
-    border-radius: 5px;
-    padding: 3px;
-    outline: none;
-}
-QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {
-    width: 18px;
-    background: #f7f9fc;
-    border: none;
-    border-left: 1px solid #e2e7ee;
-}
-QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {
-    background: #eaf2fb;
-}
-QPlainTextEdit, QTextEdit {
-    color: #202936;
-    background: #ffffff;
-    border: 1px solid #d3dbe6;
-    border-radius: 6px;
-    padding: 4px;
-}
-
-/* Buttons */
-QPushButton {
-    min-height: 25px;
-    color: #243246;
-    background: #ffffff;
-    border: 1px solid #c8d1dd;
-    border-radius: 6px;
-    padding: 4px 13px;
-}
-QPushButton:hover {
-    color: #145da5;
-    background: #edf5fd;
-    border-color: #79a9d8;
-}
-QPushButton:pressed {
-    background: #dcecfb;
-    border-color: #4f8bc6;
-}
-QPushButton:focus, QPushButton:default {
-    border: 1px solid #2877c9;
-}
-QPushButton:disabled {
-    color: #96a0ae;
-    background: #edf0f4;
-    border-color: #dce1e8;
-}
-QToolButton {
-    min-width: 22px;
-    min-height: 22px;
-    border: 1px solid transparent;
-    border-radius: 5px;
-    background: transparent;
-}
-QToolButton:hover {
-    background: #e8f1fb;
-    border-color: #c5d9ed;
-}
-QToolButton:pressed, QToolButton:checked {
-    background: #d9eafa;
-    border-color: #9fc1e2;
-}
-
-/* Navigation */
-QTabWidget::pane {
-    background: #ffffff;
-    border: 1px solid #d7dee8;
-    border-radius: 0 8px 8px 8px;
-    top: -1px;
-}
-QTabBar::tab {
-    min-width: 76px;
-    color: #667386;
-    background: transparent;
-    border: 1px solid transparent;
-    border-bottom: 2px solid transparent;
-    padding: 8px 17px;
-    margin-right: 2px;
-}
-QTabBar::tab:hover:!selected {
-    color: #245f9b;
-    background: #edf4fb;
-    border-radius: 6px 6px 0 0;
-}
-QTabBar::tab:selected {
-    color: #174f87;
-    background: #ffffff;
-    border: 1px solid #d7dee8;
-    border-bottom: 2px solid #2374c6;
-    border-radius: 6px 6px 0 0;
-    font-weight: 600;
-}
-QDockWidget {
-    color: #202936;
-}
-QDockWidget::title {
-    color: #2b3b4f;
-    background: #eaf0f7;
-    border-bottom: 1px solid #d2dbe6;
-    padding: 7px 9px;
-    font-weight: 600;
-}
-
-/* Data views */
-QTableView, QTableWidget, QTreeView, QListView {
-    alternate-background-color: #f7f9fc;
-    background: #ffffff;
-    border: 1px solid #d5dde7;
-    border-radius: 6px;
-    gridline-color: #e6eaf0;
-    outline: none;
-}
-QTableView::item, QTableWidget::item, QTreeView::item, QListView::item {
-    padding: 3px 5px;
-}
-QTableView::item:hover, QTableWidget::item:hover,
-QTreeView::item:hover, QListView::item:hover {
-    background: #edf5fd;
-}
-QTableView::item:selected, QTableWidget::item:selected,
-QTreeView::item:selected, QListView::item:selected {
-    color: #173b61;
-    background: #d9eafb;
-}
-QHeaderView::section {
-    color: #344358;
-    background: #eef2f7;
-    border: none;
-    border-right: 1px solid #dde3eb;
-    border-bottom: 1px solid #d5dde7;
-    padding: 5px 7px;
-    font-weight: 600;
-}
-QTableCornerButton::section {
-    background: #eef2f7;
-    border: none;
-    border-right: 1px solid #dde3eb;
-    border-bottom: 1px solid #d5dde7;
-}
-
-/* Feedback and structure */
-QProgressBar {
-    min-height: 17px;
-    color: #344358;
-    background: #e8edf3;
-    border: 1px solid #d2dae5;
-    border-radius: 6px;
-    text-align: center;
-    font-size: 11px;
-}
-QProgressBar::chunk {
-    background: #2c7bc9;
-    border-radius: 5px;
-}
-QStatusBar {
-    color: #536174;
-    background: #edf1f6;
-    border-top: 1px solid #d5dce6;
-    font-size: 11px;
-}
-QSplitter::handle {
-    background: #e1e6ed;
-}
-QSplitter::handle:hover {
-    background: #b7cbe0;
-}
-
-/* Scroll bars */
-QScrollBar:vertical {
-    width: 11px;
-    margin: 2px;
-    background: transparent;
-}
-QScrollBar::handle:vertical {
-    min-height: 28px;
-    background: #c4ceda;
-    border-radius: 5px;
-}
-QScrollBar::handle:vertical:hover { background: #9eacbd; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-    height: 0px;
-    background: transparent;
-}
-QScrollBar:horizontal {
-    height: 11px;
-    margin: 2px;
-    background: transparent;
-}
-QScrollBar::handle:horizontal {
-    min-width: 28px;
-    background: #c4ceda;
-    border-radius: 5px;
-}
-QScrollBar::handle:horizontal:hover { background: #9eacbd; }
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
-QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-    width: 0px;
-    background: transparent;
-}
-"""
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
@@ -451,7 +178,7 @@ class MainWindow(QMainWindow):
 
     notification_configured = Signal(str)
 
-    def __init__(self, parent: Optional[QWidget] = None, notifier=None):
+    def __init__(self, parent: Optional[QWidget] = None, notifier=None, watch_styles=False):
         super().__init__(parent)
         self._ntfy_notifier = notifier if notifier is not None else NtfyNotifier()
         self.setWindowTitle("SpectralSweep — PySide6")
@@ -460,8 +187,10 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app:
             app.setStyle("Fusion")
+            self._application_style = application_style(app)
             if not app.styleSheet():
-                app.setStyleSheet(_STYLESHEET)
+                self._application_style.reload()
+            self._application_style.set_watching(watch_styles)
             app_font = QFont("Segoe UI", _valid_font_size(cfg.font_size_pt))
             app.setFont(app_font)
             screen = app.primaryScreen()
@@ -491,6 +220,7 @@ class MainWindow(QMainWindow):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("Ready")
+        self._initialize_style_actions()
 
         self._lf6.connected.connect(
             lambda _: self._status.showMessage("Spectrometer connected")
@@ -601,6 +331,8 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._spectrum, "Spectrum")
         self._calibration = self._spectrum.create_calibration_page()
         self._tabs.addTab(self._calibration, "Calibration")
+        # The editor remains available for development, outside normal navigation.
+        self._tabs.setTabVisible(self._tabs.indexOf(self._calibration), False)
 
         # Settings
         self._settings = SettingsPanel(lf6_ctrl=self._lf6)
@@ -647,6 +379,9 @@ class MainWindow(QMainWindow):
         if current_id:
             self._sample_store.migrate_legacy(current_id, legacy_state)
         self._restore_session()
+        # A saved active Calibration tab must not reveal an unfinished page.
+        if self._tabs.currentWidget() is self._calibration:
+            self._tabs.setCurrentWidget(self._spectrum)
 
         # User input schedules a debounced observation.  A slow fallback poll
         # catches programmatic/dynamic-widget changes without walking every
@@ -670,6 +405,89 @@ class MainWindow(QMainWindow):
             app.installEventFilter(self._session_change_watcher)
         self._tabs.currentChanged.connect(self._schedule_session_observation)
         self._session_poll_timer.start()
+
+    def _initialize_style_actions(self) -> None:
+        # Keep the Python wrappers alive too (PySide6 menu-bar ownership).
+        self._view_menu_bar = self.menuBar()
+        self._view_menu = self._view_menu_bar.addMenu("&View")
+        self._view_menu_action = self._view_menu.menuAction()
+        menu = self._view_menu
+        reload_action = menu.addAction("Reload styles")
+        reload_action.setObjectName("ReloadApplicationStyles")
+        reload_action.setShortcut("Ctrl+Alt+R")
+        reload_action.setStatusTip("Apply the current application.qss without restarting")
+        reload_action.triggered.connect(self._application_style.reload)
+        self._application_style.reloaded.connect(self._styles_reloaded)
+        self._application_style.failed.connect(self._styles_failed)
+        if self._application_style.last_error:
+            self._styles_failed(self._application_style.last_error)
+        page_reload = menu.addAction("Reload Spectrum page")
+        page_reload.setObjectName("ReloadSpectrumPage")
+        page_reload.setShortcut("Ctrl+Alt+U")
+        page_reload.setStatusTip("Load Spectrum UI changes while idle; keep instrument connections and spectra")
+        page_reload.triggered.connect(self._reload_spectrum_page)
+        self._show_calibration_action = menu.addAction("Show experimental Calibration page")
+        self._show_calibration_action.setObjectName("ShowExperimentalCalibration")
+        self._show_calibration_action.setCheckable(True)
+        self._show_calibration_action.toggled.connect(self._set_calibration_visible)
+        preview_action = menu.addAction("Open Spectrum preview…")
+        preview_action.setObjectName("OpenSpectrumPreview")
+        preview_action.setStatusTip("Open a separate window with simulated data and isolated settings")
+        preview_action.triggered.connect(self._open_spectrum_preview)
+
+    @Slot()
+    def _reload_spectrum_page(self) -> None:
+        if getattr(self, "_page_reload_in_progress", False):
+            return
+        if self._acquisition_active() or any(
+            bool(getattr(panel, "_metadata_finalizing", False))
+            for panel in self._session_panels.values()
+        ):
+            self._status.showMessage("Wait for acquisition and saving to finish before reloading Spectrum", 10000)
+            return
+        from ui.page_reload import reload_spectrum_page
+        self._page_reload_in_progress = True
+        try:
+            reload_spectrum_page(self)
+        except Exception as exc:
+            self._status.showMessage(f"Spectrum unchanged — reload failed: {type(exc).__name__}: {exc}", 15000)
+        else:
+            self._status.showMessage("Spectrum page reloaded — connections and data preserved", 8000)
+        finally:
+            self._page_reload_in_progress = False
+
+    @Slot(bool)
+    def _set_calibration_visible(self, visible: bool) -> None:
+        if not visible:
+            from ui.spectrum_reload_state import spectrum_reload_block_reason
+            if spectrum_reload_block_reason(self._spectrum):
+                self._show_calibration_action.blockSignals(True)
+                self._show_calibration_action.setChecked(True)
+                self._show_calibration_action.blockSignals(False)
+                self._status.showMessage("Wait for acquisition/calibration to finish before hiding Calibration", 8000)
+                return
+            if self._tabs.currentWidget() is self._calibration:
+                self._tabs.setCurrentWidget(self._spectrum)
+        self._tabs.setTabVisible(self._tabs.indexOf(self._calibration), visible)
+        if visible:
+            self._tabs.setCurrentWidget(self._calibration)
+            self._status.showMessage("Experimental Calibration page — under development", 8000)
+
+    @Slot(str)
+    def _styles_reloaded(self, _path: str) -> None:
+        self._status.showMessage("Styles reloaded", 4000)
+
+    @Slot(str)
+    def _styles_failed(self, reason: str) -> None:
+        self._status.showMessage(f"Styles unchanged: {reason}", 10000)
+
+    @Slot()
+    def _open_spectrum_preview(self) -> None:
+        from app.ui_preview import launch_preview
+        try:
+            launch_preview()
+        except OSError as exc:
+            self._status.showMessage(f"Could not open Spectrum preview: {exc}", 10000)
 
     # ── geometry persistence ──────────────────────────────────────────────────
 
@@ -819,14 +637,22 @@ class MainWindow(QMainWindow):
         sample_layout = QVBoxLayout(sample_panel)
         sample_layout.setContentsMargins(0, 0, 0, 0)
         sample_layout.setSpacing(4)
+        self._sample_summary = QWidget()
+        self._sample_summary.setObjectName("SidebarSampleSummary")
+        summary_layout = QVBoxLayout(self._sample_summary)
+        summary_layout.setContentsMargins(0, 0, 0, 4)
+        summary_layout.setSpacing(3)
         row = QHBoxLayout()
         row.addWidget(QLabel("Sample ID"))
         self._sample_selector = QComboBox()
         self._sample_selector.setEditable(True)
         self._sample_selector.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._sample_selector.setPlaceholderText("Select or enter Sample ID")
+        self._sample_selector.setAccessibleName("Current sample ID")
+        self._sample_selector.setMinimumContentsLength(10)
+        self._sample_selector.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         row.addWidget(self._sample_selector, 1)
-        sample_layout.addLayout(row)
+        summary_layout.addLayout(row)
         self._sample_filter = QLineEdit()
         self._sample_filter.setPlaceholderText("Search saved samples")
         self._sample_filter.setClearButtonEnabled(True)
@@ -840,7 +666,8 @@ class MainWindow(QMainWindow):
         actions.addWidget(self._sample_save_btn)
         sample_layout.addLayout(actions)
         self._sample_save_status = QLabel("Not saved")
-        sample_layout.addWidget(self._sample_save_status)
+        self._sample_save_status.setWordWrap(True)
+        summary_layout.addWidget(self._sample_save_status)
         self._run_history_btn = QPushButton("Open run history")
         self._run_history_btn.setToolTip("Open completed and failed acquisition records.")
         sample_layout.addWidget(self._run_history_btn)
@@ -940,21 +767,25 @@ class MainWindow(QMainWindow):
         """Host instruments and sample settings in one responsive sidebar."""
         sidebar = QWidget()
         sidebar.setObjectName("SharedInstrumentHistorySidebar")
-        sidebar.setMinimumWidth(0)
+        # The splitter can still collapse this pane to zero. While expanded,
+        # keep the manual actions inside the viewport instead of clipping them.
+        sidebar.setMinimumWidth(300)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(4, 4, 4, 4)
         sidebar_layout.setSpacing(4)
 
         header = QHBoxLayout()
-        title = QLabel("Instruments & sample settings")
-        title.setStyleSheet("font-weight: 700; color: #29384c;")
-        self._sidebar_hide = QPushButton("Hide sidebar")
-        self._sidebar_hide.setToolTip("Collapse the instrument and experiment-history sidebar.")
+        title = QLabel("Instruments")
+        title.setProperty("fluentRole", "sectionTitle")
+        self._sidebar_hide = QPushButton("Hide")
+        self._sidebar_hide.setAccessibleName("Hide instrument sidebar")
+        self._sidebar_hide.setToolTip("Hide sidebar (Ctrl+Alt+B). Restore it from View or the same shortcut.")
         self._sidebar_hide.clicked.connect(self._toggle_sidebar)
         header.addWidget(title)
         header.addStretch(1)
         header.addWidget(self._sidebar_hide)
         sidebar_layout.addLayout(header)
+        sidebar_layout.addWidget(self._sample_summary)
 
         inner = QSplitter(Qt.Orientation.Vertical)
         inner.setObjectName("SidebarContentSplitter")
@@ -1001,14 +832,13 @@ class MainWindow(QMainWindow):
         self._sidebar_splitter.splitterMoved.connect(self._remember_sidebar_width)
         self.setCentralWidget(self._sidebar_splitter)
 
-        toolbar = QToolBar("Layout", self)
-        toolbar.setObjectName("LayoutToolbar")
-        toolbar.setMovable(False)
         self._sidebar_toggle_action = QAction("Hide sidebar", self)
-        self._sidebar_toggle_action.setToolTip("Show or hide the shared instruments and history sidebar.")
+        self._sidebar_toggle_action.setObjectName("ToggleInstrumentSidebar")
+        self._sidebar_toggle_action.setShortcut("Ctrl+Alt+B")
+        self._sidebar_toggle_action.setToolTip("Show or hide instruments and sample settings.")
         self._sidebar_toggle_action.triggered.connect(self._toggle_sidebar)
-        toolbar.addAction(self._sidebar_toggle_action)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        self._view_menu.addSeparator()
+        self._view_menu.addAction(self._sidebar_toggle_action)
 
     def _toggle_history(self) -> None:
         self._set_history_collapsed(not getattr(self, "_history_collapsed", False))
@@ -1320,7 +1150,10 @@ class MainWindow(QMainWindow):
         wanted = state.get("active_tab", "dual_gate")
         for widget, tab_id in self._tab_ids.items():
             if tab_id == wanted:
-                self._tabs.setCurrentWidget(widget)
+                if self._tabs.isTabVisible(self._tabs.indexOf(widget)):
+                    self._tabs.setCurrentWidget(widget)
+                elif tab_id == "calibration":
+                    self._tabs.setCurrentWidget(self._spectrum)
                 break
 
     @staticmethod
@@ -1396,6 +1229,10 @@ class MainWindow(QMainWindow):
             })
         if sample_id:
             self._sample_id_binder.commit(sample_id)
+        spectrum = getattr(self, "_spectrum", None)
+        if spectrum is not None:
+            panels = profile.get("panels", {}) if profile is not None else cfg.session.panels
+            spectrum.restore_sample_references(sample_id, panels.get("spectrum", {}))
         self._refresh_sample_selector()
 
     def _acquisition_active(self) -> bool:
@@ -1444,6 +1281,10 @@ class MainWindow(QMainWindow):
             # Without a saved profile, leave the current controls and drafts
             # intact; persisting below copies them under the new Sample ID.
             self._sample_id_binder.commit(target)
+            spectrum = getattr(self, "_spectrum", None)
+            if spectrum is not None:
+                panels = profile.get("panels", {}) if profile is not None else {}
+                spectrum.restore_sample_references(target, panels.get("spectrum", {}))
             self._refresh_sample_selector()
             self._refresh_history()
         finally:

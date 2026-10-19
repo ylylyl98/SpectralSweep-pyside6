@@ -68,6 +68,7 @@ from utils.config import cfg
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.power_reading import power_correction_factor
+from ui.workflow_sections import compact_form_rows, divide_grid_fields
 
 pg.setConfigOption("background", "w")
 pg.setConfigOption("foreground", "k")
@@ -427,7 +428,7 @@ class _DisplayWidget(QWidget):
         self._imgview = pg.ImageView(view=pg.PlotItem())
         self._imgview.ui.roiBtn.hide()
         self._imgview.ui.menuBtn.hide()
-        self._imgview.setMinimumHeight(520)
+        self._imgview.setMinimumHeight(240)
         self._imgview.getView().setAspectLocked(False)
         self._imgview.view.setLabel("bottom", "Wavelength", units="nm")
         self._imgview.view.setLabel("left", "Y Pixel")
@@ -640,6 +641,7 @@ class _BRCWidget(QWidget):
         controls.addWidget(self._save_csv_btn, 6, 3)
         controls.addWidget(self._save_png_btn, 6, 4)
         controls.addWidget(self._auto_color_chk, 6, 1)
+        divide_grid_fields(controls, 2, range(2, 6))
         root.addLayout(controls)
         plots = QHBoxLayout()
         self._left_plot = pg.PlotWidget()
@@ -989,6 +991,7 @@ class _FRCWidget(QWidget):
         controls.addWidget(self._compute_btn, 6, 2)
         controls.addWidget(self._save_csv_btn, 6, 3)
         controls.addWidget(self._save_png_btn, 6, 4)
+        divide_grid_fields(controls, 2, range(2, 6))
         root.addLayout(controls)
         self._image = pg.ImageView(view=pg.PlotItem())
         self._image.ui.roiBtn.hide()
@@ -1292,6 +1295,7 @@ class BFPPanel(QWidget):
         root.setContentsMargins(4, 4, 4, 4)
         self._splitter = QSplitter(Qt.Horizontal)
         splitter = self._splitter
+        splitter.setChildrenCollapsible(False)
         root.addWidget(splitter, stretch=1)
         left = QWidget()
         left_lay = QVBoxLayout(left)
@@ -1304,8 +1308,8 @@ class BFPPanel(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         settings_scroll.setMinimumSize(0, 0)
-        settings_scroll.setMinimumWidth(240)
-        settings_scroll.setMaximumWidth(360)
+        settings_scroll.setMinimumWidth(390)
+        settings_scroll.setMaximumWidth(440)
         settings_scroll.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored
         )
@@ -1345,6 +1349,8 @@ class BFPPanel(QWidget):
         self._stem_lbl = QLabel("")
         self._stem_lbl.setStyleSheet("color: gray; font-size: 10px;")
         name_form.addRow("Preview:", self._stem_lbl)
+        compact_form_rows(name_form, (self._point_edit, self._exp_type_combo), labels_above=True)
+        compact_form_rows(name_form, (self._run_idx_spin, self._auto_inc_chk))
         left_lay.addWidget(name_grp)
 
         acq_grp = QGroupBox("Acquisition Settings")
@@ -1378,6 +1384,8 @@ class BFPPanel(QWidget):
         acq_form.addRow("", self._auto_apply_chk)
         acq_form.addRow("", self._warmup_chk)
         acq_form.addRow("Est. time:", self._est_lbl)
+        compact_form_rows(acq_form, (self._center_spin, self._exp_spin), labels_above=True)
+        compact_form_rows(acq_form, (self._epf_spin, self._repeat_spin))
         left_lay.addWidget(acq_grp)
 
         btn_row = QHBoxLayout()
@@ -1386,7 +1394,6 @@ class BFPPanel(QWidget):
         self._clear_btn = QPushButton("Clear")
         btn_row.addWidget(self._acquire_btn)
         btn_row.addWidget(self._clear_btn)
-        left_lay.addLayout(btn_row)
 
         save_row = QHBoxLayout()
         self._save_csv_btn = QPushButton("Save CSV")
@@ -1395,7 +1402,6 @@ class BFPPanel(QWidget):
         self._save_png_btn.setEnabled(False)
         save_row.addWidget(self._save_csv_btn)
         save_row.addWidget(self._save_png_btn)
-        left_lay.addLayout(save_row)
 
         load_row = QHBoxLayout()
         self._use_sample_btn = QPushButton("Use as RC Sample")
@@ -1408,7 +1414,6 @@ class BFPPanel(QWidget):
 
         self._status_lbl = QLabel("Disconnected")
         self._status_lbl.setStyleSheet("color: gray;")
-        left_lay.addWidget(self._status_lbl)
 
         self._bg_panel = _BgPanel()
         left_lay.addWidget(self._bg_panel)
@@ -1418,15 +1423,27 @@ class BFPPanel(QWidget):
         left_lay.addStretch()
 
         self._tabs = QTabWidget()
+        self._tabs.setMinimumWidth(320)
         self._display = _DisplayWidget()
         self._brc = _BRCWidget()
         self._frc = _FRCWidget()
         self._tabs.addTab(self._display, "Acquired Data")
-        self._tabs.addTab(self._brc, "Binned RC")
-        self._tabs.addTab(self._frc, "Full-Sensor RC")
+        for widget, title in ((self._brc, "Binned RC"), (self._frc, "Full-Sensor RC")):
+            analysis_scroll = QScrollArea()
+            analysis_scroll.setWidgetResizable(True)
+            analysis_scroll.setWidget(widget)
+            self._tabs.addTab(analysis_scroll, title)
         splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        splitter.setSizes([390, 700])
+        # Acquisition and saving stay reachable while browsing long settings.
+        footer = QHBoxLayout()
+        footer.addLayout(btn_row)
+        footer.addLayout(save_row)
+        footer.addStretch(1)
+        footer.addWidget(self._status_lbl)
+        root.addLayout(footer)
 
     def _wire(self):
         self._acquire_btn.clicked.connect(self._on_acquire)
@@ -1711,7 +1728,9 @@ class BFPPanel(QWidget):
         sizes = state.get("splitter_sizes")
         if isinstance(sizes, list) and len(sizes) == 2:
             try:
-                self._splitter.setSizes([max(0, int(v)) for v in sizes])
+                widths = [int(v) for v in sizes]
+                # Older sessions can contain a collapsed display pane.
+                self._splitter.setSizes(widths if all(v > 0 for v in widths) else [390, 700])
             except (TypeError, ValueError):
                 pass
         self._refresh_preview()

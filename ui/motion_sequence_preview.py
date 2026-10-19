@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from ui.table_layout import fit_table_columns
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
@@ -77,13 +78,10 @@ class MotionSequencePreviewDialog(QDialog):
         self._table.setAlternatingRowColors(True)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setMinimumHeight(260)
-        header = self._table.horizontalHeader()
-        header.setStretchLastSection(False)
-        for column in range(len(self.COLUMNS)):
-            header.setSectionResizeMode(column, header.ResizeMode.Interactive)
-        for column, width in ((0, 42), (1, 70), (2, 76), (3, 105), (4, 68), (5, 68),
-                              (6, 72), (7, 72), (8, 78), (9, 68), (10, 68), (11, 62), (12, 62)):
-            self._table.setColumnWidth(column, width)
+        self._table.horizontalHeaderItem(1).setText("Seq.")
+        self._table.horizontalHeaderItem(2).setText("Cond.\n#")
+        self._table.horizontalHeaderItem(2).setToolTip("Condition number")
+        fit_table_columns(self._table, (40, 46, 54, 100, 64, 64, 64, 64, 64, 58, 58, 56, 56))
         self._table.itemChanged.connect(self._table_item_changed)
         self.table = self._table
         root.addWidget(self._table, 1)

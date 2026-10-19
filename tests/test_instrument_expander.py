@@ -4,7 +4,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QObject, QEvent
 from PySide6.QtWidgets import QApplication, QWidget
-from ui.instrument_panel import _Expander
+from ui.instrument_panel import _Expander, _OptionalStatusLabel
 from ui.megasweep_panel import _CollapsibleSection
 from ui.power_sweep_panel import PowerSweepPanel
 
@@ -61,6 +61,24 @@ class InstrumentExpanderTests(unittest.TestCase):
         finally:
             section.close()
             section.deleteLater()
+
+    def test_empty_temperature_detail_collapses_and_new_warning_reappears(self):
+        parent = QWidget()
+        label = _OptionalStatusLabel()
+        label.setParent(parent)
+        parent.show()
+        try:
+            self.assertFalse(label.isVisible())
+            label.setText("Temperature read failed")
+            self.assertTrue(label.isVisible())
+            self.assertEqual(label.text(), "Temperature read failed")
+            label.clear()
+            self.assertFalse(label.isVisible())
+            label.setText("Cooler on · -80 °C")
+            self.assertTrue(label.isVisible())
+        finally:
+            parent.close()
+            parent.deleteLater()
 
     def test_megasweep_content_is_parented_before_becoming_visible(self):
         shows = _WindowShows()

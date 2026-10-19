@@ -14,6 +14,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEventLoop, QObject, QTimer, Qt, Signal
+from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QLabel, QGroupBox, QHeaderView, QScrollArea, QSizePolicy, QStatusBar, QTableWidget, QTabWidget, QWidget
 
@@ -571,11 +572,6 @@ class MCD2100PanelTests(unittest.TestCase):
         )
         self.assertTrue(panel._condition_table.isColumnHidden(8))
         self.assertTrue(panel._condition_table.isColumnHidden(9))
-        self.assertEqual(
-            panel._condition_table.horizontalHeader().sectionResizeMode(2),
-            QHeaderView.ResizeMode.Stretch,
-        )
-        self.assertLessEqual(panel._condition_table.columnWidth(7), 90)
 
         panel._gate_entry_a.setText("1,2")
         panel._gate_entry_b.setText("3")
@@ -627,12 +623,28 @@ class MCD2100PanelTests(unittest.TestCase):
 
     def test_compact_layout_activity_feedback_and_collapsed_error_area(self):
         panel, _, _ = self.make_panel()
+        # Windows' offscreen plugin does not discover the installed system fonts.
+        # Use real glyph metrics for the clipping assertion, as in the desktop app.
+        font_path = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", "segoeui.ttf")
+        if os.path.isfile(font_path):
+            font_id = QFontDatabase.addApplicationFont(font_path)
+            families = QFontDatabase.applicationFontFamilies(font_id)
+            self.assertTrue(families)
+            panel.setFont(QFont(families[0], 9))
         panel.resize(1100, 700)
         panel.show()
         self.app.processEvents()
         self.assertTrue(panel.error_display.isHidden())
         self.assertLessEqual(panel._sample_group.height(), 70)
-        self.assertLess(abs(panel._sweep_group.y() - panel._rotation_group.y()), 20)
+        self.assertGreater(panel._rotation_group.y(), panel._sweep_group.geometry().bottom())
+        self.assertLessEqual(panel._settings_scroll.widget().minimumSizeHint().width(),
+                             panel._settings_scroll.viewport().width())
+        for value in (0, panel._settings_scroll.verticalScrollBar().maximum()):
+            panel._settings_scroll.verticalScrollBar().setValue(value)
+            self.app.processEvents()
+            self.assertTrue(panel.start_btn.isVisibleTo(panel))
+            self.assertTrue(panel.stop_btn.isVisibleTo(panel))
+            self.assertFalse(panel._settings_scroll.isAncestorOf(panel.stop_btn))
 
         panel.worker = FakeWorker()
         panel._on_phase("Gate settling after first gate ramp: 5 s")

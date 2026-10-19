@@ -67,6 +67,20 @@ class BFPMetadataTests(unittest.TestCase):
         )
         self.assertLess(panel.minimumSizeHint().height(), 950)
 
+    def test_restoring_collapsed_display_recovers_acquired_data_tabs(self):
+        panel = BFPPanel()
+        self.addCleanup(panel.close)
+        panel.resize(1000, 750)
+        panel.restore_session_state({"splitter_sizes": [360, 0]})
+        panel.show()
+        self.app.processEvents()
+        self.assertGreaterEqual(panel._splitter.sizes()[1], 320)
+        self.assertTrue(panel._tabs.isVisible())
+        # Dragging the separator all the way across must not hide the plot again.
+        panel._splitter.setSizes([1000, 0])
+        self.app.processEvents()
+        self.assertGreaterEqual(panel._splitter.sizes()[1], 320)
+
     def test_binned_png_only_gets_sidecar_and_csv_png_share_one_id(self):
         widget = _BRCWidget()
         widget._sample_edit.setText(str(self.root / "sample.csv"))

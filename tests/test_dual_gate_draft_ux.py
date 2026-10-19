@@ -32,6 +32,20 @@ class DraftUXTests(unittest.TestCase):
     def cell(self, name):
         return self.widget._batch_table.item(0, panel.BATCH_SCHEMA.index(name))
 
+    def test_customized_loop_values_stay_readable_in_compact_pane(self):
+        widget = self.widget
+        widget._mode_combo.setCurrentText("Customized")
+        widget.resize(1000, 750)
+        widget.show()
+        self.app.processEvents()
+        widget._splitter.setSizes([520, 460])
+        self.app.processEvents()
+        self.assertFalse(widget._loop_table.isColumnHidden(3))
+        self.assertGreaterEqual(widget._loop_table.columnWidth(2), 120)
+        for table in (widget._loop_table, widget._batch_table):
+            self.assertEqual(table.horizontalScrollBar().maximum(), 0)
+            self.assertLessEqual(table.horizontalHeader().length(), table.viewport().width())
+
     def test_invalid_numeric_edit_preserves_applied_plan_and_can_be_discarded(self):
         widget = self.widget
         applied = deepcopy(widget._acquisition_schedule)

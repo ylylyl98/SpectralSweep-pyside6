@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Optional
 from ui.andor_controls_widget import temperature_summary
 from ui.mff101_section import MFF101Section
+from ui.workflow_sections import CompactRow, inline_divider
 
 from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
@@ -112,8 +113,13 @@ class _ESP32ImagingStageSection(QWidget):
         self._fine_mm = QDoubleSpinBox(); self._fine_mm.setRange(.005, 10); self._fine_mm.setDecimals(3); self._fine_mm.setValue(float(cfg.imaging_stage.fine_mm))
         self._medium_mm = QDoubleSpinBox(); self._medium_mm.setRange(.005, 10); self._medium_mm.setDecimals(3); self._medium_mm.setValue(float(cfg.imaging_stage.medium_mm))
         self._coarse_mm = QDoubleSpinBox(); self._coarse_mm.setRange(.005, 10); self._coarse_mm.setDecimals(3); self._coarse_mm.setValue(float(cfg.imaging_stage.coarse_mm))
-        preset_cfg = QHBoxLayout(); preset_cfg.addWidget(self._fine_mm); preset_cfg.addWidget(self._medium_mm); preset_cfg.addWidget(self._coarse_mm); adv.addRow("Fine / Medium / Coarse mm", preset_cfg)
-        self._slow_hz = QSpinBox(); self._slow_hz.setRange(100, 2000); self._slow_hz.setValue(int(cfg.imaging_stage.slow_hz)); self._normal_hz = QSpinBox(); self._normal_hz.setRange(100, 2000); self._normal_hz.setValue(int(cfg.imaging_stage.normal_hz)); speed_cfg = QHBoxLayout(); speed_cfg.addWidget(self._slow_hz); speed_cfg.addWidget(self._normal_hz); adv.addRow("Slow / Normal Hz", speed_cfg)
+        adv.addRow(CompactRow([
+            ("Fine (mm)", self._fine_mm), ("Medium (mm)", self._medium_mm),
+            ("Coarse (mm)", self._coarse_mm),
+        ], labels_above=True))
+        self._slow_hz = QSpinBox(); self._slow_hz.setRange(100, 2000); self._slow_hz.setValue(int(cfg.imaging_stage.slow_hz))
+        self._normal_hz = QSpinBox(); self._normal_hz.setRange(100, 2000); self._normal_hz.setValue(int(cfg.imaging_stage.normal_hz))
+        adv.addRow(CompactRow([("Slow (Hz)", self._slow_hz), ("Normal (Hz)", self._normal_hz)]))
         self._maximum = QDoubleSpinBox(); self._maximum.setRange(.001, 100); self._maximum.setDecimals(3); self._maximum.setSuffix(" mm"); self._maximum.valueChanged.connect(lambda _: setattr(self, "_maximum_dirty", True))
         self._apply_max = QPushButton("Apply maximum"); self._apply_max.clicked.connect(lambda: self._ctrl.set_maximum(self._maximum.value())); maxrow = QHBoxLayout(); maxrow.addWidget(self._maximum); maxrow.addWidget(self._apply_max); adv.addRow("Maximum left from imaging end", maxrow)
         self._save_max = QPushButton("Save current as maximum"); self._save_max.clicked.connect(getattr(self._ctrl, "save_current_as_maximum", lambda: None)); adv.addRow(self._save_max)
@@ -376,6 +382,22 @@ def _set_sidebar_action_button_width(button: QPushButton, *, compact: bool = Fal
 
 # ── Collapsible expander ──────────────────────────────────────────────────────
 
+class _OptionalStatusLabel(QLabel):
+    """Do not reserve space for empty readbacks; show every new message."""
+
+    def __init__(self):
+        super().__init__("")
+        self.setWordWrap(True)
+        self.hide()
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        self.setVisible(bool(text))
+
+    def clear(self) -> None:
+        self.setText("")
+
+
 class _Expander(QWidget):
     """
     Collapsible section wrapper.
@@ -393,7 +415,9 @@ class _Expander(QWidget):
         lay.setSpacing(0)
 
         self._btn = QToolButton()
-        self._btn.setText(f"  {title}")
+        self._btn.setText(title)
+        self._btn.setAccessibleName(title)
+        self._btn.setProperty("fluentRole", "sectionHeader")
         self._btn.setCheckable(True)
         self._btn.setChecked(not collapsed)
         self._btn.setArrowType(
@@ -401,33 +425,11 @@ class _Expander(QWidget):
         )
         self._btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self._btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._btn.setStyleSheet(
-            "QToolButton {"
-            "  font-weight: 600;"
-            "  font-size: 11px;"
-            "  border: 1px solid #c8c8c8;"
-            "  border-radius: 4px;"
-            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "    stop:0 #f0f0f0, stop:1 #e4e4e4);"
-            "  padding: 5px 6px;"
-            "  text-align: left;"
-            "  color: #2a2a2a;"
-            "}"
-            "QToolButton:hover {"
-            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "    stop:0 #f8f8f8, stop:1 #eeeeee);"
-            "  border-color: #a8a8c0;"
-            "}"
-            "QToolButton:checked {"
-            "  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            "    stop:0 #e8e8f0, stop:1 #d8d8ec);"
-            "  border-color: #a8a8c0;"
-            "}"
-        )
+        self._btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self._content = content
         # Left indent so content feels nested under the header
-        self._content.setContentsMargins(8, 2, 0, 4)
+        self._content.setContentsMargins(2, 2, 0, 4)
 
         lay.addWidget(self._btn)
         lay.addWidget(self._content)
@@ -474,6 +476,9 @@ class _LF6Section(QWidget):
     def _build(self):
         lay = QVBoxLayout(self)
         lay.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.setObjectName("SpectrumConnectionSection")
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
 
         backend_row = QHBoxLayout()
         lay.addWidget(QLabel("Measurement setup:"))
@@ -495,10 +500,13 @@ class _LF6Section(QWidget):
         lay.addLayout(backend_row)
         self._setup_help = QLabel()
         self._setup_help.setWordWrap(True)
-        lay.addWidget(self._setup_help)
+        self._setup_summary = QLabel()
+        self._setup_summary.setWordWrap(True)
+        lay.addWidget(self._setup_summary)
         self._advanced_content = QWidget()
         advanced_layout = QVBoxLayout(self._advanced_content)
         advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.addWidget(self._setup_help)
 
         self._route_controls = QWidget()
         route_layout = QFormLayout(self._route_controls)
@@ -572,7 +580,10 @@ class _LF6Section(QWidget):
         self._connections_status = QLabel("Online: none")
         self._connections_status.setWordWrap(True)
         self._connections_status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        lay.addWidget(self._connections_status)
+        advanced_layout.addWidget(self._connections_status)
+        self._connection_summary = QLabel()
+        self._connection_summary.setWordWrap(True)
+        lay.addWidget(self._connection_summary)
         lay.addWidget(self._advanced_expander)
 
         detector_row = QHBoxLayout()
@@ -588,10 +599,8 @@ class _LF6Section(QWidget):
         detector_row.addWidget(self._temperature_refresh)
         detector_row.addWidget(self._cooler)
         lay.addLayout(detector_row)
-        self._temperature_detail = QLabel("")
-        self._temperature_detail.setWordWrap(True)
-        self._temperature_monitor = QLabel("")
-        self._temperature_monitor.setWordWrap(True)
+        self._temperature_detail = _OptionalStatusLabel()
+        self._temperature_monitor = _OptionalStatusLabel()
         lay.addWidget(self._temperature_detail)
         lay.addWidget(self._temperature_monitor)
         self._acquisition_condition = QLabel()
@@ -670,6 +679,7 @@ class _LF6Section(QWidget):
         self._andor_vbin.setRange(1, 32)
         binning_row.addWidget(QLabel("H"))
         binning_row.addWidget(self._andor_hbin)
+        binning_row.addWidget(inline_divider())
         binning_row.addWidget(QLabel("V"))
         binning_row.addWidget(self._andor_vbin)
         form.addRow("Full-sensor binning:", binning_row)
@@ -808,11 +818,12 @@ class _LF6Section(QWidget):
             not locked and 'winspec_ingaas' not in online
             and self._winspec_acquisition_backend.currentData() == 'winspec')
         self._backend.setEnabled(not locked)
-        self._connect_btn.setText("Switch to this setup" if selected in online else "Connect required devices")
+        self._connect_btn.setText("Use setup" if selected in online else "Connect")
+        self._connect_btn.setToolTip("Switch to this setup" if selected in online else "Connect the devices required by the selected measurement setup")
         self._connect_btn.setEnabled(not locked and (not connected or selected != active))
         self._mock_chk.setEnabled(not locked and selected not in online)
         self._disconnect_btn.setEnabled(not locked and connected)
-        self._disconnect_btn.setText("Disconnect WinSpec" if active == "winspec_ingaas" else "Disconnect LightField" if active == "lightfield" else "Disconnect Andor")
+        self._disconnect_btn.setText("Disconnect")
         self._disconnect_btn.setToolTip("Disconnect the current device. For Andor, this closes both camera and spectrograph after the temperature check. Use Spectrum → Andor controls to disconnect only Shamrock.")
         labels = {self._backend.itemData(i): self._backend.itemText(i) for i in range(self._backend.count())}
         simulation = (str((getattr(self._ctrl, 'identity', {}) or {}).get('backend', '')).startswith('mock_')
@@ -829,11 +840,22 @@ class _LF6Section(QWidget):
         self._connections_status.setText('\n'.join(
             f'{name}: {"Connected" if key in online else "Not connected"}' for name, key in requirements)
             + '\nActive setup: ' + (labels.get(active, active) if connected else 'none'))
+        short_labels = {'lightfield': 'LightField / PIXIS', 'winspec_ingaas': 'WinSpec InGaAs',
+                        'andor_si': 'Andor Si', 'andor_ingaas': 'Andor InGaAs'}
+        self._setup_summary.setText(
+            ('Simulation · ' if simulation else '') +
+            (f'Exit: {route}' if selected in ('lightfield', 'winspec_ingaas') else 'Shamrock + Andor detector'))
+        summary = ['Active: ' + (short_labels.get(active, active) if connected else 'none')]
+        if online:
+            summary.append('Online: ' + ', '.join(short_labels.get(key, key) for key in online))
         for key, snapshot in self._background_temperatures.items():
             if key in online and key != active:
                 detail = ("temperature read failed" if "error" in snapshot else
                           f"{float(snapshot['temperature_c']):.1f} °C · Cooler {'on' if snapshot.get('cooler_on') else 'off'}")
                 self._connections_status.setText(self._connections_status.text() + f"\n{labels.get(key, key)}: {detail}")
+                summary.append(f"{short_labels.get(key, key)}: {detail}")
+        self._connection_summary.setText('\n'.join(summary))
+        self._connection_summary.setToolTip(self._connections_status.text())
         winspec = selected == 'winspec_ingaas'
         self._acquisition_condition.setVisible(winspec)
         self._cooler.setVisible(self._real_andor)
@@ -2110,8 +2132,9 @@ class _ManualControlSection(QWidget):
 
     def _build(self) -> None:
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 4, 0, 4)
-        lay.setSpacing(5)
+        self.setObjectName("ManualSMUControls")
+        lay.setContentsMargins(2, 4, 2, 4)
+        lay.setSpacing(4)
 
         step_row = QHBoxLayout()
         step_row.addWidget(QLabel("Step size:"))
@@ -2123,6 +2146,7 @@ class _ManualControlSection(QWidget):
             max(0.001, float(getattr(cfg.smu, "manual_step_V", 0.1)))
         )
         self._step_spn.setSuffix(" V")
+        self._step_spn.setAccessibleName("Manual voltage step size")
         self._step_spn.setToolTip(
             "Voltage change for each Up or Down click. Default: 0.1 V."
         )
@@ -2139,22 +2163,26 @@ class _ManualControlSection(QWidget):
         self._ramp_btn_by_role: dict[str, QPushButton] = {}
 
         for role in self._CHANNELS:
-            box = QGroupBox(role)
+            box = QFrame()
+            box.setProperty("fluentRole", "channelRow")
+            box.setAccessibleName(f"{role} manual controls")
             box_lay = QVBoxLayout(box)
-            box_lay.setContentsMargins(6, 5, 6, 6)
+            box_lay.setContentsMargins(4, 5, 4, 5)
             box_lay.setSpacing(3)
 
             reading_row = QHBoxLayout()
+            channel = QLabel(role)
+            channel.setProperty("fluentRole", "sectionTitle")
+            reading_row.addWidget(channel)
             voltage = QLabel("Voltage: —")
-            voltage.setStyleSheet("font-weight: 600; color: #444;")
             voltage.setToolTip(f"Last measured {role} output voltage.")
             current = QLabel("Current: —")
             current.setAlignment(Qt.AlignmentFlag.AlignRight)
-            current.setStyleSheet("color: #555;")
             current.setToolTip(f"Last measured {role} current.")
             self._voltage_lbl[role] = voltage
             self._current_lbl[role] = current
             reading_row.addWidget(voltage, stretch=1)
+            reading_row.addWidget(inline_divider())
             reading_row.addWidget(current, stretch=1)
             box_lay.addLayout(reading_row)
 
@@ -2167,11 +2195,13 @@ class _ManualControlSection(QWidget):
             target.setSingleStep(0.1)
             target.setSuffix(" V")
             target.setKeyboardTracking(False)
+            target.setAccessibleName(f"{role} target voltage")
             target.setToolTip(
                 f"Requested {role} voltage. The field keeps the requested value "
                 "while the measured voltage remains visible above."
             )
             ramp = QPushButton("Ramp")
+            ramp.setAccessibleName(f"Ramp {role} to target")
             ramp.setMinimumWidth(50)
             ramp.setToolTip(
                 f"Read the live {role} voltage, then ramp safely to this target."
@@ -2215,7 +2245,9 @@ class _ManualControlSection(QWidget):
                 f"Increase {role} by the selected step. All readings refresh after clicking pauses."
             )
             zero.setToolTip(f"Read {role}, then ramp it safely to 0 V.")
-            zero.setStyleSheet("color: darkred;")
+            zero.setProperty("fluentAppearance", "danger")
+            for button, action in ((down, "Decrease"), (read, "Read"), (up, "Increase"), (zero, "Zero")):
+                button.setAccessibleName(f"{action} {role}")
             self._down_btn[role] = down
             self._read_btn_by_role[role] = read
             self._up_btn[role] = up
@@ -2227,6 +2259,7 @@ class _ManualControlSection(QWidget):
             button_row.addWidget(down, stretch=1)
             button_row.addWidget(read)
             button_row.addWidget(up, stretch=1)
+            button_row.addWidget(inline_divider())
             button_row.addWidget(zero)
             box_lay.addLayout(button_row)
             lay.addWidget(box)
@@ -2237,7 +2270,7 @@ class _ManualControlSection(QWidget):
         global_row = QHBoxLayout()
         self._read_all_btn = QPushButton("Read All")
         self._zero_all_btn = QPushButton("All → 0 V")
-        self._zero_all_btn.setStyleSheet("color: darkred;")
+        self._zero_all_btn.setProperty("fluentAppearance", "danger")
         self._read_all_btn.setToolTip("Refresh all connected Keithley readings.")
         self._zero_all_btn.setToolTip("Ramp every connected Keithley safely to 0 V.")
         self._read_all_btn.clicked.connect(self._on_read)

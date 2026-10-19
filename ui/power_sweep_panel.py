@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout, QGroupBox,
     QLabel, QPushButton, QLineEdit, QDoubleSpinBox, QSpinBox,
     QCheckBox, QSplitter, QScrollArea, QProgressBar,
-    QTextEdit, QMessageBox, QFrame, QComboBox, QDialog, QSizePolicy, QButtonGroup,
+    QTextEdit, QMessageBox, QFrame, QComboBox, QDialog, QSizePolicy, QButtonGroup, QStackedWidget,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +56,7 @@ from utils.motion_conditions import (MODE_DOPING_EFIELD, build_conditions,
 from ui.motion_conditions_widget import MotionConditionsWidget
 from ui.motion_sequence_preview import MotionSequencePreviewDialog
 from ui.nd_calibration_widget import NDCalibrationWidget
+from ui.workflow_sections import DisclosureSection, compact_form_rows, divide_grid_fields, inline_divider
 from utils.filename_builder import (
     FilenameContext, build_base_filename, sanitize_token, format_compact_number,
 )
@@ -1588,6 +1589,10 @@ class PowerSweepPanel(QWidget):
         pos_form.addRow("Power start:", self._power_start_spin)
         pos_form.addRow("Power end:", self._power_end_spin)
         pos_form.addRow("Power count:", self._power_count_spin)
+        self._power_range_row = compact_form_rows(
+            pos_form, (self._power_start_spin, self._power_end_spin),
+            labels_above=True,
+        )
         self._power_range_edit = QLineEdit("[1, 10, 100]")
         self._power_range_edit.setToolTip("Custom target powers [p1, p2, ...], in µW")
         self._power_range_lbl = QLabel("Custom powers (µW):")
@@ -1596,6 +1601,9 @@ class PowerSweepPanel(QWidget):
         self._power_spacing.addItem("Linear", "linear")
         self._power_spacing.addItem("Logarithmic", "log")
         pos_form.addRow("Power spacing:", self._power_spacing)
+        self._power_options_row = compact_form_rows(
+            pos_form, (self._power_kind, self._power_spacing), labels_above=True,
+        )
         self._freeze_positions_btn = QPushButton("Use these stage positions")
         self._freeze_positions_btn.setToolTip("Copy the generated positions into the position input for a later sweep.")
         self._freeze_positions_lbl = QLabel("Generated list:")
@@ -1626,6 +1634,7 @@ class PowerSweepPanel(QWidget):
         settle_row = QHBoxLayout()
         settle_row.setSpacing(4)
         settle_row.addWidget(self._motion_settle_spin, 1)
+        settle_row.addWidget(inline_divider())
         settle_row.addWidget(self._return_motion_chk)
         self._return_motion_chk.setToolTip("Return actuator to starting position after sweep")
         pos_form.addRow("Settle:", settle_row)
@@ -1702,6 +1711,7 @@ class PowerSweepPanel(QWidget):
         opt_form.addWidget(self._pm_wl_spin, 0, 3)
         opt_form.setColumnStretch(1, 1)
         opt_form.setColumnStretch(3, 1)
+        divide_grid_fields(opt_form, 2, (0, 1))
         sweep_lay.addWidget(opt_grp)
 
         # Gate settings (SMU)
@@ -1728,6 +1738,9 @@ class PowerSweepPanel(QWidget):
         self._vbias_spin.setValue(0.0)
         self._vbias_spin.setSuffix(" V")
         gate_form.addRow("Vbias:", self._vbias_spin)
+        self._gate_targets_row = compact_form_rows(
+            gate_form, (self._vbg_spin, self._vtg_spin, self._vbias_spin), labels_above=True,
+        )
         self._apply_gates_chk = QCheckBox("Apply gates")
         self._apply_gates_chk.setToolTip("Apply gate voltages before sweep")
         self._apply_gates_chk.setChecked(True)
@@ -1772,6 +1785,7 @@ class PowerSweepPanel(QWidget):
         meta_form.addWidget(self._est_lbl, 3, 0, 1, 4)
         meta_form.setColumnStretch(1, 1)
         meta_form.setColumnStretch(3, 1)
+        divide_grid_fields(meta_form, 2, (0, 1))
         sweep_lay.addWidget(meta_grp)
 
         # Hardware status
@@ -1846,7 +1860,7 @@ class PowerSweepPanel(QWidget):
             " font-size: 11px; background: #fafafa;"
             " border: 1px solid #d0d0d0; border-radius: 3px; }"
         )
-        right_lay.addWidget(self._log)
+        self._log_section = DisclosureSection("Run log", self._log)
 
         # Spectrum plot
         self._plot = pg.PlotWidget()
@@ -1857,7 +1871,13 @@ class PowerSweepPanel(QWidget):
             pen=pg.mkPen(color="#1565C0", width=1.5)
         )
         self._plot.enableAutoRange()
-        right_lay.addWidget(self._plot, stretch=1)
+        self._spectrum_stack = QStackedWidget()
+        empty = QLabel("No spectrum yet\n\nSet the motion sequence and run a sweep to view acquired spectra.")
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.setWordWrap(True)
+        self._spectrum_stack.addWidget(empty)
+        self._spectrum_stack.addWidget(self._plot)
+        right_lay.addWidget(self._spectrum_stack, stretch=1)
         self._cal_plot = pg.PlotWidget(); self._cal_plot.setLabel("bottom", "Stage position"); self._cal_plot.setLabel("left", "Predicted sample power", units="µW")
         self._cal_plot.showGrid(x=True, y=True, alpha=0.3); self._cal_plot.setMaximumHeight(180)
         self._cal_curve = self._cal_plot.plot(pen=pg.mkPen("#6a3d9a", width=2), name="Calibration curve")
@@ -1865,6 +1885,7 @@ class PowerSweepPanel(QWidget):
         self._cal_planned_points = self._cal_plot.plot(pen=None, symbol="x", symbolBrush="#e31a1c", symbolPen="#e31a1c", symbolSize=10, name="Planned points")
         self._cal_plot.addLegend(offset=(8, 8))
         self._cal_log_chk = QCheckBox("Log power axis"); right_lay.addWidget(self._cal_log_chk); right_lay.addWidget(self._cal_plot)
+        right_lay.addWidget(self._log_section)
 
         # Controls
         ctrl_row = QHBoxLayout()
@@ -2213,8 +2234,7 @@ class PowerSweepPanel(QWidget):
         self._power_spacing.setEnabled(is_stage)
         self._cal_grp.setVisible(is_stage or self._calibration_busy)
         self._update_plan_visibility()
-        self._cal_plot.setVisible(is_stage)
-        self._cal_log_chk.setVisible(is_stage)
+        self._refresh_calibration_visibility()
         self._update_position_preview()
         self._update_filename_preview()
 
@@ -2286,15 +2306,7 @@ class PowerSweepPanel(QWidget):
         """Hide legacy single-condition voltage targets in batch mode."""
         visible = not bool(across_conditions)
         self._gate_grp.setVisible(visible)
-        form = getattr(self, "_gate_form", None)
-        for field in getattr(self, "_gate_voltage_spins", ()):
-            if form is not None and hasattr(form, "setRowVisible"):
-                form.setRowVisible(field, visible)
-            else:
-                field.setVisible(visible)
-                label = form.labelForField(field) if form is not None else None
-                if label is not None:
-                    label.setVisible(visible)
+        self._gate_targets_row.setVisible(visible)
 
     def _planned_condition_sequence(self):
         conditions = self._condition_editor.conditions()
@@ -2364,6 +2376,8 @@ class PowerSweepPanel(QWidget):
         is_range = self._power_kind.currentData() == "range"
         is_power = self._motion_combo.currentData() == "stage" and self._input_mode.currentData() == "power"
         self._power_kind.setVisible(is_power)
+        self._power_options_row.setVisible(is_power)
+        self._power_range_row.setVisible(is_power and is_range)
         for widget in (self._power_start_spin, self._power_end_spin, self._power_count_spin):
             widget.setVisible(is_power and is_range)
         self._power_range_edit.setVisible(is_power and not is_range)
@@ -3010,6 +3024,13 @@ class PowerSweepPanel(QWidget):
             self._cal_curve.clear()
             self._cal_points.clear()
         self._cal_planned_points.clear()
+        self._refresh_calibration_visibility()
+
+    def _refresh_calibration_visibility(self):
+        x, _ = self._cal_curve.getData()
+        visible = self._motion_combo.currentData() == "stage" and x is not None and len(x) >= 2
+        self._cal_plot.setVisible(visible)
+        self._cal_log_chk.setVisible(visible)
 
     def _update_calibration_plot(self):
         cal = cfg.nd_calibration
@@ -3042,6 +3063,9 @@ class PowerSweepPanel(QWidget):
         except Exception:
             self._clear_calibration_plot(clear_curve=True)
 
+        finally:
+            self._refresh_calibration_visibility()
+
     @Slot()
     def _on_stop(self):
         if self._worker is not None:
@@ -3067,9 +3091,12 @@ class PowerSweepPanel(QWidget):
         self._curve.setData(
             np.asarray(wl, dtype=float), np.asarray(cts, dtype=float)
         )
+        if np.asarray(wl).size and np.asarray(cts).size:
+            self._spectrum_stack.setCurrentWidget(self._plot)
 
     @Slot(str)
     def _on_error(self, msg: str):
+        self._log_section.set_expanded(True)
         self._log.append(f"ERROR: {msg}")
         self._status_lbl.setText("Error")
         self._status_lbl.setStyleSheet("color: red; font-size: 11px;")
