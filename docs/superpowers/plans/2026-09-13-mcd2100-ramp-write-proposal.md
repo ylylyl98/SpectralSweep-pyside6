@@ -50,13 +50,13 @@
 - `app/devices/aps100_attodry1000_adapter.py:502` 保留 `set_rate_t_per_min(rate,max_abs_field_t=...)`。先用该adapter配置的磁体系数换算A/s，再读取RANGE 0..4，根据路径最大绝对电流选择相关区间，逐段写 `RATE {index} {rate_a_per_s:.7f}`，用 `RATE?` 读回核对。它不修改RANGE边界、不写RATE5，也没有保存旧速率或自动恢复机制。不能称为独立临时速率接口。
 - `tests/test_aps100_adapter.py:249` 的模拟测试调用此函数，0.1T/min、最大2T时修改fake第0段。测试使用另一磁体系数0.20328 T/A，不得复制为2100本系统的0.20449 T/A。
 - 仓库调用点检索未发现当前生产UI/workflow调用上述setter；`ui/mcd_panel.py:651` 读取已有profile并记录，随后 `move_to_field` 沿用普通段。第1407行附近明确界面只读策略。adapter运动使用 `SWEEP ... SLOW`，即设备按当前电流选择已有普通段。
-- 仓库 `05_Manual APS100 magnet power supply.pdf` 第52页确认原生RATE选择0..4为五个普通段、5为Fast，单位A/s。没有从这条命令查到可绕过普通段表的任意临时扫速参数。SDK写入持久性仍不能仅据原生RATE推断。
+- 仓库 `docs/manuals/05_Manual APS100 magnet power supply.pdf` 第52页确认原生RATE选择0..4为五个普通段、5为Fast，单位A/s。没有从这条命令查到可绕过普通段表的任意临时扫速参数。SDK写入持久性仍不能仅据原生RATE推断。
 
 本轮未执行任何setter、connect或仪器调用，未修改代码。若PSP指其他软件，需要其明确路径/名称后再核对。
 
 ## APS100 手册专项核查
 
-直接检查仓库 `05_Manual APS100 magnet power supply.pdf`，全文检索及相关章节阅读，并渲染查看第18、30、54页；页码以下均为PDF实际页码。命令汇总表的内部引用页码存在偏移，不能沿用其页码替代实际页面。
+直接检查仓库 `docs/manuals/05_Manual APS100 magnet power supply.pdf`，全文检索及相关章节阅读，并渲染查看第18、30、54页；页码以下均为PDF实际页码。命令汇总表的内部引用页码存在偏移，不能沿用其页码替代实际页面。
 
 - 第16、30页：五个连续电流区间，每段自己的速率，外加独立Fast项。不是五套完整预设。
 - 第51–52页：`RANGE` 设置边界，`RATE <Range> <Sweep Rate>` 修改选定段速率（A/s）；原生0..4为普通五段，5为Fast。

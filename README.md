@@ -1,5 +1,16 @@
 # SpectralSweep
 
+## 日常启动（Windows）
+
+**双击本项目根目录的 [`launch.bat`](launch.bat)，即可打开 SpectralSweep。**
+它与本 README、`main.py` 在同一层。根目录只保留这一个主程序 BAT 入口；
+请勿使用 `tmp/` 旧副本中的同名脚本。首次启动会检查并安装依赖，可能需要联网等待。
+
+中文速查见 [`00_启动说明.txt`](00_启动说明.txt)。仪器手册已归入 `docs/manuals/`，
+截图在 `docs/screenshots/`，旧 Notebook 和参考脚本在
+[`docs/reference/`](docs/reference/README.md)。[`tools/`](tools/README.md) 下的
+脚本用于开发、维护或仪器诊断；其中 `winspec/*.cmd` 不是桌面主程序入口。
+
 SpectralSweep is a PySide6 desktop application for spectra acquisition and sweep-driven optical measurement workflows. The repository is organized around the current desktop UI and its instrument-control runtime.
 
 The application is intended for lab setups that combine either Princeton Instruments LightField or an Andor SDK2 camera with a Shamrock spectrograph, voltage control, motion control, and optional optical power measurements. The desktop UI keeps instrument connections, sweep setup, live preview, and data capture in one operator-facing workflow.
@@ -441,6 +452,13 @@ changing the stored calibration.
 
 ```text
 SpectralSweep-pyside6/
+|-- 00_启动说明.txt
+|-- launch.bat                 # Daily Windows launcher
+|-- docs/
+|   |-- manuals/
+|   |-- screenshots/
+|   `-- reference/             # Historical notebooks and scripts
+|-- tools/                     # Maintenance and diagnostics
 |-- app/
 |   |-- devices/
 |   `-- engine/
@@ -449,7 +467,6 @@ SpectralSweep-pyside6/
 |-- utils/
 |-- iv_automation.py
 |-- lf6_automation.py
-|-- launch.bat
 |-- main.py
 |-- requirements.txt
 |-- TLPMX.py
