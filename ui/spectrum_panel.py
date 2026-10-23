@@ -1654,9 +1654,15 @@ class SpectrumPanel(QWidget):
         self._enable_optics()
         self._exposure.setEnabled(enabled and (not local_winusb or variable_local))
         self._accumulations.setEnabled(enabled and (not local_winusb or variable_local))
-        self._add_spectrum_btn.setEnabled(
-            not blocked and (bool(enabled) or (self._continuous_mode is not None and self._continuous_frames > 0))
+        # During Run, Add only copies the latest completed 1D frame. Keep it
+        # available while the next capture owns the device; hardware actions
+        # above still follow the controller lock.
+        live_spectrum_available = (
+            self._connected and self._continuous_mode == "1d"
+            and self._continuous_frames > 0
+            and self._last_data_kind == "spectrum_1d" and self._last_data is not None
         )
+        self._add_spectrum_btn.setEnabled(enabled or live_spectrum_available)
 
     @Slot(list)
     def _on_lf6_connected(self, _experiments):
@@ -1839,8 +1845,7 @@ class SpectrumPanel(QWidget):
             self.add_reference(self._last_wavelength, self._last_data,
                                settings_snapshot=self._last_acquisition_snapshot)
         self._queue_next_continuous("1d")
-        if self._continuous_mode == "1d" and self._continuous_frames > 0:
-            self._add_spectrum_btn.setEnabled(True)
+        self._refresh_action_controls()
 
     @Slot(object)
     def _on_frame_ready(self, img: np.ndarray):

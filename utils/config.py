@@ -78,6 +78,9 @@ class LF6Config:
     exposure_ms: float = 2000.0       # ms  — matches main_ui.py sidebar default
     center_nm: float = 860.0          # nm  — matches main_ui.py sidebar default
     accumulations: int = 1            # frames to combine (EPF)
+    # None: exposure/accumulation-aware budget. External triggers may need an
+    # explicit positive wait budget; expiry quarantines, it cannot cancel SDK I/O.
+    lightfield_capture_wait_timeout_s: Optional[float] = None
     auto_load_on_connect: bool = True # load saved experiment automatically
     andor_sdk2_dll_dir: str = str(_BUNDLED_ANDOR_DLL_DIR)
     andor_shamrock_dll_dir: str = str(_BUNDLED_SHAMROCK_DLL_DIR)

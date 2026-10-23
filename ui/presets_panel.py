@@ -164,6 +164,11 @@ def _validate_setup_group(active: pd.DataFrame) -> None:
 
 
 def _setup_readiness_issues(controller, schedule, requested=None) -> List[str]:
+    status = getattr(controller, "capture_status", {})
+    if isinstance(status, dict) and status.get("recovery_required"):
+        return ["LightField acquisition stalled; disconnect and reconnect after the hardware call returns."]
+    if isinstance(status, dict) and status.get("active"):
+        return ["Wait for the current LightField acquisition to finish before starting another run."]
     if requested is None:
         requested = {_setup_backend(task['ctx'][_SETUP_PARAM]) for task in schedule if _SETUP_PARAM in task['ctx']}
     missing = requested - set(getattr(controller, 'connected_backends', ()))
@@ -4599,6 +4604,8 @@ class PresetsPanel(QWidget):
         if self._lf6 is not None:
             connect(self._lf6.connected, self._refresh_readiness)
             connect(self._lf6.disconnected, self._refresh_readiness)
+            if hasattr(self._lf6, 'capture_status_changed'):
+                connect(self._lf6.capture_status_changed, self._on_capture_status_changed)
             if hasattr(self._lf6, 'settings_applied'):
                 connect(self._lf6.settings_applied, self._refresh_detector_wavelength_advice)
         if self._pm is not None:
@@ -7430,11 +7437,48 @@ class PresetsPanel(QWidget):
         self._stop_btn.setEnabled(False)
         self._status_lbl.setText("Stopping...")
         self._log("Stop requested.")
+        status = getattr(self._lf6, "capture_status", {})
+        if isinstance(status, dict) and status:
+            self._on_capture_status_changed(status)
+            self._log("Waiting for the LightField call to return; Stop cannot confirm SDK cancellation. "
+                      "A stalled acquisition preserves the last SMU state and requires recovery.")
+            return
         timeout_s = max(0.25, float(getattr(cfg.smu, "visa_timeout_ms", 5000)) / 1000.0)
         self._log(
             f"Waiting for the current hardware call (up to ~{timeout_s:g} s per SMU I/O). "
-            "The zero-ramp will begin immediately afterward."
+            "A normal stop ramps to zero after the call returns; a hardware failure preserves the last SMU state."
         )
+
+    @Slot(object)
+    def _on_capture_status_changed(self, status):
+        running = bool(self._run_thread and self._run_thread.isRunning())
+        if not running:
+            state = (bool(status.get("active")), bool(status.get("recovery_required")))
+            if state != getattr(self, "_capture_readiness_state", None):
+                self._capture_readiness_state = state
+                self._refresh_readiness()
+            return
+        if not status:
+            return
+        if status.get("recovery_required"):
+            phase = status.get("stalled_phase") or status.get("phase", "acquisition")
+            self._status_lbl.setText(
+                f"LightField stalled · {phase} · {status.get('elapsed_s', 0):.0f} s · "
+                f"saved {self._done_frames}/{self._total_points} · recovery required")
+            set_style_role(self._status_lbl, 'text', tone='danger')
+            self._readiness_lbl.setText(
+                "Hardware call has not finished; device ownership retained." if status.get("active") else
+                "Hardware call returned; finishing failed run. Reconnect LightField before running again.")
+            incident = status.get("incident_id")
+            if incident != getattr(self, "_capture_incident_id", None):
+                self._capture_incident_id = incident
+                self._log("LightField acquisition stalled. No automatic retry or zero-ramp. "
+                          f"Diagnostics: {status.get('diagnostic_path') or status.get('diagnostic_error') or 'pending'}")
+        elif self._stop_event.is_set() and status.get("active"):
+            self._status_lbl.setText(
+                f"Stopping · waiting for LightField {status.get('phase', 'acquisition')} "
+                f"· {status.get('elapsed_s', 0):.0f} s")
+            set_style_role(self._status_lbl, 'text', tone='warning')
 
     @Slot(list)
     def _on_smu_reconnected(self, _addresses: list):
@@ -7544,7 +7588,12 @@ class PresetsPanel(QWidget):
         self._stop_btn.setEnabled(False)
         self._initial_voltage_settle_spin.setEnabled(True)
         self._voltage_settle_spin.setEnabled(True)
-        if self._hardware_incident_active:
+        capture = getattr(self._lf6, "capture_status", {})
+        if isinstance(capture, dict) and capture.get("recovery_required"):
+            self._run_outcome = "failed"
+            self._status_lbl.setText("LightField stalled - disconnect and reconnect before running again")
+            set_style_role(self._status_lbl, 'text', tone='danger')
+        elif self._hardware_incident_active:
             self._run_outcome = "failed"
             self._status_lbl.setText("Hardware fault - reconnect SMUs")
             set_style_role(self._status_lbl, 'text', tone='danger')

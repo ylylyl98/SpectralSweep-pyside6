@@ -8,12 +8,18 @@ from __future__ import annotations
 import json
 import logging
 import math
+import sys
 import weakref
 import uuid
 import copy
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .lightfield_capture_guard import (
+    LightFieldAcquisitionStalled, LightFieldCaptureOwnershipError,
+    capture_operation, get_capture_guard,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,13 +68,23 @@ def timestamp():
 def read_snapshot(setup, *, camera, spectrometer, experiment):
     """Run on the acquisition execution path, immediately before Capture."""
     result = {"schema_version": 1, "captured_utc": timestamp(), "unavailable": {}}
+    guard = get_capture_guard(setup)
+
+    def checked(getter):
+        guard.check_available()
+        value = getter()
+        guard.check_available()
+        return value
 
     def read(group, name, getter):
         try:
-            value = getter()
+            value = checked(getter)
             if value is None or (isinstance(value, float) and not math.isfinite(value)):
                 raise ValueError("no valid readback")
+        except (LightFieldAcquisitionStalled, LightFieldCaptureOwnershipError):
+            raise
         except Exception as exc:
+            guard.check_available()
             value = None
             result["unavailable"][f"{group}.{name}"] = f"{type(exc).__name__}: {exc}"
         result.setdefault(group, {})[name] = value
@@ -77,29 +93,38 @@ def read_snapshot(setup, *, camera, spectrometer, experiment):
     for group, name, namespace, member, convert in FIELDS:
         def getter(namespace=namespace, member=member, convert=convert):
             key = getattr(namespaces[namespace], member)
-            if not setup.experiment.Exists(key):
+            if not checked(lambda: setup.experiment.Exists(key)):
                 raise ValueError("setting unavailable for this device/experiment")
-            value = setup.experiment.GetValue(key)
+            value = checked(lambda: setup.experiment.GetValue(key))
             if value is None:
                 raise ValueError("empty readback")
             return convert(value)
         read(group, name, getter)
 
     read("provenance", "experiment_name", lambda: str(setup.experiment.Name))
-    read("provenance", "application_assembly_version",
-         lambda: str(setup.application.GetType().Assembly.GetName().Version))
-    read("provenance", "devices", lambda: [
-        {"type": str(d.Type), "model": str(d.Model), "serial_number": str(d.SerialNumber)}
-        for d in setup.experiment.ExperimentDevices])
-    read("detector", "regions", lambda: [
-        {name: int(getattr(roi, member)) for name, member in (
-            ("x", "X"), ("y", "Y"), ("width", "Width"), ("height", "Height"),
-            ("x_binning", "XBinning"), ("y_binning", "YBinning"))}
-        for roi in setup.experiment.SelectedRegions])
+    def assembly_version():
+        kind = checked(lambda: setup.application.GetType())
+        assembly = checked(lambda: kind.Assembly)
+        name = checked(lambda: assembly.GetName())
+        return str(checked(lambda: name.Version))
+    read("provenance", "application_assembly_version", assembly_version)
+
+    def devices():
+        return [{name: str(checked(lambda: getattr(device, member)))
+                 for name, member in (("type", "Type"), ("model", "Model"), ("serial_number", "SerialNumber"))}
+                for device in checked(lambda: setup.experiment.ExperimentDevices)]
+    read("provenance", "devices", devices)
+
+    def regions():
+        return [{name: int(checked(lambda: getattr(roi, member))) for name, member in (
+                    ("x", "X"), ("y", "Y"), ("width", "Width"), ("height", "Height"),
+                    ("x_binning", "XBinning"), ("y_binning", "YBinning"))}
+                for roi in checked(lambda: setup.experiment.SelectedRegions)]
+    read("detector", "regions", regions)
     # This is the SDK detector calibration, before application alignment/binning.
     # The exported spectrum's wavelength column remains the authoritative axis.
     def calibration():
-        axis = [float(v) for v in setup.experiment.SystemColumnCalibration]
+        axis = [float(v) for v in checked(lambda: setup.experiment.SystemColumnCalibration)]
         if not axis or not all(math.isfinite(v) for v in axis):
             raise ValueError("empty or non-finite wavelength calibration")
         return axis
@@ -299,41 +324,130 @@ def set_lightfield_context(controller, **context):
         recorder.context = context
 
 
+def release_capture_dataset(dataset, operation, *, suppress_errors=False):
+    """Release a returned SDK dataset on its owner, including after timeout.
+
+    Callers transfer ownership only after a successful return from
+    ``capture_with_metadata``. A primary acquisition error must survive a
+    secondary release failure. Older offline SDK doubles may omit Dispose.
+    """
+    if dataset is None:
+        return
+    operation.stage("release_dataset", check=False)
+    try:
+        dispose = getattr(dataset, "Dispose", None)
+        if callable(dispose):
+            dispose()
+    except Exception as exc:
+        operation.quarantine(f"Dataset release failed: {type(exc).__name__}: {exc}")
+        if not suppress_errors:
+            raise
+        log.warning("LightField dataset release failed after acquisition error", exc_info=True)
+    if not suppress_errors:
+        operation.check()
+
+
+@contextmanager
+def managed_capture_dataset(setup, frames, *, purpose="measurement"):
+    """Keep the capture operation active until copied data and dataset cleanup finish."""
+    with capture_operation(setup, frames=frames, purpose=purpose) as operation:
+        dataset = None
+        try:
+            dataset = capture_with_metadata(setup, frames, purpose=purpose)
+            yield dataset, operation
+        finally:
+            release_capture_dataset(dataset, operation,
+                                    suppress_errors=sys.exc_info()[0] is not None)
+        operation.check()
+
+
 def capture_with_metadata(setup, frames, *, purpose="measurement"):
-    """Log capture outcomes; acquisition validation is mandatory when provided."""
+    """Record capture outcomes and transfer a successful dataset to the caller.
+
+    Capture completion is an SDK observation, not a claim that conversion or
+    CSV persistence succeeded. The surrounding operation also covers those
+    readout steps and rejects results which return after its deadline.
+    """
     recorder = getattr(setup, "_metadata_recorder", None)
     record = None
-    if recorder is not None and recorder.active:
+    dataset = None
+    operation = None
+    failure_recorded = False
+
+    def record_failure(exc):
+        nonlocal failure_recorded
+        if recorder is None or failure_recorded:
+            return
+        failure_recorded = True
         try:
-            record = recorder.begin(setup.read_metadata_snapshot(), frames, purpose)
-        except Exception as exc:
-            run = recorder._run()
-            marker = getattr(run, "mark_metadata_failure", None) if run is not None else None
-            if callable(marker):
-                marker(exc, event="capture_started")
-            log.warning("LightField metadata snapshot could not be recorded", exc_info=True)
-    try:
-        verify = getattr(setup, 'verify_acquisition_settings', None)
-        if callable(verify):
-            verify()
-        dataset = setup.experiment.Capture(frames)
-        if callable(verify):
-            verify()
-    except Exception as exc:
-        if recorder is not None:
-            try:
-                recorder.finish(record, error=f"{type(exc).__name__}: {exc}")
-            except Exception:
-                log.warning("LightField capture failure metadata could not be recorded", exc_info=True)
-        raise
-    if recorder is not None and record is not None:
-        try:
-            try:
-                width, height = setup._frame_dims(dataset.GetFrame(0, 0))
-                dimensions = {"width": width, "height": height}
-            except Exception:
-                dimensions = None
-            recorder.finish(record, dimensions=dimensions)
+            recorder.finish(record, error=f"{type(exc).__name__}: {exc}")
         except Exception:
-            log.warning("LightField capture result metadata could not be recorded", exc_info=True)
-    return dataset
+            log.warning("LightField capture failure metadata could not be recorded", exc_info=True)
+
+    def discard_owned_dataset(active_operation):
+        nonlocal dataset
+        # Clear the ownership slot before Dispose: even a failing cleanup must
+        # never be retried by a second exception/exit path.
+        owned, dataset = dataset, None
+        release_capture_dataset(owned, active_operation, suppress_errors=True)
+
+    @contextmanager
+    def release_on_failure():
+        try:
+            yield
+        except BaseException as exc:
+            record_failure(exc)
+            discard_owned_dataset(operation)
+            raise
+
+    try:
+        with capture_operation(setup, frames=frames, purpose=purpose,
+                               on_stalled_exit=discard_owned_dataset) as operation, release_on_failure():
+            if recorder is not None and recorder.active:
+                operation.stage("metadata_snapshot")
+                try:
+                    snapshot = setup.read_metadata_snapshot()
+                    operation.check()
+                    record = recorder.begin(snapshot, frames, purpose)
+                    if record is not None:
+                        operation.update_context(acquisition_id=record.get("acquisition_id"))
+                except LightFieldAcquisitionStalled:
+                    raise
+                except Exception as exc:
+                    run = recorder._run()
+                    marker = getattr(run, "mark_metadata_failure", None) if run is not None else None
+                    if callable(marker):
+                        marker(exc, event="capture_started")
+                    log.warning("LightField metadata snapshot could not be recorded", exc_info=True)
+            operation.stage("validate_before_capture")
+            verify = getattr(setup, 'verify_acquisition_settings', None)
+            if callable(verify):
+                verify()
+            operation.stage("capture")
+            dataset = setup.experiment.Capture(frames)
+            operation.stage("validate_after_capture")
+            if callable(verify):
+                verify()
+            operation.check()
+            if recorder is not None and record is not None:
+                operation.stage("frame_dimensions")
+                try:
+                    frame = dataset.GetFrame(0, 0)
+                    operation.check()
+                    width, height = setup._frame_dims(frame)
+                    operation.check()
+                    dimensions = {"width": width, "height": height}
+                except LightFieldAcquisitionStalled:
+                    raise
+                except Exception:
+                    dimensions = None
+                operation.stage("record_capture_completed")
+                try:
+                    recorder.finish(record, dimensions=dimensions)
+                except Exception:
+                    log.warning("LightField capture result metadata could not be recorded", exc_info=True)
+            operation.check()
+        return dataset
+    except BaseException as exc:
+        record_failure(exc)
+        raise

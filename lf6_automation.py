@@ -2,8 +2,10 @@
 import clr, ctypes
 import builtins
 import time
-from app.lightfield_metadata import LightFieldRecorder, capture_with_metadata, read_snapshot
+from functools import wraps
+from app.lightfield_metadata import LightFieldRecorder, managed_capture_dataset, read_snapshot
 from app.lightfield_diagnostics import center_context, diagnostic_path, trace_center_write
+from app.lightfield_capture_guard import LightFieldAcquisitionStalled, capture_operation, get_capture_guard
 
 # Import python sys module
 import sys, os
@@ -51,10 +53,23 @@ class LightFieldSettingTimeoutError(TimeoutError):
     """A LightField setting could not be written and verified within the bounded wait."""
 
 
+def _guard_setup_call(method):
+    """Keep direct settings/readback calls out of a quarantined capture owner."""
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        guard = get_capture_guard(self)
+        guard.check_available()
+        result = method(self, *args, **kwargs)
+        guard.check_available()
+        return result
+    return guarded
+
+
 class LF6Setup:
     def bind_metadata_run(self, run):
         self._metadata_recorder = LightFieldRecorder(run)
 
+    @_guard_setup_call
     def read_metadata_snapshot(self):
         return read_snapshot(self, camera=CameraSettings,
                              spectrometer=SpectrometerSettings, experiment=ExperimentSettings)
@@ -73,17 +88,21 @@ class LF6Setup:
 
     def close(self):
         """Dispose only this setup's owned Automation instance, once."""
+        from app.lightfield_capture_guard import get_capture_guard
+        get_capture_guard(self).check_close()
         auto = getattr(self, 'auto', None)
         if auto is not None:
             auto.Dispose()
             self.auto = None
 
+    @_guard_setup_call
     def print_saved_experiments(self):
         # Print a list (of type string) of saved experiments
         print("My Saved Experiments:")
         for saved_experiment in self.experiment.GetSavedExperiments():
             print("\t" + saved_experiment)
 
+    @_guard_setup_call
     def load_experiment(self, exp_name: str):
         load_success = self.experiment.Load(exp_name)
         if load_success:
@@ -92,12 +111,21 @@ class LF6Setup:
             print('loading experiment failed')
 
     def acquire(self, *, purpose="measurement"):
-        frames = 1
-        dataset = capture_with_metadata(self, frames, purpose=purpose)
-        image_data = dataset.GetFrame(0, frames - 1).GetData()
-        image_frame = dataset.GetFrame(0, frames - 1)
-        array = self.convert_buffer(image_data, image_frame.Format)
+        with managed_capture_dataset(self, 1, purpose=purpose) as (dataset, operation):
+            array, _ = self._copy_capture_frame(dataset, 0, operation)
         return array
+
+    def _copy_capture_frame(self, dataset, index, operation):
+        operation.stage("get_frame")
+        frame = dataset.GetFrame(0, index)
+        operation.stage("read_frame_data")
+        image_data = frame.GetData()
+        operation.stage("read_frame_format")
+        image_format = frame.Format
+        operation.stage("copy_frame_data")
+        array = self.convert_buffer(image_data, image_format)
+        operation.check()
+        return array, frame
 
     def abort_acquisition(self) -> bool:
         """Request cancellation of an active LightField acquisition.
@@ -106,6 +134,8 @@ class LF6Setup:
         objects. Try the supported-looking surfaces without assuming one
         particular SDK version; the caller still enforces its own timeout.
         """
+        get_capture_guard(self).check_close()
+        get_capture_guard(self).check_available()
         for owner in (self.experiment, self.application):
             for name in ("Stop", "Abort", "Cancel"):
                 method = getattr(owner, name, None)
@@ -120,21 +150,30 @@ class LF6Setup:
 
     def _frame_dims(self, frame):
         """Try common LightField frame width/height attributes (property or method)."""
-        def _get(names):
-            for name in names:
-                if hasattr(frame, name):
-                    v = getattr(frame, name)
+        with capture_operation(self) as operation:
+            def _get(names):
+                for name in names:
+                    operation.stage("frame_dimensions")
+                    try:
+                        v = getattr(frame, name)
+                    except AttributeError:
+                        operation.check()
+                        continue
+                    operation.check()
                     try:
                         v = v() if callable(v) else v
+                        operation.check()
                         v = int(v)
                         if v > 0:
                             return v
+                    except LightFieldAcquisitionStalled:
+                        raise
                     except Exception:
-                        pass
-            return None
+                        operation.check()
+                return None
 
-        w = _get(["Width", "GetWidth", "SizeX", "GetSizeX", "XSize", "GetXSize"])
-        h = _get(["Height", "GetHeight", "SizeY", "GetSizeY", "YSize", "GetYSize"])
+            w = _get(["Width", "GetWidth", "SizeX", "GetSizeX", "XSize", "GetXSize"])
+            h = _get(["Height", "GetHeight", "SizeY", "GetSizeY", "YSize", "GetYSize"])
         return w, h
 
     def acquire_2d(self, *, purpose="measurement"):
@@ -142,27 +181,23 @@ class LF6Setup:
         Capture one frame and return a 2D array (H, W) if frame dimensions are available.
         If dimension detection fails, returns the raw 1D array (same as acquire()).
         """
-        frames = 1
-        dataset = capture_with_metadata(self, frames, purpose=purpose)
-
-        # for frames=1, index is always 0
-        frame = dataset.GetFrame(0, 0)
-        image_data = frame.GetData()
-
-        arr = self.convert_buffer(image_data, frame.Format)
-
-        w, h = self._frame_dims(frame)
-        if w and h and arr.ndim == 1 and arr.size == w * h:
-            arr = arr.reshape(h, w)  # (H, W)
-
+        with managed_capture_dataset(self, 1, purpose=purpose) as (dataset, operation):
+            arr, frame = self._copy_capture_frame(dataset, 0, operation)
+            operation.stage("frame_dimensions")
+            w, h = self._frame_dims(frame)
+            operation.check()
+            if w and h and arr.ndim == 1 and arr.size == w * h:
+                arr = arr.reshape(h, w)  # (H, W)
         return arr
 
+    @_guard_setup_call
     def change_exp_setting(self, setting, value):
         # Check for existence before setting
         # gain, adc rate, or adc quality
         if self.exp_settings.Exists(setting):
             self.exp_settings.SetValue(setting, value)
 
+    @_guard_setup_call
     def change_spec_setting(self, setting, value):
         # Check for existence before setting
         # gain, adc rate, or adc quality
@@ -171,9 +206,13 @@ class LF6Setup:
 
     # Creates a numpy array from our acquired buffer
     def convert_buffer(self, net_array, image_format):
+        guard = get_capture_guard(self)
+        guard.check_available()
         src_hndl = GCHandle.Alloc(net_array, GCHandleType.Pinned)
         try:
+            guard.check_available()
             src_ptr = src_hndl.AddrOfPinnedObject().ToInt64()
+            guard.check_available()
 
             # Possible data types returned from acquisition
             if (image_format == ImageDataFormat.MonochromeUnsigned16):
@@ -185,30 +224,33 @@ class LF6Setup:
 
             cbuf = buf_type.from_address(src_ptr)
             resultArray = np.frombuffer(cbuf, dtype=cbuf._type_)
-
+            # The view refers to pinned .NET storage; copy before unpinning it.
+            return np.copy(resultArray)
         # Free the handle
         finally:
             if src_hndl.IsAllocated: src_hndl.Free()
-
-        # Make a copy of the buffer
-        return np.copy(resultArray)
 
     def change_center_wavelength(self, wavelength):
         """Legacy alias; all center writes use the guarded shared setter."""
         return self.set_center_wavelength_when_ready(wavelength)
 
+    @_guard_setup_call
     def get_wavelength_calibration(self):
+        guard = get_capture_guard(self)
         net_array = self.experiment.SystemColumnCalibration
+        guard.check_available()
         src_hndl = GCHandle.Alloc(net_array, GCHandleType.Pinned)
         try:
+            guard.check_available()
             src_ptr = src_hndl.AddrOfPinnedObject().ToInt64()
+            guard.check_available()
             buf_type = ctypes.c_double * len(net_array)
             cbuf = buf_type.from_address(src_ptr)
             resultArray = np.frombuffer(cbuf, dtype=cbuf._type_)
+            return np.copy(resultArray)
         # Free the handle
         finally:
             if src_hndl.IsAllocated: src_hndl.Free()
-        return np.copy(resultArray)
 
     def take_one_look(self):
         plt.plot(self.get_wavelength_calibration(), self.acquire())
@@ -216,6 +258,7 @@ class LF6Setup:
     def create_spectra_sweep(self, sample_name, exp_name):
         return SpectraSweep(sample_name, exp_name, self)
     # added by Lei
+    @_guard_setup_call
     def change_expose_time(self, value):
         value = float(value)
         resume = self._begin_recipe_change('exposure_ms', value)
@@ -229,6 +272,7 @@ class LF6Setup:
         """Legacy center setter routed through the guarded shared path."""
         return self.set_center_wavelength_when_ready(value)
 
+    @_guard_setup_call
     def _set_center_wavelength_raw(self, value, *, deadline=None, before_write=None):
         """Perform exactly one authoritative CenterWavelength SetValue attempt."""
         setting = SpectrometerSettings.GratingCenterWavelength
@@ -332,6 +376,7 @@ class LF6Setup:
         return bool(self.readiness_snapshot["ready"])
 
     @property
+    @_guard_setup_call
     def readiness_evidence(self):
         """Return True/False when LightField exposes explicit readiness evidence."""
         values = [
@@ -344,6 +389,7 @@ class LF6Setup:
         return False if any(value is False for value in explicit) else True
 
     @property
+    @_guard_setup_call
     def readiness_snapshot(self):
         """Describe the strongest readiness evidence exposed by this LF version."""
         explicit = self.readiness_evidence
@@ -404,6 +450,7 @@ class LF6Setup:
         }
 
     @property
+    @_guard_setup_call
     def is_busy(self):
         """Read SDK acquisition/update state as well as legacy wrapper flags."""
         for obj in (self.application, self.experiment):
@@ -555,6 +602,7 @@ class LF6Setup:
                 stable_since = baseline = None
             time.sleep(min(poll_interval_s, remaining))
 
+    @_guard_setup_call
     @trace_center_write
     def set_center_wavelength_when_ready(
         self,
@@ -735,6 +783,7 @@ class LF6Setup:
                 stats["last_exception"] = self._exception_description(frozen)
                 time.sleep(min(float(poll_interval_s), max(0.0, deadline - time.monotonic())))
 
+    @_guard_setup_call
     def configure_for_acquisition(self, *, center_nm, exposure_ms, frames,
                                   timeout_s=LIGHTFIELD_SETTING_TIMEOUT_S):
         """Apply the complete mutable run recipe immediately before acquisition."""
@@ -787,6 +836,7 @@ class LF6Setup:
 
     def _begin_recipe_change(self, name, value):
         """Track explicit PIXIS setters as well as complete acquisition recipes."""
+        get_capture_guard(self).check_available()
         resume = not getattr(self, '_configuring_acquisition', False)
         self._acquisition_prepared = False
         recipe = dict(getattr(self, '_acquisition_recipe', {}))
@@ -801,6 +851,7 @@ class LF6Setup:
 
     def _verify_acquisition_recipe(self):
         actual = {}
+        guard = get_capture_guard(self)
         for name, setting, tolerance in (
             ('center_nm', SpectrometerSettings.GratingCenterWavelength, LIGHTFIELD_CENTER_TOLERANCE_NM),
             ('exposure_ms', CameraSettings.ShutterTimingExposureTime, max(.001, abs(self._acquisition_recipe.get('exposure_ms', 0.)) * 1e-6)),
@@ -810,7 +861,11 @@ class LF6Setup:
                 continue
             expected = self._acquisition_recipe[name]
             try:
+                guard.check_available()
                 value = self.experiment.GetValue(setting)
+                guard.check_available()
+            except LightFieldAcquisitionStalled:
+                raise
             except builtins.Exception as exc:
                 raise RuntimeError(f'LightField {name} readback unavailable; requested={expected:g}. Acquisition blocked.') from exc
             if not self._numeric_readback_matches(value, expected, tolerance):
@@ -822,7 +877,11 @@ class LF6Setup:
         if 'grating' in self._acquisition_recipe:
             expected = self._acquisition_recipe['grating']
             try:
+                guard.check_available()
                 value = self.experiment.GetValue(SpectrometerSettings.GratingSelected)
+                guard.check_available()
+            except LightFieldAcquisitionStalled:
+                raise
             except builtins.Exception as exc:
                 raise RuntimeError('LightField grating readback unavailable; acquisition blocked.') from exc
             if value is None or str(value) != expected:
@@ -832,12 +891,14 @@ class LF6Setup:
                 )
         return actual
 
+    @_guard_setup_call
     def verify_acquisition_settings(self):
         """Read-only checks before/after Capture; never move optics mid-measurement."""
         try:
             if not getattr(self, '_acquisition_prepared', True):
                 raise RuntimeError('LightField acquisition setup was not verified; apply settings again.')
             self._ensure_detector_output(apply=False)
+            get_capture_guard(self).check_available()
             if getattr(self, '_acquisition_recipe', None) is not None:
                 self._verify_acquisition_recipe()
         except builtins.Exception:
@@ -863,24 +924,28 @@ class LF6Setup:
             "writable": self.setting_is_writable(setting),
         }
 
+    @_guard_setup_call
     def change_roi_FullSensor(self):
         if self.experiment.Exists(CameraSettings.ReadoutControlRegionsOfInterestSelection):
             self.experiment.SetValue(CameraSettings.ReadoutControlRegionsOfInterestSelection,
                                      RegionsOfInterestSelection.FullSensor)
             print('roi sets to FullSensor')
 
+    @_guard_setup_call
     def change_roi_LineSensor(self):
         if self.experiment.Exists(CameraSettings.ReadoutControlRegionsOfInterestSelection):
             self.experiment.SetValue(CameraSettings.ReadoutControlRegionsOfInterestSelection,
                                      RegionsOfInterestSelection.LineSensor)
             print('roi sets to LineSensor')
 
+    @_guard_setup_call
     def change_to_side_exit_port(self):
         # 4 front exit 5 Side exit
         if self.experiment.Exists(SpectrometerSettings.OpticalPortExitSelected):
             self.experiment.SetValue(SpectrometerSettings.OpticalPortExitSelected,
                                      OpticalPortLocation.SideExit)
             print('exit port : Side')
+    @_guard_setup_call
     def change_to_front_exit_port(self):
         # 4 front exit 5 Side exit
         if self.experiment.Exists(SpectrometerSettings.OpticalPortExitSelected):
@@ -888,6 +953,7 @@ class LF6Setup:
                                      OpticalPortLocation.FrontExit)
             print('exit port : Front')
             
+    @_guard_setup_call
     def change_frame_to_combine(self, frames: int):
         """
         Sets Online Processes -> Exposures per Frame.
@@ -901,6 +967,7 @@ class LF6Setup:
         self.experiment.SetValue(setting, Int64(frames))
         self._finish_recipe_change(resume)
 
+    @_guard_setup_call
     def readback_online_process(self) -> dict:
         def _get(key):
             try:
@@ -919,6 +986,7 @@ class LF6Setup:
         }
 
 
+    @_guard_setup_call
     def set_frames_to_save(self,frames):
         if self.experiment.Exists(ExperimentSettings.AcquisitionFramesToStore):
             self.experiment.SetValue(
@@ -926,31 +994,23 @@ class LF6Setup:
             print('Frame:', String.Format(str(frames)))
 
     def multi_frame_acquire(self,image_mode:bool=False , x_pixels_num = 512 ,y_pixels_num = 512):
-        if self.experiment.Exists(ExperimentSettings.AcquisitionFramesToStore):
-            frames = self.experiment.GetValue(
-                                    ExperimentSettings.AcquisitionFramesToStore)
+        with capture_operation(self) as operation:
+            operation.stage("read_capture_frames")
+            exists = self.experiment.Exists(ExperimentSettings.AcquisitionFramesToStore)
+            operation.check()
+            if not exists:
+                return
+            frames = int(self.experiment.GetValue(ExperimentSettings.AcquisitionFramesToStore))
+            operation.check()
+            operation.set_frames(frames)
             print('Frame:', String.Format(str(frames)))
-            if image_mode:
-                
-                dataset = capture_with_metadata(self, frames)
-                bufferdata = np.zeros((frames,x_pixels_num*y_pixels_num))
+            with managed_capture_dataset(self, frames) as (dataset, operation):
+                width = x_pixels_num * y_pixels_num if image_mode else x_pixels_num
+                bufferdata = np.zeros((frames, width))
                 for i in range(frames):
-                    image_data = dataset.GetFrame(0, i).GetData()
-                    image_frame = dataset.GetFrame(0, i)
-                    array = self.convert_buffer(image_data, image_frame.Format)
+                    array, _ = self._copy_capture_frame(dataset, i, operation)
                     bufferdata[i,:] = array
-                return bufferdata
-            else:
-                dataset = capture_with_metadata(self, frames)
-                bufferdata = np.zeros((frames,x_pixels_num))
-                for i in range(frames):
-                    image_data = dataset.GetFrame(0, i).GetData()
-                    image_frame = dataset.GetFrame(0, i)
-                    array = self.convert_buffer(image_data, image_frame.Format)
-                    bufferdata[i,:] = array
-                return bufferdata
-        else:
-            return    
+            return bufferdata
 
 
 

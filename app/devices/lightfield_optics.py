@@ -2,10 +2,23 @@
 import math
 import time
 
+from app.lightfield_capture_guard import (
+    LightFieldAcquisitionStalled, LightFieldCaptureOwnershipError, get_capture_guard,
+)
+
+
+def _checked(setup, call):
+    """Reject a late SDK reply before dispatching another optics operation."""
+    guard = get_capture_guard(setup)
+    guard.check_available()
+    result = call()
+    guard.check_available()
+    return result
+
 
 def _key(setup, name):
-    key = getattr(setup.spectrometer_settings, name, None)
-    return key if key is not None and setup.experiment.Exists(key) else None
+    key = _checked(setup, lambda: getattr(setup.spectrometer_settings, name, None))
+    return key if key is not None and _checked(setup, lambda: setup.experiment.Exists(key)) else None
 
 
 def read_optics(setup, *, include_capabilities=True):
@@ -19,13 +32,16 @@ def read_optics(setup, *, include_capabilities=True):
             key = _key(setup, setting)
             if key is None:
                 continue
-            value = setup.experiment.GetValue(key)
+            value = _checked(setup, lambda: setup.experiment.GetValue(key))
             result[field] = float(value) if field == "wavelength_nm" else str(value)
             if choices and include_capabilities:
-                values = list(setup.experiment.GetCurrentCapabilities(key))
+                values = _checked(setup, lambda: list(setup.experiment.GetCurrentCapabilities(key)))
                 result[choices] = ([{"index": str(value), "label": str(value)} for value in values]
                                    if field == "grating" else [str(value) for value in values])
+        except (LightFieldAcquisitionStalled, LightFieldCaptureOwnershipError):
+            raise
         except Exception as exc:
+            get_capture_guard(setup).check_available()
             result["readback_errors"][field] = str(exc)
     result["output_flipper_present"] = len(result["output_ports"]) > 1
     result['output_port_capability'] = ('unknown' if 'output_port' in result['readback_errors'] else
@@ -89,6 +105,7 @@ def ensure_output_route(setup, route, *, apply=True, timeout_s=15.0):
 
 
 def apply_optics(setup, requested, *, timeout_s=15.0):
+    get_capture_guard(setup).check_available()
     timeout_s = float(timeout_s)
     if not math.isfinite(timeout_s) or timeout_s <= 0:
         raise ValueError('LightField optics timeout must be finite and positive')
@@ -108,23 +125,24 @@ def apply_optics(setup, requested, *, timeout_s=15.0):
         key = _key(setup, setting)
         if key is None:
             raise ValueError(f"LightField {field} is not available")
-        choices = {str(value): value for value in setup.experiment.GetCurrentCapabilities(key)}
+        choices = _checked(setup, lambda: {
+            str(value): value for value in setup.experiment.GetCurrentCapabilities(key)})
         target = str(requested[field])
         if target not in choices:
             raise ValueError(f"Unsupported LightField {field}: {target}")
         writes.append((field, key, choices[target]))
     for field, key, value in writes:
-        setup.wait_until_setting_writable(key, timeout_s=remaining())
+        _checked(setup, lambda: setup.wait_until_setting_writable(key, timeout_s=remaining()))
         remaining()  # A slow SDK readiness query may have consumed the budget.
-        setup.experiment.SetValue(key, value)
+        _checked(setup, lambda: setup.experiment.SetValue(key, value))
         # Idle SDK flags may precede a delayed exit/calibration update. Require
         # unchanged optical readbacks before issuing another motor command.
-        setup.wait_until_optics_stable(expected={field: str(value)}, timeout_s=remaining())
-        if str(setup.experiment.GetValue(key)) != str(value):
+        _checked(setup, lambda: setup.wait_until_optics_stable(expected={field: str(value)}, timeout_s=remaining()))
+        if str(_checked(setup, lambda: setup.experiment.GetValue(key))) != str(value):
             raise RuntimeError(f"LightField readback did not match requested value: {value}")
         remaining()
     if "wavelength_nm" in requested:
-        setup.set_center_wavelength_when_ready(float(requested["wavelength_nm"]), timeout_s=remaining())
+        _checked(setup, lambda: setup.set_center_wavelength_when_ready(float(requested["wavelength_nm"]), timeout_s=remaining()))
     optics = read_optics(setup)
     remaining()
     return optics

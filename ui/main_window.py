@@ -239,6 +239,7 @@ class MainWindow(QMainWindow):
         self._lf6.error.connect(
             lambda m: self._status.showMessage(f"Spectrometer error: {m[:80]}")
         )
+        self._lf6.capture_stalled.connect(self._on_capture_stalled)
         self._lf6.state_changed.connect(
             lambda state: self._status.showMessage(
                 f"Spectrometer {getattr(state, 'value', state).lower()}"
@@ -1588,7 +1589,28 @@ class MainWindow(QMainWindow):
             else:
                 self._status.showMessage("Motion sweep finished — instrument controls unlocked")
 
+    def _on_capture_stalled(self, status):
+        phase = status.get("stalled_phase") or status.get("phase", "acquisition")
+        message = (f"LightField stalled in {phase} after {status.get('elapsed_s', 0):.0f} s. "
+                   "Device ownership retained; no automatic retry. "
+                   "Wait for the call to return before disconnecting and reconnecting.")
+        diagnostic = status.get("diagnostic_path")
+        if diagnostic:
+            message += f" Diagnostics: {diagnostic}"
+        self._status.showMessage(message)
+        self._ntfy_notifier.notify_warning(
+            "LightField acquisition stalled", message,
+            key=("lightfield-capture-stalled", status.get("incident_id")),
+        )
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        status = getattr(getattr(self, "_lf6", None), "capture_status", {})
+        if ((isinstance(status, dict) and status.get("active")) or
+                getattr(getattr(self, "_lf6", None), "acquisition_in_progress", False) is True):
+            self._status.showMessage(
+                "LightField acquisition still owns the device; wait for the hardware call before closing.", 5000)
+            event.ignore()
+            return
         presets = getattr(self, "_presets", None)
         thread = getattr(presets, "_run_thread", None)
         finalizing = getattr(presets, "metadata_finalizing", False)

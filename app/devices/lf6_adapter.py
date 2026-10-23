@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Tuple
 import numpy as np
 import lf6_automation
+from app.lightfield_capture_guard import LightFieldAcquisitionStalled, capture_operation, get_capture_guard
 
 from .spectrum_alignment import align_wavelengths_to_image, align_wavelengths_to_intensities
 
@@ -26,6 +27,8 @@ class SpectrometerLF6:
     def calibration_wavelengths(self, force: bool = False) -> np.ndarray:
         """Return wavelength vector; refresh if force=True or cache empty."""
         if force or self._wls_cache is None:
+            guard = get_capture_guard(self.setup)
+            guard.check_available()
             try:
                 # primary getter
                 self._wls_cache = np.asarray(
@@ -33,12 +36,17 @@ class SpectrometerLF6:
                 ).ravel()
             except AttributeError:
                 # fallback to older method names
+                guard.check_available()
                 try:
                     self._wls_cache = np.asarray(
                         self.setup.calibrate_wavelength(), dtype=float
                     ).ravel()
+                except LightFieldAcquisitionStalled:
+                    raise
                 except Exception:
+                    guard.check_available()
                     self._wls_cache = np.array([], dtype=float)
+            guard.check_available()
         return self._wls_cache
 
     # ---- data API ----
@@ -48,17 +56,21 @@ class SpectrometerLF6:
         Refresh the SDK axis for every captured frame. LightField can also
         change calibration outside this adapter's setting methods.
         """
-        # acquire_2d preserves full-sensor geometry while still returning a
-        # flat buffer when the LightField frame does not expose dimensions.
-        if hasattr(self.setup, "acquire_2d"):
-            y = np.asarray(self.setup.acquire_2d(), dtype=float)
-        else:
-            y = np.asarray(self.setup.acquire(), dtype=float)
-        wl = self.calibration_wavelengths(force=True)
-        if y.ndim == 2 and y.shape[0] > 1 and y.shape[1] > 1:
-            return align_wavelengths_to_image(wl, y)
-        y = y.ravel()
-        return align_wavelengths_to_intensities(wl, y)
+        with capture_operation(self.setup) as operation:
+            # Keep the owner/deadline through the SDK wavelength readback too.
+            if hasattr(self.setup, "acquire_2d"):
+                y = np.asarray(self.setup.acquire_2d(), dtype=float)
+            else:
+                y = np.asarray(self.setup.acquire(), dtype=float)
+            operation.stage("wavelength_calibration")
+            wl = self.calibration_wavelengths(force=True)
+            operation.stage("align_spectrum")
+            if y.ndim == 2 and y.shape[0] > 1 and y.shape[1] > 1:
+                result = align_wavelengths_to_image(wl, y)
+            else:
+                result = align_wavelengths_to_intensities(wl, y.ravel())
+            operation.check()
+            return result
 
     def abort_acquisition(self) -> bool:
         """Forward a best-effort cancellation request to LightField."""
@@ -67,7 +79,10 @@ class SpectrometerLF6:
 
     def acquire_2d(self):
         """Use the setup's validated capture and metadata path for 2D too."""
-        return self.setup.acquire_2d()
+        with capture_operation(self.setup) as operation:
+            result = self.setup.acquire_2d()
+            operation.check()
+            return result
 
     # ---- convenience setter that also clears λ cache ----
     def change_spectra_center(self, center_nm) -> None:
