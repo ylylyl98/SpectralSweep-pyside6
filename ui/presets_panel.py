@@ -64,6 +64,7 @@ from utils.numeric_sequences import (
     MAX_SEQUENCE_VALUES, NUMERIC_SEQUENCE_HELP, parse_numeric_sequence,
 )
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
+from app.dual_gate_metadata import DualGateFileMetadata
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.power_reading import power_correction_factor, read_power
 from ui.workflow_sections import divide_grid_fields, inline_divider
@@ -2493,6 +2494,8 @@ class _RunWorker(QObject):
     incident       = Signal(object)
     acquisition_ready = Signal(object)
     finalizing     = Signal()
+    startup_phase  = Signal(str)
+    metadata_ready = Signal(object)
     finished       = Signal(bool, str)
     error          = Signal(str)
 
@@ -2511,6 +2514,7 @@ class _RunWorker(QObject):
         acquisition_schedule: Optional[Sequence[Dict[str, Any]]] = None,
         metadata_run=None,
         files_before: Optional[Sequence[Path]] = None,
+        startup_metadata: Optional[dict] = None,
     ) -> None:
         super().__init__()
         self._seq      = final_sequence
@@ -2537,17 +2541,75 @@ class _RunWorker(QObject):
         )
         self._active_run_context: Dict[str, Any] = {}
         self._metadata_run = metadata_run
+        self._startup_metadata = dict(startup_metadata) if startup_metadata is not None else None
+        self.preparing_run = startup_metadata is not None
+        self._file_metadata = DualGateFileMetadata(metadata_run)
         self._metadata_finalizing = threading.Event()
         self.metadata_failed = False
-        self._files_before = set(files_before) if files_before is not None else set(_experiment_output_files(out_dir))
-        self._setup_sequence = any(_SETUP_PARAM in task['ctx'] for task in self._schedule)
+        self._files_before = set(files_before or []) if startup_metadata is not None else (
+            set(files_before) if files_before is not None else set(_experiment_output_files(out_dir)))
+        self._setup_sequence = False
         self._active_recipe = None
-        self._required_smu_roles = _required_smu_roles(
-            self._seq, self._batch, self._schedule
-        )
-        self._required_optical_axes = _required_optical_axes(
-            self._seq, self._schedule
-        )
+        self._required_smu_roles = ()
+        self._required_optical_axes = ()
+        if startup_metadata is None:
+            self._resolve_run_requirements()
+
+    def _resolve_run_requirements(self):
+        self._setup_sequence = any(_SETUP_PARAM in task['ctx'] for task in self._schedule)
+        self._required_smu_roles = _required_smu_roles(self._seq, self._batch, self._schedule)
+        self._required_optical_axes = _required_optical_axes(self._seq, self._schedule)
+
+    def _prepare_run_metadata(self):
+        """Validate and durably save the applied plan before any device command."""
+        if self._startup_metadata is None:
+            return
+        started = time.monotonic()
+        self.startup_phase.emit("Validating run plan...")
+        self.log.emit("Validating the applied run plan...")
+        if self._stop.is_set():
+            raise _StopRequested()
+        _validate_plan_budget(len(self._seq), self._batch,
+                              nested=bool(self._startup_metadata.get("nested")))
+        issues = _validate_safe_jumps(self._seq, self._batch,
+                                     self._startup_metadata["safe_jump_V"], self._schedule)
+        if issues:
+            raise _RunFlowError("planning", issues[0])
+        self._resolve_run_requirements()
+        if self._stop.is_set():
+            raise _StopRequested()
+        self.log.emit(f"Run plan validated in {time.monotonic() - started:.2f} s.")
+        self.startup_phase.emit("Saving run plan...")
+        self.log.emit("Saving run plan before instrument preparation...")
+        started = time.monotonic()
+        try:
+            # One worker-owned inventory scan also excludes older outputs from
+            # terminal registration. Never scan this directory on the GUI thread.
+            self._files_before = set(_experiment_output_files(self._out_dir))
+            if self._stop.is_set():
+                raise _StopRequested()
+            self._metadata_run = ExperimentMetadataService(self._out_dir).begin(
+                "dual_gate_sweep", self._meta["device_id"], output_dir=self._out_dir,
+                settings=self._meta, instruments=self._startup_metadata["instruments"])
+            self._file_metadata = DualGateFileMetadata(self._metadata_run)
+            self.metadata_ready.emit(self._metadata_run)
+            plan = self._meta.get("executed_plan", {})
+            recorded = self._metadata_run.record_event(
+                "plan_requested", plan_id="dual-gate-plan-1",
+                plan_summary={"sequence_count": len(plan.get("sequence", [])),
+                              "batch_rows": len(plan.get("batch_table", []))})
+            if recorded is None:
+                raise RuntimeError("Run plan event could not be durably recorded")
+        except _StopRequested:
+            raise
+        except Exception as exc:
+            self.metadata_failed = True
+            raise _RunFlowError("metadata", f"Run plan could not be saved: {exc}") from exc
+        self.log.emit(f"Run plan saved in {time.monotonic() - started:.2f} s.")
+        if self._stop.is_set():
+            raise _StopRequested()
+        self.startup_phase.emit("Preparing instruments...")
+        self.log.emit("Preparing instruments...")
 
     @property
     def metadata_finalizing(self) -> bool:
@@ -2561,6 +2623,9 @@ class _RunWorker(QObject):
         self.finalizing.emit()
         self.log.emit("Saving experiment metadata...")
         try:
+            run.metadata.setdefault("summary", {}).update(
+                completed_points=self._file_metadata.completed_points,
+                metadata_recording_policy="file")
             files = [
                 {"path": path, "role": "raw" if path.suffix.lower() == ".csv" else "intermediate"}
                 for path in _experiment_output_files(run.path.parent)
@@ -2572,7 +2637,9 @@ class _RunWorker(QObject):
             elif stopped:
                 result = run.cancel(message, files=files)
             else:
-                result = run.complete({"message": message}, files=files)
+                result = run.complete({"message": message,
+                                       "completed_points": self._file_metadata.completed_points,
+                                       "metadata_recording_policy": "file"}, files=files)
             if not failed and result["status"] == "failed":
                 raise RuntimeError((result.get("error") or {}).get("message", "Metadata recording failed"))
         finally:
@@ -2599,6 +2666,36 @@ class _RunWorker(QObject):
         if self._stop.wait(settle_s):
             raise _StopRequested()
 
+    def _record_interruption(self, status, message):
+        try:
+            self._file_metadata.interrupt(status, message, self._active_run_context)
+        except Exception as exc:
+            # Recording failure must not replace the original error or change
+            # the hardware cleanup policy of an operator Stop.
+            self.metadata_failed = True
+            self.log.emit(f"Could not save interruption metadata: {exc}")
+
+    def _close_output(self, writer, path, *, status, error=None):
+        close_error = None
+        try:
+            writer.close()
+        except Exception as exc:
+            close_error = exc
+        try:
+            self._file_metadata.finish(
+                path, status="failed" if close_error else status,
+                csv_closed=close_error is None, error=error, close_error=close_error)
+        except Exception as exc:
+            self.metadata_failed = True
+            self.log.emit(f"Could not save file metadata: {exc}")
+            if error is None and close_error is None and status == "completed":
+                raise _RunFlowError("metadata", str(exc)) from exc
+        if close_error is not None:
+            self.metadata_failed = True
+            self.log.emit(f"CSV close error: {close_error}")
+            if error is None:
+                raise _RunFlowError("save", f"CSV close error: {close_error}") from close_error
+
     def _require_smu_ready(self):
         issues = _smu_readiness_issues(self._smu, self._required_smu_roles)
         if issues:
@@ -2619,8 +2716,9 @@ class _RunWorker(QObject):
             raise _RunFlowError('acquisition', 'Multi-setup scan preparation is unavailable.')
         try:
             prepare(*recipe, 'device', self._stop)
+            self._file_metadata.configuration_changed()
             if self._metadata_run is not None:
-                bind_lightfield_metadata(self._lf6, self._metadata_run)
+                bind_lightfield_metadata(self._lf6, self._metadata_run, capture_policy="file")
         except Exception as exc:
             if self._stop.is_set():
                 raise _StopRequested() from exc
@@ -2695,6 +2793,7 @@ class _RunWorker(QObject):
         hardware_error = None
         hardware_stage = "smu_io"
         hardware_traceback = ""
+        hardware_started = False
         cleanup_report: Dict[str, Any] = {
             "attempted": False,
             "roles": {},
@@ -2706,15 +2805,25 @@ class _RunWorker(QObject):
         stream_power: Dict[Tuple[Any, ...], Tuple[Optional[float], Any]] = {}
 
         try:
+            try:
+                self._prepare_run_metadata()
+            finally:
+                self.preparing_run = False
+            if self._stop.is_set():
+                raise _StopRequested()
             self._require_smu_ready()
             self._require_optical_ready()
+            issues = _setup_readiness_issues(self._lf6, self._schedule)
+            if issues:
+                raise _RunFlowError('acquisition', issues[0])
+            if self._metadata_run is not None:
+                bind_lightfield_metadata(self._lf6, self._metadata_run, capture_policy="file")
+            hardware_started = True
             if self._setup_sequence:
-                issues = _setup_readiness_issues(self._lf6, self._schedule)
-                if issues:
-                    raise _RunFlowError('acquisition', issues[0])
                 # Configure every distinct complete recipe before any gate write.
                 recipes = dict.fromkeys(self._recipe(task['ctx']) for task in self._schedule)
-                for recipe in recipes:
+                for recipe_i, recipe in enumerate(recipes, 1):
+                    self.log.emit(f"Preparing detector recipe {recipe_i}/{len(recipes)}: {recipe[0]}, {recipe[1]:g} nm...")
                     self._prepare_setup(recipe)
                 self._active_recipe = None
             validate_centers = getattr(self._lf6, 'validate_scan_centers', None)
@@ -2811,6 +2920,7 @@ class _RunWorker(QObject):
                                 prepare(center_nm=spec_values["Center Wavelength (nm)"],
                                         exposure_ms=spec_values["Exposure Time (ms)"],
                                         frames=spec_values["Accumulations (EPF)"])
+                                self._file_metadata.configuration_changed()
                                 last_motion_values[param] = value
                         elif param == "Rotation1 Angle (deg)" and last_motion_values.get(param) != value:
                             self._move_optical_checked("rot1", float(value))
@@ -2862,6 +2972,7 @@ class _RunWorker(QObject):
                         if not callable(prepare):
                             raise _RunFlowError("acquisition", "Spectrometer acquisition preparation is unavailable.")
                         prepare(center_nm=center, exposure_ms=exp_ms, frames=accum)
+                        self._file_metadata.configuration_changed()
                         last_motion_values.update({
                             "Center Wavelength (nm)": center,
                             "Exposure Time (ms)": exp_ms,
@@ -2895,6 +3006,7 @@ class _RunWorker(QObject):
                             exposure_ms=exp_ms,
                             frames=accum,
                         )
+                        self._file_metadata.configuration_changed()
 
                     if val_rot1 is not None and (
                         last_motion_values.get("Rotation1 Angle (deg)") != val_rot1
@@ -3204,11 +3316,25 @@ class _RunWorker(QObject):
                                 wl = np.array([]); cts = np.array([])
                                 if self._lf6 and self._lf6.is_connected:
                                     try:
-                                        set_lightfield_context(self._lf6, output_file=csv_path, point_index=original_point_number,
+                                        set_lightfield_context(self._lf6,
+                                            output_file=self._file_metadata.output_path(csv_path),
+                                            output_file_is_portable=self._metadata_run is not None,
+                                            point_index=original_point_number,
                                             Vbg_set=float(vbg_set), Vtg_set=float(vtg_set),
                                             measurement_setup=getattr(self._lf6, 'backend', None),
                                             center_nm=center, exposure_ms=exp_ms, accumulations=accum)
+                                        self._file_metadata.before_capture(
+                                            self._lf6, csv_path, point_index=original_point_number,
+                                            planned_points=original_point_total,
+                                            context={**self._active_run_context,
+                                                     "measurement_setup": getattr(self._lf6, "backend", None),
+                                                     "center_nm": center, "exposure_ms": exp_ms,
+                                                     "accumulations": accum})
+                                        if self._stop.is_set():
+                                            raise _StopRequested()
                                         wl, cts = self._lf6.adapter.acquire()
+                                    except _StopRequested:
+                                        raise
                                     except Exception as e:
                                         raise _RunFlowError("acquisition", f"Acquire error: {e}") from e
                                 else:
@@ -3286,6 +3412,8 @@ class _RunWorker(QObject):
                                     )
                                 else:
                                     writer.write_row(row_data, acquired.tolist())
+                                self._file_metadata.point_written(
+                                    csv_path, original_point_number, getattr(writer, "_data_rows_written", 0))
                                 preview_payload = {
                                     "csv_path": str(csv_path),
                                     "measurement_setup": getattr(self._lf6, 'backend', None),
@@ -3312,7 +3440,13 @@ class _RunWorker(QObject):
                             raise _RunFlowError("save", f"CSV write error: {e}") from e
                         finally:
                             if writer is not None and stream_key is None:
-                                writer.close()
+                                primary_error = sys.exc_info()[1]
+                                stopped_here = self._stop.is_set() or isinstance(primary_error, _StopRequested)
+                                file_status = ("failed" if primary_error is not None and not isinstance(primary_error, _StopRequested)
+                                               else "stopped" if stopped_here else "completed")
+                                if file_status != "completed":
+                                    self._record_interruption(file_status, primary_error or "Run stopped by user.")
+                                self._close_output(writer, csv_path, status=file_status, error=primary_error)
 
                         if self._stop.is_set():
                             summary = "Run stopped by user."
@@ -3322,6 +3456,14 @@ class _RunWorker(QObject):
                             done += 1
                             self.progress.emit(done, total_acq)
                         elif stream_last_schedule.get(stream_key) == schedule_i:
+                            # A nested stream can span interleaved tasks, but
+                            # once its last point is saved it must release its
+                            # file handle and buffers before the next stream.
+                            # Otherwise long runs retain every completed CSV.
+                            finished_writer = writer_cache.pop(stream_key)
+                            self._close_output(finished_writer, csv_path, status="completed")
+                            del stream_paths[stream_key]
+                            del stream_power[stream_key]
                             done += 1
                             self.progress.emit(done, total_acq)
 
@@ -3369,12 +3511,24 @@ class _RunWorker(QObject):
             self.log.emit(summary)
             self.error.emit(summary)
         finally:
-            for cached_writer in list(writer_cache.values()):
+            if failed or self._stop.is_set():
+                self._record_interruption("failed" if failed else "stopped", summary)
+            close_failed = False
+            for cached_key, cached_writer in list(writer_cache.items()):
                 try:
-                    cached_writer.close()
-                except Exception:
-                    pass
-            if self._smu and self._smu.is_connected and failed:
+                    self._close_output(
+                        cached_writer, stream_paths.get(cached_key),
+                        status="failed" if failed else "stopped",
+                        error=summary if failed else None)
+                except Exception as exc:
+                    close_failed = True
+                    self.log.emit(str(exc))
+                    if not failed:
+                        summary = str(exc)
+            writer_cache.clear()
+            if not hardware_started:
+                cleanup_report.update(attempted=False, status="skipped_before_instrument_preparation")
+            elif self._smu and self._smu.is_connected and failed:
                 cleanup_report.update({
                     "attempted": False,
                     "status": "skipped_preserve_last_smu_state",
@@ -3456,13 +3610,14 @@ class _RunWorker(QObject):
                 )
                 self.incident.emit(incident)
 
-            if self._smu and self._smu.is_connected:
+            if hardware_started and self._smu and self._smu.is_connected:
                 try:
                     self._smu.device.clear_operation_context()
                 except Exception:
                     pass
 
             stopped = self._stop.is_set()
+            failed = failed or close_failed or self.metadata_failed
             try:
                 self._finalize_metadata(failed, stopped, summary)
             except Exception as exc:
@@ -5609,7 +5764,7 @@ class PresetsPanel(QWidget):
         self._refresh_draft_state()
         self._refresh_filename_preview()
 
-    def _refresh_draft_state(self):
+    def _refresh_draft_state(self, *, refresh_readiness: bool = True):
         if not hasattr(self, "_draft_badge"):
             return
         self._sync_loop_run_selectors()
@@ -5645,8 +5800,9 @@ class PresetsPanel(QWidget):
         running = bool(self._run_thread and self._run_thread.isRunning())
         self._apply_btn.setEnabled(self._tables_dirty and not validation_issues and not running)
         self._discard_btn.setEnabled(self._tables_dirty)
-        self._refresh_readiness(validation_issues=validation_issues)
-        self._refresh_sequence_preview()
+        if refresh_readiness:
+            self._refresh_readiness(validation_issues=validation_issues)
+            self._refresh_sequence_preview()
 
     def _refresh_sequence_preview(self) -> None:
         """Render the editable draft when valid; otherwise explain applied data."""
@@ -5861,17 +6017,18 @@ class PresetsPanel(QWidget):
     def _refresh_readiness(self, *_args, when_errors=None, validation_issues=None):
         if not hasattr(self, "_readiness_lbl"):
             return
-        self._sync_loop_run_selectors()
-        self._update_loop_row_buttons()
-        self._refresh_detector_wavelength_advice()
         running = bool(self._run_thread and self._run_thread.isRunning())
         if running:
+            self._update_loop_row_buttons()
             self._readiness_lbl.setText("Running the applied plan.")
             set_style_role(self._readiness_lbl, 'message', tone='warning')
             self._run_btn.setEnabled(False)
             self._apply_btn.setEnabled(False)
             self._readiness_lbl.setToolTip("Edits remain a draft until this run finishes.")
             return
+        self._sync_loop_run_selectors()
+        self._update_loop_row_buttons()
+        self._refresh_detector_wavelength_advice()
         self._apply_btn.setEnabled(self._tables_dirty and not getattr(self, "_draft_issues", []))
         issues = self._readiness_issues(
             when_errors=when_errors, validation_issues=validation_issues
@@ -6392,18 +6549,21 @@ class PresetsPanel(QWidget):
                 continue
         self._upcoming_preview.setPlainText("\n".join(upcoming) if upcoming else "No upcoming filenames yet.")
 
-    def _validate_before_run(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-        self._refresh_draft_state()
+    def _validate_before_run(self, *, defer_plan_checks: bool = False) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        # Run startup checks the resolved schedule on its worker. Keep this
+        # GUI pass limited to the editable inputs and local connection state.
+        self._refresh_draft_state(refresh_readiness=not defer_plan_checks)
         if self._draft_issues:
             return None, self._draft_issues[0]
         if self._tables_dirty:
             return None, "Apply or discard the plan changes before running (tables or execution order)."
-        try:
-            _validate_plan_budget(
-                len(self._final_seq), self._df_batch, nested=bool(self._applied_execution_order),
-            )
-        except ValueError as exc:
-            return None, str(exc)
+        if not defer_plan_checks:
+            try:
+                _validate_plan_budget(
+                    len(self._final_seq), self._df_batch, nested=bool(self._applied_execution_order),
+                )
+            except ValueError as exc:
+                return None, str(exc)
         when_errors = self._validate_when_rows(self._loop_src, self._batch_src)
         if when_errors:
             row, error = when_errors[0]
@@ -6418,42 +6578,48 @@ class PresetsPanel(QWidget):
             return None, "Enable at least one filename part."
         if not self._lf6 or not self._lf6.is_connected:
             return None, "LF6 must be connected or running in mock mode before a sweep can start."
-        setup_issues = _setup_readiness_issues(self._lf6, self._acquisition_schedule)
-        if setup_issues:
-            return None, setup_issues[0]
+        if not defer_plan_checks:
+            setup_issues = _setup_readiness_issues(self._lf6, self._acquisition_schedule)
+            if setup_issues:
+                return None, setup_issues[0]
         if self._df_batch.empty or not self._final_seq or not self._acquisition_schedule:
             return None, "No runnable plan is available."
-        required_smu_roles = _required_smu_roles(
-            self._final_seq, self._df_batch, self._acquisition_schedule
-        )
-        smu_issues = _smu_readiness_issues(self._smu, required_smu_roles)
-        if smu_issues:
-            return None, smu_issues[0]
-        optical_issues = _optical_readiness_issues(
-            self._rot,
-            self._stage,
-            _required_optical_axes(self._final_seq, self._acquisition_schedule),
-        )
-        if optical_issues:
-            return None, optical_issues[0]
+        if not defer_plan_checks:
+            required_smu_roles = _required_smu_roles(
+                self._final_seq, self._df_batch, self._acquisition_schedule
+            )
+            smu_issues = _smu_readiness_issues(self._smu, required_smu_roles)
+            if smu_issues:
+                return None, smu_issues[0]
+            optical_issues = _optical_readiness_issues(
+                self._rot,
+                self._stage,
+                _required_optical_axes(self._final_seq, self._acquisition_schedule),
+            )
+            if optical_issues:
+                return None, optical_issues[0]
+        elif not self._smu or not self._smu.is_connected:
+            return None, "Required Keithley channels are not connected."
         if any(_to_bool(row.get("MeasurePower", False)) for _, row in self._df_batch.iterrows()):
             if not self._pm or not self._pm.is_connected:
                 return None, "MeasurePower rows require a connected PM100D."
-        jump_issues = _validate_safe_jumps(
-            self._final_seq,
-            self._df_batch,
-            float(self._safe_jump_spin.value()),
-            self._acquisition_schedule,
-        )
-        if jump_issues:
-            for issue in jump_issues:
-                self._log(issue)
-            return None, jump_issues[0]
+        if not defer_plan_checks:
+            jump_issues = _validate_safe_jumps(
+                self._final_seq,
+                self._df_batch,
+                float(self._safe_jump_spin.value()),
+                self._acquisition_schedule,
+            )
+            if jump_issues:
+                for issue in jump_issues:
+                    self._log(issue)
+                return None, jump_issues[0]
         out_dir = self._current_output_dir(run_meta)
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            return None, f"Save path is invalid: {exc}"
+        if not defer_plan_checks:
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                return None, f"Save path is invalid: {exc}"
         try:
             first_task = self._acquisition_schedule[0]
             _build_run_filename_base(
@@ -7293,7 +7459,7 @@ class PresetsPanel(QWidget):
             self._log("No plan — click Apply first.")
             return
 
-        run_meta, err = self._validate_before_run()
+        run_meta, err = self._validate_before_run(defer_plan_checks=True)
         if err:
             QMessageBox.warning(self, "Cannot start run", err)
             self._log(err)
@@ -7306,24 +7472,15 @@ class PresetsPanel(QWidget):
                 run_meta.get('spectrometer_defaults', {}).get('Center Wavelength (nm)', cfg.lf6.center_nm)):
             self._log('Run cancelled at detector wavelength reminder.')
             return
-        self._run_csv_before = {path for path in _experiment_output_files(out_dir) if path.suffix.lower() == ".csv"}
-        self._run_files_before = set(_experiment_output_files(out_dir))
-        try:
-            self._experiment_run = ExperimentMetadataService(out_dir).begin(
-                "dual_gate_sweep", run_meta["device_id"], output_dir=out_dir, settings=run_meta,
-                instruments=instrument_inventory(lightfield=self._lf6, smu=self._smu,
-                                                 rotation=self._rot, stage=self._stage, power_meter=self._pm)
-            )
-            self._experiment_run.record_event(
-                "plan_requested", plan_id="dual-gate-plan-1",
-                plan_summary={"sequence_count": len(run_meta.get("executed_plan", {}).get("sequence", [])),
-                              "batch_rows": len(run_meta.get("executed_plan", {}).get("batch_table", []))},
-            )
-            bind_lightfield_metadata(self._lf6, self._experiment_run)
-        except Exception as exc:
-            QMessageBox.critical(self, "Metadata error", f"Experiment metadata could not be created; run blocked.\n\n{exc}")
-            self._log(f"Metadata error: {exc}")
-            return
+        # Capture only small cached identities and widget values on the GUI
+        # thread. The applied plan remains read-only while its run thread owns it.
+        startup_metadata = {
+            "instruments": instrument_inventory(lightfield=self._lf6, smu=self._smu,
+                                                rotation=self._rot, stage=self._stage, power_meter=self._pm),
+            "safe_jump_V": float(self._safe_jump_spin.value()),
+            "nested": bool(self._applied_execution_order),
+        }
+        self._experiment_run = None
 
         self._stop_event.clear()
         self._done_acq = 0
@@ -7346,8 +7503,7 @@ class PresetsPanel(QWidget):
             stop_event=self._stop_event,
             preview_event=self._preview_event,
             acquisition_schedule=self._acquisition_schedule,
-            metadata_run=self._experiment_run,
-            files_before=self._run_files_before,
+            startup_metadata=startup_metadata,
         )
         self._run_worker.moveToThread(self._run_thread)
         self._run_thread.started.connect(self._run_worker.run)
@@ -7362,20 +7518,34 @@ class PresetsPanel(QWidget):
         self._run_worker.acquisition_ready.connect(self._on_acquisition_ready)
         self._run_worker.error.connect(lambda e: self._log(f"ERROR: {e}"))
         self._run_worker.finalizing.connect(self._on_finalizing)
+        self._run_worker.startup_phase.connect(self._on_startup_phase)
+        self._run_worker.metadata_ready.connect(self._on_metadata_ready)
         self._run_worker.finished.connect(self._on_finished)
         self._run_worker.finished.connect(self._run_thread.quit)
 
         self._run_btn.setEnabled(False)
+        self._apply_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._initial_voltage_settle_spin.setEnabled(False)
         self._voltage_settle_spin.setEnabled(False)
-        self._status_lbl.setText("Running…")
+        self._status_lbl.setText("Preparing run...")
         set_style_role(self._status_lbl, 'text', tone='warning')
-        self._on_progress(0, self._total_acq)
+        self._progress.setRange(0, max(self._total_points, 1))
+        self._progress.setValue(0)
+        self._log("Preparing run; validating and saving the plan before instrument commands.")
         pause = getattr(self._lf6, "set_temperature_monitor_paused", None)
         if callable(pause):
             pause("presets", True)
         self._run_thread.start()
+
+    @Slot(str)
+    def _on_startup_phase(self, phase):
+        if not self._stop_event.is_set():
+            self._status_lbl.setText(phase)
+
+    @Slot(object)
+    def _on_metadata_ready(self, run):
+        self._experiment_run = run
 
     @Slot(bool)
     def _toggle_spectrum_viewer(self, checked: bool):
@@ -7437,6 +7607,9 @@ class PresetsPanel(QWidget):
         self._stop_btn.setEnabled(False)
         self._status_lbl.setText("Stopping...")
         self._log("Stop requested.")
+        if getattr(self._run_worker, "preparing_run", False):
+            self._log("Waiting for the current plan validation/save to finish; instruments have not started.")
+            return
         status = getattr(self._lf6, "capture_status", {})
         if isinstance(status, dict) and status:
             self._on_capture_status_changed(status)
@@ -7462,22 +7635,34 @@ class PresetsPanel(QWidget):
             return
         if status.get("recovery_required"):
             phase = status.get("stalled_phase") or status.get("phase", "acquisition")
+            metadata_stalled = status.get("timeout_domain") == "metadata"
+            label = "Metadata persistence stalled" if metadata_stalled else "LightField stalled"
+            elapsed = status.get("wait_elapsed_s", status.get("elapsed_s", 0))
             self._status_lbl.setText(
-                f"LightField stalled · {phase} · {status.get('elapsed_s', 0):.0f} s · "
+                f"{label} · {phase} · {elapsed:.0f} s · "
                 f"saved {self._done_frames}/{self._total_points} · recovery required")
             set_style_role(self._status_lbl, 'text', tone='danger')
             self._readiness_lbl.setText(
-                "Hardware call has not finished; device ownership retained." if status.get("active") else
-                "Hardware call returned; finishing failed run. Reconnect LightField before running again.")
+                ("Local metadata write has not finished; device ownership retained." if metadata_stalled else
+                 "Hardware call has not finished; device ownership retained.") if status.get("active") else
+                "Operation returned; finishing failed run. Reconnect LightField before running again.")
             incident = status.get("incident_id")
             if incident != getattr(self, "_capture_incident_id", None):
                 self._capture_incident_id = incident
-                self._log("LightField acquisition stalled. No automatic retry or zero-ramp. "
+                self._log(f"{label}. No automatic retry or zero-ramp. "
                           f"Diagnostics: {status.get('diagnostic_path') or status.get('diagnostic_error') or 'pending'}")
+        elif status.get("active") and status.get("active_domain") == "metadata":
+            self._status_lbl.setText(
+                f"Saving metadata · {status.get('wait_elapsed_s', 0):.0f} s · "
+                f"saved {self._done_frames}/{self._total_points}")
         elif self._stop_event.is_set() and status.get("active"):
             self._status_lbl.setText(
                 f"Stopping · waiting for LightField {status.get('phase', 'acquisition')} "
                 f"· {status.get('elapsed_s', 0):.0f} s")
+        elif status.get("active") and self._status_lbl.text().startswith("Saving metadata"):
+            self._status_lbl.setText(
+                f"Acquiring · {status.get('phase', 'acquisition')} · "
+                f"saved {self._done_frames}/{self._total_points}")
             set_style_role(self._status_lbl, 'text', tone='warning')
 
     @Slot(list)
@@ -7591,7 +7776,9 @@ class PresetsPanel(QWidget):
         capture = getattr(self._lf6, "capture_status", {})
         if isinstance(capture, dict) and capture.get("recovery_required"):
             self._run_outcome = "failed"
-            self._status_lbl.setText("LightField stalled - disconnect and reconnect before running again")
+            label = ("Metadata persistence stalled" if capture.get("timeout_domain") == "metadata"
+                     else "LightField stalled")
+            self._status_lbl.setText(f"{label} - disconnect and reconnect before running again")
             set_style_role(self._status_lbl, 'text', tone='danger')
         elif self._hardware_incident_active:
             self._run_outcome = "failed"

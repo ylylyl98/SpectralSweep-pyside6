@@ -54,6 +54,7 @@ from utils.config import cfg
 from app.devices.aps100_field_policy import APS100FieldLimits
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
+from app.engine.mcd_metadata import condition_metadata_summary, finalize_mcd_metadata
 from utils.filename_builder import (
     FilenameContext,
     build_base_filename,
@@ -263,6 +264,7 @@ class _ContinuousMCDWorker(QObject):
         self._metadata_run = metadata_run
         self._stop = threading.Event()
         self._csv_path: Optional[Path] = None
+        self._output_csv_paths: list[str] = []
         self._metadata_path: Optional[Path] = None
         self._metadata: dict = {}
         self._spectra_written = 0
@@ -469,6 +471,20 @@ class _ContinuousMCDWorker(QObject):
                 self._set_metadata_status("stopped")
             elif result.get("error"):
                 self._set_metadata_status("failed", error=result["error"])
+            # Keep even partially written conditions in the output inventory.
+            # Do the one terminal manifest write on this worker, before the UI
+            # releases the run lock or announces completion.
+            result["csv_paths"] = list(dict.fromkeys(
+                list(result.get("csv_paths", [])) + self._output_csv_paths))
+            if result["csv_paths"]:
+                result["csv_path"] = result["csv_paths"][-1]
+            try:
+                if self._metadata_run is not None:
+                    self._emit_log("Saving experiment metadata…")
+                    finalize_mcd_metadata(self._metadata_run, result)
+            except Exception as exc:
+                result["metadata_error"] = str(exc)
+                self.error.emit(f"Metadata finalization failed: {exc}")
             self.finished.emit(result)
 
     def _run(self) -> dict:
@@ -600,6 +616,7 @@ class _ContinuousMCDWorker(QObject):
         if rotator is None:
             raise RuntimeError(f"{p['rotator'].upper()} is not connected")
         self._csv_path, self._metadata_path = self._create_output_paths(p)
+        self._output_csv_paths.append(str(self._csv_path))
 
         if self._metadata_run is not None:
             condition_id = f"condition-{int(p.get('condition_index', 1))}"
@@ -887,6 +904,7 @@ class _ContinuousMCDWorker(QObject):
                 "spectra_written": self._spectra_written,
             }
         )
+        self._write_metadata()
         if self._metadata_run is not None:
             # The JSON compatibility file remains useful to older tooling, but
             # the shared experiment journal owns the condition timing,
@@ -895,9 +913,8 @@ class _ContinuousMCDWorker(QObject):
                 "condition_completed",
                 condition_id=f"condition-{int(p.get('condition_index', index))}",
                 output={"file": self._csv_path.name, "rows": int(self._spectra_written)},
-                condition_detail=self._metadata,
+                condition_detail=condition_metadata_summary(self._metadata, self._metadata_path.name),
             )
-        self._write_metadata()
         self._emit_log(f"MCD spectra saved to {self._csv_path}")
         return {
             "csv_path": str(self._csv_path),
@@ -1186,20 +1203,20 @@ class _ContinuousMCDWorker(QObject):
         self._metadata["spectra_written"] = self._spectra_written
         if error:
             self._metadata["error"] = str(error)
+        try:
+            self._write_metadata()
+        except Exception:
+            return
         if self._metadata_run is not None:
             try:
                 self._metadata_run.record_event(
                     "condition_failed" if str(status).lower() == "failed" else "condition_stopped",
                     condition_id=f"condition-{int(self._metadata.get('condition_index', 1))}",
                     output={"file": self._csv_path.name} if self._csv_path else None,
-                    condition_detail=self._metadata,
+                    condition_detail=condition_metadata_summary(self._metadata, self._metadata_path.name),
                 )
             except Exception:
                 pass
-        try:
-            self._write_metadata()
-        except Exception:
-            pass
 
     @staticmethod
     def _snapshot_dict(snapshot) -> dict:
@@ -3225,7 +3242,9 @@ class MCDPanel(QWidget):
 
     @Slot(object)
     def _on_run_finished(self, result: dict) -> None:
-        if result.get("error"):
+        if result.get("metadata_status") == "failed" or result.get("metadata_error"):
+            self._run_status.setText("Metadata finalization failed — check log")
+        elif result.get("error"):
             self._run_status.setText("Error — check log and APS100")
         elif result.get("stopped"):
             self._run_status.setText("Stopped — APS100 paused")
@@ -3235,29 +3254,10 @@ class MCDPanel(QWidget):
             self._run_status.setText("Finished")
         self._magnet.release_exclusive("mcd")
         self._magnet.refresh_snapshot()
-        run = getattr(self, "_experiment_run", None)
-        if run is not None:
-            try:
-                for csv_name in result.get("csv_paths", []) or ([result["csv_path"]] if result.get("csv_path") else []):
-                    path = Path(csv_name)
-                    if path.exists():
-                        run.register_file(path, "raw")
-                        for sibling in (path.with_suffix(".meta.json"),):
-                            if sibling.exists():
-                                run.register_file(
-                                    sibling, "intermediate",
-                                    details={"compatibility_projection": True,
-                                             "derived_from_experiment_id": run.experiment_id},
-                                )
-                if result.get("error"):
-                    run.fail(result["error"])
-                elif result.get("stopped"):
-                    run.cancel("MCD stop requested")
-                else:
-                    run.complete()
-            except Exception as exc:
-                self._append_log(f"Metadata finalization error: {exc}")
-                QMessageBox.critical(self, "Metadata error", str(exc))
+        if result.get("metadata_error"):
+            self._run_status.setText("Metadata finalization failed — check log")
+            self._append_log(f"Metadata finalization error: {result['metadata_error']}")
+            QMessageBox.critical(self, "Metadata error", str(result["metadata_error"]))
 
     @Slot()
     def _on_run_thread_finished(self) -> None:

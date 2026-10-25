@@ -247,6 +247,17 @@ class MCDWorkflowTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_metadata_failure_survives_worker_finished_ui_cleanup(self):
+        panel = MCDPanel(_PanelMagnetController(), _EmptyController(), _EmptyController(), _EmptyController())
+        self.addCleanup(panel.close)
+        with patch.object(QMessageBox, "critical"):
+            panel._on_run_finished({"status": "FAILED", "measurement_status": "COMPLETED",
+                                    "metadata_status": "failed", "metadata_error": "history index unavailable",
+                                    "csv_path": "completed-spectrum.csv"})
+        panel._on_run_thread_finished()
+        self.assertIn("Metadata finalization failed", panel._run_status.text())
+        self.assertIn("history index unavailable", panel._log.toPlainText())
+
     def test_panel_defaults_to_ref_and_previews_mcd_data_subfolder(self):
         panel = MCDPanel(
             _PanelMagnetController(),

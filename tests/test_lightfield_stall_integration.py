@@ -129,17 +129,24 @@ def test_controller_reserves_stalled_owner_and_allows_only_drained_disconnect(pa
         ctrl.shutdown()
 
 
-def test_stall_ui_overrides_stop_and_keeps_saved_progress():
+@pytest.mark.parametrize("domain", ["sdk", "metadata"])
+def test_stall_ui_overrides_stop_and_keeps_saved_progress(domain):
     status = dict(active=True, recovery_required=True, phase="capture", stalled_phase="capture",
-                  elapsed_s=35, incident_id="fake", diagnostic_path="local.jsonl")
+                  elapsed_s=35, incident_id="fake", diagnostic_path="local.jsonl", timeout_domain=domain)
     panel = PresetsPanel()
     panel._lf6 = SimpleNamespace(capture_status=status)
     panel._run_thread = SimpleNamespace(isRunning=lambda: True)
     panel._done_frames, panel._total_points = 586, 906
     panel._run_worker = SimpleNamespace(metadata_failed=False)
     try:
+        if domain == "metadata":
+            panel._on_capture_status_changed(dict(active=True, active_domain="metadata", wait_elapsed_s=5))
+            assert "Saving metadata" in panel._status_lbl.text()
+            panel._on_capture_status_changed(dict(active=True, active_domain="sdk", phase="capture"))
+            assert "Acquiring" in panel._status_lbl.text()
         panel._on_stop()
         assert "stalled" in panel._status_lbl.text().lower()
+        assert ("Metadata persistence" in panel._status_lbl.text()) == (domain == "metadata")
         assert "586/906" in panel._status_lbl.text()
         assert "zero-ramp will begin immediately" not in panel._log_text.toPlainText()
         assert _setup_readiness_issues(panel._lf6, [])
@@ -189,10 +196,12 @@ def test_capture_observer_does_not_probe_sdk_on_healthy_transition_to_idle():
 
 
 @pytest.mark.parametrize("active", [False, True])
-def test_main_window_rejects_close_without_touching_devices_and_queues_warning(active):
+@pytest.mark.parametrize("domain", ["sdk", "metadata"])
+def test_main_window_rejects_close_without_touching_devices_and_queues_warning(active, domain):
     window = MainWindow.__new__(MainWindow)
     QMainWindow.__init__(window)
-    status = dict(active=active, recovery_required=True, phase="capture", elapsed_s=31, incident_id="fake")
+    status = dict(active=active, recovery_required=True, phase="capture", elapsed_s=31,
+                  incident_id="fake", timeout_domain=domain)
     window._lf6 = SimpleNamespace(capture_status=status, acquisition_in_progress=True)
     window._status = QStatusBar(window)
     window._power_sweep = SimpleNamespace(shutdown=Mock())
@@ -204,6 +213,8 @@ def test_main_window_rejects_close_without_touching_devices_and_queues_warning(a
         window._power_sweep.shutdown.assert_not_called()
         window._on_capture_stalled(status)
         window._ntfy_notifier.notify_warning.assert_called_once()
+        title = window._ntfy_notifier.notify_warning.call_args.args[0]
+        assert ("metadata persistence" in title) == (domain == "metadata")
         assert "retained" in window._status.currentMessage()
     finally:
         window.deleteLater()

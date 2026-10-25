@@ -331,6 +331,28 @@ class MCD2100PanelTests(unittest.TestCase):
         self.app.processEvents()
         self.assertIsNone(panel.worker)
 
+    def test_metadata_failure_persists_after_thread_and_detach_callbacks(self):
+        panel, controller, _ = self.make_panel()
+        panel._on_terminal({"status": "FAILED", "measurement_status": "COMPLETED",
+                            "metadata_status": "failed", "metadata_error": "history index unavailable",
+                            "spectra_written": 2})
+        self.assertFalse(panel._connected)
+        self.assertTrue(panel._detached_after_completion)
+        self.assertIn("metadata finalization", panel.status.text())
+        self.assertIn("FAILED", panel.run_activity.text())
+        self.assertIn("Run finished: FAILED", panel._log.toPlainText())
+        panel._thread_finished()
+        panel._on_disconnected()
+        panel._on_controller_state(SimpleNamespace(name="DISCONNECTED"))
+        panel._on_phase("Completed: late phase message")
+        panel._refresh_activity()
+        self.assertIn("FAILED", panel.status.text())
+        self.assertIn("metadata finalization", panel._terminal_status)
+        self.assertIn("metadata finalization", panel.run_activity.text())
+        self.assertIn("Detached", panel.connection_status.text())
+        self.assertFalse(panel.start_btn.isEnabled())
+        self.assertTrue(panel.connect_btn.isEnabled())
+
     def test_session_state_preserves_raw_gate_entry_draft(self):
         panel, _controller, _factory = self.make_panel()
         panel._condition_table.item(0, 8).setText("partial")

@@ -22,6 +22,9 @@ import uuid
 _INSTALL_LOCK = threading.Lock()
 _DIAGNOSTIC_LOCK = threading.Lock()
 _GUARD_ATTR = "_lightfield_capture_guard"
+# Local serialization/fsync has its own budget; it must not spend the SDK's
+# exposure/readout allowance. This remains bounded even if a disk stops replying.
+METADATA_WAIT_TIMEOUT_S = 120.0
 _CONTEXT_FIELDS = frozenset({
     "run_id", "experiment_id", "acquisition_id", "point_index", "output_file",
     "Vbg_set", "Vtg_set", "Vbias_set", "measurement_setup", "center_nm",
@@ -31,6 +34,10 @@ _CONTEXT_FIELDS = frozenset({
 
 class LightFieldAcquisitionStalled(TimeoutError):
     """The wait budget expired; this does not confirm hardware cancellation."""
+
+
+class LightFieldMetadataStalled(LightFieldAcquisitionStalled):
+    """Local metadata persistence exceeded its budget, not an SDK operation."""
 
 
 class LightFieldCaptureOwnershipError(RuntimeError):
@@ -156,12 +163,20 @@ class CaptureOperation:
             _capture_wait_timeout_s=cached.get("_capture_wait_timeout_s"),
         )
         self.deadline = self.started + self.timeout_s
+        self.metadata_timeout_s = _positive(METADATA_WAIT_TIMEOUT_S, "Metadata wait budget")
+        self.metadata_elapsed_s = 0.0
+        self._metadata_started = None
+        self._metadata_deadline = None
+        self._metadata_depth = 0
         self.context = _context(setup, frames, purpose)
         self.phase = "starting"
         self.stalled_phase = None
         self.stalled = False
         self.incident_id = None
         self.reason = None
+        self.timeout_domain = None
+        self.stalled_timeout_s = None
+        self.stalled_wait_elapsed_s = None
         self.ended = None
         self.depth = 1
         self.diagnostic_path = _diagnostic_path(setup)
@@ -178,6 +193,19 @@ class CaptureOperation:
     def check(self):
         self._guard._check(self)
 
+    @contextmanager
+    def local_metadata(self, name, *, check=True):
+        """Time pure local persistence separately while retaining device ownership.
+
+        No SDK calls may run in this scope. ``check=False`` is only for failure
+        records after an error; it never clears or changes an existing incident.
+        """
+        previous_phase = self._guard._begin_metadata(self, str(name), check)
+        try:
+            yield
+        finally:
+            self._guard._end_metadata(self, previous_phase, check)
+
     def update_context(self, **values):
         with self._guard._lock:
             self._guard._require_owner(self)
@@ -191,7 +219,7 @@ class CaptureOperation:
             expired = self._guard._expire_locked(self, time.monotonic())
             if not self.stalled:
                 self.timeout_s = budget
-                self.deadline = self.started + budget
+                self.deadline = self.started + budget + self.metadata_elapsed_s
                 self.context["capture_frames_requested"] = int(frames)
                 expired = self._guard._expire_locked(self, time.monotonic()) or expired
             self._wake.set()
@@ -218,6 +246,13 @@ class LightFieldCaptureGuard:
         self._recovery_required = False
 
     def _error(self, op):
+        if op.timeout_domain == "metadata":
+            return LightFieldMetadataStalled(
+                f"LightField metadata persistence {op.reason} "
+                f"({op.stalled_timeout_s:g} s budget; phase: {op.stalled_phase}). "
+                "Device ownership is retained until the operation and cleanup return. "
+                "This connection requires recovery before another acquisition."
+            )
         return LightFieldAcquisitionStalled(
             f"LightField acquisition {op.reason or 'wait budget exceeded'} ({op.timeout_s:g} s budget; "
             f"phase: {op.stalled_phase}). Hardware stop is not confirmed. "
@@ -230,20 +265,75 @@ class LightFieldCaptureGuard:
         if op.owner_thread_id != threading.get_ident():
             raise LightFieldCaptureOwnershipError("LightField capture belongs to another thread")
 
-    def _expire_locked(self, op, now):
-        if self._current is not op or not self._active or op.stalled or now < op.deadline:
-            return False
-        return self._quarantine_locked(op, "wait budget exceeded")
+    def _deadline_locked(self, op):
+        return op._metadata_deadline if op._metadata_depth else op.deadline
 
-    def _quarantine_locked(self, op, reason):
+    def _metadata_elapsed_locked(self, op, now):
+        return op.metadata_elapsed_s + (
+            max(0.0, now - op._metadata_started) if op._metadata_depth else 0.0)
+
+    def _expire_locked(self, op, now):
+        if (self._current is not op or not self._active or op.stalled
+                or now < self._deadline_locked(op)):
+            return False
+        domain = "metadata" if op._metadata_depth else "sdk"
+        return self._quarantine_locked(op, "wait budget exceeded", domain=domain, now=now)
+
+    def _quarantine_locked(self, op, reason, *, domain="sdk", now=None):
         if self._current is not op or not self._active or op.stalled:
             return False
         op.stalled = True
         op.stalled_phase = op.phase
         op.incident_id = str(uuid.uuid4())
         op.reason = reason
+        op.timeout_domain = domain
+        op.stalled_timeout_s = op.metadata_timeout_s if domain == "metadata" else op.timeout_s
+        now = time.monotonic() if now is None else now
+        op.stalled_wait_elapsed_s = (
+            max(0.0, now - op._metadata_started) if domain == "metadata"
+            else max(0.0, now - op.started - self._metadata_elapsed_locked(op, now)))
         self._recovery_required = True
         return True
+
+    def _begin_metadata(self, op, name, check):
+        with self._lock:
+            self._require_owner(op)
+            now = time.monotonic()
+            # Check before switching domains: local work cannot rescue a late SDK.
+            expired = self._expire_locked(op, now)
+            stalled = op.stalled
+            previous_phase = op.phase
+            if not stalled or not check:
+                if not op._metadata_depth:
+                    op._metadata_started = now
+                    op._metadata_deadline = now + op.metadata_timeout_s
+                op._metadata_depth += 1
+                op.phase = name
+                op._wake.set()
+        if expired:
+            self._diagnose(op)
+        if stalled and check:
+            raise self._error(op)
+        return previous_phase
+
+    def _end_metadata(self, op, previous_phase, check):
+        with self._lock:
+            self._require_owner(op)
+            now = time.monotonic()
+            expired = self._expire_locked(op, now)
+            op._metadata_depth -= 1
+            if not op._metadata_depth:
+                elapsed = max(0.0, now - op._metadata_started)
+                op.metadata_elapsed_s += elapsed
+                op.deadline += elapsed
+                op._metadata_started = op._metadata_deadline = None
+            op.phase = previous_phase
+            stalled = op.stalled
+            op._wake.set()
+        if expired:
+            self._diagnose(op)
+        if stalled and check:
+            raise self._error(op)
 
     def _diagnose(self, op):
         # Never hold the state lock during filesystem access. Quarantine is
@@ -282,18 +372,21 @@ class LightFieldCaptureGuard:
 
     def _watch(self, op):
         while True:
-            op._wake.wait(max(0.0, op.deadline - time.monotonic()))
-            op._wake.clear()
-            if op._done.is_set():
-                return
             with self._lock:
                 if self._current is not op or not self._active:
                     return
                 expired = self._expire_locked(op, time.monotonic())
                 stalled = op.stalled
+                wait_s = max(0.0, self._deadline_locked(op) - time.monotonic())
+                # Clear while holding the same lock as domain changes, so no
+                # wakeup announcing a shorter/new deadline can be lost.
+                op._wake.clear()
             if expired:
                 self._diagnose(op)
             if stalled:
+                return
+            op._wake.wait(wait_s)
+            if op._done.is_set():
                 return
 
     def _enter(self, setup, frames, purpose):
@@ -333,6 +426,8 @@ class LightFieldCaptureGuard:
     def _stage(self, op, name, check):
         with self._lock:
             self._require_owner(op)
+            if op._metadata_depth:
+                raise LightFieldCaptureOwnershipError("SDK stages are prohibited during local metadata persistence")
             # Attribute the deadline to the phase that was active before this
             # boundary, even if cleanup is now starting.
             expired = self._expire_locked(op, time.monotonic())
@@ -397,14 +492,30 @@ class LightFieldCaptureGuard:
                     "elapsed_s": 0.0, "timeout_s": None, "context": {},
                     "operation_token": None, "owner_thread_id": None,
                     "diagnostic_path": None, "diagnostic_error": None, "reason": None,
+                    "timeout_domain": None, "active_domain": None, "wait_elapsed_s": 0.0,
+                    "sdk_elapsed_s": 0.0, "metadata_elapsed_s": 0.0,
+                    "sdk_timeout_s": None, "metadata_timeout_s": None,
                 }
+            now = op.ended if op.ended is not None else time.monotonic()
+            elapsed = max(0.0, now - op.started)
+            metadata_elapsed = self._metadata_elapsed_locked(op, now)
+            sdk_elapsed = max(0.0, elapsed - metadata_elapsed)
+            wait_elapsed = (max(0.0, now - op._metadata_started)
+                            if op._metadata_depth else sdk_elapsed)
             return {
                 "active": self._active, "stalled": op.stalled,
                 "recovery_required": self._recovery_required,
                 "incident_id": op.incident_id, "phase": op.phase,
                 "stalled_phase": op.stalled_phase,
-                "elapsed_s": max(0.0, (op.ended if op.ended is not None else time.monotonic()) - op.started),
-                "timeout_s": op.timeout_s, "context": dict(op.context),
+                "elapsed_s": elapsed,
+                "timeout_s": (op.stalled_timeout_s if op.stalled else
+                              op.metadata_timeout_s if op._metadata_depth else op.timeout_s),
+                "timeout_domain": op.timeout_domain,
+                "active_domain": "metadata" if op._metadata_depth else "sdk",
+                "wait_elapsed_s": op.stalled_wait_elapsed_s if op.stalled else wait_elapsed,
+                "sdk_elapsed_s": sdk_elapsed, "metadata_elapsed_s": metadata_elapsed,
+                "sdk_timeout_s": op.timeout_s, "metadata_timeout_s": op.metadata_timeout_s,
+                "context": dict(op.context),
                 "operation_token": op.token, "owner_thread_id": op.owner_thread_id,
                 "diagnostic_path": str(op.diagnostic_path) if op.diagnostic_path is not None else None,
                 "diagnostic_error": op.diagnostic_error,
@@ -419,6 +530,8 @@ class LightFieldCaptureGuard:
             op = self._current if self._active else None
             if op is not None:
                 self._require_owner(op)
+                if op._metadata_depth:
+                    raise LightFieldCaptureOwnershipError("SDK access is prohibited during local metadata persistence")
                 expired = self._expire_locked(op, time.monotonic())
             else:
                 expired = False

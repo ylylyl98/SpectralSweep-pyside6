@@ -872,6 +872,8 @@ class AndorSDK2Setup:
             * self._accumulations
         )
         recorder = getattr(self, "_metadata_recorder", None)
+        if recorder is not None and not getattr(recorder, "records_captures", True):
+            recorder = None
         record = None
         if recorder is not None and recorder.active:
             try:

@@ -111,7 +111,9 @@ def test_executed_plan_is_preserved_once_and_reported_as_non_loadable(tmp_path):
     settings = {"executed_plan": {"acquisition_schedule": schedule}, "voltage_settle_s": .05}
     service = ExperimentMetadataService(tmp_path, tmp_path / "private-history.sqlite")
     run = service.begin("dual_gate_sweep", "sample", settings=settings)
-    saved = json.loads(run.path.read_text(encoding="utf-8"))
+    stored = json.loads(run.path.read_text(encoding="utf-8"))
+    assert "$table" in stored["settings"]["requested"]["executed_plan"]["acquisition_schedule"]
+    saved = service.load_metadata(run.path, migrate=False)
     assert saved["settings"]["requested"]["executed_plan"]["acquisition_schedule"] == schedule
     assert "executed_plan" not in saved["settings"]["loadable"]
     preview = service.preview_settings(saved)

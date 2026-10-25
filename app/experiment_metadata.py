@@ -22,12 +22,13 @@ import weakref
 import copy
 from itertools import islice
 from functools import lru_cache
+from collections.abc import Mapping
 from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Protocol
+from typing import Any, Iterable, Optional, Protocol
 
-from .metadata_storage import compact_metadata, expand_metadata
+from .metadata_storage import TABLE_STORAGE_FORMAT, compact_metadata, expand_metadata
 
 # ``schema_version`` describes the original envelope. ``metadata_schema`` 3
 # adds declared local JSON pointers for repeated containers; consumers should
@@ -77,6 +78,17 @@ def _jsonable(value: Any) -> Any:
     string.  The function intentionally avoids importing NumPy so metadata
     remains usable in catalog-only installations.
     """
+    # Plans mostly contain plain JSON values. Avoid walking generic typing,
+    # Enum and array protocols millions of times for these known native types.
+    kind = type(value)
+    if value is None or kind in (str, int, bool):
+        return value
+    if kind is float:
+        return value if math.isfinite(value) else None
+    if kind is dict:
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if kind in (list, tuple):
+        return [_jsonable(v) for v in value]
     # Enum internals include their class and callables; persist the declared
     # value, as settings snapshots do, instead of walking their __dict__.
     if isinstance(value, Enum):
@@ -208,8 +220,24 @@ def _software_provenance() -> dict[str, Any]:
     return result
 
 
+class _PreparedMetadata(dict):
+    """One write's normalized snapshot and transient table-encoding cache."""
+
+    def __init__(self, value):
+        super().__init__(_jsonable(value))
+        self.table_cache = {}
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    prepared = value if isinstance(value, _PreparedMetadata) else _PreparedMetadata(value)
+    stored = compact_metadata(prepared, _table_cache=prepared.table_cache)
+    storage = stored.get("metadata_storage")
+    is_table = isinstance(storage, Mapping) and storage.get("format") == TABLE_STORAGE_FORMAT
+    # Large column arrays do not need a separate indented line per scalar.
+    # Serialize once, then write once instead of json.dump's tiny file writes.
+    text = json.dumps(stored, sort_keys=True, indent=None if is_table else 2,
+                      separators=(",", ":") if is_table else None)
     temporary: Optional[Path] = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -217,7 +245,7 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             prefix=f".{path.name}.", suffix=".tmp", delete=False,
         ) as handle:
             temporary = Path(handle.name)
-            json.dump(compact_metadata(_jsonable(value)), handle, indent=2, sort_keys=True)
+            handle.write(text)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -253,13 +281,23 @@ def _portable_path(path: Path, root: Path) -> str:
 
 def _portable_settings(value: Any, root: Path, key: str = "") -> Any:
     """Keep settings JSON portable even when a legacy panel includes paths."""
-    if isinstance(value, Mapping):
+    kind = type(value)
+    if value is None or kind in (int, bool):
+        return value
+    if kind is float:
+        return value if math.isfinite(value) else None
+    if kind is dict or isinstance(value, Mapping):
         return {str(k): _portable_settings(v, root, str(k)) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_portable_settings(v, root, key) for v in value]
     if isinstance(value, Path):
         value = str(value)
     if isinstance(value, str):
+        # Most strings are parameter names/labels, repeated at every point.
+        # Only possible absolute/home paths need pathlib parsing or resolution.
+        if (not value.startswith(("~", "/", "\\"))
+                and not (len(value) > 2 and value[1] == ":" and value[2] in "/\\")):
+            return _jsonable(value)
         candidate = Path(value).expanduser()
         if candidate.is_absolute():
             try:
@@ -361,7 +399,8 @@ class ExperimentHistory:
                         metadata["experiment_type"], metadata["started_utc"],
                         metadata.get("completed_utc"), metadata["status"],
                         str(Path(local_metadata_path).resolve()) if local_metadata_path is not None else metadata["metadata_path"],
-                        json.dumps(compact_metadata(metadata.get("settings", {})), sort_keys=True),
+                        json.dumps(compact_metadata(metadata.get("settings", {}),
+                                                    _table_cache=getattr(metadata, "table_cache", None)), sort_keys=True),
                         json.dumps(metadata.get("summary", {}), sort_keys=True),
                     ),
             )
@@ -470,12 +509,17 @@ class ExperimentRun:
         self._allow_post_completion = bool(allow_post_completion)
         self._event_index = 0
         self._compatibility_states: dict[str, dict[str, Any]] = {}
-        self._events_since_checkpoint = 0
-        self._checkpoint_interval = 25
         event_name = self.path.name.replace(".experiment.metadata.json", ".experiment.events.jsonl")
         if event_name == self.path.name:
             event_name = f"{self.path.stem}.experiment.events.jsonl"
         self._event_path = self.path.with_name(event_name)
+        # Persist the journal location with the initial plan. The first event
+        # must not rewrite a potentially very large plan just to announce its
+        # journal. Only add it to files once an event has actually been written.
+        self.metadata.setdefault("event_log", {
+            "path": _portable_path(self._event_path, self.service.output_root),
+            "format": "jsonl", "append_only": True, "index": "event_index",
+        })
         # Recover a crash-truncated tail once when opening the run.  Doing
         # this in every capture would turn a long sweep into quadratic I/O.
         self._repair_event_tail()
@@ -494,6 +538,11 @@ class ExperimentRun:
                 pass
         self._rebuild_durable_summary(durable_events)
         self._replay_compatibility_events(durable_events)
+        if durable_events:
+            # An interrupted run may have appended events since its last
+            # manifest write. Restore the file inventory even if recovery
+            # finishes the run without appending another event.
+            self._register_event_file(persist=False)
         with _OPEN_RUNS_LOCK:
             # ``ExperimentMetadataService.begin/open_run`` hold this lock
             # through construction, so this insertion cannot race another
@@ -503,11 +552,13 @@ class ExperimentRun:
 
     def _write(self, *, index_history: bool = True) -> None:
         with self._lock:
-            _atomic_json(self.path, self.metadata)
+            # Share only within this immutable write snapshot. Reusing encodings
+            # across later writes could hide edits to a plan or its settings.
+            prepared = _PreparedMetadata(self.metadata)
+            _atomic_json(self.path, prepared)
             if index_history:
-                self.service.history.upsert(self.metadata, local_metadata_path=self.path)
+                self.service.history.upsert(prepared, local_metadata_path=self.path)
             self._files_dirty = False
-            self._events_since_checkpoint = 0
 
     def _rebuild_durable_summary(self, events: Iterable[Mapping[str, Any]]) -> None:
         """Recover bounded acquisition counters after reopening a run."""
@@ -646,19 +697,17 @@ class ExperimentRun:
                     }
                 if not any(item.get("path") == self.metadata["event_log"]["path"]
                            for item in self.metadata.setdefault("files", [])):
-                    self._register_event_file()
-                # Counters describe durable events only.  They are checkpointed
-                # periodically and always at terminalization, avoiding a full
-                # manifest/index rewrite for every capture.
+                    self._register_event_file(persist=False)
+                # Each event is already an fsynced checkpoint. Rewriting the
+                # complete immutable plan/history every few events can block
+                # acquisition for seconds on long sequences. Keep live counters
+                # here; reopen rebuilds them from the journal, and state changes
+                # and terminalization persist the complete manifest as before.
                 acquisition_state = self.metadata.setdefault("acquisitions", {"count": 0, "outputs": []})
                 self._accumulate_capture(acquisition_state, record)
-                self._events_since_checkpoint += 1
-                if self._events_since_checkpoint >= self._checkpoint_interval:
-                    self._events_since_checkpoint = 0
-                    self._write()
             except Exception as exc:
                 # The JSONL line is authoritative once fsync returned.  Keep
-                # its index even if the subsequent manifest checkpoint failed;
+                # its index even if the subsequent summary update failed;
                 # otherwise the next event would reuse an existing index.
                 if not appended:
                     self._event_index -= 1
@@ -1115,7 +1164,6 @@ class ExperimentMetadataService:
                  index_initial_state: bool = True) -> ExperimentRun:
         """Reopen a sidecar and continue a recoverable partial event journal."""
         sidecar = Path(path).expanduser().resolve()
-        metadata = self.load_metadata(sidecar)
         output_root = self.output_root
         try:
             sidecar.relative_to(output_root)
@@ -1131,6 +1179,10 @@ class ExperimentMetadataService:
                     existing._allow_post_completion or allow_post_completion
                 )
                 return existing
+            # Keep readers inside the same lock as recovery's atomic replace.
+            # On Windows an overlapping open can deny the replacement, and a
+            # live owner does not need to reload the entire plan from disk.
+            metadata = self.load_metadata(sidecar)
             return ExperimentRun(
                 self, metadata, sidecar, allow_post_completion=allow_post_completion,
                 index_initial_state=index_initial_state,
@@ -1181,11 +1233,29 @@ class ExperimentMetadataService:
                 return value[:500] + f"… ({len(value) - 500} characters omitted)"
             return value
         sections = ["Preview summary. Omitted items remain in the complete metadata file; use Open metadata to inspect them."]
-        for title, key in (("Setup", "settings"), ("Plan", "plan"),
+        policy = metadata.get("recording_policy", {})
+        file_mode = isinstance(policy, Mapping) and policy.get("mode") == "file"
+        if file_mode:
+            sections.append("Capture attempts: not recorded (file mode). "
+                            "Completed point counts represent successful CSV writes.")
+        if metadata.get("status") == RUNNING and metadata.get("event_log"):
+            if file_mode:
+                sections.append("File summaries are saved at file boundaries and are available in Events. "
+                                "An active file's progress is recorded when it closes or the run is interrupted.")
+            else:
+                sections.append("Acquisition counts show the last saved snapshot and may lag an active run. "
+                                "Per-capture records are available in Events.")
+        for title, key in (("Recording policy", "recording_policy"),
+                           ("Summary", "summary"),
+                           ("Setup", "settings"), ("Plan", "plan"),
                            ("Conditions", "conditions"), ("Acquisitions", "acquisitions"),
                            ("Instruments", "instruments"),
                            ("Calibration", "calibration"), ("Observations", "observed"),
                            ("Files", "files"), ("Status", "result")):
+            if file_mode and key == "acquisitions":
+                continue  # The legacy capture counter is not maintained in this mode.
+            if not file_mode and key == "summary":
+                continue
             value = metadata.get(key, {})
             if value not in ({}, [], None):
                 sections.append(f"[{title}]\n{json.dumps(summarize(value), indent=2, sort_keys=True, default=str)}")

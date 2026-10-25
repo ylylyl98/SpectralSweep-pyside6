@@ -62,3 +62,43 @@ The original partial implementation added typed arrays, a shared recorder, confi
 The target architecture is implemented in the working tree: one authoritative experiment JSON, one shared per-run event log, and linked data files, with separate linked records for processing that combines multiple experiments. Compatibility files are derived projections when a shared run is present; standalone workers retain their legacy behavior when no shared run exists. No hardware was operated.
 
 Source line numbers refer to the working tree at the end of this review and may move in later edits. Existing ND-calibration changes and the user's `test_ntfy_notification.py` were preserved.
+
+## 2026-10-25 throughput follow-up
+
+- MCD1000 and MCD2100 register all output files with the terminal manifest update in their existing worker, after hardware cleanup. For 12 CSVs and 12 compatibility files this reduces terminal full writes from 25 to one. The UI waits for finalization before announcing completion.
+- Shared-run MCD2100 writes fsynced compatibility-state deltas at per-spectrum and telemetry checkpoints. It retains full legacy JSON at initial, phase, and terminal boundaries. A 100-checkpoint test observes 100 durable deltas and zero full legacy rewrites, with exact reconstruction. Standalone operation without a shared run retains its previous behavior.
+- Motion Sweep and MegaSweep batch terminal file registration into one manifest/history write and report failed metadata persistence as an error. Their terminal update still runs synchronously in the GUI thread; batching reduces the number of writes but does not eliminate the remaining write latency.
+- MegaSweep removes repeated complete point arrays and optical conditions from each map's compatibility projection. The exact plan remains in the run's requested settings; legacy text exports retain the same contents. Long `all_points` and `valid_points` arrays use the lossless table format. Heterogeneous snapshots and condition collections retain pointer deduplication because an opaque table can hide shared calibration arrays and increase storage.
+- BFP batches frozen input registrations and output finalization, refers to the stored processing context instead of repeating it, and skips metadata updates for an identical output at the same path. Spectrum already avoids repeated identical-save metadata updates; its capture-time settings remain unchanged.
+- History expands recognized compressed files in its isolated reader even when the stored file is smaller than 1 MB. A compressed file can otherwise conceal a much larger expanded plan.
+
+No pending-write queue was introduced. Following the user's policy change, Dual Gate now stores actual settings/full-precision calibration before each file's first acquisition and after spectrometer configuration changes. It skips per-point metadata reads and capture events, appends completion only after successful CSV close, and records error/stop progress before cleanup. File summaries contain successful CSV point counts separately from physical row counts; optional per-point timing and temperature history is intentionally omitted. Hardware validation and dataset lifecycle checks remain active. File journal records are fsynced synchronously, and the final manifest adds output associations and the total saved-point count.
+
+Validation uses fake devices, temporary outputs, journal reconstruction, write-count assertions, and offscreen Qt widgets. A read-only historical MegaSweep sample compressed from 132,714,234 to 3,095,162 bytes (97.67% smaller), with equal expanded content and an unchanged source hash. Encoding that unusually large historical record still took 27.4 seconds; this is a storage measurement, not a claim that metadata takes zero time or that real acquisition duration has been measured. Benchmark copies are kept only under ignored `tmp/`.
+
+### Run-button startup follow-up
+
+The file policy removed per-point metadata work but left full-plan validation,
+directory scans and initial sidecar/history creation on the GUI thread. Run now
+captures small cached identities and UI values, then validates and saves the
+applied plan on the existing acquisition worker. GUI logs and Stop remain
+available; no instrument command, including a zero ramp, is issued after a
+startup cancellation or persistence failure. Cached device readiness, including
+active/quarantined LightField state, is checked before recorder rebinding and
+before instrument preparation. Editing the next draft cannot replace the plan
+owned by the running worker.
+
+Profiling also found repeated normalization, pathlib handling of ordinary
+parameter strings, and two table encodings per save. Native JSON values and
+ordinary strings now use fast paths; the sidecar and history share a table
+encoding within one detached write snapshot. Each later save builds a fresh
+cache. Synchronous fsync, atomic replacement, then history update remain in that
+order. Regression tests cover exact types/calibration, changes between writes,
+and fsync failure without publication.
+
+For the same 16,804-point historical plan, local begin() measurements changed
+from 35.47 seconds to 12.41–14.21 seconds under shared machine load. These are
+approximate timings, not a controlled speedup ratio or a hardware startup
+measurement. The deterministic reduction is two table encodings to one per
+sidecar/history save. Evidence is under ignored
+`tmp/metadata-start-profile-20261025/`.

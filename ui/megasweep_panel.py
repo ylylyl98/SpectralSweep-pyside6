@@ -926,6 +926,21 @@ def build_megasweep_filename(params: dict) -> str:
     return "~".join(parts)
 
 
+def _metadata_projection_params(params: dict) -> dict:
+    """Keep only the point counts needed by the legacy text projection.
+
+    The complete exact point arrays and optical sequence already belong to the
+    experiment's requested settings. Copying them into each map's journal makes
+    a multi-map run grow by the entire plan for every output file.
+    """
+    projected = {key: value for key, value in params.items() if key not in {
+        "all_points", "valid_points", "axis_a_vals", "axis_b_vals", "optical_conditions",
+    }}
+    projected["all_point_count"] = len(params["all_points"])
+    projected["valid_point_count"] = len(params["valid_points"])
+    return projected
+
+
 def _build_csv_metadata_text(
     params: dict,
     wls: np.ndarray,
@@ -940,6 +955,10 @@ def _build_csv_metadata_text(
     vbias_available = bool(params.get("vbias_available", True))
     smu_connected = bool(params.get("smu_connected", False))
     lf6_connected = bool(params.get("lf6_connected", False))
+    # Old compatibility journals hold the full arrays; new projections carry
+    # their exact counts. Both produce the same human-readable export.
+    all_count = int(params["all_point_count"]) if "all_point_count" in params else len(params["all_points"])
+    valid_count = int(params["valid_point_count"]) if "valid_point_count" in params else len(params["valid_points"])
 
     lines = [
         "# MegaSweep Data File",
@@ -951,7 +970,7 @@ def _build_csv_metadata_text(
         f"# CompletedPoints: {int(completed_points)}",
         "#",
         "# === Sweep Configuration ===",
-        f"# CoordinateSystem: {'Raw' if params['coord'] == CoordSystem.RAW else 'Physical'}",
+        f"# CoordinateSystem: {'Raw' if params['coord'] in (CoordSystem.RAW, CoordSystem.RAW.value) else 'Physical'}",
         f"# AxisA_Name: {params['axis_a']}",
         f"# AxisA_Start: {axis_a_desc['start']:.4f}",
         f"# AxisA_Stop: {axis_a_desc['stop']:.4f}",
@@ -965,9 +984,9 @@ def _build_csv_metadata_text(
         f"# AxisB_StepMode: {axis_b_desc['mode']}",
         f"# AxisB_Points: {axis_b_desc['points']}",
         f"# Snake: {params['snake']}",
-        f"# TotalPlanned: {len(params['all_points'])}",
-        f"# InBounds: {len(params['valid_points'])}",
-        f"# Skipped: {len(params['all_points']) - len(params['valid_points'])}",
+        f"# TotalPlanned: {all_count}",
+        f"# InBounds: {valid_count}",
+        f"# Skipped: {all_count - valid_count}",
         "#",
         "# === Coordinate Transform ===",
         f"# GateRatio_r: {float(params['ratio']):.4f}",
@@ -2331,9 +2350,10 @@ class _MegaSweepWorker(QObject):
         completed_points = 0
         status = "Running"
         if self._metadata_run is not None:
+            projection_params = _metadata_projection_params(p)
             initial_shared_state = self._metadata_run.record_compatibility_state(
                 meta_fp.name,
-                {"params": p, "wavelengths": wls.tolist(),
+                {"params": projection_params, "wavelengths": wls.tolist(),
                  "status": status, "completed_points": completed_points},
             )
             if initial_shared_state is None:
@@ -2451,7 +2471,7 @@ class _MegaSweepWorker(QObject):
                 try:
                     shared_state = self._metadata_run.record_compatibility_state(
                         meta_fp.name,
-                        {"params": p, "wavelengths": wls.tolist(),
+                        {"params": projection_params, "wavelengths": wls.tolist(),
                          "status": status, "completed_points": completed_points},
                     )
                     if shared_state is None:
@@ -3797,6 +3817,36 @@ class MegaSweepPanel(QWidget):
         pause = getattr(self._lf6, "set_temperature_monitor_paused", None)
         if callable(pause):
             pause("megasweep", False)
+        run = getattr(self, "_experiment_run", None)
+        if run is not None:
+            try:
+                self._set_status("Saving experiment metadata...", 'muted')
+                files = []
+                for data_file in Path(run.path.parent).glob("*"):
+                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".txt", ".log", ".json"}:
+                        continue
+                    files.append({
+                        "path": data_file,
+                        "role": "raw" if data_file.suffix.lower() == ".csv" else "intermediate",
+                        "details": (
+                            {"compatibility_projection": True,
+                             "derived_from_experiment_id": run.experiment_id}
+                            if data_file.suffix.lower() in {".txt", ".log"} else None
+                        ),
+                    })
+                # File inventory and final status form one durable snapshot.
+                if self._run_failed:
+                    result = run.fail("gate map failed", files=files)
+                elif worker is not None and worker._stop.is_set():
+                    result = run.cancel("user stop", files=files)
+                else:
+                    result = run.complete(files=files)
+                if result.get("status") == "failed" and not self._run_failed:
+                    detail = (result.get("metadata_error") or result.get("error") or {}).get(
+                        "message", "One or more metadata records could not be saved")
+                    self._on_error(f"Metadata recording failed: {detail}")
+            except Exception as exc:
+                self._on_error(f"Metadata finalization error: {exc}")
         self._run_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         if self._run_failed:
@@ -3805,29 +3855,6 @@ class MegaSweepPanel(QWidget):
             self._set_status("Stopped", 'muted')
         else:
             self._set_status("Done", 'success')
-        run = getattr(self, "_experiment_run", None)
-        if run is not None:
-            try:
-                for data_file in Path(run.path.parent).glob("*"):
-                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".txt", ".log", ".json"}:
-                        continue
-                    run.register_file(
-                        data_file,
-                        "raw" if data_file.suffix.lower() == ".csv" else "intermediate",
-                        details=(
-                            {"compatibility_projection": True,
-                             "derived_from_experiment_id": run.experiment_id}
-                            if data_file.suffix.lower() in {".txt", ".log"} else None
-                        ),
-                    )
-                if self._run_failed:
-                    run.fail("gate map failed")
-                elif worker is not None and worker._stop.is_set():
-                    run.cancel("user stop")
-                else:
-                    run.complete()
-            except Exception as exc:
-                self._on_error(f"Metadata finalization error: {exc}")
         self._update_ratio_validation()
         self._schedule_preview()
 

@@ -12,7 +12,7 @@ import sys
 import weakref
 import uuid
 import copy
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -132,6 +132,33 @@ def read_snapshot(setup, *, camera, spectrometer, experiment):
     return result
 
 
+def _capture_policy(value):
+    if value not in ("capture", "file"):
+        raise ValueError("Metadata capture policy must be 'capture' or 'file'")
+    return value
+
+
+def _settings_and_observations(snapshot):
+    """Separate immutable settings from telemetry without truncating values."""
+    snapshot = copy.deepcopy(snapshot)
+    captured = snapshot.pop("captured_utc")
+    previous_frame = None
+    if snapshot.get("identity", {}).get("backend") == "winspec_ingaas":
+        observed = dict(snapshot.get("observed", {}))
+        previous_frame = observed.pop("last_frame", None)
+        snapshot["observed"] = observed
+    camera = dict(snapshot.get("camera", {}))
+    temperature = camera.pop("temperature_c", None)
+    temperature_status = camera.pop("temperature_status", None)
+    snapshot["camera"] = camera
+    if snapshot.get("backend") == "andor_sdk2" or snapshot.get("identity", {}).get("backend") == "andor_sdk2":
+        observed = dict(snapshot.get("observed", {}))
+        temperature = observed.pop("temperature_c", temperature)
+        temperature_status = observed.pop("temperature_status", temperature_status)
+        snapshot["observed"] = observed
+    return snapshot, captured, temperature, temperature_status, previous_frame
+
+
 class LightFieldRecorder:
     """Deduplicate configuration; append capture timing/temperature to JSONL.
 
@@ -139,8 +166,9 @@ class LightFieldRecorder:
     completed run. The acquisition journal avoids rewriting a growing JSON
     sidecar on every point of a long sweep.
     """
-    def __init__(self, run):
+    def __init__(self, run, *, capture_policy="capture"):
         self._run = weakref.ref(run)
+        self.capture_policy = capture_policy
         self._settings = {}
         self._index = 0
         self._last_completed_id = None
@@ -156,6 +184,18 @@ class LightFieldRecorder:
         run = self._run()
         return run is not None and not run._terminal
 
+    @property
+    def capture_policy(self):
+        return self._capture_policy
+
+    @capture_policy.setter
+    def capture_policy(self, value):
+        self._capture_policy = _capture_policy(value)
+
+    @property
+    def records_captures(self):
+        return self.active and self.capture_policy == "capture"
+
     @contextmanager
     def _recording_guard(self, event):
         """Keep storage errors visible even when acquisition callers continue."""
@@ -168,32 +208,33 @@ class LightFieldRecorder:
                 marker(exc, event=event)
             raise
 
-    def begin(self, snapshot, frames, purpose):
+    def record_settings_snapshot(self, snapshot):
+        """Durably save fixed settings/calibration, without a capture event.
+
+        The caller owns hardware reads and file-boundary error handling. File
+        policy does not disable this explicit write; inactive runs return None.
+        """
         run = self._run()
         if run is None:
+            return None
+        with run._lock, self._recording_guard("settings_snapshot"):
+            if run._terminal:
+                return None
+            settings, captured, *_ = _settings_and_observations(snapshot)
+            return run.register_settings_snapshot(
+                settings, source="lightfield", observed_utc=captured, persist=True)
+
+    def begin(self, snapshot, frames, purpose):
+        run = self._run()
+        if run is None or not self.records_captures:
             return None
         with run._lock, self._recording_guard("capture_started"):
             if run._terminal:
                 return None
-            snapshot = copy.deepcopy(snapshot)
-            captured = snapshot.pop("captured_utc")
             # WinSpec exposes the preceding frame's timing/guard diagnostics
             # alongside settings. They change on every frame, and must not
             # invalidate the settings identity or duplicate calibration data.
-            previous_frame = None
-            if snapshot.get("identity", {}).get("backend") == "winspec_ingaas":
-                observed = dict(snapshot.get("observed", {}))
-                previous_frame = observed.pop("last_frame", None)
-                snapshot["observed"] = observed
-            camera = dict(snapshot.get("camera", {}))
-            temperature = camera.pop("temperature_c", None)
-            temperature_status = camera.pop("temperature_status", None)
-            snapshot["camera"] = camera
-            if snapshot.get("backend") == "andor_sdk2" or snapshot.get("identity", {}).get("backend") == "andor_sdk2":
-                observed = dict(snapshot.get("observed", {}))
-                temperature = observed.pop("temperature_c", temperature)
-                temperature_status = observed.pop("temperature_status", temperature_status)
-                snapshot["observed"] = observed
+            snapshot, captured, temperature, temperature_status, previous_frame = _settings_and_observations(snapshot)
             key = json.dumps(snapshot, sort_keys=True, allow_nan=False)
             state = run.metadata.setdefault("observed", {}).setdefault("lightfield", {
                 "schema_version": 1, "settings_snapshots": [],
@@ -252,7 +293,7 @@ class LightFieldRecorder:
             return appended
 
     def finish(self, record, *, dimensions=None, error=None, frame_observation=None):
-        if record is None:
+        if record is None or not self.records_captures:
             return
         run = self._run()
         if run is None:
@@ -292,35 +333,43 @@ class LightFieldRecorder:
         return record
 
 
-def bind_lightfield_metadata(controller, run):
+def bind_lightfield_metadata(controller, run, *, capture_policy="capture"):
     """Bind without reading hardware on the UI thread; other backends opt out."""
+    capture_policy = _capture_policy(capture_policy)
     setup = getattr(controller, "setup", None)
     existing = getattr(setup, '_metadata_recorder', None)
     if isinstance(existing, LightFieldRecorder) and existing._run() is run:
+        existing.capture_policy = capture_policy
         return
     if getattr(controller, 'backend', None) == 'winspec_ingaas':
         adapter = getattr(controller, 'adapter', None)
         if adapter is not None:
             adapter.bind_metadata_run(run)
-        return
-    binder = getattr(setup, "bind_metadata_run", None)
-    if callable(binder):
-        binder(run)
+    else:
+        binder = getattr(setup, "bind_metadata_run", None)
+        if callable(binder):
+            binder(run)
+    recorder = getattr(setup, '_metadata_recorder', None)
+    if isinstance(recorder, LightFieldRecorder) and recorder._run() is run:
+        recorder.capture_policy = capture_policy
 
 
-def set_lightfield_context(controller, **context):
-    """Associate the next capture with a sweep point without changing hardware."""
+def set_lightfield_context(controller, *, output_file_is_portable=False, **context):
+    """Associate a point; callers may reuse an already validated portable path."""
     setup = getattr(controller, "setup", None)
     recorder = getattr(setup, "_metadata_recorder", None)
     if isinstance(recorder, LightFieldRecorder) and recorder.active:
         output = context.get("output_file")
         if output is not None:
-            run = recorder._run()
-            try:
-                context["output_file"] = Path(output).resolve().relative_to(
-                    run.service.output_root.resolve()).as_posix()
-            except ValueError:
-                context["output_file"] = Path(output).name
+            if output_file_is_portable:
+                context["output_file"] = str(output)
+            else:
+                run = recorder._run()
+                try:
+                    context["output_file"] = Path(output).resolve().relative_to(
+                        run.service.output_root.resolve()).as_posix()
+                except ValueError:
+                    context["output_file"] = Path(output).name
         recorder.context = context
 
 
@@ -369,6 +418,8 @@ def capture_with_metadata(setup, frames, *, purpose="measurement"):
     readout steps and rejects results which return after its deadline.
     """
     recorder = getattr(setup, "_metadata_recorder", None)
+    if recorder is not None and not getattr(recorder, "records_captures", True):
+        recorder = None
     record = None
     dataset = None
     operation = None
@@ -380,7 +431,12 @@ def capture_with_metadata(setup, frames, *, purpose="measurement"):
             return
         failure_recorded = True
         try:
-            recorder.finish(record, error=f"{type(exc).__name__}: {exc}")
+            # The final handoff may already have released the operation. All
+            # other failure records retain its owner and its first incident.
+            scope = (operation.local_metadata("record_capture_failed", check=False)
+                     if operation is not None and operation.ended is None else nullcontext())
+            with scope:
+                recorder.finish(record, error=f"{type(exc).__name__}: {exc}")
         except Exception:
             log.warning("LightField capture failure metadata could not be recorded", exc_info=True)
 
@@ -408,7 +464,8 @@ def capture_with_metadata(setup, frames, *, purpose="measurement"):
                 try:
                     snapshot = setup.read_metadata_snapshot()
                     operation.check()
-                    record = recorder.begin(snapshot, frames, purpose)
+                    with operation.local_metadata("record_capture_started"):
+                        record = recorder.begin(snapshot, frames, purpose)
                     if record is not None:
                         operation.update_context(acquisition_id=record.get("acquisition_id"))
                 except LightFieldAcquisitionStalled:
@@ -417,7 +474,8 @@ def capture_with_metadata(setup, frames, *, purpose="measurement"):
                     run = recorder._run()
                     marker = getattr(run, "mark_metadata_failure", None) if run is not None else None
                     if callable(marker):
-                        marker(exc, event="capture_started")
+                        with operation.local_metadata("record_metadata_failure", check=False):
+                            marker(exc, event="capture_started")
                     log.warning("LightField metadata snapshot could not be recorded", exc_info=True)
             operation.stage("validate_before_capture")
             verify = getattr(setup, 'verify_acquisition_settings', None)
@@ -441,9 +499,11 @@ def capture_with_metadata(setup, frames, *, purpose="measurement"):
                     raise
                 except Exception:
                     dimensions = None
-                operation.stage("record_capture_completed")
                 try:
-                    recorder.finish(record, dimensions=dimensions)
+                    with operation.local_metadata("record_capture_completed"):
+                        recorder.finish(record, dimensions=dimensions)
+                except LightFieldAcquisitionStalled:
+                    raise
                 except Exception:
                     log.warning("LightField capture result metadata could not be recorded", exc_info=True)
             operation.check()

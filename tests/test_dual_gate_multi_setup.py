@@ -319,12 +319,29 @@ def test_real_controller_routes_and_calibrates_both_setups_under_dual_gate_lock(
             exported = list(csv.DictReader(stream))
         assert [float(row['Vbg_set']) for row in exported] == [1., 2.]
         np.testing.assert_allclose(np.array(list(exported[0].values())[9:], dtype=float), np.arange(512)[19:490] / 3)
-        captures = [json.loads(line) for line in run.event_path.read_text(encoding='utf-8').splitlines()
-                    if json.loads(line)['event'] == 'capture_started']
-        assert len(captures) == 2
-        assert all(c['context']['measurement_setup'] == 'winspec_ingaas' for c in captures)
-        assert all(c['context']['center_nm'] == 1050 and c['context']['exposure_ms'] == 500 for c in captures)
-        assert all(c['context']['accumulations'] == 3 for c in captures)
+        journal = [json.loads(line) for line in run.event_path.read_text(encoding='utf-8').splitlines()]
+        starts = [event for event in journal if event['event'] == 'file_started']
+        assert len(starts) == 2
+        winspec_start = next(event for event in starts
+                             if event['context']['measurement_setup'] == 'winspec_ingaas')
+        assert winspec_start['context']['center_nm'] == 1050
+        assert winspec_start['context']['exposure_ms'] == 500
+        assert winspec_start['context']['accumulations'] == 3
+        assert not any(event['event'].startswith('capture_') for event in journal)
+        saved = run.service.load_metadata(run.path)
+        snapshot = next(item['values'] for item in saved['settings']['snapshots']
+                        if item['settings_id'] == winspec_start['settings_id'])
+        assert snapshot['calibration']['axis_unit'] == 'nm'
+        assert snapshot['calibration']['record'] == cfg.lf6.winspec_wavelength_calibrations[0]
+        assert snapshot['calibration']['context'] == winspec.last_calibration_context
+        np.testing.assert_array_equal(snapshot['calibration']['wavelength_axis_nm'],
+                                      controller.adapter.calibration_wavelengths())
+        assert snapshot['observed']['winspec']['exposure_ms'] == 500
+        assert snapshot['observed']['winspec']['accumulations'] == 3
+        assert 'last_frame' not in snapshot['observed']
+        completed = [event for event in journal if event['event'] == 'file_completed']
+        assert len(completed) == 2
+        assert all(event['completed_points'] == event['csv_rows'] == 2 for event in completed)
     finally:
         controller.set_temperature_monitor_paused('presets', False)
     assert not controller.switching_locked

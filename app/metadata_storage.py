@@ -10,48 +10,100 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+from .metadata_tables import decode_records, encode_records
+
 STORAGE_KEY = "metadata_storage"
 STORAGE_FORMAT = "local-json-pointers-v1"
+TABLE_STORAGE_FORMAT = "local-json-tables-v2"
+# These are complete provenance collections, not hardware execution inputs.
+# Their public loaders reconstruct the original records and exact point values.
+_RECORD_COLLECTIONS = frozenset({
+    "acquisition_schedule", "all_points", "valid_points",
+})
 
 
 def _token(key: str) -> str:
     return key.replace("~", "~0").replace("/", "~1")
 
 
-def compact_metadata(value: Mapping[str, Any], *, minimum_bytes: int = 256) -> dict[str, Any]:
+def compact_metadata(value: Mapping[str, Any], *, minimum_bytes: int = 256,
+                     _table_cache: dict | None = None) -> dict[str, Any]:
     """Store repeated containers once without mutating the caller's values."""
     if STORAGE_KEY in value:
         # Do not overwrite an existing user field or re-encode an encoded file.
         return copy.deepcopy(dict(value))
     seen: dict[bytes, str] = {}
     references: dict[str, str] = {}
+    prepared_tables: set[str] = set()
+    tables: list[str] = []
+
+    def prepare(item: Any, path: str) -> Any:
+        # A schedule repeats its recipe/context at every point. Normalize it
+        # before hashing ancestors, so neither the pointer manifest nor hashing
+        # work scales with thousands of copies of those same dictionaries.
+        if path.rsplit("/", 1)[-1] in _RECORD_COLLECTIONS and isinstance(item, list):
+            cached = _table_cache.get(id(item)) if _table_cache is not None else None
+            if cached is not None and cached[0] is item:
+                table = cached[1]
+            else:
+                table = encode_records(item)
+                if _table_cache is not None:
+                    # Hold the source object too: its id must not be recycled
+                    # for a different list during the sidecar/history write.
+                    _table_cache[id(item)] = (item, table)
+            if table is not None:
+                prepared_tables.add(path)
+                return {"$table": table}
+        if isinstance(item, dict):
+            return {key: prepare(child, path + "/" + _token(str(key)))
+                    for key, child in item.items()}
+        if isinstance(item, list):
+            return [prepare(child, path + "/" + str(index))
+                    for index, child in enumerate(item)]
+        return item
 
     def encode(item: Any, path: str) -> Any:
         if isinstance(item, (dict, list)):
             if path:
                 canonical = json.dumps(item, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
                 if len(canonical) >= minimum_bytes:
-                    digest = hashlib.sha256(canonical).digest()
+                    # Encoded tables and literal user dictionaries can have
+                    # identical JSON bytes but different decoded meanings.
+                    # Include relative table locations, also for parent objects.
+                    identity = hashlib.sha256(canonical)
+                    relative_tables = sorted(table[len(path):] for table in prepared_tables
+                                             if table == path or table.startswith(path + "/"))
+                    identity.update(b"\0tables\0")
+                    identity.update(json.dumps(relative_tables).encode("utf-8"))
+                    digest = identity.digest()
                     if digest in seen:
                         source = seen[digest]
                         references[path] = source
                         return {"$ref": "#" + source}
                     seen[digest] = path
+            if path in prepared_tables:
+                tables.append(path)
+                return item  # Table values are literal data, not JSON pointers.
             if isinstance(item, dict):
                 return {key: encode(child, path + "/" + _token(str(key))) for key, child in item.items()}
             return [encode(child, path + "/" + str(index)) for index, child in enumerate(item)]
         return item
 
-    result = encode(dict(value), "")
-    if references:
-        result[STORAGE_KEY] = {"format": STORAGE_FORMAT, "references": references}
+    result = encode(prepare(dict(value), ""), "")
+    if references or tables:
+        result[STORAGE_KEY] = {
+            "format": TABLE_STORAGE_FORMAT if tables else STORAGE_FORMAT,
+            "references": references,
+        }
+        if tables:
+            result[STORAGE_KEY]["tables"] = tables
     return result
 
 
 def expand_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
     """Expand declared local pointers; reject missing, malformed or cyclic ones."""
     storage = value.get(STORAGE_KEY)
-    if not isinstance(storage, Mapping) or storage.get("format") != STORAGE_FORMAT:
+    if not isinstance(storage, Mapping) or storage.get("format") not in {STORAGE_FORMAT, TABLE_STORAGE_FORMAT}:
         return copy.deepcopy(dict(value))
     references = storage.get("references")
     if not isinstance(references, dict) or any(
@@ -60,6 +112,12 @@ def expand_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
         for at, source in references.items()
     ):
         raise ValueError("Invalid metadata storage references")
+    table_paths = storage.get("tables", []) if storage["format"] == TABLE_STORAGE_FORMAT else []
+    if (not isinstance(table_paths, list)
+            or any(not isinstance(path, str) or not path.startswith("/") for path in table_paths)
+            or len(set(table_paths)) != len(table_paths)):
+        raise ValueError("Invalid metadata storage tables")
+    tables = set(table_paths)
 
     def lookup(path: str) -> Any:
         node: Any = value
@@ -80,6 +138,15 @@ def expand_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
         if lookup(at) != {"$ref": "#" + source}:
             raise ValueError(f"Invalid metadata reference declaration: {at}")
         lookup(source)
+    for path in tables:
+        table = lookup(path)
+        if not isinstance(table, dict) or set(table) != {"$table"}:
+            raise ValueError("Invalid metadata table declaration")
+        if any(at == path or at.startswith(path + "/") or source.startswith(path + "/")
+               for at, source in references.items()):
+            raise ValueError("Metadata pointers cannot refer inside a table")
+        if any(other != path and other.startswith(path + "/") for other in tables):
+            raise ValueError("Metadata tables cannot overlap")
 
     def decode(item: Any, path: str, active: frozenset[str]) -> Any:
         if path in references:
@@ -87,6 +154,8 @@ def expand_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
                 raise ValueError("Cyclic metadata storage reference")
             source = references[path]
             return decode(lookup(source), source, active | {path})
+        if path in tables:
+            return decode_records(item["$table"])
         if isinstance(item, dict):
             return {key: decode(child, path + "/" + _token(str(key)), active)
                     for key, child in item.items() if path or key != STORAGE_KEY}

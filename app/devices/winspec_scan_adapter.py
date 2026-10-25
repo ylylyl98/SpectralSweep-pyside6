@@ -97,6 +97,8 @@ class WinSpecScanAdapter:
     def acquire(self):
         context, record, axis, mask = self._check_prepared()
         recorder = getattr(self.setup, '_metadata_recorder', None)
+        if recorder is not None and not getattr(recorder, 'records_captures', True):
+            recorder = None
         capture_record = None
         if recorder is not None and recorder.active:
             try:

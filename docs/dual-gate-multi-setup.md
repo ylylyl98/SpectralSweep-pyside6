@@ -80,6 +80,41 @@ remain editable as before. **Exposure Time** is the integration time per exposur
 
 Review **Measurement sequence preview**, then click **Apply plan** before **Run**.
 Editing the sequence does not start a measurement or apply hardware settings.
+Clicking **Run** starts a preparation phase on the existing run worker. The
+status/log distinguish plan validation, durable plan saving, and instrument
+preparation, with validation/save elapsed times. Full schedule checks, output
+directory inventory, JSON encoding and history updates do not run on the GUI
+thread. The current applied plan and filename inputs are captured for the run;
+edits remain a separate draft until it finishes. Stop remains responsive during
+preparation: it waits for the current validation/save to finish, then cancels
+before any instrument command. Failed plan persistence also blocks instrument
+preparation. A cancelled startup does not send an unnecessary zero ramp.
+The inline preview shows at most eight nearby steps, together with the full
+plan counts. **Full sequence** shows up to 200 steps per page. Use **Previous**,
+**Next** or the page number to inspect another part of the plan; manual paging
+turns off **Follow current step**, so live progress does not move your page.
+Enable it again to return to the active acquisition. Paging only changes the
+display: every planned acquisition still runs and is recorded.
+
+Metadata is saved at file boundaries. Before each file's first acquisition,
+actual settings and full-precision calibration are persisted, followed by a
+`file_started` event in `.experiment.events.jsonl`. Unchanged points write their
+scientific data to CSV without reading a metadata snapshot or appending capture
+events. Each successful spectrometer reconfiguration or backend change invalidates
+the settings snapshot; an open file then receives `file_settings_changed` before
+its next acquisition. WinSpec snapshots retain the scan adapter's complete
+calibration record and wavelength axis.
+
+After a CSV closes successfully, a synchronous `file_completed` journal event
+saves its file/settings IDs, start/end time, successful point count and CSV row
+count. A full-sensor point can span several CSV rows. Stop/error progress is
+recorded immediately before file closing and hardware cleanup, followed by
+`file_stopped` or `file_failed`; close errors never produce `file_completed`.
+No per-point metadata queue is retained in RAM. A crash may leave an unfinished
+file without its terminal summary; its previously written CSV and durable file
+start/settings remain available. The final manifest adds output associations
+and `summary.completed_points`; individual capture-attempt counts and per-point
+timing/temperature history are not recorded. Keep the journal with the manifest.
 If you change group membership, use **Reset order**, review the order,
 and apply the plan again, as with other Dual Gate loop edits.
 
@@ -140,7 +175,7 @@ axis within a CSV stops export before appending mismatched data.
 These checks do not move the exit mirror. A changed setting blocks
 acquisition or discards the affected frame before CSV export; earlier verified
 rows remain saved. Errors report the requested and observed settings, and the
-acquisition journal records capture validation failures when metadata is active.
+file journal records the failed file and active point context.
 An exit mismatch requires applying the setup again. Existing CSVs are not
 relabelled or repaired by these checks.
 Once validation fails, manually restoring a device value does not resume
@@ -158,7 +193,7 @@ timing against the verified configuration. Legacy connections check live
 settings before acquisition; both paths check returned frame settings before
 publishing data. A frame cannot replace the expected configuration. Failed
 configuration or acquisition validation requires a successful Apply before
-continuing; failed captures are recorded in the acquisition journal.
+continuing; Dual Gate records the error in its interrupted-run and file summaries.
 
 With optical parameters in separate groups, the complete recipe is still
 configured atomically at the Measurement setup group's position; group nesting

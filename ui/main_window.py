@@ -1591,7 +1591,11 @@ class MainWindow(QMainWindow):
 
     def _on_capture_stalled(self, status):
         phase = status.get("stalled_phase") or status.get("phase", "acquisition")
-        message = (f"LightField stalled in {phase} after {status.get('elapsed_s', 0):.0f} s. "
+        metadata_stalled = status.get("timeout_domain") == "metadata"
+        title = "LightField metadata persistence stalled" if metadata_stalled else "LightField acquisition stalled"
+        label = "Metadata persistence stalled" if metadata_stalled else "LightField stalled"
+        elapsed = status.get("wait_elapsed_s", status.get("elapsed_s", 0))
+        message = (f"{label} in {phase} after {elapsed:.0f} s. "
                    "Device ownership retained; no automatic retry. "
                    "Wait for the call to return before disconnecting and reconnecting.")
         diagnostic = status.get("diagnostic_path")
@@ -1599,7 +1603,7 @@ class MainWindow(QMainWindow):
             message += f" Diagnostics: {diagnostic}"
         self._status.showMessage(message)
         self._ntfy_notifier.notify_warning(
-            "LightField acquisition stalled", message,
+            title, message,
             key=("lightfield-capture-stalled", status.get("incident_id")),
         )
 

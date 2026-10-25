@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 from utils.mcd_common import build_mcd2100_filename, resolve_gate_conditions
 from app.engine.magnet_preparation import MagnetPreparation, MagnetPreparationCancelled
+from app.engine.mcd_metadata import condition_metadata_summary
 
 
 def _optical_acquire(optical: Any, angle: float, label: str, stop_event: Any,
@@ -648,12 +649,12 @@ class MCD2100Worker:
                 self._metadata["stop_ack"] = _jsonable(result)
                 self._metadata["stop_error"] = None
                 if self._metadata_path is not None:
-                    self._write_metadata(self._metadata_path, self._metadata)
+                    self._write_legacy_metadata(self._metadata_path, self._metadata)
         except BaseException as exc:
             if self._metadata is not None:
                 self._metadata["stop_error"] = str(exc)
                 if self._metadata_path is not None:
-                    self._write_metadata(self._metadata_path, self._metadata)
+                    self._write_legacy_metadata(self._metadata_path, self._metadata)
             raise
         finally:
             self._stop_handle = None
@@ -703,7 +704,7 @@ class MCD2100Worker:
                 self._initial_snapshot_logged = True
                 self._emit_log(self._format_snapshot_log(snapshot))
             if self._metadata_path is not None:
-                self._write_metadata(self._metadata_path, self._metadata)
+                self._write_legacy_metadata(self._metadata_path, self._metadata, materialize=False)
         return snapshot
 
     @staticmethod
@@ -1006,12 +1007,17 @@ class MCD2100Worker:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
 
-    def _write_legacy_metadata(self, path: Path, data: Mapping[str, Any]) -> None:
-        payload = data
+    def _write_legacy_metadata(self, path: Path, data: Mapping[str, Any], *, materialize=True) -> None:
+        payload = {key: value for key, value in data.items() if not str(key).startswith("_")}
         if self.metadata_run is not None:
-            payload = self.metadata_run.record_compatibility_state(path.name, data)
+            payload = self.metadata_run.record_compatibility_state(path.name, payload)
             if payload is None:
                 raise RuntimeError("shared compatibility metadata could not be recorded")
+            # The delta is fsynced before returning. Keep full legacy JSON at
+            # phase/terminal boundaries; each spectrum and telemetry snapshot
+            # must not rewrite all earlier snapshots and condition details.
+            if not materialize:
+                return
         self._write_metadata(path, payload)
 
     @staticmethod
@@ -1217,7 +1223,7 @@ class MCD2100Worker:
                 stream.flush()
                 os.fsync(stream.fileno())
                 # The durable CSV row is the live-data boundary.  Plot it
-                # immediately; the larger metadata snapshot follows and must
+                # immediately; durable metadata recording follows and must
                 # not delay the user's spectrum update.
                 self._emit_spectrum(
                     wavelengths, counts,
@@ -1261,7 +1267,7 @@ class MCD2100Worker:
                     condition_index,
                     condition_count,
                 )
-                self._write_metadata(metadata["_path"], metadata)
+                self._write_legacy_metadata(metadata["_path"], metadata, materialize=False)
             # Complete the angle cycle that started below the direction gate;
             # crossing during that cycle is retained as real data.  The next
             # loop performs the direction gate check.  Use the timing-critical
@@ -1328,8 +1334,14 @@ class MCD2100Worker:
         if self.conditions:
             metadata["gate_conditions"] = _jsonable(self.conditions)
             metadata["file_details"] = []
+        if self.metadata_run is not None:
+            metadata["progress_events"] = {
+                "path": self.metadata_run.event_path.name,
+                "format": "jsonl", "compatibility_key": metadata_path.name,
+                "description": "Live progress is durable in the journal; this JSON is a phase snapshot.",
+            }
         self._metadata_path, self._metadata = metadata_path, metadata
-        self._write_metadata(metadata_path, {k: v for k, v in metadata.items() if k != "_path"})
+        self._write_legacy_metadata(metadata_path, {k: v for k, v in metadata.items() if k != "_path"})
         outcome, error, cleanup_error = WorkflowOutcome.COMPLETED, None, None
         failure_exception: BaseException | None = None
         detached_success = False
@@ -1376,7 +1388,7 @@ class MCD2100Worker:
                 "snapshot": _jsonable(prepared_snapshot),
             })
             self._magnet_preparation = None
-            self._write_metadata(metadata_path, metadata)
+            self._write_legacy_metadata(metadata_path, metadata)
             if self.filename_temperature_k is not None:
                 self._emit_log(
                     f"Filename sample temperature: {self.filename_temperature_k:g} K "
@@ -1384,7 +1396,7 @@ class MCD2100Worker:
                 )
             if self.temperature_control_enabled:
                 self._stabilize_sample_temperature(metadata)
-                self._write_metadata(metadata_path, metadata)
+                self._write_legacy_metadata(metadata_path, metadata)
             # Temperature settling can take a long time; revalidate mode,
             # quench, limits and field ownership before optical/gate setup.
             post_temperature = self._execute_handle(
@@ -1440,11 +1452,12 @@ class MCD2100Worker:
                         )
                         metadata["completed_legs"] = 2
                 if self.metadata_run is not None:
+                    self._write_legacy_metadata(metadata_path, metadata, materialize=False)
                     self.metadata_run.record_event(
                         "condition_completed", condition_id="condition-1",
                         output={"file": csv_path.name,
                                 "rows": int(metadata["spectra_written"])},
-                        condition_detail=metadata,
+                        condition_detail=condition_metadata_summary(metadata, metadata_path.name),
                     )
             else:
                 enabled = [item for item in self.conditions if item.get("enabled", True)]
@@ -1524,7 +1537,7 @@ class MCD2100Worker:
                     metadata["file_details"].append(detail)
                     metadata["current_file_detail"] = detail
                     metadata["current_file_path"] = str(batch_path)
-                    self._write_metadata(metadata_path, metadata)
+                    self._write_legacy_metadata(metadata_path, metadata)
                     turnaround_snapshot = None
                     with batch_path.open("w", newline="", encoding="utf-8") as stream:
                         writer = csv.writer(stream)
@@ -1544,7 +1557,7 @@ class MCD2100Worker:
                             detail["field"]["actual_stop_T"] = endpoint_field
                             turnaround_snapshot = endpoint_snapshot if leg == 1 else None
                             metadata["completed_legs"] += 1
-                            self._write_metadata(metadata_path, metadata)
+                            self._write_legacy_metadata(metadata_path, metadata)
                     detail["spectra_written"] = int(metadata["spectra_written"] - detail["spectra_start"])
                     detail["file_status"] = "complete"
                     detail["complete"] = True
@@ -1560,7 +1573,7 @@ class MCD2100Worker:
                         f"Gate {condition_index}/{len(enabled)} complete: "
                         f"{detail['spectra_written']} spectra written"
                     )
-                    self._write_metadata(metadata_path, metadata)
+                    self._write_legacy_metadata(metadata_path, metadata)
         except (MCD2100Cancelled, MagnetPreparationCancelled) as exc:
             failure_exception = exc
             outcome, error = WorkflowOutcome.CANCELLED, str(exc)
@@ -1607,7 +1620,7 @@ class MCD2100Worker:
                     metadata.update({"status": WorkflowOutcome.COMPLETED.value,
                                      "error": None, "cleanup_error": None,
                                      "completion_utc": _utc_now()})
-                    self._write_metadata(metadata_path, metadata)
+                    self._write_legacy_metadata(metadata_path, metadata)
                     detach = getattr(self.controller, "detach_completed_run_async", None)
                     if not callable(detach):
                         raise RuntimeError("controller does not expose completed-run detach")
@@ -1663,7 +1676,7 @@ class MCD2100Worker:
             if not detached_success:
                 metadata.pop("_path", None)
                 metadata.update({"status": outcome.value, "error": error, "cleanup_error": cleanup_error})
-                self._write_metadata(metadata_path, metadata)
+                self._write_legacy_metadata(metadata_path, metadata)
             if self.metadata_run is not None:
                 try:
                     self.metadata_run.record_event(

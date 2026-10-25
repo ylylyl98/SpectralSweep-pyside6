@@ -295,7 +295,7 @@ def test_default_center_reminder_refreshes_after_external_change(app, monkeypatc
 def test_run_shows_one_combined_reminder_and_cancel_stops_before_metadata(widget, monkeypatch, tmp_path):
     widget._loop_table.item(1, 2).setText('1100, 730')
     widget._on_apply()
-    monkeypatch.setattr(widget, '_validate_before_run', lambda: ({}, None))
+    monkeypatch.setattr(widget, '_validate_before_run', lambda **_kwargs: ({}, None))
     monkeypatch.setattr(widget, '_current_output_dir', lambda _meta: tmp_path)
     monkeypatch.setattr(panel, 'ExperimentMetadataService', lambda *_a, **_k: pytest.fail('Metadata started after Cancel'))
     errors = []

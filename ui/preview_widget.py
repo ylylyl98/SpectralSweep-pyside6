@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QModelIndex, QSize, Qt, QTimer
@@ -37,7 +38,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QTreeWidget,
     QTreeWidgetItem,
-    QWidget, QDialog, QVBoxLayout,
+    QWidget, QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
+    QSpinBox, QCheckBox,
 )
 from utils.filename_builder import build_condition_display_label
 from utils.when_condition import evaluate_when_expression
@@ -332,6 +334,10 @@ class RunPlanTree(QTreeWidget):
         self._flat_steps: Dict[int, Dict[str, object]] = {}
         self._flat_groups: List[Dict[str, object]] = []
         self._flat_root: Optional[QTreeWidgetItem] = None
+        self._flat_plan_cache = None
+        self._sequence_page = 0
+        self._sequence_page_size = 200
+        self._follow_current = True
         self._fit_columns_to_viewport()
 
     def resizeEvent(self, event) -> None:
@@ -414,11 +420,8 @@ class RunPlanTree(QTreeWidget):
         self.setHeaderLabels(["Status", "Batch row", "Loop setting", "Measurement details"])
         self._fit_columns_to_viewport()
         if acquisition_schedule is not None:
-            expanded_node_ids = (
-                self._expanded_node_ids() if self._semantic_tree_built else None
-            )
             self._update_flat_schedule(
-                list(acquisition_schedule),
+                acquisition_schedule,
                 final_sequence=final_sequence,
                 df_batch=df_batch,
                 done=done,
@@ -431,7 +434,7 @@ class RunPlanTree(QTreeWidget):
                 acquisition_grouping=acquisition_grouping,
                 loop_definition=loop_definition,
                 loop_mode=loop_mode,
-                expanded_node_ids=expanded_node_ids,
+                max_show=max_seq_show,
                 run_outcome=run_outcome,
                 preview_state=preview_state,
             )
@@ -587,11 +590,66 @@ class RunPlanTree(QTreeWidget):
             layout = QVBoxLayout(self._full_sequence_dialog)
             self._full_sequence_tree = RunPlanTree(self._full_sequence_dialog)
             self._full_sequence_tree._show_full_sequence = True
+            child = self._full_sequence_tree
+            navigation = QHBoxLayout()
+            previous = QPushButton("Previous", self._full_sequence_dialog)
+            following = QPushButton("Next", self._full_sequence_dialog)
+            child._page_spin = QSpinBox(self._full_sequence_dialog)
+            child._page_spin.setPrefix("Page ")
+            child._page_spin.setMinimum(1)
+            child._page_spin.setAccessibleName("Sequence page")
+            child._page_label = QLabel(self._full_sequence_dialog)
+            child._follow_check = QCheckBox("Follow current step", self._full_sequence_dialog)
+            child._follow_check.setChecked(True)
+            child._page_previous, child._page_next = previous, following
+            previous.clicked.connect(lambda: child._page_spin.setValue(child._page_spin.value() - 1))
+            following.clicked.connect(lambda: child._page_spin.setValue(child._page_spin.value() + 1))
+            child._page_spin.valueChanged.connect(child._select_sequence_page)
+            child._follow_check.toggled.connect(child._set_follow_current)
+            for control in (previous, child._page_spin, child._page_label, following):
+                navigation.addWidget(control)
+            navigation.addStretch()
+            navigation.addWidget(child._follow_check)
+            layout.addLayout(navigation)
             layout.addWidget(self._full_sequence_tree)
         if self._last_plan:
             self._full_sequence_tree.update_plan(**self._last_plan)
         self._full_sequence_dialog.show()
         self._full_sequence_dialog.raise_()
+
+    def _select_sequence_page(self, page):
+        self._sequence_page = page - 1
+        self._follow_check.setChecked(False)
+        if self._last_plan:
+            self.update_plan(**self._last_plan)
+
+    def _set_follow_current(self, enabled):
+        self._follow_current = enabled
+        if enabled and self._last_plan:
+            self.update_plan(**self._last_plan)
+
+    def _visible_sequence_range(self, total, current, max_show):
+        """Bound Qt items independently of the size of the execution plan."""
+        current = max(0, min(current, max(0, total - 1)))
+        if not self._show_full_sequence:
+            limit = max(1, min(max_show, 8))
+            start = max(0, min(current, total - limit))
+            return start, min(total, start + limit)
+        size = self._sequence_page_size
+        pages = max(1, (total + size - 1) // size)
+        if self._follow_current:
+            self._sequence_page = current // size
+        self._sequence_page = max(0, min(self._sequence_page, pages - 1))
+        if hasattr(self, "_page_spin"):
+            blocked = self._page_spin.blockSignals(True)
+            self._page_spin.setMaximum(pages)
+            self._page_spin.setValue(self._sequence_page + 1)
+            self._page_spin.blockSignals(blocked)
+            self._page_label.setText(f"of {pages} · up to {size} steps per page")
+            self._page_previous.setEnabled(self._sequence_page > 0)
+            self._page_next.setEnabled(self._sequence_page + 1 < pages)
+        start = self._sequence_page * size
+        return start, min(total, start + size)
 
     def _update_nested_schedule(self, schedule, *, done, total_acq, current_step,
                                 completed_points, run_outcome, max_show,
@@ -603,9 +661,7 @@ class RunPlanTree(QTreeWidget):
         completed = max(0, int(completed_points if completed_points is not None else max(current_step, 0)))
         if run_outcome == "completed":
             completed = len(schedule)
-        limit = len(schedule) if self._show_full_sequence else min(max_show, 8)
-        start = 0 if self._show_full_sequence else max(0, min(max(current_step, completed), len(schedule) - limit))
-        stop = min(len(schedule), start + limit)
+        start, stop = self._visible_sequence_range(len(schedule), max(current_step, completed), max_show)
         signature = (start, stop, self._show_full_sequence, preview_state)
         rebuilt = getattr(self, "_nested_schedule", None) is not schedule or self._flat_signature != signature
         if rebuilt:
@@ -634,7 +690,9 @@ class RunPlanTree(QTreeWidget):
         previous_completed = getattr(self, "_nested_completed", 0)
         previous_active = getattr(self, "_nested_last_active", -1)
         changed = (self._flat_steps.keys() if rebuilt else
-                   set(range(min(previous_completed, completed), max(previous_completed, completed))) | {previous_active, current_step} | set(getattr(self, "_new_nested_steps", [])))
+                   {i for i in self._flat_steps
+                    if min(previous_completed, completed) <= i < max(previous_completed, completed)}
+                   | {previous_active, current_step} | set(getattr(self, "_new_nested_steps", [])))
         newly_created = set(getattr(self, "_new_nested_steps", []))
         self._new_nested_steps = []
         for task_i in changed:
@@ -724,11 +782,64 @@ class RunPlanTree(QTreeWidget):
         acquisition_grouping: str,
         loop_definition,
         loop_mode: str,
-        expanded_node_ids: Optional[set[str]],
+        max_show: int,
         run_outcome: str,
         preview_state: str = "Applied sequence",
     ) -> None:
-        """Render a compact checklist with row and loop context side by side."""
+        """Render only the visible window; reuse immutable applied plan inputs."""
+        inputs = (schedule, final_sequence, df_batch, loop_definition)
+        options = (acquisition_grouping, loop_mode, tuple(param_order or ()))
+        cached = self._flat_plan_cache
+        if cached is None or not all(a is b for a, b in zip(inputs, cached[0])) or options != cached[1]:
+            data = self._prepare_flat_schedule(schedule, final_sequence, df_batch,
+                                               loop_definition, acquisition_grouping,
+                                               loop_mode, param_order)
+            self._flat_plan_cache = (inputs, options, data)
+        else:
+            data = cached[2]
+        batch_rows, definition_rows, counts, prefix_sums, task_map, plan_signature = data
+        total_combinations = len(final_sequence) * len(batch_rows)
+        focus = max(current_step_i, bisect_right(prefix_sums, done) - 1)
+        focus = max(0, min(focus, len(schedule) - 1))
+        task = schedule[focus] if schedule else {}
+        seq_i, row_i = int(task.get("seq_i", 0)), int(task.get("row_i", 0))
+        current = (row_i * len(final_sequence) + seq_i if acquisition_grouping == "batch_first"
+                   else seq_i * len(batch_rows) + row_i)
+        start, stop = self._visible_sequence_range(total_combinations, current, max_show)
+        signature = (plan_signature, preview_state, start, stop)
+        if signature == self._flat_signature and self._flat_root is not None:
+            self._update_flat_status(done=done, total_acq=total_acq,
+                current_step_i=current_step_i, current_rep_i=current_rep_i,
+                current_frame_i=current_frame_i, current_frame_total=current_frame_total,
+                run_outcome=run_outcome, preview_state=preview_state)
+            return
+        expanded_node_ids = self._expanded_node_ids() if self._semantic_tree_built else None
+        combinations = []
+        for index in range(start, stop):
+            if acquisition_grouping == "batch_first":
+                row_i, seq_i = divmod(index, len(final_sequence))
+            else:
+                seq_i, row_i = divmod(index, len(batch_rows))
+            task_i = task_map.get((seq_i, row_i))
+            combinations.append(dict(seq_i=seq_i, row_i=row_i, ctx=final_sequence[seq_i],
+                                     row=batch_rows[row_i], task_i=task_i,
+                                     applicable=task_i is not None))
+        self._flat_total_steps = len(schedule)
+        self._flat_skipped = total_combinations - len(task_map)
+        self._flat_visible_range = (start, stop, total_combinations)
+
+        self._build_flat_window(combinations, batch_rows, definition_rows, counts,
+            prefix_sums, final_sequence, acquisition_grouping, loop_mode, param_order,
+            signature, expanded_node_ids)
+        self._update_flat_status(done=done, total_acq=total_acq,
+            current_step_i=current_step_i, current_rep_i=current_rep_i,
+            current_frame_i=current_frame_i, current_frame_total=current_frame_total,
+            run_outcome=run_outcome, preview_state=preview_state)
+
+    def _prepare_flat_schedule(self, schedule, final_sequence, df_batch,
+                               loop_definition, acquisition_grouping, loop_mode,
+                               param_order):
+        """Index a new plan once, never on a frame-progress update."""
         if _HAS_PANDAS and isinstance(df_batch, pd.DataFrame):
             frame = df_batch.copy()
             if "Run" in frame.columns:
@@ -768,41 +879,11 @@ class RunPlanTree(QTreeWidget):
             (int(task.get("seq_i", -1)), int(task.get("row_i", -1))): task_i
             for task_i, task in enumerate(schedule)
         }
-        pairs = (
-            (
-                (seq_i, row_i)
-                for row_i in range(len(batch_rows))
-                for seq_i in range(len(final_sequence))
-            )
-            if acquisition_grouping == "batch_first"
-            else (
-                (seq_i, row_i)
-                for seq_i in range(len(final_sequence))
-                for row_i in range(len(batch_rows))
-            )
-        )
-        combinations: List[Dict[str, object]] = []
-        for seq_i, row_i in pairs:
-            ctx = dict(final_sequence[seq_i])
-            row = dict(batch_rows[row_i])
-            when_ok = _when_ok(row.get("When", ""), _outer_ctx_alias(ctx))
-            task_i = task_map.get((seq_i, row_i)) if when_ok else None
-            combinations.append(
-                {
-                    "seq_i": seq_i,
-                    "row_i": row_i,
-                    "ctx": ctx,
-                    "row": row,
-                    "task_i": task_i,
-                    "applicable": task_i is not None,
-                }
-            )
-
         signature = repr(
             (
                 acquisition_grouping,
                 loop_mode,
-                preview_state,
+                param_order,
                 final_sequence,
                 batch_rows,
                 definition_rows,
@@ -816,6 +897,32 @@ class RunPlanTree(QTreeWidget):
                 ],
             )
         )
+        if loop_mode == "Zip":
+            resolution_text = f"Zip · {len(final_sequence)} zipped setting(s)"
+        elif loop_mode == "Synchronize":
+            factor_counts = []
+            for row in definition_rows:
+                parameter = str(row.get("Parameter", ""))
+                values = {repr(ctx[parameter]) for ctx in final_sequence
+                          if ctx.get(parameter) is not None}
+                if values:
+                    factor_counts.append(len(values))
+            factor_text = " × ".join(str(value) for value in factor_counts)
+            resolution_text = "Cartesian"
+            if factor_text:
+                resolution_text += f" · {factor_text} = {len(final_sequence)} setting(s)"
+            else:
+                resolution_text += f" · {len(final_sequence)} setting(s)"
+        elif loop_mode == "Customized":
+            resolution_text = f"Customized zipped groups · {len(final_sequence)} setting(s)"
+        else:
+            resolution_text = f"{len(final_sequence)} resolved setting(s)"
+        self._flat_resolution_text = resolution_text
+        return batch_rows, definition_rows, counts, prefix_sums, task_map, signature
+
+    def _build_flat_window(self, combinations, batch_rows, definition_rows, counts,
+                           prefix_sums, final_sequence, acquisition_grouping,
+                           loop_mode, param_order, signature, expanded_node_ids):
 
         def set_bold(item: QTreeWidgetItem, column: int = 0) -> None:
             font = item.font(column)
@@ -906,7 +1013,7 @@ class RunPlanTree(QTreeWidget):
             self._flat_steps.clear()
             self._flat_groups.clear()
 
-            skipped_count = sum(not bool(entry["applicable"]) for entry in combinations)
+            skipped_count = self._flat_skipped
             root = QTreeWidgetItem(["", "", "", ""])
             root.setData(0, _NODE_ID_ROLE, "run")
             set_bold(root)
@@ -941,8 +1048,7 @@ class RunPlanTree(QTreeWidget):
             )
 
             outer_key = "row_i" if acquisition_grouping == "batch_first" else "seq_i"
-            outer_count = len(batch_rows) if outer_key == "row_i" else len(final_sequence)
-            for outer_i in range(outer_count):
+            for outer_i in dict.fromkeys(int(entry[outer_key]) for entry in combinations):
                 entries = [entry for entry in combinations if int(entry[outer_key]) == outer_i]
                 runnable = [entry for entry in entries if entry["applicable"]]
                 group = QTreeWidgetItem(["", "", "", ""])
@@ -960,8 +1066,8 @@ class RunPlanTree(QTreeWidget):
                         f"{_fmt_ctx(final_sequence[outer_i], param_order)}"
                     )
                 group_title += (
-                    f" · {len(runnable)} runnable step(s)"
-                    f" · {len(entries) - len(runnable)} skipped"
+                    f" · {len(runnable)} visible runnable step(s)"
+                    f" · {len(entries) - len(runnable)} visible skipped"
                 )
                 group.setText(0, f"○  {group_title}")
                 group.setToolTip(0, group_title)
@@ -1034,32 +1140,8 @@ class RunPlanTree(QTreeWidget):
                     item.setToolTip(3, full_detail(ctx, row))
                     group.addChild(item)
 
-            if loop_mode == "Zip":
-                resolution_text = f"Zip · {len(final_sequence)} zipped setting(s)"
-            elif loop_mode == "Synchronize":
-                factor_counts = []
-                for row in definition_rows:
-                    parameter = str(row.get("Parameter", ""))
-                    values = []
-                    for ctx in final_sequence:
-                        value = ctx.get(parameter)
-                        if value is not None and value not in values:
-                            values.append(value)
-                    if values:
-                        factor_counts.append(len(values))
-                factor_text = " × ".join(str(value) for value in factor_counts)
-                resolution_text = "Cartesian"
-                if factor_text:
-                    resolution_text += f" · {factor_text} = {len(final_sequence)} setting(s)"
-                else:
-                    resolution_text += f" · {len(final_sequence)} setting(s)"
-            elif loop_mode == "Customized":
-                resolution_text = f"Customized zipped groups · {len(final_sequence)} setting(s)"
-            else:
-                resolution_text = f"{len(final_sequence)} resolved setting(s)"
-
             loop_inputs = QTreeWidgetItem(
-                root, ["Plan inputs", "", "Loop variables", resolution_text]
+                root, ["Plan inputs", "", "Loop variables", self._flat_resolution_text]
             )
             loop_inputs.setData(0, _NODE_ID_ROLE, "loop-definitions")
             set_bold(loop_inputs)
@@ -1091,7 +1173,8 @@ class RunPlanTree(QTreeWidget):
             batch_inputs.setExpanded(
                 bool(expanded_node_ids and "batch-definitions" in expanded_node_ids)
             )
-            for row_i, row in enumerate(batch_rows):
+            for row_i in dict.fromkeys(int(entry["row_i"]) for entry in combinations):
+                row = batch_rows[row_i]
                 child = QTreeWidgetItem(
                     ["", f"[ROW {row_i + 1}] {_condition_name(row, row_i)}", "", sweep_text(row)]
                 )
@@ -1099,17 +1182,6 @@ class RunPlanTree(QTreeWidget):
                 batch_inputs.addChild(child)
 
             self._flat_signature = signature
-
-        self._update_flat_status(
-            done=done,
-            total_acq=total_acq,
-            current_step_i=current_step_i,
-            current_rep_i=current_rep_i,
-            current_frame_i=current_frame_i,
-            current_frame_total=current_frame_total,
-            run_outcome=run_outcome,
-            preview_state=preview_state,
-        )
 
     def _update_flat_status(
         self,
@@ -1131,16 +1203,12 @@ class RunPlanTree(QTreeWidget):
             "failed": "Failed",
         }.get(run_outcome, "Ready")
         if self._flat_root is not None:
-            skipped = sum(
-                1
-                for group in self._flat_groups
-                for child_i in range(group["item"].childCount())
-                if group["item"].child(child_i).text(0) == "⊘"
-            )
+            start, stop, total = self._flat_visible_range
             self._flat_root.setText(
                 0,
                 f"{preview_state} · {outcome_text} · {done}/{total_acq} files · "
-                f"{len(self._flat_steps)} runnable step(s) · {skipped} skipped",
+                f"{self._flat_total_steps} runnable step(s) · {self._flat_skipped} skipped"
+                + (f" · showing {start + 1}-{stop} of {total}" if stop - start < total else ""),
             )
 
         active_item: Optional[QTreeWidgetItem] = None
@@ -1180,6 +1248,13 @@ class RunPlanTree(QTreeWidget):
             repeats = int(record["repeats"])
             state = step_state(task_i, start, end)
             states[task_i] = state
+            status = (state, max(0, min(done - start, repeats)),
+                      (current_rep_i, current_frame_i, current_frame_total) if state == "now" else None)
+            if state in ("now", "failed", "stopped"):
+                active_item = item
+            if record.get("status") == status:
+                continue
+            record["status"] = status
             suffix = {
                 "now": "  RUNNING",
                 "failed": "  FAILED",
@@ -1196,7 +1271,11 @@ class RunPlanTree(QTreeWidget):
             item.setFont(0, font)
 
             tokens = []
-            for rep_i in range(repeats):
+            repeat_start = max(0, min(max(done - start, current_rep_i if state == "now" else 0) - 4, repeats - 12))
+            repeat_stop = min(repeats, repeat_start + 12)
+            if repeat_start:
+                tokens.append("…")
+            for rep_i in range(repeat_start, repeat_stop):
                 absolute_i = start + rep_i
                 if absolute_i < done:
                     token = f"✓{rep_i + 1}"
@@ -1205,7 +1284,11 @@ class RunPlanTree(QTreeWidget):
                 else:
                     token = f"○{rep_i + 1}"
                 tokens.append(token)
+            if repeat_stop < repeats:
+                tokens.append("…")
             progress = f"Files: {' '.join(tokens)}"
+            if repeats > 12:
+                progress += f" ({max(0, min(done - start, repeats))}/{repeats} saved)"
             if state == "now" and current_frame_total > 1:
                 frame_i = max(0, min(current_frame_i, current_frame_total))
                 progress += f" · frame {frame_i}/{current_frame_total}"
@@ -1228,6 +1311,9 @@ class RunPlanTree(QTreeWidget):
                 state = "now"
             else:
                 state = "todo"
+            if group.get("status") == state:
+                continue
+            group["status"] = state
             item.setText(0, f"{symbols[state]}  {group['title']}")
             if state == "todo":
                 foreground = (
@@ -1241,8 +1327,9 @@ class RunPlanTree(QTreeWidget):
             item.setForeground(0, _brush(foreground))
             item.setBackground(0, _brush(background))
 
-        if active_item is not None:
+        if active_item is not None and getattr(self, "_flat_last_active_item", None) is not active_item:
             self.scrollToItem(active_item, QAbstractItemView.ScrollHint.PositionAtCenter)
+        self._flat_last_active_item = active_item
 
     def clear_plan(self) -> None:
         """Reset to empty state (before a run starts)."""
@@ -1252,6 +1339,8 @@ class RunPlanTree(QTreeWidget):
         self._flat_steps.clear()
         self._flat_groups.clear()
         self._flat_root = None
+        self._flat_plan_cache = None
+        self._last_plan = None
         self._nested_schedule = None
         self._classified_schedule = None
         self._schedule_is_nested = False

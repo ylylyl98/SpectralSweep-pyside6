@@ -1,14 +1,11 @@
 """UI work must scale with changed data, without touching instruments."""
 import os
 import unittest
-import time
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from tests import test_sweep_line_calculator  # optional hardware-library stub
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QTimer
-from PySide6.QtTest import QTest
 from ui import presets_panel as panel
 from ui.preview_widget import RunPlanTree
 from ui import megasweep_panel as mega
@@ -93,26 +90,77 @@ class UIPerformanceTests(unittest.TestCase):
             self.assertEqual(build.call_count, 1)
             self.assertEqual(draw.call_count, 1)
 
-    def test_full_sequence_populates_in_chunks_and_keeps_qt_events_running(self):
+    def test_full_sequence_pages_details_and_keeps_manual_page_during_progress(self):
         batch = panel._DEFAULT_BATCH.copy(deep=True)
         batch.loc[:, "frames"] = 1001
         schedule = panel._build_nested_execution_schedule(panel._DEFAULT_LOOP, batch)
         tree = RunPlanTree()
         self.addCleanup(tree.close)
         tree.update_plan([], batch, acquisition_schedule=schedule)
-        ticks = []
-        timer = QTimer()
-        timer.timeout.connect(lambda: ticks.append(1))
-        timer.start(5)
-        self.addCleanup(timer.stop)
         tree.show_full_sequence()
         child = tree._full_sequence_tree
-        self.assertLess(len(child._flat_steps), len(schedule))
-        deadline = time.perf_counter() + 5
-        while len(child._flat_steps) < len(schedule) and time.perf_counter() < deadline:
-            QTest.qWait(10)
-        self.assertEqual(len(child._flat_steps), len(schedule))
-        self.assertGreater(len(ticks), 2)
+        self.assertEqual(len(child._flat_steps), 200)
+        self.assertFalse(child._page_previous.isEnabled())
+        child._page_next.click()
+        self.assertEqual(min(child._flat_steps), 200)
+        self.assertFalse(child._follow_current)
+        tree.update_plan([], batch, acquisition_schedule=schedule,
+                         current_seq_i=800, completed_points=800, run_outcome="running")
+        self.assertEqual(min(child._flat_steps), 200)
+        child._follow_check.setChecked(True)
+        self.assertEqual(min(child._flat_steps), 800)
+        self.assertTrue(child._flat_steps[800]["item"].text(0).startswith("▶"))
+        child._page_spin.setValue(child._page_spin.maximum())
+        self.assertIn(len(schedule) - 1, child._flat_steps)
+        self.assertFalse(child._page_next.isEnabled())
+        self.assertLessEqual(len(child._flat_steps), 200)
+
+    def test_long_flat_preview_is_bounded_and_reuses_plan_on_progress(self):
+        row = dict(Run=True, When="", repeat=1, frames=2, condition_label="row",
+                   Vbg_start=0, Vbg_stop=1, Vtg_start=0, Vtg_stop=1)
+        sequence = [{"Rotation1 Angle (deg)": i} for i in range(2000)]
+        batch = [row]
+        schedule = [dict(seq_i=i, row_i=0, ctx=ctx, row=row)
+                    for i, ctx in enumerate(sequence)]
+        tree = RunPlanTree()
+        self.addCleanup(tree.close)
+        kwargs = dict(acquisition_schedule=schedule, total_acq=len(schedule), run_outcome="running")
+        tree.update_plan(sequence, batch, **kwargs)
+        self.assertEqual(len(tree._flat_steps), 8)
+        with patch.object(tree, "_prepare_flat_schedule", wraps=tree._prepare_flat_schedule) as prepare:
+            for i in (0, 1, 500, 1999):
+                tree.update_plan(sequence, batch, current_seq_i=i, done=i, **kwargs)
+                self.assertLessEqual(len(tree._flat_steps), 8)
+                self.assertIn(i, tree._flat_steps)
+            self.assertEqual(prepare.call_count, 0)
+        self.assertIn("2000 runnable step(s)", tree.topLevelItem(0).text(0))
+        tree.show_full_sequence()
+        child = tree._full_sequence_tree
+        self.assertEqual(len(child._flat_steps), 200)
+        self.assertIn(1999, child._flat_steps)
+        child._page_spin.setValue(1)
+        self.assertEqual(min(child._flat_steps), 0)
+        tree.update_plan(sequence, batch, done=2000, run_outcome="completed",
+                         acquisition_schedule=schedule, total_acq=2000)
+        self.assertTrue(all(record["item"].text(0).startswith("✓") for record in child._flat_steps.values()))
+
+    def test_repeated_frame_progress_does_not_repaint_unchanged_flat_steps(self):
+        row = dict(Run=True, repeat=100000, frames=2, condition_label="row")
+        sequence, batch = [{}], [row]
+        schedule = [dict(seq_i=0, row_i=0, ctx={}, row=row)]
+        tree = RunPlanTree()
+        self.addCleanup(tree.close)
+        kwargs = dict(acquisition_schedule=schedule, total_acq=100000,
+                      current_seq_i=0, done=54321, current_rep_i=54321,
+                      current_frame_i=1, current_frame_total=2, run_outcome="running")
+        tree.update_plan(sequence, batch, **kwargs)
+        detail = tree._flat_steps[0]["item"].text(3)
+        self.assertIn("54321/100000 saved", detail)
+        self.assertLess(len(detail), 400)
+        changed = []
+        tree.model().dataChanged.connect(lambda *args: changed.append(args))
+        tree.update_plan(sequence, batch, **kwargs)
+        self.assertEqual(changed, [])
 
     def test_clearing_nested_tree_restores_unscheduled_preview(self):
         tree = RunPlanTree()

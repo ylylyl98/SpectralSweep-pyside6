@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
 from app.history_reader import read_preview, read_settings
+from app.metadata_storage import STORAGE_FORMAT, TABLE_STORAGE_FORMAT
 
 
 class _Results(QObject):
@@ -77,9 +78,26 @@ def resolve_metadata_path(raw_path, output_root, cancel):
     raise FileNotFoundError("Metadata sidecar could not be found")
 
 
+def _requires_isolated_reader(path):
+    # A small compressed file can expand into a very large plan. Its on-disk
+    # size alone is no longer a reliable measure of Python/GIL work.
+    if path.stat().st_size >= 1_000_000:
+        return True
+    with path.open(encoding="utf-8") as stream:
+        text = stream.read(1_000_000)
+    if len(text) == 1_000_000:
+        return True
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        return False  # The reader reports the original parse error.
+    storage = raw.get("metadata_storage") if isinstance(raw, dict) else None
+    return isinstance(storage, dict) and storage.get("format") in {STORAGE_FORMAT, TABLE_STORAGE_FORMAT}
+
+
 def load_preview(raw_path, output_root, event_filter, offset, cancel):
     path = resolve_metadata_path(raw_path, output_root, cancel)
-    if path.stat().st_size >= 1_000_000:
+    if _requires_isolated_reader(path):
         return _read_isolated({"operation": "preview", "path": str(path),
                                "event_filter": event_filter, "offset": offset}, cancel)
     return read_preview(path, event_filter, offset, cancel)
@@ -87,7 +105,7 @@ def load_preview(raw_path, output_root, event_filter, offset, cancel):
 
 def load_settings(raw_path, output_root, cancel, *, supported_keys=None):
     path = resolve_metadata_path(raw_path, output_root, cancel)
-    if path.stat().st_size >= 1_000_000:
+    if _requires_isolated_reader(path):
         return _read_isolated({"operation": "settings", "path": str(path), "supported_keys": supported_keys}, cancel)
     return read_settings(path, supported_keys)
 

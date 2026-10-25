@@ -160,14 +160,11 @@ class ExperimentEventRecorderTests(unittest.TestCase):
         self.assertEqual([item["event"] for item in reopened.read_events()], ["first", "second"])
         self.assertEqual([item["event_index"] for item in reopened.read_events()], [1, 2])
 
-    def test_checkpoint_failure_keeps_next_event_index(self):
+    def test_summary_failure_after_durable_append_keeps_next_event_index(self):
         run = self.service.begin("motion_sweep", "sample")
-        run._checkpoint_interval = 1
         run.record_event("first")
-        original = run._write
-        run._write = mock.Mock(side_effect=OSError("checkpoint unavailable"))
-        self.assertIsNone(run.record_event("second"))
-        run._write = original
+        with mock.patch.object(run, "_accumulate_capture", side_effect=OSError("summary unavailable")):
+            self.assertIsNone(run.record_event("second"))
         self.assertIsNotNone(run.record_event("third"))
         indexes = [item["event_index"] for item in run.read_events()]
         self.assertEqual(indexes, [1, 2, 3])

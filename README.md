@@ -135,7 +135,7 @@ snapshot includes its last observed position and readback timestamp.
 
 ## LightField experiment metadata
 
-LightField runs in Presets, Power Sweep, MegaSweep, BFP, and both MCD tabs
+LightField runs in Power Sweep, MegaSweep, BFP, and both MCD tabs
 automatically read instrument settings immediately before each capture. The
 experiment's `*.experiment.metadata.json` stores distinct configurations under
 `settings.snapshots`, separate from requested UI settings. The compatibility
@@ -167,6 +167,28 @@ the run, including when switching setups or recreating a recorder. Recovery
 counts capture attempts consistently with live recording, without counting
 completion events again. This metadata is provenance and is not automatically
 restored to hardware when loading saved settings.
+
+Dual Gate (Presets) uses file-boundary metadata for LightField, Andor, and
+WinSpec. Before a file's first acquisition it synchronously saves the actual
+settings and full-precision calibration, then appends `file_started`. A
+spectrometer configuration or backend change triggers a fresh snapshot and a
+`file_settings_changed` event for an already open file. Unchanged points skip
+metadata snapshot queries and capture events; hardware safety validation and
+CSV writes still occur on each point. After CSV close succeeds, `file_completed`
+records the file ID, settings ID, start/end time, successful point count and CSV
+row count. Errors/stops write `run_interrupted` before cleanup and a
+`file_failed`/`file_stopped` summary. These journal records are synchronously
+fsynced. Only scalar counters for unfinished files remain in memory, with no
+pending-write queue or per-point timing/temperature history. The final manifest
+registers outputs together and reports `summary.completed_points`; capture
+attempt counts are intentionally not recorded in this mode. Keep the event
+journal with the manifest to retain file summaries after an interruption.
+
+Dual Gate startup validates and saves the applied plan on its run worker before
+instrument preparation. Run immediately shows a preparation status; the log
+reports validation and save durations, and Stop remains available. A cancelled
+or failed startup sends no instrument commands. Plan and filename inputs remain
+those captured when Run was clicked, even if the next draft is edited.
 
 ## Power-meter correction
 
@@ -599,6 +621,31 @@ plain `json.load()` exposes the stored pointers. The history index applies the
 same encoding and its query API expands the values. Older metadata remains
 readable, and legacy `.meta.json` / `.meta.txt` projections keep their formats.
 Pointers never resolve external files or URLs.
+
+Long `acquisition_schedule`, `all_points`, and `valid_points` lists
+(64 or more uniform records) use the
+`local-json-tables-v2` storage format. Shared settings and execution context are
+stored once per column; changing values use compact value lists, dictionaries
+or repeated runs. Nested gate values, exact floating-point values, ordering and
+repeated group-instance identities are all preserved. The loader expands the
+table to the same list of records used by the application; this does not change
+the in-memory measurement schedule. Table-bearing sidecars use compact JSON
+whitespace and a single buffered write before the existing fsync/atomic replace.
+Plain JSON readers see the stored table,
+so use the current metadata loader when reading these new sidecars. Existing
+pointer-format and unencoded files remain readable and are not rewritten by
+inspection. The history index uses the same lossless encoding.
+
+MCD, Motion Sweep, and MegaSweep batch their final output associations into
+one terminal manifest/history update. MCD performs that update in its existing
+worker after hardware cleanup. Shared-run MCD2100 progress uses synchronous,
+fsynced journal deltas; its legacy JSON is materialized at phase and terminal
+boundaries. MegaSweep's per-map compatibility state stores point counts while
+the complete exact plan remains in requested settings. BFP skips duplicate
+metadata updates when the output path and exported bytes have not changed.
+These changes do not queue pending writes in memory. Dual Gate uses the
+file-boundary policy described above. Small compressed history files are expanded in a separate
+reader process so their expanded size does not stall the GUI interpreter.
 
 Spectrum exports retain one metadata record per output path. Repeating an
 identical save leaves the metadata and event journal unchanged. Overwriting

@@ -32,6 +32,7 @@ from app.engine.magnet_preparation import (
 )
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
+from app.engine.mcd_metadata import finalize_mcd_metadata
 from controllers.rotation_controller import RotationController
 from utils.config import cfg
 from utils.filename_builder import sanitize_token, make_unique_stem
@@ -296,6 +297,26 @@ class _Runner(QObject):
             result = self.worker.run()
         except BaseException as exc:
             result = {"status": "FAILED", "error": str(exc), "spectra_written": 0}
+        run = getattr(self.worker, "metadata_run", None)
+        if run is not None:
+            # A terminal write can itself raise after the CSV has been saved.
+            # Retain those outputs even when the engine could not return its
+            # usual result dictionary.
+            metadata_path = getattr(self.worker, "_metadata_path", None)
+            metadata = getattr(self.worker, "_metadata", None)
+            if metadata_path is not None:
+                result.setdefault("metadata_path", str(metadata_path))
+                if not result.get("csv_paths") and not result.get("csv_path"):
+                    candidates = metadata.get("batch_file_paths", []) if isinstance(metadata, dict) else []
+                    if not candidates:
+                        candidates = [str(Path(metadata_path).with_name(
+                            Path(metadata_path).name.removesuffix(".meta.json") + ".csv"))]
+                    result["csv_paths"] = list(candidates)
+            self.phase.emit("Saving experiment metadata")
+            try:
+                finalize_mcd_metadata(run, result)
+            except Exception as exc:
+                result["metadata_error"] = str(exc)
         self.finished.emit(result)
 
 
@@ -361,6 +382,7 @@ class MCD2100Panel(QWidget):
         self._externally_busy = False
         self._interlock_held = False
         self._terminal_status = "Disconnected" if not self._connected else "Ready"
+        self._metadata_terminal_failed = False
         self._connect_handle = None
         self._disconnect_handle = None
         self._temperature_apply_handle = None
@@ -2881,7 +2903,10 @@ class MCD2100Panel(QWidget):
         self.telemetry_note.setText(
             f"Field and temperature are last-known values ({observed}), not live telemetry."
         )
-        self._terminal_status = "Completed — telemetry detached; magnet left at final field"
+        self._terminal_status = (
+            "FAILED — metadata finalization; telemetry detached; magnet left at final field"
+            if self._metadata_terminal_failed else
+            "Completed — telemetry detached; magnet left at final field")
         self.status.setText(self._terminal_status)
 
     @Slot(object)
@@ -3064,6 +3089,7 @@ class MCD2100Panel(QWidget):
                 thread.deleteLater()
             raise
         self._operation = operation
+        self._metadata_terminal_failed = False
         self._preparation_progress = None
         self._preparation_closed = False
         self._terminal_status = "Preparing magnet" if operation == "magnet_preparation" else "Running"
@@ -3322,6 +3348,8 @@ class MCD2100Panel(QWidget):
     @Slot(str)
     def _on_phase(self, message: str) -> None:
         sender = self.sender()
+        if self._metadata_terminal_failed and self._preparation_closed:
+            return
         if isinstance(sender, _Runner) and (sender is not self.runner or self._preparation_closed
                 and self._terminal_status in {"FAILED", "CANCELLED", "COMPLETED", "Magnet ready at Start"}):
             return
@@ -3372,7 +3400,10 @@ class MCD2100Panel(QWidget):
         waiting = any(token in phase_lower for token in (
             "settling", "ramping gate", "positioning", "configuring", "starting"
         ))
-        if preparation is not None:
+        if self._metadata_terminal_failed:
+            self.run_activity.setText(f"● {self._terminal_status}")
+            set_style_role(self.run_activity, 'text', tone='danger', strong=True)
+        elif preparation is not None:
             self.run_activity.setText("● Preparing magnet")
             set_style_role(self.run_activity, 'text', tone='warning', strong=True)
         elif running and since_spectrum is not None and since_spectrum < 1.5:
@@ -3425,6 +3456,11 @@ class MCD2100Panel(QWidget):
         terminal = str(result.get("status", "FAILED")).upper()
         if terminal not in {"COMPLETED", "CANCELLED", "FAILED"}:
             terminal = "FAILED"
+        measurement_terminal = str(result.get("measurement_status") or terminal).upper()
+        self._metadata_terminal_failed = (
+            result.get("metadata_status") == "failed" or bool(result.get("metadata_error")))
+        if self._metadata_terminal_failed:
+            terminal = "FAILED"
         standalone_prepare = result.get("operation") == "magnet_preparation"
         if standalone_prepare and terminal == "COMPLETED":
             self._detached_after_completion = False
@@ -3438,12 +3474,12 @@ class MCD2100Panel(QWidget):
                 if terminal == "CANCELLED" or result.get("recovery_required")
                 else terminal
             )
-        elif terminal == "COMPLETED":
+        elif measurement_terminal == "COMPLETED":
             self._detached_after_completion = True
             self._connected = False
             self._show_completed_detach()
         else:
-            self._terminal_status = terminal
+            self._terminal_status = "FAILED — metadata finalization" if self._metadata_terminal_failed else terminal
             self.status.setText(self._terminal_status)
         spectra = int(result.get("spectra_written", 0))
         self.progress.setText(f"{spectra} spectra")
@@ -3457,37 +3493,13 @@ class MCD2100Panel(QWidget):
         errors = [str(value) for value in (primary_error, cleanup_error) if value]
         if errors:
             self._show_error("\n".join(errors))
-        run = getattr(self, "_experiment_run", None)
         if standalone_prepare:
             self._refresh_controls()
             return
-        if run is not None:
-            try:
-                csv_paths = result.get("csv_paths") or ([result.get("csv_path")] if result.get("csv_path") else [])
-                details = {str(item.get("path")): item for item in (result.get("file_details") or []) if isinstance(item, dict)}
-                for csv_name in csv_paths:
-                    csv_path = Path(csv_name)
-                    if csv_path.exists():
-                        detail = details.get(str(csv_path), {})
-                        role = detail.get("role", "raw")
-                        run.register_file(csv_path, role=role,
-                                         kind=detail.get("kind", "continuous_mcd_spectrum"),
-                                         details=detail)
-                legacy = Path(result.get("metadata_path", ""))
-                if legacy.exists():
-                    run.register_file(
-                        legacy, "intermediate",
-                        details={"compatibility_projection": True,
-                                 "derived_from_experiment_id": run.experiment_id},
-                    )
-                if terminal == "COMPLETED":
-                    run.complete({"spectra_written": spectra})
-                elif terminal == "CANCELLED":
-                    run.cancel(error or "user cancellation")
-                else:
-                    run.fail(error or "MCD 2100 failed")
-            except Exception as exc:
-                self._show_error(f"Metadata finalization failed: {exc}")
+        if result.get("metadata_error"):
+            self.status.setText(self._terminal_status)
+            self._append_log(f"Metadata finalization failed: {result['metadata_error']}")
+            self._show_error(f"Metadata finalization failed: {result['metadata_error']}")
 
     @Slot()
     def _thread_finished(self):
@@ -3509,6 +3521,7 @@ class MCD2100Panel(QWidget):
             if callable(polling):
                 polling(True)
         self.status.setText(self._terminal_status)
+        self._refresh_activity()
         self._refresh_controls()
 
     def _refresh_controls(self):

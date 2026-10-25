@@ -3045,12 +3045,6 @@ class PowerSweepPanel(QWidget):
         if self._run_finalized and self._worker is None:
             return
         worker = self._worker
-        self._run_btn.setEnabled(True)
-        self._motion_grp.setEnabled(True)
-        self._stop_btn.setEnabled(False)
-        if self._status_lbl.text() not in ("Error", "Stopping…"):
-            self._status_lbl.setText("Ready")
-            set_style_role(self._status_lbl, 'text', tone='muted', size='status')
         if self._thread:
             thread = self._thread
             thread.quit()
@@ -3064,18 +3058,37 @@ class PowerSweepPanel(QWidget):
         run = getattr(self, "_experiment_run", None)
         if run is not None:
             try:
+                if self._status_lbl.text() not in ("Error", "Stopping…"):
+                    self._status_lbl.setText("Saving experiment metadata…")
+                files = []
                 for data_file in Path(run.path.parent).glob("*"):
                     if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".log", ".json", ".txt"}:
                         continue
-                    run.register_file(data_file, "raw" if data_file.suffix.lower() == ".csv" else "intermediate")
+                    files.append({"path": data_file,
+                                  "role": "raw" if data_file.suffix.lower() == ".csv" else "intermediate"})
+                # Associate all outputs in the terminal write. Registering each
+                # file separately rewrites the complete plan and history N times.
                 if getattr(self, "_run_failed", False):
-                    run.fail("motion sweep failed")
+                    result = run.fail("motion sweep failed", files=files)
                 elif worker is not None and worker._stop.is_set():
-                    run.cancel("user stop")
+                    result = run.cancel("user stop", files=files)
                 else:
-                    run.complete()
+                    result = run.complete(files=files)
+                if result.get("status") == "failed" and not getattr(self, "_run_failed", False):
+                    detail = (result.get("metadata_error") or result.get("error") or {}).get(
+                        "message", "One or more metadata records could not be saved")
+                    self._on_error(f"Metadata recording failed: {detail}")
             except Exception as exc:
                 self._on_error(f"Metadata finalization error: {exc}")
+        self._run_btn.setEnabled(True)
+        self._motion_grp.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+        if getattr(self, "_run_failed", False):
+            self._status_lbl.setText("Error")
+            set_style_role(self._status_lbl, 'text', tone='danger', size='status')
+        elif self._status_lbl.text() not in ("Error", "Stopping…"):
+            self._status_lbl.setText("Ready")
+            set_style_role(self._status_lbl, 'text', tone='muted', size='status')
         self._worker = None
         self._run_finalized = True
         self._cal_widget.set_external_busy(False)

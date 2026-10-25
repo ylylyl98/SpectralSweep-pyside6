@@ -109,6 +109,22 @@ class HistoryPerformanceTests(unittest.TestCase):
             self.assertEqual(settings, {"center_nm": 860, "executed_plan": None})
             self.assertLess(len(json.dumps(settings)), 1000)
 
+    def test_small_compressed_plan_expands_outside_gui_process(self):
+        from app.metadata_storage import compact_metadata
+        from ui.history_loader import load_preview, load_settings
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "compressed.json"
+            value = {"settings": {"requested": {"all_points": [
+                {"point": i, "recipe": {"center_nm": 860, "exposure_ms": 50}}
+                for i in range(4000)]}, "loadable": {"center_nm": 860}}}
+            path.write_text(json.dumps(compact_metadata(value)))
+            self.assertLess(path.stat().st_size, 1_000_000)
+            with patch.object(ExperimentMetadataService, "load_metadata", side_effect=AssertionError("Expanded in GUI process")):
+                preview = load_preview(str(path), root, "", 0, threading.Event())
+                settings = load_settings(str(path), root, threading.Event())
+            self.assertIn("all_points", preview["text"])
+            self.assertEqual(settings, {"center_nm": 860})
+
     def test_adapter_key_query_is_readonly_and_bfp_dispatch_preserves_it(self):
         from tests import test_sweep_line_calculator
         from PySide6.QtWidgets import QWidget

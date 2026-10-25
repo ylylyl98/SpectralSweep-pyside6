@@ -113,11 +113,21 @@ def _input_identity(path: str | Path, role: str) -> dict:
     # small directory-local lookup and never places the absolute source path
     # in the portable sidecar settings.
     try:
-        for sidecar in sorted(candidate.parent.glob("*.experiment.metadata.json")):
-            data = ExperimentMetadataService.load_metadata(sidecar)
+        direct = (candidate.with_name(candidate.name + ".experiment.metadata.json"),
+                  candidate.with_suffix(".experiment.metadata.json"))
+        legacy = sorted(candidate.parent.glob("*.experiment.metadata.json"),
+                        key=lambda item: item.stat().st_mtime_ns, reverse=True)
+        for sidecar in dict.fromkeys((*direct, *legacy)):
+            try:
+                data = ExperimentMetadataService.load_metadata(sidecar)
+            except (OSError, ValueError, TypeError):
+                continue
             listed = data.get("files", []) if isinstance(data, dict) else []
+            if not isinstance(listed, list):
+                continue
             if any(Path(str(item.get("path", ""))).name == candidate.name
                    and str(item.get("role", "")) in {"raw", "processed"}
+                   and (not item.get("sha256") or item.get("sha256") == sha256)
                    for item in listed if isinstance(item, dict)):
                 parent_experiment_id = data.get("experiment_id")
                 break
@@ -129,16 +139,61 @@ def _input_identity(path: str | Path, role: str) -> dict:
             "parent_experiment_id": parent_experiment_id}
 
 
-def _frozen_input(run, path: str | Path, identity: dict, kind: str) -> None:
+def _frozen_input(run, path: str | Path, identity: dict, kind: str, *, persist: bool = True) -> None:
     """Register an input while retaining the compute-time content identity."""
     # Keep the historical ``metadata`` file role for compatibility while the
     # explicit input_role records whether this was sample or background.
-    run.register_file(
+    register = run.register_file if persist else run._register_file
+    register(
         path, role="metadata", kind=kind, external=True,
         frozen_identity=identity,
         details={"input_role": identity.get("role"),
                  "parent_experiment_id": identity.get("parent_experiment_id")},
     )
+
+
+def _record_rc_inputs(run, inputs, kind: str, context: str) -> None:
+    """Persist both frozen input links together; the full context is in settings."""
+    with run._lock:
+        for role, path, identity in inputs:
+            _frozen_input(run, path, identity if isinstance(identity, dict) else {"role": role},
+                          kind, persist=False)
+        if run._files_dirty:
+            run._write()
+        event = run.record_processing({"processing_context_ref": {
+            "metadata_file": run.path.name,
+            "json_pointer": "/settings/requested/processing_context",
+        }}, context=context)
+        if event is None:
+            raise RuntimeError("RC processing metadata could not be durably recorded")
+
+
+def _finish_rc_output(run, path: Path, role: str, context: str):
+    """Register an output and finalize once; identical repeated saves are a no-op."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    sha256 = digest.hexdigest()
+    portable = path.resolve().relative_to(run.service.output_root).as_posix()
+    with run._lock:
+        previous = next((item for item in run.metadata.get("files", [])
+                         if item.get("path") == portable and item.get("role") == role), None)
+        if (previous is not None and previous.get("sha256") == sha256
+                and run.metadata.get("status") == "completed" and not run._files_dirty):
+            return run
+        run._register_file(path, role, details={"sha256": sha256})
+        event = run.record_export({"path": path.name, "role": role, "context": context,
+                                   "sha256": sha256}, output={"file": path.name})
+        if event is None:
+            raise RuntimeError("RC export metadata could not be durably recorded")
+        if run.metadata.get("status") == "running":
+            result = run.complete({"context": context})
+            if result.get("status") != "completed":
+                raise RuntimeError("RC export metadata finalization failed")
+        elif run._files_dirty:
+            run._write()
+    return run
 
 
 def _make_png_size_combo() -> QComboBox:
@@ -817,19 +872,13 @@ class _BRCWidget(QWidget):
                       "scale": context.get("processing", {}).get("scale"),
                       "order": context.get("processing", {}).get("gradient_order")},
         )
-        for role, input_path, identity in (("sample", sample_path, sample_input), ("background", background_path, background_input)):
-            _frozen_input(self._rc_run, input_path, identity if isinstance(identity, dict) else {"role": role}, "binned_spectrum_input")
-        self._rc_run.record_processing(context, context="binned_rc")
+        _record_rc_inputs(self._rc_run,
+                          (("sample", sample_path, sample_input), ("background", background_path, background_input)),
+                          "binned_spectrum_input", "binned_rc")
         return self._rc_run
 
     def _finish_rc_export(self, path: Path, role: str):
-        run = self._ensure_rc_run()
-        run.register_file(path, role)
-        run.record_export({"path": path.name, "role": role, "context": "binned_rc"},
-                          output={"file": path.name})
-        if run.metadata.get("status") == "running":
-            run.complete({"context": "binned_rc"})
-        return run
+        return _finish_rc_output(self._ensure_rc_run(), path, role, "binned_rc")
 
     def save_csv(self):
         if self._wl is None or self._result is None:
@@ -1187,19 +1236,13 @@ class _FRCWidget(QWidget):
                       "calculation": context.get("processing", {}).get("calculation"),
                       "display_key": context.get("processing", {}).get("display_key")},
         )
-        for role, input_path, identity in (("sample", sample_path, sample_input), ("background", background_path, background_input)):
-            _frozen_input(self._rc_run, input_path, identity if isinstance(identity, dict) else {"role": role}, "full_sensor_spectrum_input")
-        self._rc_run.record_processing(context, context="full_sensor_rc")
+        _record_rc_inputs(self._rc_run,
+                          (("sample", sample_path, sample_input), ("background", background_path, background_input)),
+                          "full_sensor_spectrum_input", "full_sensor_rc")
         return self._rc_run
 
     def _finish_rc_export(self, path: Path, role: str):
-        run = self._ensure_rc_run()
-        run.register_file(path, role)
-        run.record_export({"path": path.name, "role": role, "context": "full_sensor_rc"},
-                          output={"file": path.name})
-        if run.metadata.get("status") == "running":
-            run.complete({"context": "full_sensor_rc"})
-        return run
+        return _finish_rc_output(self._ensure_rc_run(), path, role, "full_sensor_rc")
 
     def save_csv(self):
         if self._display_img is None or self._display_wl is None or self._display_y is None:
