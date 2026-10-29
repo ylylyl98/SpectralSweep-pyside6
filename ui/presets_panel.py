@@ -4155,12 +4155,14 @@ class PresetsPanel(QWidget):
         )
         self._tag_edit.hide()
         self._tag_label.hide()
-        self._subfolder_edit.setText("Initial Data")
+        # Retain the source for run/session compatibility; edit it in Settings.
+        self._subfolder_edit.setText(cfg.filename.dual_gate_subfolder)
+        self._subfolder_edit.setParent(self)
+        self._subfolder_edit.hide()
         fields = (
             ("Sample ID:", self._sample_edit), ("Point:", self._point_edit),
             ("Temp (K):", self._temp_edit), ("Mode:", self._mode_combo_name),
             ("Laser (nm):", self._laser_edit), ("Power (µW):", self._power_edit),
-            ("Subfolder:", self._subfolder_edit),
         )
         for i, (title, editor) in enumerate(fields):
             row, column = divmod(i, 4)

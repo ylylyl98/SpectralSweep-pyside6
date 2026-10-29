@@ -98,7 +98,7 @@ def test_mega_disclosure_headings_stay_separate_from_metadata_fields(app):
 def test_dual_metadata_has_named_groups_without_changing_source_values(app):
     panel = PresetsPanel()
     sources = (panel._sample_edit, panel._point_edit, panel._temp_edit,
-               panel._mode_combo_name, panel._laser_edit, panel._power_edit, panel._subfolder_edit)
+               panel._mode_combo_name, panel._laser_edit, panel._power_edit)
     changed = QSignalSpy(panel._sample_edit.textChanged)
     try:
         install_table_editors(panel)
@@ -106,21 +106,22 @@ def test_dual_metadata_has_named_groups_without_changing_source_values(app):
         sections = configure_gate_sections(panel, "dual_gate")
         coverage = install_parameter_forms(panel, "dual_gate")
         assert changed.count() == 0
-        assert [sections[key].title() for key in ("sample", "measurement", "output")] == [
-            "Sample and location", "Measurement context", "Output"]
+        assert [sections[key].title() for key in ("sample", "measurement")] == [
+            "Sample and location", "Measurement context"]
         form_for = {source: form for form in coverage["forms"] for source in form.adapter._fields.values()}
         assert all(source in form_for for source in sources)
         assert form_for[sources[0]] is not form_for[sources[3]]
-        assert form_for[sources[3]] is not form_for[sources[6]]
+        assert panel._subfolder_edit.isHidden()
+        assert panel._subfolder_edit not in form_for
         panel.resize(1700, 950)
         panel.show()
         QTest.qWait(120)
-        assert sections["sample"].y() == sections["measurement"].y() == sections["output"].y()
+        assert sections["sample"].y() == sections["measurement"].y()
         panel.resize(896, 780)
         QTest.qWait(120)
-        assert sections["output"].y() > sections["sample"].y()
+        assert sections["sample"].y() == sections["measurement"].y()
         assert sources == (panel._sample_edit, panel._point_edit, panel._temp_edit,
-                           panel._mode_combo_name, panel._laser_edit, panel._power_edit, panel._subfolder_edit)
+                           panel._mode_combo_name, panel._laser_edit, panel._power_edit)
     finally:
         _dispose(panel)
 

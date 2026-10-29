@@ -340,6 +340,18 @@ class SettingsPanel(QWidget):
         row.addWidget(self._browse_btn)
         lay.addLayout(row)
 
+        self._dual_gate_subfolder = QLineEdit()
+        self._dual_gate_subfolder.setObjectName("DualGateOutputSubfolder")
+        self._dual_gate_subfolder.setAccessibleName("Dual Gate subfolder")
+        self._dual_gate_subfolder.setPlaceholderText("Initial Data")
+        self._dual_gate_subfolder.setToolTip(
+            "Dual Gate data is saved under Base output folder / Sample ID / this subfolder."
+        )
+        form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.addRow("Dual Gate subfolder:", self._dual_gate_subfolder)
+        lay.addLayout(form)
+
         return grp
 
     def _build_filename_group(self) -> QGroupBox:
@@ -477,6 +489,9 @@ class SettingsPanel(QWidget):
         self._base_out_edit.textChanged.connect(
             lambda t: setattr(cfg.filename, "base_out", t)
         )
+        self._dual_gate_subfolder.textChanged.connect(
+            lambda t: setattr(cfg.filename, "dual_gate_subfolder", t)
+        )
         self._temp_edit.textChanged.connect(
             lambda t: setattr(cfg.filename, "temperature", t)
         )
@@ -536,6 +551,7 @@ class SettingsPanel(QWidget):
         self._andor_invert_wl.setChecked(bool(cfg.lf6.andor_invert_wavelength_axis))
         self._andor_discard_first.setChecked(bool(cfg.lf6.andor_discard_first))
         self._base_out_edit.setText(cfg.filename.base_out)
+        self._dual_gate_subfolder.setText(cfg.filename.dual_gate_subfolder)
         self._temp_edit.setText(cfg.filename.temperature)
         self._measurement_mode.setCurrentText(cfg.filename.measurement_mode)
         self._power_coeff.setValue(float(cfg.filename.power_coefficient))

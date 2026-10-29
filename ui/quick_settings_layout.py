@@ -194,6 +194,7 @@ def configure_quick_settings(panel):
                 widget._quick_parallel_group = True
     panel._base_out_edit.setProperty("quickPreferredWidth", 650)
     panel._base_out_edit.setProperty("quickLabelAbove", True)
+    panel._dual_gate_subfolder.setProperty("quickPreferredWidth", 230)
     panel._notifications.url_edit.setProperty("quickPreferredWidth", 620)
     panel._notifications.url_edit.setProperty("quickLabelAbove", True)
     panel._notifications.name_edit.setProperty("quickPreferredWidth", 240)

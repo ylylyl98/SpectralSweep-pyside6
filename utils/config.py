@@ -179,6 +179,7 @@ class NDCalibrationConfig:
 class FilenameConfig:
     """Filename settings and output path."""
     base_out: str = r"D:\instrument_control_v3_1"
+    dual_gate_subfolder: str = "Initial Data"
     temperature: str = "1.8"
     measurement_mode: str = "PL"
     power_coefficient: float = 1.0

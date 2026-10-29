@@ -356,6 +356,7 @@ class MainWindow(QMainWindow):
         # Settings
         self._settings = SettingsPanel(lf6_ctrl=self._lf6)
         self._bind_settings_signals(self._settings)
+        self._bind_dual_gate_subfolder(self._presets, self._settings)
         self._tabs.addTab(self._settings, "Settings")
 
         self._session_panels = {
@@ -537,6 +538,26 @@ class MainWindow(QMainWindow):
             if connections is not None:
                 connections.clear()
             self._bind_settings_signals(new)
+        if (page_id in {"dual_gate", "settings"}
+                and hasattr(self, "_presets") and hasattr(self, "_settings")):
+            self._bind_dual_gate_subfolder(
+                new if page_id == "dual_gate" else self._presets,
+                new if page_id == "settings" else self._settings,
+            )
+
+    def _bind_dual_gate_subfolder(self, presets, settings) -> None:
+        from ui.signal_connections import SignalConnections
+        connections = getattr(self, "_subfolder_connections", None)
+        if connections is None:
+            connections = self._subfolder_connections = SignalConnections(self)
+        else:
+            connections.clear()
+        source, editor = presets._subfolder_edit, settings._dual_gate_subfolder
+        # Legacy sessions still restore the original source field. Reflect that
+        # value in Settings, and reconnect both directions after either reload.
+        editor.setText(source.text())
+        connections.connect(editor.textChanged, source.setText)
+        connections.connect(source.textChanged, editor.setText)
 
     def _bind_settings_signals(self, panel) -> None:
         from ui.signal_connections import SignalConnections

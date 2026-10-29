@@ -86,25 +86,21 @@ class _MetadataColumns(QObject):
         return False
 
     def fit(self):
-        columns = 3 if self.frame.width() >= 1200 else 2 if self.frame.width() >= 750 else 1
+        columns = 2 if self.frame.width() >= 750 else 1
         if columns == self.columns:
             return
         self.columns = columns
         grid = self.frame.layout()
         for group in self.groups:
             grid.removeWidget(group)
-        if columns == 3:
+        if columns == 2:
             for column, group in enumerate(self.groups):
                 grid.addWidget(group, 0, column, Qt.AlignmentFlag.AlignTop)
-        elif columns == 2:
-            grid.addWidget(self.groups[0], 0, 0, Qt.AlignmentFlag.AlignTop)
-            grid.addWidget(self.groups[1], 0, 1, Qt.AlignmentFlag.AlignTop)
-            grid.addWidget(self.groups[2], 1, 0, 1, 2, Qt.AlignmentFlag.AlignTop)
         else:
             for row, group in enumerate(self.groups):
                 grid.addWidget(group, row, 0, Qt.AlignmentFlag.AlignTop)
-        for column in range(3):
-            grid.setColumnStretch(column, (2 if column < 2 else 1) if columns == 3 else int(column < columns))
+        for column in range(len(self.groups)):
+            grid.setColumnStretch(column, int(column < columns))
 
 
 def _dual_sections(panel):
@@ -127,7 +123,6 @@ def _dual_sections(panel):
          ((panel._sample_edit, 180), (panel._point_edit, 140), (panel._temp_edit, 90))),
         ("Measurement context", "QuickGateMeasurementMetadata",
          ((panel._mode_combo_name, 100), (panel._laser_edit, 120), (panel._power_edit, 120))),
-        ("Output", "QuickGateOutputMetadata", ((panel._subfolder_edit, 230),)),
     ):
         group = QGroupBox(title, frame)
         group.setObjectName(object_name)
@@ -146,7 +141,7 @@ def _dual_sections(panel):
             label.show()
         groups.append(group)
     panel._quick_metadata_columns = _MetadataColumns(frame, groups)
-    return {"sample": groups[0], "measurement": groups[1], "output": groups[2]}
+    return {"sample": groups[0], "measurement": groups[1]}
 
 
 def configure_gate_sections(panel, page_id):
