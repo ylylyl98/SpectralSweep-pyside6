@@ -32,7 +32,11 @@ def app(monkeypatch):
 
 
 def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app):
+    from ui.quick_controls import install_workflow_controls
+
     panel = PresetsPanel()
+    command = install_workflow_controls(panel, "Dual Gate", {
+        "apply": panel._apply_btn, "run": panel._run_btn, "stop": panel._stop_btn})
     source = (panel._safe_jump_spin, panel._initial_voltage_settle_spin,
               panel._voltage_settle_spin, panel._execution_order_table)
     original_plan = panel._acquisition_schedule
@@ -41,8 +45,12 @@ def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app
         assembly = configure_workspace_layout(panel, "dual_gate")
         assert configure_workspace_layout(panel, "dual_gate") is assembly
         forms = install_parameter_forms(panel, "dual_gate")
+        panel.layout().removeWidget(command)
+        panel._results_pane.layout().addWidget(command)
+        command.rootObject().setProperty("compact", True)
+        command.show()
         panel.setProperty("quickEditorsInstalled", True)
-        panel.resize(1136, 700)
+        panel.resize(1136, 850)
         panel.show()
         QTest.qWait(250)
         assert panel._splitter.orientation() == Qt.Orientation.Horizontal
@@ -53,10 +61,40 @@ def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app
         assert panel._preview_splitter.widget(0) is assembly["execution"]
         top = panel._tree.mapTo(panel._results_scroll.viewport(), QPoint(0, 0))
         visible_height = min(top.y() + panel._tree.height(), panel._results_scroll.viewport().height()) - max(0, top.y())
-        # A short plan now owns only its measured content height; require the
-        # whole preview to remain visible rather than reserving 300 empty px.
+        # A short plan owns its measured content height, including the detailed
+        # loop path and navigation. A desktop viewport shows the entire card;
+        # shorter windows deliberately scroll the preview above fixed actions.
         assert visible_height == panel._tree.height() > 0, (
             top, panel._tree.size(), panel._results_scroll.viewport().size())
+
+        panel.resize(1136, 700)
+        QTest.qWait(150)
+        scroll = panel._results_scroll
+        viewport = scroll.viewport()
+        top = panel._tree.mapTo(viewport, QPoint())
+        assert 0 <= top.y() < viewport.height()
+        if top.y() + panel._tree.height() > viewport.height():
+            assert scroll.verticalScrollBar().maximum() > 0
+            fixed_actions = command.mapTo(panel, QPoint())
+            scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+            QTest.qWait(30)
+            bottom = panel._tree.mapTo(viewport, QPoint(0, panel._tree.height()))
+            assert 0 < bottom.y() <= viewport.height()
+            assert command.mapTo(panel, QPoint()) == fixed_actions
+        assert command.isVisibleTo(panel) and command.height() > 0
+        def quick_items(item):
+            yield item
+            for child in item.childItems():
+                yield from quick_items(child)
+
+        buttons = {item.objectName(): item for item in quick_items(command.rootObject())}
+        for action in ("apply", "run", "stop"):
+            button = buttons["command_" + action]
+            assert button.isVisible() and button.height() > 0
+        assert command.y() >= scroll.y() + scroll.height()
+        assert command.y() + command.height() <= panel._results_pane.height()
+        scroll.verticalScrollBar().setValue(0)
+
         safety_field = next(field for form in forms["forms"]
                             for field, source_widget in form.adapter._fields.items()
                             if source_widget is assembly["safety"].toggle)
@@ -103,6 +141,7 @@ def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app
             assert panel._preview_splitter.height() == collapsed_height
             assert update.call_count == 0
     finally:
+        command.shutdown()
         coverage = getattr(panel, "_quick_parameter_forms", {})
         for form in coverage.get("forms", []):
             form.shutdown()

@@ -130,7 +130,9 @@ class WatchdogSession:
             self.path = _DIR / f"watchdog-{self.pid}-{secrets.token_hex(8)}.json"
             _atomic_write(self.path, {"token": self.token, "pid": self.pid, "state": "running", "heartbeat": time.time()})
             self._writer.start()
-            cmd = module_command("app.process_watchdog", "--state", str(self.path), "--token", self.token, "--pid", str(self.pid), "--url", self.url)
+            # URL-safe tokens can begin with '-'; bind the value in one argv
+            # entry so argparse cannot mistake it for another option.
+            cmd = module_command("app.process_watchdog", "--state", str(self.path), f"--token={self.token}", "--pid", str(self.pid), "--url", self.url)
             kw = {"close_fds": True}
             if os.name == "nt": kw["creationflags"] = subprocess.CREATE_NO_WINDOW
             self.process = subprocess.Popen(cmd, **kw)

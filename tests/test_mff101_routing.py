@@ -91,13 +91,19 @@ def test_real_spectrometer_connection_and_capture_without_flipper(app, no_flippe
     import sys
     from types import SimpleNamespace
     import numpy as np
-    from app.devices import lf6_adapter
     from controllers.lf6_controller import LF6Controller
 
     flipper, calls = no_flipper
-    setup = SimpleNamespace(close=lambda: None)
+    sensor_checks = []
+    def prepare_sensor_readout(intent, *, apply=True, **kwargs):
+        sensor_checks.append((intent['mode'], apply))
+        return {'fingerprint': 'fake-lightfield-bin-all', 'changed': False}
+    setup = SimpleNamespace(close=lambda: None, prepare_sensor_readout=prepare_sensor_readout)
     adapter = SimpleNamespace(acquire=lambda: (np.array([730.]), np.array([1.])))
     monkeypatch.setitem(sys.modules, 'lf6_automation', SimpleNamespace(LF6Setup=lambda: setup))
+    # Install the SDK double before importing its adapter on machines that do
+    # not have LightField/.NET vendor assemblies installed (including CI).
+    from app.devices import lf6_adapter
     monkeypatch.setattr(lf6_adapter, 'SpectrometerLF6', lambda _: adapter)
     spec = LF6Controller()
     spec.set_flipper_controller(flipper)
@@ -114,6 +120,7 @@ def test_real_spectrometer_connection_and_capture_without_flipper(app, no_flippe
         assert not errors
         assert len(spectra) == 1
         assert calls == []
+        assert sensor_checks == [('bin_all', True), ('bin_all', False)]
     finally:
         spec.shutdown()
 

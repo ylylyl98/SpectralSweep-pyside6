@@ -39,9 +39,12 @@ class TestWatchdog(unittest.TestCase):
   s=WatchdogSession("x"); s.start(); s.beat(); s.close(True); self.assertFalse(s.path.exists())
  def test_default_sender_two_args(self):
   p=self.path(); self.write(p)
-  with patch("urllib.request.urlopen") as u:
+  # Exercise the default sender with an explicit subscription rather than
+  # inheriting this computer's optional persistent ntfy configuration.
+  with patch.object(pw,"_DEFAULT_URL","https://ntfy.sh/spectralsweep-test"), patch("urllib.request.urlopen") as u:
    u.return_value.__enter__.return_value=None
    self.assertEqual(WatchdogMonitor(p,"t",4,liveness=lambda _:False,now=lambda:100).step()[0],"Spectra Sweep CRASH")
+   u.assert_called_once()
  def test_boundary_and_pid_token_mismatch(self):
   p=self.path(); self.write(p,hb=100)
   self.assertIsNone(WatchdogMonitor(p,"t",4,lambda *_:1,lambda _:True,lambda:130).step())
@@ -49,11 +52,24 @@ class TestWatchdog(unittest.TestCase):
   self.write(p,token="wrong"); self.assertIsNone(WatchdogMonitor(p,"t",4).step())
   self.write(p,pid=9); self.assertIsNone(WatchdogMonitor(p,"t",4).step())
  def test_crash_close_preserves_running_state(self):
-  s=WatchdogSession("x"); s.start(); path=s.path; s.close(False); self.assertTrue(path.exists()); self.assertEqual(json.loads(path.read_text())["state"],"running"); self.assertIsNone(s.process.poll()); s.process.terminate(); s.process.wait()
+  # A generated token may start with '-'. Exercise the actual Python worker's
+  # argparse entry; the invalid URL cannot send any real notification.
+  with patch.object(pw.secrets,"token_urlsafe",return_value="-watchdog-regression"):
+   s=WatchdogSession("invalid-test-url"); s.start()
+  try:
+   path=s.path; s.close(False)
+   self.assertTrue(path.exists())
+   self.assertEqual(json.loads(path.read_text())["state"],"running")
+   with self.assertRaises(pw.subprocess.TimeoutExpired):
+    s.process.wait(timeout=.5)
+  finally:
+   if s.process is not None:
+    s.process.terminate(); s.process.wait(timeout=5)
+   if s.path is not None: s.path.unlink(missing_ok=True)
  def test_launch_arguments(self):
   s=WatchdogSession("url")
   with patch.object(pw.subprocess,"Popen",return_value=MagicMock()) as pop:
-   s.start(); args,kw=pop.call_args; self.assertIn("app.process_watchdog",args[0]); self.assertIn(str(s.pid),args[0]); self.assertIn(s.token,args[0]); self.assertIn("url",args[0]); self.assertTrue(kw["close_fds"]); s.close()
+   s.start(); args,kw=pop.call_args; self.assertIn("app.process_watchdog",args[0]); self.assertIn(str(s.pid),args[0]); self.assertIn(f"--token={s.token}",args[0]); self.assertIn("url",args[0]); self.assertTrue(kw["close_fds"]); s.close()
  def test_module_isolated(self):
   text=Path(pw.__file__).read_text(); self.assertNotRegex(text,r"import .*\b(ui|controllers|instruments)\b")
 

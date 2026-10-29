@@ -4,11 +4,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.lightfield_sdk_stub import lightfield_test_module
+
+lf6 = lightfield_test_module()
+LF6Setup, SpectrometerSettings = lf6.LF6Setup, lf6.SpectrometerSettings
+from tests.test_lightfield_acquisition_validation import CENTER, EXIT, Experiment
+
 from app.devices.lf6_adapter import SpectrometerLF6
 from app.devices.lightfield_optics import ensure_output_route
 from controllers.lf6_controller import _LF6Worker, LightFieldLifecycleState
-from lf6_automation import LF6Setup, SpectrometerSettings
-from tests.test_lightfield_acquisition_validation import CENTER, EXIT, Experiment
 
 
 class Clock:
@@ -51,7 +55,7 @@ class UpdatingExperiment(Experiment):
 def transition(monkeypatch):
     clock = Clock()
     # Replace only the module's clock, not global time used by Qt/pytest.
-    monkeypatch.setattr('lf6_automation.time', clock)
+    monkeypatch.setattr(lf6, 'time', clock)
     setup = object.__new__(LF6Setup)
     setup.application = SimpleNamespace(IsReady=True, IsBusy=False)
     setup.experiment = UpdatingExperiment(clock)

@@ -10,7 +10,9 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-import lf6_automation as lf6
+from tests.lightfield_sdk_stub import lightfield_test_module
+
+lf6 = lightfield_test_module()
 from app.devices.lf6_adapter import SpectrometerLF6
 from app.devices.lightfield_optics import apply_optics
 from app.lightfield_capture_guard import (

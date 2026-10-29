@@ -257,6 +257,10 @@ def test_independent_monitor_classifies_blocked_local_io_and_keeps_owner(tmp_pat
 
 def test_monitor_resumes_short_sdk_deadline_after_longer_local_scope(tmp_path, monkeypatch):
     monkeypatch.setattr(guard_module, "METADATA_WAIT_TIMEOUT_S", 2)
+    # Keep the real monitor thread, but control elapsed domain time: Windows
+    # Event.wait(.5) can return just before .5 seconds on the monotonic clock.
+    clock = Clock()
+    monkeypatch.setattr(guard_module, "time", clock)
     setup, _ = make_setup(tmp_path, budget=.4)
     entered_local, release_local = threading.Event(), threading.Event()
     entered_sdk, release_sdk = threading.Event(), threading.Event()
@@ -279,16 +283,19 @@ def test_monitor_resumes_short_sdk_deadline_after_longer_local_scope(tmp_path, m
     thread.start()
     try:
         assert entered_local.wait(1)
-        assert not operations[0]._diagnostic_done.wait(.5)
+        clock.advance(.6)
+        operations[0]._wake.set()
+        assert not operations[0]._diagnostic_done.wait(.05)
         assert not capture_status(setup)["stalled"]
         release_local.set()
         assert entered_sdk.wait(1)
+        clock.advance(.5)
         assert operations[0]._diagnostic_done.wait(1.5)
         status = capture_status(setup)
         assert status["timeout_domain"] == "sdk"
         assert status["stalled_phase"] == "capture"
-        assert status["metadata_elapsed_s"] >= .5
-        assert status["sdk_elapsed_s"] < 1.5
+        assert status["metadata_elapsed_s"] == pytest.approx(.6)
+        assert status["sdk_elapsed_s"] == pytest.approx(.5)
     finally:
         release_local.set()
         release_sdk.set()

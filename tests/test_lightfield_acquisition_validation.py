@@ -6,9 +6,14 @@ import json
 import numpy as np
 import pytest
 
+from tests.lightfield_sdk_stub import lightfield_test_module
+
+lf6 = lightfield_test_module()
+LF6Setup, CameraSettings = lf6.LF6Setup, lf6.CameraSettings
+ExperimentSettings, SpectrometerSettings = lf6.ExperimentSettings, lf6.SpectrometerSettings
+Array, Double = lf6.Array, lf6.Double
+
 from app.devices.lf6_adapter import SpectrometerLF6
-from lf6_automation import LF6Setup, CameraSettings, ExperimentSettings, SpectrometerSettings
-from System import Array, Double
 
 
 CENTER = SpectrometerSettings.GratingCenterWavelength

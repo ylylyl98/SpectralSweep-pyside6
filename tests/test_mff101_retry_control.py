@@ -100,7 +100,11 @@ def test_detector_acquires_only_after_successful_retry(app, hardware, fail_all):
         captures.append(driver.state)
         return np.array([700.]), np.array([1.])
     worker = spec._worker
-    worker._setup = SimpleNamespace(close=lambda: None)
+    sensor_checks = []
+    def prepare_sensor_readout(intent, *, apply=True, **kwargs):
+        sensor_checks.append((intent['mode'], apply))
+        return {'fingerprint': 'fake-lightfield-bin-all', 'changed': False}
+    worker._setup = SimpleNamespace(close=lambda: None, prepare_sensor_readout=prepare_sensor_readout)
     worker._adapter = SimpleNamespace(acquire=acquire)
     worker._identity = {'backend': 'lightfield'}
     worker._state = LightFieldLifecycleState.READY
@@ -111,10 +115,12 @@ def test_detector_acquires_only_after_successful_retry(app, hardware, fail_all):
         assert len(driver.commands) == 2
         if fail_all:
             assert not captures
+            assert not sensor_checks
             assert errors and '2 command(s)' in errors[0]
             assert ctrl.state['position'] is None
         else:
             assert captures == [1]
             assert not errors
+            assert sensor_checks == [('bin_all', True), ('bin_all', False)]
     finally:
         spec.shutdown()

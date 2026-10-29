@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -30,7 +31,16 @@ def tracker(tmp_path):
 def write(tracker, name, text):
     path = tracker.root / name
     path.parent.mkdir(parents=True, exist_ok=True)
+    previous_mtime = path.stat().st_mtime_ns if path.exists() else None
     path.write_text(text, encoding="utf-8")
+    if previous_mtime is not None:
+        # These classification tests refresh synchronously, before watcher
+        # events are dispatched. Give same-size edits distinct timestamps even
+        # on filesystems whose clock resolution coalesces rapid writes. The
+        # same-stat fileChanged path has its own explicit regression below.
+        stamp = path.stat()
+        os.utime(path, ns=(stamp.st_atime_ns,
+                           max(stamp.st_mtime_ns, previous_mtime + 1_000_000)))
 
 
 def test_classifies_scoped_reload_styles_and_restart(tracker):

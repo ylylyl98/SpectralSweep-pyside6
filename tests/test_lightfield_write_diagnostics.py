@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from lf6_automation import LF6Setup, SpectrometerSettings
+from tests.lightfield_sdk_stub import lightfield_test_module
+
+lf6 = lightfield_test_module()
+SpectrometerSettings = lf6.SpectrometerSettings
 from tests.test_lightfield_acquisition_validation import CENTER, EXIT, setup
 
 

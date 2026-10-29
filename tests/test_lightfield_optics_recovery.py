@@ -6,7 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.devices.lightfield_optics import apply_optics, ensure_output_route
-from lf6_automation import LF6Setup, SpectrometerSettings
+from tests.lightfield_sdk_stub import lightfield_test_module
+
+lf6 = lightfield_test_module()
+LF6Setup, SpectrometerSettings = lf6.LF6Setup, lf6.SpectrometerSettings
 from tests.test_lightfield_acquisition_validation import CENTER, EXIT, Experiment
 from tests.test_lightfield_setup_transition import Clock
 
@@ -63,7 +66,7 @@ class DelayedExperiment(Experiment):
 @pytest.fixture
 def optics(monkeypatch):
     clock = Clock()
-    monkeypatch.setattr('lf6_automation.time', clock)
+    monkeypatch.setattr(lf6, 'time', clock)
     monkeypatch.setattr('app.devices.lightfield_optics.time', clock, raising=False)
     monkeypatch.setattr('app.lightfield_diagnostics.time', clock, raising=False)
     setup = object.__new__(LF6Setup)

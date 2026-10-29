@@ -4,7 +4,10 @@ import unittest
 import inspect
 from types import SimpleNamespace
 
-from lf6_automation import LF6Setup, SpectrometerSettings
+from tests.lightfield_sdk_stub import lightfield_test_module
+
+lf6 = lightfield_test_module()
+LF6Setup = lf6.LF6Setup
 from controllers.lf6_controller import _LF6Worker, LightFieldLifecycleState
 
 
