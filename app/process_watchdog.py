@@ -4,6 +4,7 @@ import argparse, ctypes, json, os, secrets, subprocess, sys, tempfile, time, url
 from ctypes import wintypes
 from pathlib import Path
 from .notification_config import runtime_url
+from .subprocess_command import module_command
 
 _DIR = Path(tempfile.gettempdir()) / "SpectralSweep"
 _DEFAULT_URL = runtime_url()
@@ -129,7 +130,7 @@ class WatchdogSession:
             self.path = _DIR / f"watchdog-{self.pid}-{secrets.token_hex(8)}.json"
             _atomic_write(self.path, {"token": self.token, "pid": self.pid, "state": "running", "heartbeat": time.time()})
             self._writer.start()
-            cmd = [sys.executable, "-m", "app.process_watchdog", "--state", str(self.path), "--token", self.token, "--pid", str(self.pid), "--url", self.url]
+            cmd = module_command("app.process_watchdog", "--state", str(self.path), "--token", self.token, "--pid", str(self.pid), "--url", self.url)
             kw = {"close_fds": True}
             if os.name == "nt": kw["creationflags"] = subprocess.CREATE_NO_WINDOW
             self.process = subprocess.Popen(cmd, **kw)

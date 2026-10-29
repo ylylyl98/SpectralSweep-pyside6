@@ -12,3 +12,5 @@ config.local.json
 /tmp/
 /.runtime/
 /tests/fixtures/winusb-single-frame/
+/build/
+/dist/

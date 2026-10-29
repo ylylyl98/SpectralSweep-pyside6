@@ -1,5 +1,9 @@
 # SpectralSweep
 
+Windows EXE 下载见本仓库 **Releases**。main 更新后自动运行完整测试、构建和隔离启动检查，
+通过后发布预发布版；`v*` 标签生成正式版。使用与维护说明见
+[`Windows 自动发布`](docs/windows-release.md)。
+
 ## 日常启动（Windows）
 
 **双击本项目根目录的 [`launch.bat`](launch.bat)，即可打开 SpectralSweep。**

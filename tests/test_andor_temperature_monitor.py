@@ -27,6 +27,9 @@ class TemperatureMonitorTests(unittest.TestCase):
         self.controller._worker._setup = SimpleNamespace(
             get_temperature_snapshot=self.read, is_busy=False)
         self.controller._worker._identity = {"backend": "andor_sdk2"}
+        # Match the fake Andor adapter: the default LightField backend now
+        # requires sensor-readout verification before invoking acquire().
+        self.controller._worker._backend = "andor_si"
         self.controller._worker._state = LightFieldLifecycleState.READY
         self.results = []
         signal = getattr(self.controller, "temperature_snapshot_ready", None)

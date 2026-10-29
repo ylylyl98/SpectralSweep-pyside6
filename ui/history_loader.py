@@ -2,11 +2,11 @@
 import json
 import threading
 import subprocess
-import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
 from app.history_reader import read_preview, read_settings
+from app.subprocess_command import module_command
 from app.metadata_storage import STORAGE_FORMAT, TABLE_STORAGE_FORMAT
 
 
@@ -115,7 +115,7 @@ def _read_isolated(request, cancel):
     if cancel.is_set():
         return None
     process = subprocess.Popen(
-        [sys.executable, "-m", "app.history_reader"],
+        module_command("app.history_reader"),
         cwd=str(Path(__file__).resolve().parents[1]),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8",

@@ -37,6 +37,8 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="SpectralSweep PySide6")
     p.add_argument("--mock", action="store_true",
                    help="Use mock LF6 (no hardware required)")
+    p.add_argument("--smoke-test", type=Path, metavar="OUTPUT",
+                   help="Audit the packaged UI and worker without connecting instruments")
     p.add_argument("--watch-styles", action="store_true",
                    help="Reload application.qss automatically when edited")
     p.add_argument("--preview-spectrum", action="store_true",
@@ -54,6 +56,9 @@ def _parse_args() -> argparse.Namespace:
 
 def main():
     args = _parse_args()
+    if args.smoke_test is not None:
+        from app.release_smoke import run
+        sys.exit(run(args.smoke_test))
     if args.ui == "quick" or args.preview_quick or args.preview_workspaces or args.preview_workspaces_child:
         from app.quick_runtime import require_quick_runtime
         require_quick_runtime()
