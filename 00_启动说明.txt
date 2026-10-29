@@ -1,19 +1,26 @@
 SpectralSweep 启动说明
 ====================
 
-日常使用：双击本说明旁边的 launch.bat。
-这是本项目唯一的主程序 BAT 入口，会打开 SpectralSweep 测量界面。
+EXE 用户：从 GitHub Releases 下载完整便携 ZIP，全部解压后运行 SpectralSweep.exe。
+保留同目录的 SpectralSweep-worker.exe 和 _internal；无需另装 Python。
+仪器驱动、厂商软件和本机配置仍需按实际设备准备。
+
+源码用户：双击本说明旁边的 launch.bat。
+这是源码项目的主程序 BAT 入口，会打开 SpectralSweep 测量界面。
 默认使用 Qt Quick 界面；需要兼容旧界面时可加 --ui widgets。
 不要从搜索结果里的 tmp 子目录或旧工程副本启动。
 
-第一次启动会检查、安装 Python 依赖，可能需要联网并等待。
+源码第一次启动会检查、安装 Python 依赖，可能需要联网并等待。
 以后依赖没有变化时会直接启动。正常使用不需要手动运行任何其他脚本。
 请保留 launch.bat 在项目根目录；需要快捷方式时，给它创建快捷方式即可。
 
 文件放在哪里
 ------------
-launch.bat                  日常启动，只用这一个
-README.md                   完整项目说明，开头也有中文启动入口
+launch.bat                  源码日常启动
+README.md                   English 项目首页
+README.zh-CN.md             中文项目首页
+docs/installation.zh-CN.md  用户需自行下载安装的驱动/软件与首次配置
+docs/usage-reference.md     原 README 的详细操作与开发参考
 docs/manuals/               仪器手册
 docs/screenshots/           界面参考截图
 docs/reference/notebooks/   旧实验 Notebook（不是主程序入口）

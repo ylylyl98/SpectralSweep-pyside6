@@ -2,6 +2,8 @@
 
 工作流：`.github/workflows/windows-release.yml`。
 
+用户安装与设备驱动清单：[中文](installation.zh-CN.md) · [English](installation.md)。
+
 - 向 `main` 推送：并行运行完整 `tests/` 测试集和 Windows EXE 构建；两者通过后自动发布带 run number 和提交 SHA 的预发布版本。
 - 向 main 提交 PR：运行相同测试和构建，保留产物，不发布 Release。
 - 推送 `v*` 标签：相同验证通过后发布正式 Release，并标记为 Latest。
