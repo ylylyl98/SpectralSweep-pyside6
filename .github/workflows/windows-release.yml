@@ -149,8 +149,8 @@ jobs:
           EOF
           # Immutable assets: do not overwrite a previous release on a rerun.
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists; preserving its original assets."
-            exit 0
+            echo "::error::Release $tag already exists. Preserving its assets; inspect the existing release before retrying."
+            exit 1
           fi
           gh release create "$tag" release-files/* --target "$GITHUB_SHA" \
             --title "SpectralSweep $tag" --notes-file release-notes.md "${flags[@]}"

@@ -44,6 +44,8 @@ def main():
     # never conceal a missing module/resource in the EXE.
     report = ROOT / "tmp/release-smoke"
     report.mkdir(parents=True, exist_ok=True)
+    for filename in ("smoke-result.json", "smoke-error.txt", "process.log"):
+        (report / filename).unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="SpectralSweep-release-") as scratch:
         relocated = Path(scratch) / "SpectralSweep"
         shutil.copytree(bundle, relocated)

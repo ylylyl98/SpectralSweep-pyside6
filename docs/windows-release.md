@@ -24,6 +24,7 @@ LightField、NI/VISA/DAQ、相机/USB/FTDI 驱动、指定的 attoDRY SDK 或 Wi
 Python 回调错误及历史后台进程的 JSON 管道协议。测试报告和截图保留在 Actions artifacts。
 同时验证 WinUSB 版本清单、页面重载需要的 Python 源资源，以及 watchdog 辅助程序入口。
 main 的预发布不覆盖已有 Release，也不会替换正式版 Latest。
+重复运行若发现同名 Release 已存在会明确失败并保留其资产，避免把缺少文件的既有发布误判为成功。
 
 本机复现：
 
