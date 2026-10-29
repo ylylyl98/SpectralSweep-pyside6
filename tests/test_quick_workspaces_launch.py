@@ -33,7 +33,8 @@ if '--preview-workspaces-child' not in flags:
  original_run=preview.subprocess.run
  def child(command,*,env,cwd):
   assert command[1:]==[str(project/'main.py'),'--preview-workspaces-child','--ui','quick'],command
-  assert Path(cwd)==Path(env[preview.PREVIEW_ROOT_ENV])
+  # Windows TEMP can use an 8.3 alias while preparation resolves the root.
+  assert Path(cwd).resolve()==Path(env[preview.PREVIEW_ROOT_ENV]).resolve(),(cwd,env[preview.PREVIEW_ROOT_ENV])
   with (results/'supervisor.jsonl').open('a',encoding='utf8') as stream:
    stream.write(json.dumps({'command':command,'scratch':str(cwd)})+'\n')
   return original_run([sys.executable,'-I',__file__,str(project),str(results),*command[2:]],env=env,cwd=cwd)
