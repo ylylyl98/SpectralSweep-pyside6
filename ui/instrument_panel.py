@@ -7,7 +7,7 @@
 #   1. LF6 Spectrometer
 #   2. SMU (Keithley)  — VISA resource selection + role mapping
 #   3. Manual Sweep (Keithley) — step one gate and record I
-#   4. Rotation Mount 1 + 2 — Elliptec (COM) or Newport ESP300 (VISA)
+#   4. Rotation Mount 1 + 2 — Elliptec (COM) or Newport ESP300/301 (VISA)
 #   5. Linear Stage    — Elliptec (COM)
 #   6. PM100D Power Meter
 #
@@ -31,7 +31,7 @@ from ui.andor_controls_widget import temperature_summary
 from ui.mff101_section import MFF101Section
 from ui.workflow_sections import CompactRow, inline_divider
 
-from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import Qt, QObject, QThread, QTimer, QSignalBlocker, Signal, Slot
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
     QComboBox, QCheckBox, QScrollArea, QSizePolicy, QFormLayout,
@@ -2787,6 +2787,9 @@ class _RotationBlock(QWidget):
         self._ctrl = rot_ctrl
         self._axes: list[int] = [1]
         self._cfg = getattr(cfg.rotation, slot)
+        self._axes_known = False
+        self._pending_operation = ""
+        self._operation_error = ""
         self._rot_worker: Optional[object] = None   # keep Python ref so GC can't destroy it
         self._build()
         self._wire()
@@ -2797,11 +2800,15 @@ class _RotationBlock(QWidget):
         type_row = QHBoxLayout()
         type_row.addWidget(QLabel("Type:"))
         self._type_combo = QComboBox()
-        self._type_combo.addItems(["<none>", "Thorlabs Elliptec", "Newport ESP300 (shared)"])
+        self._type_combo.addItems([
+            "<none>", "Thorlabs Elliptec", "Newport ESP300 (shared)",
+            "Newport ESP301 (shared)",
+        ])
         type_map = {
             "none": "<none>",
             "elliptec": "Thorlabs Elliptec",
             "esp300": "Newport ESP300 (shared)",
+            "esp301": "Newport ESP301 (shared)",
         }
         self._type_combo.setCurrentText(type_map.get((self._cfg.backend or "none").lower(), "<none>"))
         type_row.addWidget(self._type_combo)
@@ -2824,14 +2831,34 @@ class _RotationBlock(QWidget):
         lay.addLayout(addr_row)
 
         self._axis_row_widget = QWidget()
-        axis_row = QHBoxLayout(self._axis_row_widget)
-        axis_row.setContentsMargins(0, 0, 0, 0)
+        axis_layout = QVBoxLayout(self._axis_row_widget)
+        axis_layout.setContentsMargins(0, 0, 0, 0)
+        axis_row = QHBoxLayout()
+        axis_layout.addLayout(axis_row)
         self._scan_axes_btn = QPushButton("Scan Axes")
         self._axis_combo = QComboBox()
         self._axis_combo.addItem(str(int(self._cfg.esp300_axis or (1 if self._slot == "rot1" else 2))))
         axis_row.addWidget(self._scan_axes_btn)
         axis_row.addWidget(QLabel("Axis:"))
         axis_row.addWidget(self._axis_combo)
+        self._serial_row_widget = QWidget()
+        serial_row = QHBoxLayout(self._serial_row_widget)
+        serial_row.setContentsMargins(0, 0, 0, 0)
+        serial_row.addWidget(QLabel("Serial link:"))
+        self._baud_combo = QComboBox()
+        self._baud_combo.addItem("USB · 921600 baud", 921600)
+        self._baud_combo.addItem("RS-232 · 19200 baud", 19200)
+        for baud in (9600, 38400, 57600, 115200):
+            self._baud_combo.addItem(f"RS-232 · {baud} baud", baud)
+        saved_baud = int(getattr(self._cfg, "esp301_baud", 921600))
+        baud_index = self._baud_combo.findData(saved_baud)
+        self._baud_combo.setCurrentIndex(max(0, baud_index))
+        self._baud_combo.setToolTip(
+            "ESP301 USB uses 921600 baud. For an RS-232 cable, match the "
+            "controller's serial setting (default 19200). This only changes the PC connection."
+        )
+        serial_row.addWidget(self._baud_combo)
+        axis_layout.addWidget(self._serial_row_widget)
         self._axis_row_widget.setVisible(False)
         lay.addWidget(self._axis_row_widget)
 
@@ -2844,6 +2871,8 @@ class _RotationBlock(QWidget):
         lay.addLayout(btn_row)
 
         self._status = _status_label("Disconnected", 'muted')
+        self._status.setWordWrap(True)
+        self._status.setTextFormat(Qt.TextFormat.PlainText)
         lay.addWidget(self._status)
 
         self._mapping_hint = QLabel("")
@@ -2851,7 +2880,7 @@ class _RotationBlock(QWidget):
         set_style_role(self._mapping_hint, 'text', tone='muted', size='caption')
         lay.addWidget(self._mapping_hint)
 
-        self._profile_group = QGroupBox("ESP300 per-axis motion profile")
+        self._profile_group = QGroupBox("Newport per-axis motion profile")
         profile_lay = QVBoxLayout(self._profile_group)
         fraction_row = QHBoxLayout()
         fraction_row.addWidget(QLabel("Velocity:"))
@@ -2878,7 +2907,7 @@ class _RotationBlock(QWidget):
         self._apply_profile_btn = QPushButton("Apply + verify")
         self._save_profile_btn = QPushButton("Save controller (SM)")
         self._save_profile_btn.setToolTip(
-            "Save the complete shared ESP300 configuration for all axes to non-volatile memory."
+            "Save the complete shared Newport configuration for all axes to non-volatile memory."
         )
         profile_buttons.addWidget(self._query_profile_btn)
         profile_buttons.addWidget(self._apply_profile_btn)
@@ -2964,10 +2993,13 @@ class _RotationBlock(QWidget):
         self._disconnect_btn.clicked.connect(self._on_disconnect)
         self._scan_axes_btn.clicked.connect(self._on_scan_axes)
         self._axis_combo.currentTextChanged.connect(self._on_axis_changed)
+        self._baud_combo.currentIndexChanged.connect(self._on_baud_changed)
         self._ctrl.connected.connect(self._on_connected)
         self._ctrl.disconnected.connect(self._on_disconnected)
-        self._ctrl.error.connect(lambda msg: self._status.setText(f"Error: {msg[:60]}"))
+        self._ctrl.error.connect(self._on_controller_error)
         self._ctrl.axes_scanned.connect(self._on_axes_scanned)
+        if hasattr(self._ctrl, "operation_finished"):
+            self._ctrl.operation_finished.connect(self._on_operation_finished)
         if hasattr(self._ctrl, "motion_profile_ready"):
             self._ctrl.motion_profile_ready.connect(self._on_motion_profile)
         if hasattr(self._ctrl, "settings_saved"):
@@ -3018,12 +3050,22 @@ class _RotationBlock(QWidget):
 
     @Slot(str)
     def _on_rot_error(self, msg: str):
-        self._status.setText(f"Error: {msg[:60]}")
+        self._show_rotation_error(msg)
+
+    def _show_rotation_error(self, message: str):
+        # Keep the complete first diagnostic line visible, with normal layout
+        # wrapping. Tracebacks and any additional controller details remain
+        # available without truncation to mouse and accessibility users.
+        summary = next((line.strip() for line in message.splitlines() if line.strip()), "Unknown error")
+        self._status.setText(f"Rotation error\n{summary}")
+        self._status.setToolTip(message)
+        self._status.setAccessibleDescription(message)
+        set_style_role(self._status, 'text', tone='danger', strong=True)
 
     @Slot()
     def _on_rot_done(self):
         self._rot_worker = None   # allow GC now that the thread is done
-        self._set_ctrl_enabled(True)
+        self._set_ctrl_enabled(self._ctrl.is_connected(self._slot))
 
     @Slot()
     def _on_move(self):
@@ -3054,28 +3096,85 @@ class _RotationBlock(QWidget):
             "<none>": "none",
             "Thorlabs Elliptec": "elliptec",
             "Newport ESP300 (shared)": "esp300",
+            "Newport ESP301 (shared)": "esp301",
         }.get(type_str, "none")
-        is_esp = type_str == "Newport ESP300 (shared)"
+        is_esp = self._newport_model() is not None
         self._axis_row_widget.setVisible(is_esp)
         self._profile_group.setVisible(is_esp)
         self._set_profile_enabled(is_esp and self._ctrl.is_connected(self._slot))
+        self._axes_known = False
+        self._update_connection_controls()
+        self._apply_mapping_hint()
+
+    def _newport_model(self):
+        return {
+            "Newport ESP300 (shared)": "esp300",
+            "Newport ESP301 (shared)": "esp301",
+        }.get(self._type_combo.currentText())
+
+    def _newport_options(self):
+        model = self._newport_model() or "esp300"
+        return {"model": model, "baud": (
+            int(self._baud_combo.currentData()) if model == "esp301" else None
+        )}
+
+    def _update_connection_controls(self):
+        busy = bool(self._pending_operation)
+        connected = self._ctrl.is_connected(self._slot)
+        for widget in (self._type_combo, self._addr_combo, self._axis_combo,
+                       self._baud_combo, self._refresh_btn, self._asrl_chk):
+            widget.setEnabled(not busy and not connected)
+        self._scan_axes_btn.setEnabled(not busy and not connected and bool(self._newport_model()))
+        can_connect = (not self._newport_model() or not self._axes_known
+                       or bool(self._axes))
+        self._connect_btn.setEnabled(not busy and not connected and can_connect)
+        self._disconnect_btn.setEnabled(not busy and connected)
+        self._serial_row_widget.setVisible(
+            self._newport_model() == "esp301"
+            and self._addr_combo.currentText().upper().startswith(("ASRL", "COM"))
+        )
+
+    def _begin_connection_operation(self, operation):
+        self._pending_operation = operation
+        self._operation_error = ""
+        self._update_connection_controls()
+
+    @Slot(str, str)
+    def _on_operation_finished(self, slot, operation):
+        if slot != self._slot or operation != self._pending_operation:
+            return
+        self._pending_operation = ""
+        self._update_connection_controls()
+
+    @Slot(str)
+    def _on_controller_error(self, message):
+        # A shared controller emits errors for both mounts. Keep them local.
+        if not message.startswith(f"Rotation {self._slot} "):
+            return
+        self._operation_error = message.splitlines()[0]
+        self._show_rotation_error(message)
+
+    @Slot(int)
+    def _on_baud_changed(self, _index):
+        self._cfg.esp301_baud = int(self._baud_combo.currentData())
+        self._axes_known = False
+        self._update_connection_controls()
         self._apply_mapping_hint()
 
     @Slot()
     def _on_refresh(self):
+        if self._pending_operation or self._ctrl.is_connected(self._slot):
+            return
         t = self._type_combo.currentText()
         if t == "Thorlabs Elliptec":
-            self._addr_combo.clear()
-            self._addr_combo.addItems(_list_com_ports())
-            self._apply_saved_address()
-        elif t == "Newport ESP300 (shared)":
+            self._set_address_choices(_list_com_ports())
+        elif self._newport_model():
             if self._rot_scan_thread and self._rot_scan_thread.isRunning():
                 return
+            self._begin_connection_operation("resources")
             # Build COM-port-derived ASRL addresses instantly (no VISA timeout)
             self._fast_asrl = _com_ports_as_asrl()
-            self._addr_combo.clear()
-            self._addr_combo.addItems(self._fast_asrl)
-            self._apply_saved_address()
+            self._set_address_choices(self._fast_asrl)
             # Then kick off a background VISA scan for GPIB/USB (and optionally ASRL)
             prefixes = ("ASRL", "GPIB", "USB") if self._asrl_chk.isChecked() \
                        else ("GPIB", "USB")
@@ -3095,40 +3194,72 @@ class _RotationBlock(QWidget):
 
     @Slot(list)
     def _on_rot_scan_done(self, resources: list):
+        if self._pending_operation != "resources" or self._ctrl.is_connected(self._slot):
+            # A late result must not replace the mapping of an active mount.
+            self._on_operation_finished(self._slot, "resources")
+            return
         # Merge fast ASRL list with VISA scan results, dedup, preserve order
         combined = list(dict.fromkeys(
             getattr(self, "_fast_asrl", []) + resources
         ))
-        self._addr_combo.clear()
-        self._addr_combo.addItems(combined)
-        self._apply_saved_address()
-        self._refresh_btn.setEnabled(True)
+        self._set_address_choices(combined)
+        self._on_operation_finished(self._slot, "resources")
         self._status.setText("Disconnected")
         set_style_role(self._status, 'text', tone='muted', strong=True)
 
     @Slot()
     def _on_scan_axes(self):
+        if self._pending_operation or self._ctrl.is_connected(self._slot):
+            return
         addr = self._addr_combo.currentText()
         if not addr:
             self._status.setText("Select a VISA resource first.")
             return
-        self._ctrl.scan_axes(self._slot, addr)
+        self._begin_connection_operation("scan")
+        self._status.setText("Reading available Newport axes…")
+        self._ctrl.scan_axes(self._slot, addr, **self._newport_options())
 
     @Slot(str, list)
     def _on_axes_scanned(self, slot: str, axes: list):
         if slot != self._slot:
             return
-        self._axis_combo.clear()
-        for ax in axes:
-            self._axis_combo.addItem(str(ax))
-        idx = self._axis_combo.findText(str(int(self._cfg.esp300_axis or 1)))
-        self._axis_combo.setCurrentIndex(max(idx, 0))
+        if self._ctrl.is_connected(self._slot):
+            return
+        selected = str(self._cfg.esp300_axis)
+        self._axes = sorted({int(ax) for ax in axes if int(ax) in (1, 2, 3)})
+        self._axes_known = True
+        with QSignalBlocker(self._axis_combo):
+            self._axis_combo.clear()
+            self._axis_combo.addItems([str(ax) for ax in self._axes])
+            idx = self._axis_combo.findText(selected)
+            self._axis_combo.setCurrentIndex(idx if idx >= 0 else (0 if self._axes else -1))
+        if self._axes:
+            self._cfg.esp300_axis = int(self._axis_combo.currentText())
+            self._status.setText(
+                f"{len(self._axes)} usable {'axis' if len(self._axes) == 1 else 'axes'}: "
+                + ", ".join(str(ax) for ax in self._axes)
+            )
+        elif not self._operation_error:
+            self._status.setText("No usable axes detected. Check the controller and stage cables.")
+        if not hasattr(self._ctrl, "operation_finished"):
+            self._pending_operation = ""
+        self._update_connection_controls()
         self._apply_mapping_hint()
+
+    def _set_address_choices(self, resources):
+        saved = self._addr_combo.currentText() or (
+            self._cfg.visa_resource if self._newport_model() else self._cfg.com_port
+        )
+        with QSignalBlocker(self._addr_combo):
+            self._addr_combo.clear()
+            self._addr_combo.addItems(resources)
+            _select_or_insert_combo_text(self._addr_combo, saved)
+        self._on_addr_changed(self._addr_combo.currentText())
 
     def _apply_saved_address(self):
         saved = (
             self._cfg.visa_resource
-            if self._type_combo.currentText() == "Newport ESP300 (shared)"
+            if self._newport_model()
             else self._cfg.com_port
         )
         if not saved:
@@ -3138,11 +3269,13 @@ class _RotationBlock(QWidget):
     def _apply_mapping_hint(self):
         display_name = _ROTATION_DISPLAY_NAMES.get(self._slot, self._slot.upper())
         type_text = self._type_combo.currentText()
-        if type_text == "Newport ESP300 (shared)":
+        if self._newport_model():
             addr = self._addr_combo.currentText().strip() or self._cfg.visa_resource or "<select VISA>"
-            axis = self._axis_combo.currentText().strip() or str(int(self._cfg.esp300_axis or 1))
+            axis = self._axis_combo.currentText().strip() or "none detected"
             self._mapping_hint.setText(
-                f"{display_name} uses shared Newport ESP300 at {addr}, axis {axis}."
+                f"{display_name}: {self._newport_model().upper()} at {addr}, axis {axis}. "
+                + ("" if self._axes_known or self._ctrl.is_connected(self._slot)
+                   else "Scan Axes to verify available stages.")
             )
         elif type_text == "Thorlabs Elliptec":
             addr = self._addr_combo.currentText().strip() or self._cfg.com_port or "<select COM>"
@@ -3152,10 +3285,12 @@ class _RotationBlock(QWidget):
 
     @Slot(str)
     def _on_addr_changed(self, value: str):
-        if self._type_combo.currentText() == "Newport ESP300 (shared)":
+        self._axes_known = False
+        if self._newport_model():
             self._cfg.visa_resource = value.strip()
         elif self._type_combo.currentText() == "Thorlabs Elliptec":
             self._cfg.com_port = value.strip()
+        self._update_connection_controls()
         self._apply_mapping_hint()
 
     @Slot(str)
@@ -3168,11 +3303,17 @@ class _RotationBlock(QWidget):
 
     @Slot()
     def _on_connect(self):
+        if self._pending_operation:
+            return
         t = self._type_combo.currentText()
         addr = self._addr_combo.currentText()
         if t == "<none>" or not addr:
             self._status.setText("Select type and address first.")
             return
+        if self._newport_model() and not self._axis_combo.currentText():
+            self._status.setText("Scan Axes and select an available axis first.")
+            return
+        self._begin_connection_operation("connect")
         self._status.setText("Connecting…")
         set_style_role(self._status, 'text', tone='warning', strong=True)
         if t == "Thorlabs Elliptec":
@@ -3182,7 +3323,9 @@ class _RotationBlock(QWidget):
             try:
                 axis = int(self._axis_combo.currentText())
             except ValueError:
-                axis = 1 if self._slot == "rot1" else 2
+                self._on_operation_finished(self._slot, "connect")
+                self._status.setText("Select a valid axis first.")
+                return
             self._cfg.visa_resource = addr
             self._cfg.esp300_axis = axis
             self._cfg.esp300_velocity_fraction = self._velocity_pct.value() / 100.0
@@ -3193,19 +3336,26 @@ class _RotationBlock(QWidget):
                 axis,
                 self._cfg.esp300_velocity_fraction,
                 self._cfg.esp300_acceleration_fraction,
+                **self._newport_options(),
             )
 
     @Slot()
     def _on_disconnect(self):
+        if self._pending_operation:
+            return
+        self._begin_connection_operation("disconnect")
         self._ctrl.disconnect(self._slot)
 
     @Slot(str, str)
     def _on_connected(self, slot: str, adapter_type: str):
         if slot != self._slot:
             return
-        if adapter_type == "esp300":
+        self._status.setToolTip("")
+        self._status.setAccessibleDescription("")
+        if adapter_type in ("esp300", "esp301"):
             self._status.setText(
-                f"Connected (shared ESP300 axis {int(self._cfg.esp300_axis or 1)})"
+                f"Connected ({adapter_type.upper()} · axis {int(self._cfg.esp300_axis or 1)})"
+                "\nMotor ON · verified"
             )
         else:
             self._status.setText(f"Connected ({adapter_type})")
@@ -3213,7 +3363,8 @@ class _RotationBlock(QWidget):
         self._connect_btn.setEnabled(False)
         self._disconnect_btn.setEnabled(True)
         self._set_ctrl_enabled(True)
-        self._set_profile_enabled(adapter_type == "esp300")
+        self._set_profile_enabled(adapter_type in ("esp300", "esp301"))
+        self._update_connection_controls()
         self._apply_mapping_hint()
         try:
             cfg.save()
@@ -3225,6 +3376,8 @@ class _RotationBlock(QWidget):
     def _on_disconnected(self, slot: str):
         if slot != self._slot:
             return
+        self._status.setToolTip("")
+        self._status.setAccessibleDescription("")
         self._status.setText("Disconnected")
         set_style_role(self._status, 'text', tone='muted', strong=True)
         self._connect_btn.setEnabled(True)
@@ -3233,6 +3386,7 @@ class _RotationBlock(QWidget):
         self._pos_lbl.setText("— °")
         set_style_role(self._pos_lbl, 'text', tone='muted')
         self._set_profile_enabled(False)
+        self._update_connection_controls()
 
     @Slot()
     def _apply_motion_profile(self):
@@ -3253,15 +3407,15 @@ class _RotationBlock(QWidget):
     def _save_motion_profile(self):
         answer = QMessageBox.question(
             self,
-            "Save ESP300 settings",
-            "This writes the complete shared ESP300 configuration for every axis "
+            "Save Newport settings",
+            "This writes the complete shared Newport configuration for every axis "
             "(including any linear stage) to non-volatile memory. Save now?",
             QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
         if answer != QMessageBox.StandardButton.Save:
             return
-        self._profile_status.setText("Saving complete ESP300 configuration…")
+        self._profile_status.setText("Saving complete Newport configuration…")
         self._ctrl.save_esp300_settings(self._slot)
 
     @Slot(str, object)
@@ -3280,7 +3434,7 @@ class _RotationBlock(QWidget):
         if slot != self._slot:
             return
         self._profile_status.setText(
-            f"Saved complete ESP300 configuration to non-volatile memory ({resource})."
+            f"Saved complete Newport configuration to non-volatile memory ({resource})."
         )
 
 

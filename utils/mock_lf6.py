@@ -27,6 +27,8 @@ from __future__ import annotations
 import time
 import numpy as np
 from typing import List
+import copy
+from types import SimpleNamespace
 
 from app.devices.spectrum_alignment import align_wavelengths_to_intensities
 
@@ -35,6 +37,55 @@ from app.devices.spectrum_alignment import align_wavelengths_to_intensities
 _DEFAULT_N_PIXELS = 1340          # detector width in pixels
 _DEFAULT_DISPERSION_NM_PX = 0.05  # nm per pixel at the detector
 _SIMULATE_ACQUIRE_DELAY = True    # set False to skip exposure sleep in tests
+
+_SENSOR_MEMBERS = (
+    "ReadoutControlRegionsOfInterestSelection", "ReadoutControlRegionsOfInterestResult",
+    "ReadoutControlRegionsOfInterestFullSensor", "ReadoutControlRegionsOfInterestBinningProvider",
+    "ReadoutControlRegionsOfInterestLineSensorRowBinning", "SensorInformationActiveAreaWidth",
+    "SensorInformationActiveAreaHeight")
+_SENSOR_SETTINGS = SimpleNamespace(**{name: name for name in _SENSOR_MEMBERS})
+_SENSOR_SELECTIONS = SimpleNamespace(FullSensor="FullSensor", LineSensor="LineSensor")
+
+
+class _MockSensorExperiment:
+    """SDK-shaped façade so mock and production execute the same pure policy."""
+    def __init__(self, setup):
+        self.setup = setup
+
+    @property
+    def Name(self):
+        return self.setup._loaded_experiment or "Mock_Experiment_Default"
+
+    def Exists(self, key):
+        return key in _SENSOR_MEMBERS
+
+    def GetValue(self, key):
+        setup = self.setup
+        full = dict(x=0, y=0, width=setup._n_pixels, height=setup._sensor_height,
+                    x_binning=1, y_binning=1)
+        if key == "ReadoutControlRegionsOfInterestSelection": return setup._roi
+        if key == "SensorInformationActiveAreaWidth": return setup._n_pixels
+        if key == "SensorInformationActiveAreaHeight": return setup._sensor_height
+        if key == "ReadoutControlRegionsOfInterestBinningProvider": return setup._sensor_provider
+        if key == "ReadoutControlRegionsOfInterestLineSensorRowBinning": return setup._sensor_row_binning
+        if key == "ReadoutControlRegionsOfInterestFullSensor": return [full]
+        if key == "ReadoutControlRegionsOfInterestResult":
+            if setup._roi == "CustomRegions": return copy.deepcopy(setup._custom_sensor_regions)
+            if setup._roi == "LineSensor":
+                count = setup._sensor_row_binning
+                return [dict(full, y=(setup._sensor_height - count) // 2, height=count, y_binning=count)]
+            return [full]
+        raise KeyError(key)
+
+    def GetCurrentCapabilities(self, _key):
+        return ["FullSensor", "LineSensor", "CustomRegions"]
+
+    def SetValue(self, key, value):
+        if key == "ReadoutControlRegionsOfInterestSelection": self.setup._roi = value
+        elif key == "ReadoutControlRegionsOfInterestLineSensorRowBinning":
+            if not 1 <= int(value) <= self.setup._sensor_height: raise ValueError("Invalid row count")
+            self.setup._sensor_row_binning = int(value)
+        else: raise ValueError("Mock sensor setting is read-only")
 
 
 class MockLF6Setup:
@@ -67,6 +118,12 @@ class MockLF6Setup:
         self._accumulations = 1
         self._simulate_delay = simulate_delay
         self._roi = "FullSensor"
+        self._sensor_height = 100
+        self._sensor_row_binning = self._sensor_height
+        self._sensor_provider = "Hardware"
+        self._custom_sensor_regions = []
+        self._sensor_intent = None
+        self._sensor_prepared = True
         self._exit_port = "Front"
         self._frames_to_save = 1
         self._loaded_experiment: str | None = None
@@ -130,29 +187,49 @@ class MockLF6Setup:
 
     def acquire(self) -> np.ndarray:
         """Return 1-D spectrum array (n_pixels,)."""
+        self.verify_acquisition_settings()
         self._maybe_sleep()
         wl = self._wavelength_axis()
-        return self._make_spectrum(wl)
+        result = self._make_spectrum(wl)
+        if self._roi == "CustomRegions":
+            selected = self._mock_custom_region()
+            start, width, bins = selected['x'], selected['width'], selected['x_binning']
+            result = result[start:start + width].reshape(width // bins, bins).sum(axis=1)
+        self.verify_acquisition_settings()
+        return result
 
     def acquire_2d(self) -> np.ndarray:
         """
         Return 2-D array (n_rows, n_pixels) simulating a CCD image.
         n_rows = 100 (typical binned rows for full-sensor mode).
         """
+        self.verify_acquisition_settings()
         self._maybe_sleep()
         wl = self._wavelength_axis()
         spectrum_1d = self._make_spectrum(wl)
-        n_rows = 100
+        n_rows = self._sensor_height
         # Spatial variation: Gaussian profile across rows (peak at centre row)
         rows = np.arange(n_rows, dtype=float)
         row_profile = np.exp(-0.5 * ((rows - n_rows / 2.0) / 15.0) ** 2)
         image = spectrum_1d[np.newaxis, :] * row_profile[:, np.newaxis]
         noise = self._rng.normal(0.0, 5.0, image.shape).astype(np.float32)
-        return np.clip(image + noise, 0.0, None).astype(np.float32)
+        result = np.clip(image + noise, 0.0, None).astype(np.float32)
+        if self._roi in {"LineSensor", "CustomRegions"}:
+            selected = self.read_sensor_snapshot()['regions'][0] if self._roi == "LineSensor" else self._mock_custom_region()
+            x, y, width, height = (selected[key] for key in ('x', 'y', 'width', 'height'))
+            xb, yb = selected['x_binning'], selected['y_binning']
+            result = result[y:y + height, x:x + width].reshape(height // yb, yb, width // xb, xb).sum(axis=(1, 3))
+        self.verify_acquisition_settings()
+        return result
 
     def get_wavelength_calibration(self) -> np.ndarray:
         """Return wavelength axis as float64 array, matching real LF6 output."""
-        return self._wavelength_axis().astype(np.float64)
+        wavelengths = self._wavelength_axis().astype(np.float64)
+        if self._roi == "CustomRegions":
+            selected = self._mock_custom_region()
+            start, width, bins = selected['x'], selected['width'], selected['x_binning']
+            wavelengths = wavelengths[start:start + width].reshape(width // bins, bins).mean(axis=1)
+        return wavelengths
 
     # --- settings: exposure --------------------------------------------------
 
@@ -192,11 +269,59 @@ class MockLF6Setup:
 
     # --- settings: ROI -------------------------------------------------------
 
+    def _mock_custom_region(self):
+        if len(self._custom_sensor_regions) != 1:
+            raise RuntimeError('Mock custom acquisition requires exactly one ROI; no flattening')
+        return self._custom_sensor_regions[0]
+
+    def _sensor_setup(self):
+        return SimpleNamespace(experiment=_MockSensorExperiment(self), is_ready=True, is_busy=False,
+                               setting_is_available=lambda key: key in _SENSOR_MEMBERS,
+                               setting_is_writable=lambda key: True)
+
+    def read_sensor_snapshot(self):
+        from app.devices.lightfield_sensor import read_sensor_snapshot
+        return read_sensor_snapshot(self._sensor_setup(), _SENSOR_SETTINGS)
+
+    def prepare_sensor_readout(self, intent, stop_event=None, apply=True, **kwargs):
+        from app.devices.lightfield_sensor import prepare_sensor_readout
+        self._sensor_prepared = False
+        result = prepare_sensor_readout(self._sensor_setup(), intent, _SENSOR_SETTINGS,
+                                        _SENSOR_SELECTIONS, stop_event=stop_event, apply=apply, **kwargs)
+        if apply:
+            self._sensor_intent = dict(mode=result['mode'], snapshot=copy.deepcopy(result),
+                                       _verified_fingerprint=result['fingerprint'])
+        self._sensor_prepared = True
+        return result
+
+    def verify_acquisition_settings(self):
+        from app.devices.lightfield_sensor import verify_sensor_readout
+        if not self._sensor_prepared:
+            raise RuntimeError('Mock LightField sensor preparation failed; acquisition blocked')
+        if self._sensor_intent is not None:
+            verify_sensor_readout(self.read_sensor_snapshot(), self._sensor_intent)
+
+    def ensure_spectrum_sensor_mode(self, mode, *, stop_event=None, apply=True, **_kwargs):
+        if mode not in {"1d", "2d"}:
+            raise ValueError("Spectrum mode must be 1d or 2d")
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("Sensor mode preparation cancelled")
+        expected = "FullSensor" if mode == "2d" else "LineSensor"
+        changed = self._roi != expected
+        if changed and not apply:
+            raise RuntimeError(f"LightField sensor mode mismatch: expected {expected}; acquisition blocked")
+        self._roi = expected
+        return dict(requested=expected, actual=self._roi, changed=changed)
+
     def change_roi_FullSensor(self) -> None:
+        self._sensor_intent = None
+        self._sensor_prepared = True
         self._roi = "FullSensor"
         print("[MockLF6] ROI → FullSensor")
 
     def change_roi_LineSensor(self) -> None:
+        self._sensor_intent = None
+        self._sensor_prepared = True
         self._roi = "LineSensor"
         print("[MockLF6] ROI → LineSensor")
 
@@ -259,6 +384,8 @@ class MockLF6Setup:
         return False
 
     def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
+        self._sensor_intent = None
+        self._sensor_prepared = True
         self.set_center_wavelength_when_ready(center_nm)
         self.change_expose_time(exposure_ms)
         self.change_frame_to_combine(frames)

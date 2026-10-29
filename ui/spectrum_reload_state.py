@@ -25,6 +25,8 @@ _LABELS = (
 
 
 def capture_spectrum_state(panel):
+    from ui.quick_editing import require_committed_quick_edits
+    require_committed_quick_edits(panel)
     references = []
     for ref in panel._references:
         record = {k: v for k, v in ref.items() if not k.startswith("_row_")}

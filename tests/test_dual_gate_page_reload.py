@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal, SIGNAL
 from PySide6.QtWidgets import QApplication, QLineEdit, QMainWindow, QTabWidget, QWidget
 from shiboken6 import isValid
 
@@ -92,6 +92,7 @@ def test_preserves_applied_plan_invalid_draft_selections_history_and_logs(shell,
     old._log("unsaved operator log")
     old._log_toggle.setChecked(True)
     old._status_lbl.setText("Last run stopped")
+    old._run_time_lbl.setText("Elapsed 01:23 · Remaining —")
     old._status_lbl.setProperty("spectralTone", "warning")
     cfg.ramp.safe_jump_V = 987.0  # A different page changed the shared default.
     old._batch_table.selectRow(0)
@@ -123,6 +124,8 @@ def test_preserves_applied_plan_invalid_draft_selections_history_and_logs(shell,
     assert new._batch_row_clipboard == old._batch_row_clipboard
     assert "unsaved operator log" in new._log_text.toPlainText()
     assert new._status_lbl.text() == "Last run stopped"
+    assert new._run_time_lbl.text() == "Elapsed 01:23 · Remaining —"
+    assert not new._run_time_timer.isActive()
     assert new._status_lbl.property("spectralTone") == "warning"
     assert cfg.ramp.safe_jump_V == 987.0
     assert new._run_outcome == "stopped" and new._done_frames == 1
@@ -188,10 +191,11 @@ def test_repeat_reload_has_one_subscription_and_keeps_other_listeners(shell):
         new = page_reload.reload_dual_gate_page(shell)
         previous_power = previous._last_power_uw
         new._update_filename_preview = Mock()
+        assert pm.receivers(SIGNAL("power_ready(double)")) == 2
         pm.power_ready.emit((count + 1) * 1e-6)
         assert new._last_power_uw == pytest.approx(count + 1)
         assert previous._last_power_uw == previous_power
-        new._update_filename_preview.assert_called_once()
+        new._update_filename_preview.assert_not_called()
     assert len(others) == 3
 
 
@@ -199,7 +203,9 @@ def test_repeat_reload_has_one_subscription_and_keeps_other_listeners(shell):
 def test_failed_reload_retains_original_modules_page_and_subscriptions(shell, monkeypatch, tmp_path, failure):
     old = shell._presets
     old._sample_edit.setText("keep me")
-    original_modules = {name: sys.modules[name] for name in page_reload._DUAL_GATE_MODULES}
+    # Optional Quick modules are intentionally absent in the Widgets frontend;
+    # a failed transaction must restore absence as well as module identities.
+    original_modules = {name: sys.modules.get(name) for name in page_reload._DUAL_GATE_MODULES}
     original_path = page_reload._source_path
     if failure == "restore":
         from dataclasses import replace
@@ -227,7 +233,7 @@ def test_failed_reload_retains_original_modules_page_and_subscriptions(shell, mo
         page_reload.reload_dual_gate_page(shell)
     assert shell._presets is old and old._sample_edit.text() == "keep me"
     assert shell._tabs.currentWidget() is old
-    assert all(sys.modules[name] is module for name, module in original_modules.items())
+    assert all(sys.modules.get(name) is module for name, module in original_modules.items())
     shell.controllers[-1].power_ready.emit(2e-6)
     assert old._last_power_uw == pytest.approx(2)
 

@@ -5,6 +5,54 @@ import lf6_automation
 from app.lightfield_capture_guard import LightFieldAcquisitionStalled, capture_operation, get_capture_guard
 
 from .spectrum_alignment import align_wavelengths_to_image, align_wavelengths_to_intensities
+from .lightfield_sensor import verify_sensor_readout
+
+
+def _align_custom_spectrum(wavelengths, frame, snapshot):
+    """Map only verified one-row ROI data; never trim away a custom ROI's X offset.
+
+    The installed Automation manual pp.64/68 defines calibration and ROI sensor
+    coordinates. SPE 3.0 pp.25-26 defines sensor-column wavelength mapping and
+    zero-based sensor regions. A full-sensor axis can therefore be sampled at
+    each output bin's sensor-column center when both orientations are Normal.
+    """
+    region = snapshot["regions"][0]
+    width, xbin = region["width"], region["x_binning"]
+    output_width = width // xbin
+    data = np.asarray(frame, dtype=float)
+    if data.shape not in {(output_width,), (1, output_width)}:
+        raise RuntimeError(
+            f"Custom LightField ROI returned shape {data.shape}; expected one row with "
+            f"{output_width} columns. Acquisition blocked; no silent flattening.")
+    axis = np.asarray(wavelengths, dtype=float).ravel()
+    if not axis.size or not np.all(np.isfinite(axis)):
+        raise RuntimeError("Custom LightField wavelength calibration is unavailable/non-finite; acquisition blocked.")
+    if axis.size == output_width:
+        # Versions which supply ROI-adjusted calibration already label each
+        # output sample. Applying X/binning again would corrupt those labels.
+        return axis.copy(), data.reshape(output_width).copy()
+    full_regions = snapshot.get("full_regions", [])
+    sensor_width = snapshot.get("sensor_width")
+    if (len(full_regions) != 1 or axis.size != sensor_width
+            or full_regions[0].get("width") != sensor_width
+            or full_regions[0].get("x_binning") != 1):
+        raise RuntimeError(
+            "Custom LightField wavelength axis has an unverified size/reference; "
+            "check calibration and sensor regions. Acquisition blocked.")
+    if (snapshot.get("acquisition_orientation") != "Normal"
+            or snapshot.get("calibration_orientation") != "Normal"):
+        raise RuntimeError(
+            "Custom LightField wavelength coordinates cannot be verified for this orientation. "
+            "Use matching Normal acquisition/calibration orientation or an ROI-sized SDK axis; acquisition blocked.")
+    start = region["x"] - full_regions[0]["x"]
+    if start < 0 or start + width > axis.size:
+        raise RuntimeError("Custom LightField ROI lies outside the verified wavelength reference; acquisition blocked.")
+    # A bin spans xbin sensor columns; its center is halfway between its first
+    # and last column. Interpolate that coordinate rather than averaging a
+    # potentially nonlinear wavelength calibration over the whole bin.
+    centers = start + np.arange(output_width, dtype=float) * xbin + (xbin - 1) / 2.
+    mapped = np.interp(centers, np.arange(axis.size, dtype=float), axis)
+    return mapped, data.reshape(output_width).copy()
 
 class SpectrometerLF6:
     """
@@ -57,6 +105,13 @@ class SpectrometerLF6:
         change calibration outside this adapter's setting methods.
         """
         with capture_operation(self.setup) as operation:
+            bound_sensor = vars(self.setup).get("_sensor_intent")
+            custom = isinstance(bound_sensor, dict) and bound_sensor.get("mode") == "custom"
+            if custom:
+                # Keep the exact reviewed intent through Capture and wavelength
+                # readback; a later drift must never repair/relabel this frame.
+                before = self.setup.read_sensor_snapshot()
+                verify_sensor_readout(before, bound_sensor)
             # Keep the owner/deadline through the SDK wavelength readback too.
             if hasattr(self.setup, "acquire_2d"):
                 y = np.asarray(self.setup.acquire_2d(), dtype=float)
@@ -65,7 +120,11 @@ class SpectrometerLF6:
             operation.stage("wavelength_calibration")
             wl = self.calibration_wavelengths(force=True)
             operation.stage("align_spectrum")
-            if y.ndim == 2 and y.shape[0] > 1 and y.shape[1] > 1:
+            if custom:
+                observed = self.setup.read_sensor_snapshot()
+                verify_sensor_readout(observed, bound_sensor)
+                result = _align_custom_spectrum(wl, y, observed)
+            elif y.ndim == 2 and y.shape[0] > 1 and y.shape[1] > 1:
                 result = align_wavelengths_to_image(wl, y)
             else:
                 result = align_wavelengths_to_intensities(wl, y.ravel())

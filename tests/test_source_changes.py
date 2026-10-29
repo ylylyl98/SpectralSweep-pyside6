@@ -110,6 +110,50 @@ def test_style_acknowledges_only_successfully_applied_source(tracker):
     assert tracker.pending()[0]["styles"]
 
 
+def test_quick_style_initial_acknowledgement_has_no_phantom_changes(tracker):
+    name = "ui/styles/quick_application.qss"
+    source = "QLabel { color: green; }\n"
+    write(tracker, name, source)
+    assets = SourceChangeTracker(tracker.root, {}, style_path=tracker.root / name, parent=tracker)
+    assets.mark_styles_applied(source)
+    assert assets.style_path == name
+    assert not assets.pending()
+
+
+def test_style_switch_tracks_active_qss_and_acknowledges_only_its_source(tracker):
+    quick = "ui/styles/quick_application.qss"
+    quick_source = "QLabel { color: green; }\n"
+    write(tracker, quick, quick_source)
+    assets = SourceChangeTracker(tracker.root, {}, parent=tracker)
+    # Quick mode applies its stylesheet after constructing the tracker.
+    assets.mark_styles_applied(quick_source, tracker.root / quick)
+    assert not assets.pending()
+    write(tracker, quick, "QLabel { color: purple; }\n")
+    write(tracker, tracker.style_path, "QLabel { color: orange; }\n")
+    qml = "ui/qml/Page.qml"
+    write(tracker, qml, "Item {}\n")
+    assets.refresh()
+    pending = {item["path"]: item for item in assets.pending()}
+    assert pending[quick] == {"path": quick, "pages": [], "styles": True, "restart": False}
+    assert pending[tracker.style_path]["restart"] and not pending[tracker.style_path]["styles"]
+    assets.mark_styles_applied("QLabel { color: purple; }\n", quick)
+    assert {item["path"] for item in assets.pending()} == {tracker.style_path, qml}
+
+
+def test_external_stylesheets_do_not_fingerprint_repository_styles(tracker):
+    external = tracker.root.parent / "external.qss"
+    assets = SourceChangeTracker(tracker.root, {}, style_path=external, parent=tracker)
+    assets.mark_styles_applied("external style")
+    assert assets.style_path is None
+    assert None not in assets._baseline
+    assert not assets.pending()
+    write(tracker, tracker.style_path, "QLabel { color: orange; }\n")
+    tracker.mark_styles_applied("external style", external)
+    assert tracker.style_path is None
+    assert tracker.pending() == [{"path": "ui/styles/application.qss", "pages": [],
+                                  "styles": False, "restart": True}]
+
+
 def test_watcher_survives_atomic_replacement(tracker):
     replacement = tracker.root / "ui/replacement.tmp"
     replacement.write_text("old = 2\n", encoding="utf-8")
@@ -119,6 +163,50 @@ def test_watcher_survives_atomic_replacement(tracker):
     while not tracker.pending() and timer.elapsed() < 5000:
         QTest.qWait(25)
     assert [item["path"] for item in tracker.pending()] == ["ui/page.py"]
+
+
+@pytest.mark.parametrize("name", ["ui/qml/Page.qml", "ui/qml/qmldir",
+                                  "ui/qml/helpers.js", "ui/qml/helpers.mjs"])
+def test_quick_asset_edits_and_deletions_require_restart_even_after_page_reload(tracker, name):
+    write(tracker, name, "original source\n")
+    # Even an accidentally registered asset cannot be acknowledged by a
+    # Python page reload while the shared QML engine still has cached code.
+    assets = SourceChangeTracker(tracker.root, {"page": ("ui/page.py", name)}, parent=tracker)
+    expected = [{"path": name, "pages": [], "styles": False, "restart": True}]
+    write(tracker, name, "updated source\n")
+    assets.refresh()
+    assert assets.pending() == expected
+    assets.mark_page_applied("page", assets.snapshot(assets.groups["page"]))
+    assets.mark_styles_applied((tracker.root / tracker.style_path).read_text(encoding="utf-8"))
+    assert assets.pending() == expected
+    (tracker.root / name).unlink()
+    assets.refresh()
+    assert assets.pending() == expected
+    write(tracker, name, "original source\n")
+    assets.refresh()
+    assert not assets.pending()
+
+
+@pytest.mark.parametrize("name", ["ui/qml/Page.qml", "ui/qml/qmldir",
+                                  "ui/qml/helpers.js", "ui/qml/helpers.mjs"])
+def test_new_quick_assets_require_restart(tracker, name):
+    write(tracker, name, "new source\n")
+    tracker.refresh()
+    assert tracker.pending() == [{"path": name, "pages": [], "styles": False, "restart": True}]
+
+
+def test_quick_asset_watcher_survives_atomic_replacement(tracker):
+    name = "ui/qml/Page.qml"
+    write(tracker, name, "original source\n")
+    assets = SourceChangeTracker(tracker.root, {}, parent=tracker)
+    replacement = tracker.root / "ui/qml/replacement.tmp"
+    replacement.write_text("updated source\n", encoding="utf-8")
+    replacement.replace(tracker.root / name)
+    timer = QElapsedTimer()
+    timer.start()
+    while not assets.pending() and timer.elapsed() < 5000:
+        QTest.qWait(25)
+    assert assets.pending() == [{"path": name, "pages": [], "styles": False, "restart": True}]
 
 
 def test_refresh_reads_only_changed_source_files(tracker, monkeypatch):

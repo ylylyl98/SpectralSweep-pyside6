@@ -45,8 +45,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import pyqtgraph as pg
+from ui.plot_factory import create_plot, create_image_view
 from utils.config import cfg
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
+from copy import deepcopy
+from ui.sensor_readout_preflight import ensure_sensor_readout
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.power_reading import power_correction_factor, power_reading_lock, read_power
 from app.nd_calibration import make_power_points, positions_for_power, predict_power
@@ -56,7 +59,7 @@ from utils.motion_conditions import (MODE_DOPING_EFIELD, build_conditions,
     normalize_motion_axis, parse_motion_values, MOTION_NOT_USED, MOTION_HOLD, MOTION_FIXED, MOTION_SWEEP,
     MOTION_AXES)
 from ui.motion_conditions_widget import MotionConditionsWidget
-from ui.motion_sequence_preview import MotionSequencePreviewDialog
+from ui.motion_sequence_preview import create_motion_sequence_preview as MotionSequencePreviewDialog
 from ui.nd_calibration_widget import NDCalibrationWidget
 from ui.workflow_sections import DisclosureSection, compact_form_rows, divide_grid_fields, inline_divider
 from utils.filename_builder import (
@@ -435,9 +438,7 @@ class _PowerSweepWorker(QObject):
                 from controllers.mff101_controller import MFF101RoutingError
                 if isinstance(exc, MFF101RoutingError):
                     raise
-                self.log.emit(f"[{_ts()}] LF6 settings warning: {exc}")
-                if p.get("strict_sequence"):
-                    raise RuntimeError(f"LF6 acquisition preparation failed: {exc}") from exc
+                raise RuntimeError(f"LF6 acquisition preparation failed: {exc}") from exc
 
         # ── wavelength calibration ───────────────────────────────────────────
         self.log.emit(f"[{_ts()}] Acquiring wavelength calibration...")
@@ -1840,7 +1841,7 @@ class PowerSweepPanel(QWidget):
         self._log_section = DisclosureSection("Run log", self._log)
 
         # Spectrum plot
-        self._plot = pg.PlotWidget()
+        self._plot = create_plot()
         self._plot.setLabel("bottom", "Wavelength", units="nm")
         self._plot.setLabel("left", "Intensity", units="counts")
         self._plot.showGrid(x=True, y=True, alpha=0.3)
@@ -1855,7 +1856,7 @@ class PowerSweepPanel(QWidget):
         self._spectrum_stack.addWidget(empty)
         self._spectrum_stack.addWidget(self._plot)
         right_lay.addWidget(self._spectrum_stack, stretch=1)
-        self._cal_plot = pg.PlotWidget(); self._cal_plot.setLabel("bottom", "Stage position"); self._cal_plot.setLabel("left", "Predicted sample power", units="µW")
+        self._cal_plot = create_plot(); self._cal_plot.setLabel("bottom", "Stage position"); self._cal_plot.setLabel("left", "Predicted sample power", units="µW")
         self._cal_plot.showGrid(x=True, y=True, alpha=0.3); self._cal_plot.setMaximumHeight(180)
         self._cal_curve = self._cal_plot.plot(pen=pg.mkPen("#6a3d9a", width=2), name="Calibration curve")
         self._cal_points = self._cal_plot.plot(pen=None, symbol="o", symbolBrush="#6a3d9a", name="Measured points")
@@ -2316,18 +2317,23 @@ class PowerSweepPanel(QWidget):
                     excluded.append(preview_row)
             rows = reopened + excluded
         dialog = MotionSequencePreviewDialog(rows, point_count=len(self._positions), parent=self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            selected_rows = dialog.result_rows()
-            self._custom_condition_sequence = []
-            for row in selected_rows:
-                source = int(row.get("_source_index", -1))
-                if 0 <= source < len(sequence):
-                    selected = dict(sequence[source]); selected["_source_index"] = source
-                    self._custom_condition_sequence.append(selected)
-            if not self._custom_condition_sequence:
-                self._condition_preview_lbl.setText("Invalid condition plan: selection is empty")
-            else:
-                self._update_condition_preview()
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                selected_rows = dialog.result_rows()
+                self._custom_condition_sequence = []
+                for row in selected_rows:
+                    source = int(row.get("_source_index", -1))
+                    if 0 <= source < len(sequence):
+                        selected = dict(sequence[source]); selected["_source_index"] = source
+                        self._custom_condition_sequence.append(selected)
+                if not self._custom_condition_sequence:
+                    self._condition_preview_lbl.setText("Invalid condition plan: selection is empty")
+                else:
+                    self._update_condition_preview()
+        finally:
+            # Read the accepted snapshot first; then release the parent-owned
+            # model and (in Quick mode) engine on both Apply and Cancel.
+            dialog.deleteLater()
 
     def _update_power_input_visibility(self, _index=None):
         is_range = self._power_kind.currentData() == "range"
@@ -2791,6 +2797,8 @@ class PowerSweepPanel(QWidget):
 
     @Slot()
     def _on_run(self):
+        if getattr(self, "_sensor_preflight_pending", False):
+            return
         # Ensure a pending debounced edit cannot leave stale sweep positions.
         self._update_position_preview()
         if not self._validate():
@@ -2912,6 +2920,9 @@ class PowerSweepPanel(QWidget):
         snapshot = self._calibration_snapshot(ref)
         snapshot["planned_positions_source"] = dict(self._freeze_source) if self._freeze_source else {"mode": self._input_mode.currentData() or "position"}
         params["nd_calibration"] = snapshot
+        if not ensure_sensor_readout(self, self._lf6, mode="1d"):
+            return
+        params["sensor_readout_intents"] = deepcopy(getattr(self._lf6, "sensor_readout_intents", {}))
         self._run_btn.setEnabled(False); self._run_failed = False
         self._sweep_busy = True
         self._run_finalized = False
@@ -3003,6 +3014,12 @@ class PowerSweepPanel(QWidget):
 
     @Slot()
     def _on_stop(self):
+        if getattr(self, "_sensor_preflight_pending", False):
+            self._sensor_preflight_cancelled = True
+            abort = getattr(self._lf6, "abort_acquisition", None)
+            if getattr(self._lf6, "sensor_preflight_pending", False) and callable(abort):
+                abort()
+            return
         if self._worker is not None:
             self._worker.request_stop()
         self._stop_btn.setEnabled(False)

@@ -19,6 +19,7 @@ from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
+from ui.plot_factory import create_plot, create_image_view
 from PySide6.QtCore import QEvent, QObject, QThread, Qt, Signal, Slot
 from ui.workflow_sections import CompactRow, bind_log_toggle, compact_form_rows, inline_divider
 from ui.table_layout import fit_table_columns
@@ -53,6 +54,8 @@ from PySide6.QtWidgets import (
 from utils.config import cfg
 from app.devices.aps100_field_policy import APS100FieldLimits
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
+from copy import deepcopy
+from ui.sensor_readout_preflight import ensure_sensor_readout
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.engine.mcd_metadata import condition_metadata_summary, finalize_mcd_metadata
 from utils.filename_builder import (
@@ -2068,7 +2071,7 @@ class MCDPanel(QWidget):
         header.addStretch()
         header.addWidget(self._clear_log_btn)
         display_layout.addLayout(header)
-        self._plot = pg.PlotWidget()
+        self._plot = create_plot()
         self._plot.setToolTip(
             "Real-time spectra: A (blue) and B (orange), updated as each is acquired."
         )
@@ -3073,6 +3076,8 @@ class MCDPanel(QWidget):
 
     @Slot()
     def _start_run(self) -> None:
+        if getattr(self, "_sensor_preflight_pending", False):
+            return
         if self._worker is not None or self._safe_magnet_operation_active:
             return
         if self._externally_busy:
@@ -3162,6 +3167,10 @@ class MCDPanel(QWidget):
         if QMessageBox.question(self, "Arm continuous MCD", summary) != QMessageBox.StandardButton.Yes:
             self._magnet.release_exclusive("mcd")
             return
+        if not ensure_sensor_readout(self, self._lf6, mode="1d"):
+            self._magnet.release_exclusive("mcd")
+            return
+        params["sensor_readout_intents"] = deepcopy(getattr(self._lf6, "sensor_readout_intents", {}))
 
         self._save_config_from_ui()
         self._last_run_params = dict(params)
@@ -3203,6 +3212,12 @@ class MCDPanel(QWidget):
 
     @Slot()
     def _stop_run(self) -> None:
+        if getattr(self, "_sensor_preflight_pending", False):
+            self._sensor_preflight_cancelled = True
+            abort = getattr(self._lf6, "abort_acquisition", None)
+            if getattr(self._lf6, "sensor_preflight_pending", False) and callable(abort):
+                abort()
+            return
         if self._worker is not None:
             self._worker.request_stop()
         self._magnet.pause()

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from shiboken6 import isValid
 from PySide6.QtCore import QEvent, QObject, QPointF, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QFont, QPolygonF
 from PySide6.QtWidgets import (
@@ -56,10 +57,13 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import pyqtgraph as pg
+from ui.plot_factory import create_plot, create_image_view
 from utils.config import cfg
 from ui.workflow_sections import DisclosureSection, divide_grid_fields, inline_divider
 from ui.table_layout import fit_table_columns
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
+from copy import deepcopy
+from ui.sensor_readout_preflight import ensure_sensor_readout
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from utils.filename_builder import format_compact_number, format_decimal_token, format_power_uw_decimal, sanitize_token
 from utils.mcd_common import (
@@ -1602,11 +1606,11 @@ class _PreviewPlot(QWidget):
         self._tabs = QTabWidget()
         lay.addWidget(self._tabs)
 
-        self._pw_axis = pg.PlotWidget()
+        self._pw_axis = create_plot()
         self._pw_axis.showGrid(x=True, y=True, alpha=0.25)
         self._tabs.addTab(self._pw_axis, "Axis-space")
 
-        self._pw_v = pg.PlotWidget()
+        self._pw_v = create_plot()
         self._pw_v.setLabel("bottom", "Vtg", units="V")
         self._pw_v.setLabel("left", "Vbg", units="V")
         self._pw_v.showGrid(x=True, y=True, alpha=0.25)
@@ -2903,7 +2907,15 @@ class MegaSweepPanel(QWidget):
         )
 
     def _refresh_settings_scroll_range(self):
-        if not hasattr(self, "_settings_content"):
+        if not isValid(self) or not hasattr(self, "_settings_content"):
+            return
+        # Deferred layout work can outlive an unvisited page during shutdown.
+        # A surviving Python wrapper does not keep its native children alive.
+        owners = (self._settings_content, self._settings_scroll, self._left_lay)
+        if any(not isValid(owner) for owner in owners):
+            return
+        if hasattr(self, "_optical_scroll") and (
+                not isValid(self._optical_scroll) or not isValid(self._optical_group)):
             return
         if hasattr(self, "_optical_scroll"):
             optical_height = self._optical_group.sizeHint().height()
@@ -3696,6 +3708,8 @@ class MegaSweepPanel(QWidget):
 
     @Slot()
     def _on_run(self):
+        if getattr(self, "_sensor_preflight_pending", False):
+            return
         if bool(getattr(self._lf6, "switching_locked", False)):
             self._set_status("Wait for the current device operation to finish", 'muted')
             return
@@ -3703,6 +3717,13 @@ class MegaSweepPanel(QWidget):
         params = self._collect_params()
         if not self._validate(params):
             return
+        active_backend = getattr(self._lf6, "backend", "")
+        requested_setups = sorted({condition.get("backend") or active_backend
+                                  for condition in params.get("optical_conditions", [])
+                                  if condition.get("enabled", True)})
+        if not ensure_sensor_readout(self, self._lf6, mode="1d", backends=requested_setups or None):
+            return
+        params["sensor_readout_intents"] = deepcopy(getattr(self._lf6, "sensor_readout_intents", {}))
         self._run_csv_before = set(Path(params["out_path"]).glob("*.csv"))
         self._run_files_before = set(Path(params["out_path"]).glob("*"))
         self._run_metadata_params = dict(params)
@@ -3748,6 +3769,12 @@ class MegaSweepPanel(QWidget):
 
     @Slot()
     def _on_stop(self):
+        if getattr(self, "_sensor_preflight_pending", False):
+            self._sensor_preflight_cancelled = True
+            abort = getattr(self._lf6, "abort_acquisition", None)
+            if getattr(self._lf6, "sensor_preflight_pending", False) and callable(abort):
+                abort()
+            return
         if self._worker is not None:
             self._worker.request_stop()
         self._stop_btn.setEnabled(False)

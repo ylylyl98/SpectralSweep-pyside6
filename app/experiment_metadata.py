@@ -286,18 +286,28 @@ def _portable_settings(value: Any, root: Path, key: str = "") -> Any:
         return value
     if kind is float:
         return value if math.isfinite(value) else None
-    if kind is dict or isinstance(value, Mapping):
+    if kind is str:
+        return _portable_string(value, root)
+    if kind is dict:
+        return {str(k): _portable_settings(v, root, str(k)) for k, v in value.items()}
+    if kind in (list, tuple):
+        return [_portable_settings(v, root, key) for v in value]
+    if isinstance(value, Mapping):
         return {str(k): _portable_settings(v, root, str(k)) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [_portable_settings(v, root, key) for v in value]
     if isinstance(value, Path):
         value = str(value)
     if isinstance(value, str):
-        # Most strings are parameter names/labels, repeated at every point.
-        # Only possible absolute/home paths need pathlib parsing or resolution.
-        if (not value.startswith(("~", "/", "\\"))
-                and not (len(value) > 2 and value[1] == ":" and value[2] in "/\\")):
-            return _jsonable(value)
+        return _portable_string(value, root)
+    return _jsonable(value)
+
+
+def _portable_string(value: str, root: Path) -> Any:
+    # Most strings are parameter names/labels, repeated at every point. Native
+    # strings do not need generic Mapping, sequence or Enum protocol checks.
+    if (value.startswith(("~", "/", "\\"))
+            or (len(value) > 2 and value[1] == ":" and value[2] in "/\\")):
         candidate = Path(value).expanduser()
         if candidate.is_absolute():
             try:
@@ -306,7 +316,7 @@ def _portable_settings(value: Any, root: Path, key: str = "") -> Any:
                 # Preserve the fact that a path-like setting existed without
                 # leaking the machine-specific location into the sidecar.
                 return candidate.name
-    return _jsonable(value)
+    return value if type(value) is str else _jsonable(value)
 
 
 def instrument_inventory(**controllers: Any) -> list[dict[str, Any]]:

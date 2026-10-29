@@ -11,6 +11,8 @@ def settings_reload_block_reason(panel):
 
 
 def capture_settings_state(panel):
+    from ui.quick_editing import require_committed_quick_edits
+    require_committed_quick_edits(panel)
     controls = {}
     for name, widget in vars(panel).items():
         if isinstance(widget, QLineEdit):
@@ -26,7 +28,8 @@ def capture_settings_state(panel):
         widget = getattr(panel, name)
         labels[name] = (widget.text(), widget.toolTip(), widget.styleSheet(),
                         {bytes(key).decode(): widget.property(bytes(key).decode())
-                         for key in widget.dynamicPropertyNames()})
+                         for key in widget.dynamicPropertyNames()
+                         if not bytes(key).startswith(b"_")})
     return {
         "controls": controls,
         "labels": labels,

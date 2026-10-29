@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pyqtgraph as pg
+from ui.plot_factory import create_plot, create_image_view
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -38,12 +39,12 @@ class DualGateSpectrumViewer(QWidget):
         root.addLayout(header)
 
         self._stack = QStackedWidget()
-        self._plot = pg.PlotWidget()
+        self._plot = create_plot()
         self._plot.setLabel("bottom", "Wavelength", units="nm")
         self._plot.setLabel("left", "Intensity")
         self._plot.showGrid(x=True, y=True, alpha=0.25)
         self._curve = self._plot.plot(pen=pg.mkPen("#1769aa", width=1.4))
-        self._image = pg.ImageView(view=pg.PlotItem())
+        self._image = create_image_view(view=pg.PlotItem())
         self._image.ui.roiBtn.hide()
         self._image.ui.menuBtn.hide()
         self._image.getView().setAspectLocked(False)

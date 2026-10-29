@@ -769,6 +769,9 @@ class MotionVerificationTests(unittest.TestCase):
             def motion_status(self, *, axis):
                 return self.statuses.pop(0) if self.statuses else True
 
+            def require_motor_enabled(self, *, axis):
+                return None
+
             def get_position(self, *, axis):
                 return self.positions.pop(0) if self.positions else self.position
 
@@ -817,6 +820,9 @@ class MotionVerificationTests(unittest.TestCase):
 
             def motion_status(self, axis=None):
                 return False
+
+            def require_motor_enabled(self, *, axis):
+                return None
 
         device = StalledESP()
         with patch(

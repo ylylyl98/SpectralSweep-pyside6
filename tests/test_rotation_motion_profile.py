@@ -43,6 +43,9 @@ class RotationMotionProfileTests(unittest.TestCase):
         calls = []
 
         class Controller:
+            def get_axes(self, conservative=True):
+                return [1, 2]
+
             def apply_fast_safe_motion_profile(self, **kwargs):
                 calls.append(("apply", kwargs))
                 return SimpleNamespace(axis=kwargs["axis"])
@@ -72,6 +75,9 @@ class RotationMotionProfileTests(unittest.TestCase):
 
     def test_failed_profile_application_releases_shared_controller(self):
         class Controller:
+            def get_axes(self, conservative=True):
+                return [1]
+
             def apply_fast_safe_motion_profile(self, **_kwargs):
                 raise RuntimeError("profile rejected")
 

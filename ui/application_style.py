@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 
 STYLE_PATH = Path(__file__).resolve().parent / "styles" / "application.qss"
+QUICK_STYLE_PATH = STYLE_PATH.with_name("quick_application.qss")
 
 
 def read_style(path: Path) -> str:
@@ -63,6 +64,7 @@ class ApplicationStyle(QObject):
         self._watcher.fileChanged.connect(self._changed)
         self._watcher.directoryChanged.connect(self._changed)
         self._last_source = None
+        self._last_palette_key = app.palette().cacheKey()
 
     def reload(self) -> bool:
         try:
@@ -74,7 +76,13 @@ class ApplicationStyle(QObject):
             return False
         # Only visual properties change. Existing objects, signal connections,
         # editable values and in-flight acquisitions remain owned by their UI.
-        self.app.setStyleSheet(source)
+        # Reapplying identical QSS repolishes every retained source control and
+        # Quick host. Keep explicit reload/error/watch semantics without that
+        # whole-window layout work when the stylesheet has not changed.
+        if (self.app.styleSheet() != source
+                or self.app.palette().cacheKey() != self._last_palette_key):
+            self.app.setStyleSheet(source)
+        self._last_palette_key = self.app.palette().cacheKey()
         self._last_source = source
         self.last_error = ""
         self._sync_watches()
@@ -114,6 +122,6 @@ class ApplicationStyle(QObject):
 def application_style(app: QApplication) -> ApplicationStyle:
     manager = getattr(app, "_spectral_application_style", None)
     if manager is None:
-        manager = ApplicationStyle(app)
+        manager = ApplicationStyle(app, QUICK_STYLE_PATH if app.property("spectralQuick") else STYLE_PATH)
         app._spectral_application_style = manager
     return manager

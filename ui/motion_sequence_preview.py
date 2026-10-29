@@ -4,35 +4,30 @@ from __future__ import annotations
 from ui.style_roles import set_style_role
 
 import copy
-import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtCore import Signal
 from ui.table_layout import fit_table_columns
 from PySide6.QtWidgets import (
-    QAbstractItemView, QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton,
-    QSizePolicy, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QAbstractItemView, QDialog, QHBoxLayout, QLabel, QPushButton, QTableView, QVBoxLayout,
 )
 
 
-_ROW_ROLE = Qt.ItemDataRole.UserRole
-_SOURCE_ROLE = Qt.ItemDataRole.UserRole + 1
-_MAX_ROWS = 100_000
+from app.motion_sequence_model import COLUMNS, MAX_SEQUENCE_ROWS, MotionSequenceModel
 
 
-def _display(value: Any) -> str:
-    if value is None or value == "":
-        return "—"
-    if isinstance(value, bool):
-        return "1" if value else "0"
-    try:
-        number = float(value)
-        if math.isfinite(number):
-            return f"{number:.8g}"
-    except (TypeError, ValueError):
-        pass
-    return str(value)
+class _SequenceTableView(QTableView):
+    """Row/column counts used by the shared visible-row column fitter."""
+
+    def rowCount(self):
+        return self.model().rowCount()
+
+    def columnCount(self):
+        return self.model().columnCount()
+
+    def currentRow(self):
+        return self.currentIndex().row()
 
 
 class MotionSequencePreviewDialog(QDialog):
@@ -45,12 +40,7 @@ class MotionSequencePreviewDialog(QDialog):
 
     selectionApplied = Signal()
 
-    COLUMNS = (
-        ("Use", "use"), ("Sequence", "sequence"), ("Condition", "condition_index"),
-        ("Label", "label"), ("D", "D"), ("F", "F"), ("Vtg", "Vtg"),
-        ("Vbg", "Vbg"), ("Vbias", "Vbias"), ("Rot1", "rot1"),
-        ("Rot2", "rot2"), ("Repeat", "repeat"), ("Points", "point_count"),
-    )
+    COLUMNS = COLUMNS
 
     def __init__(self, rows: Sequence[Mapping[str, Any]] | None, *, point_count: int | None = None,
                  parent=None) -> None:
@@ -58,12 +48,16 @@ class MotionSequencePreviewDialog(QDialog):
         self.setWindowTitle("Motion sweep sequence preview")
         self.resize(1000, 600)
         self.setMinimumSize(700, 420)
-        self._default_point_count = point_count
-        self._entries: list[dict[str, Any]] = []
+        self.sequence_model = MotionSequenceModel(rows, point_count=point_count, parent=self)
         self._selected_result: list[dict[str, Any]] | None = None
         self._selected_source_indices: list[int] = []
         self._build_ui()
-        self._load_rows(rows or [])
+        self.sequence_model.selectionChanged.connect(self._selection_changed)
+        if self.sequence_model.truncated:
+            self._status.setText(f"Sequence exceeds {MAX_SEQUENCE_ROWS:,} entries; preview capped at {MAX_SEQUENCE_ROWS:,}.")
+        if self.sequence_model.count:
+            self._table.selectRow(0)
+        self._update_summary()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -73,18 +67,14 @@ class MotionSequencePreviewDialog(QDialog):
         self._summary.setWordWrap(True)
         root.addWidget(self._summary)
 
-        self._table = QTableWidget(0, len(self.COLUMNS))
-        self._table.setHorizontalHeaderLabels([title for title, _ in self.COLUMNS])
+        self._table = _SequenceTableView()
+        self._table.setModel(self.sequence_model)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table.setAlternatingRowColors(True)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setMinimumHeight(260)
-        self._table.horizontalHeaderItem(1).setText("Seq.")
-        self._table.horizontalHeaderItem(2).setText("Cond.\n#")
-        self._table.horizontalHeaderItem(2).setToolTip("Condition number")
         fit_table_columns(self._table, (40, 46, 54, 100, 64, 64, 64, 64, 64, 58, 58, 56, 56))
-        self._table.itemChanged.connect(self._table_item_changed)
         self.table = self._table
         root.addWidget(self._table, 1)
 
@@ -121,85 +111,22 @@ class MotionSequencePreviewDialog(QDialog):
         self._apply_button.clicked.connect(self.apply_selection)
         self._cancel_button.clicked.connect(self.reject)
 
-    @staticmethod
-    def _normalize(source: Mapping[str, Any], index: int, point_count: int | None) -> dict[str, Any]:
-        row = copy.deepcopy(dict(source))
-        row.setdefault("sequence", index + 1)
-        row.setdefault("condition_index", row.get("condition", index + 1))
-        row.setdefault("label", row.get("condition_label", ""))
-        row.setdefault("point_count", row.get("points", point_count))
-        row.setdefault("enabled", row.get("use", True))
-        row["_source_index"] = int(row.get("_source_index", row.get("source_index", index)))
-        return row
-
-    def _load_rows(self, rows: Sequence[Mapping[str, Any]]) -> None:
-        if len(rows) > _MAX_ROWS:
-            rows = rows[:_MAX_ROWS]
-            self._status.setText(f"Sequence exceeds {_MAX_ROWS:,} entries; preview capped at {_MAX_ROWS:,}.")
-        self._entries = [self._normalize(row, index, self._default_point_count) for index, row in enumerate(rows)]
-        self._reload()
-
-    def _reload(self, selected_row: int | None = None) -> None:
-        with QSignalBlocker(self._table):
-            self._table.setRowCount(0)
-            for row_number, row in enumerate(self._entries):
-                self._table.insertRow(row_number)
-                enabled = bool(row.get("enabled", row.get("use", True)))
-                for column, (_, key) in enumerate(self.COLUMNS):
-                    item = QTableWidgetItem()
-                    if column == 0:
-                        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
-                        item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
-                    else:
-                        value = row.get(key)
-                        if key == "D": value = row.get("D", row.get("doping_v"))
-                        elif key == "F": value = row.get("F", row.get("efield_v"))
-                        elif key == "Vtg": value = row.get("Vtg", row.get("vtg_v"))
-                        elif key == "Vbg": value = row.get("Vbg", row.get("vbg_v"))
-                        elif key == "Vbias": value = row.get("Vbias", row.get("vbias_v"))
-                        elif key == "rot1": value = row.get("rot1", row.get("rotation"))
-                        item.setText(_display(value))
-                    item.setData(_ROW_ROLE, copy.deepcopy(row))
-                    item.setData(_SOURCE_ROLE, row.get("_source_index"))
-                    self._table.setItem(row_number, column, item)
-        if self._entries:
-            self._table.selectRow(max(0, min(selected_row if selected_row is not None else 0, len(self._entries) - 1)))
-        self._update_summary()
-
     def _update_summary(self) -> None:
-        selected = len(self.selected_rows())
-        self._summary.setText(f"{len(self._entries):,} sequence entries · {selected:,} selected · order follows the table")
-        self._apply_button.setEnabled(bool(self._entries))
+        self._summary.setText(f"{self.sequence_model.count:,} sequence entries · {self.sequence_model.selectedCount:,} selected · order follows the table")
+        self._apply_button.setEnabled(bool(self.sequence_model.count))
 
-    def _table_item_changed(self, item: QTableWidgetItem) -> None:
-        if item.column() != 0 or item.row() >= len(self._entries):
-            return
-        self._entries[item.row()]["enabled"] = item.checkState() == Qt.CheckState.Checked
-        self._entries[item.row()]["use"] = self._entries[item.row()]["enabled"]
+    def _selection_changed(self) -> None:
         self._status.clear()
         self._update_summary()
 
-    def _row_state(self, row: int) -> dict[str, Any]:
-        source = self._table.item(row, 1)
-        value = source.data(_ROW_ROLE) if source else None
-        entry = copy.deepcopy(value) if isinstance(value, dict) else copy.deepcopy(self._entries[row])
-        use = self._table.item(row, 0)
-        entry["enabled"] = bool(use and use.checkState() == Qt.CheckState.Checked)
-        entry["use"] = entry["enabled"]
-        return entry
-
     def selected_rows(self) -> list[dict[str, Any]]:
-        return [self._row_state(row) for row in range(self._table.rowCount()) if self._is_checked(row)]
-
-    def _is_checked(self, row: int) -> bool:
-        item = self._table.item(row, 0)
-        return bool(item and item.checkState() == Qt.CheckState.Checked)
+        return self.sequence_model.selected_rows()
 
     def selected_sequence(self) -> list[dict[str, Any]]:
         return self.selected_rows()
 
     def selected_indices(self) -> list[int]:
-        return [int(row.get("_source_index", index)) for index, row in enumerate(self.selected_rows())]
+        return self.sequence_model.selected_indices()
 
     def selection_result(self) -> dict[str, Any]:
         rows = self.selected_rows()
@@ -215,26 +142,15 @@ class MotionSequencePreviewDialog(QDialog):
         self._status.clear()
 
     def _set_all(self, checked: bool) -> None:
-        with QSignalBlocker(self._table):
-            for row in range(self._table.rowCount()):
-                item = self._table.item(row, 0)
-                if item is not None:
-                    item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-                if row < len(self._entries):
-                    self._entries[row]["enabled"] = checked
-                    self._entries[row]["use"] = checked
+        self.sequence_model.set_all_checked(checked)
         self._status.clear()
-        self._update_summary()
 
     def move_selected(self, delta: int) -> bool:
         row = self._table.currentRow()
         target = row + int(delta)
-        if row < 0 or target < 0 or target >= self._table.rowCount():
+        if not self.sequence_model.move_entry(row, target):
             return False
-        states = [self._row_state(index) for index in range(self._table.rowCount())]
-        states.insert(target, states.pop(row))
-        self._entries = states
-        self._reload(target)
+        self._table.selectRow(target)
         return True
 
     move_up = lambda self: self.move_selected(-1)
@@ -245,14 +161,14 @@ class MotionSequencePreviewDialog(QDialog):
         if not rows:
             self._status.setText("Select at least one sequence entry before applying.")
             return None
-        self._selected_result = copy.deepcopy(rows)
-        self._selected_source_indices = self.selected_indices()
+        self._selected_result = rows
+        self._selected_source_indices = [row["_source_index"] for row in rows]
         self.selectionApplied.emit()
         self.accept()
         return copy.deepcopy(rows)
 
     def result_rows(self) -> list[dict[str, Any]]:
-        return copy.deepcopy(self._selected_result if self._selected_result is not None else self.selected_rows())
+        return copy.deepcopy(self._selected_result) if self._selected_result is not None else self.selected_rows()
 
     def result_indices(self) -> list[int]:
         if self._selected_result is not None:
@@ -260,4 +176,14 @@ class MotionSequencePreviewDialog(QDialog):
         return self.selected_indices()
 
 
-__all__ = ["MotionSequencePreviewDialog"]
+def create_motion_sequence_preview(rows, *, point_count=None, parent=None):
+    """Use the opt-in Quick frontend without importing Quick in Widgets mode."""
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app is not None and app.property("spectralQuick"):
+        from ui.quick_motion_sequence import QuickMotionSequencePreviewDialog
+        return QuickMotionSequencePreviewDialog(rows, point_count=point_count, parent=parent)
+    return MotionSequencePreviewDialog(rows, point_count=point_count, parent=parent)
+
+
+__all__ = ["MotionSequencePreviewDialog", "create_motion_sequence_preview"]

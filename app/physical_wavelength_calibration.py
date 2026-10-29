@@ -8,7 +8,6 @@ import re
 import uuid
 from datetime import datetime,timezone
 import numpy as np
-from scipy.optimize import least_squares
 from app.full_detector_calibration import _rows
 
 
@@ -36,6 +35,9 @@ def fit_physical_calibration(training,checks,context,tolerance_nm=.2):
         raise ValueError('Need four distributed training centers and detector-spanning peaks')
     if len(set(b[:,0]))<2 or len(b)<6:raise ValueError('Need at least two independent check centers and six peaks')
     if not np.isfinite(tolerance_nm) or tolerance_nm<=0:raise ValueError('Positive RMS tolerance required')
+    # Opening the calibration workspace only displays its current state. Load
+    # the numerical optimizer when a physical fit is actually requested.
+    from scipy.optimize import least_squares
     fit=least_squares(lambda t:geometry_axis(a[:,0],a[:,1],t,grooves)-a[:,2],
                       [6000.,256.5,.2,0.,0.],bounds=([4000.,1.,-.6,-.5,-.02],[10000.,512.,.6,.5,.02]),
                       loss='soft_l1',f_scale=.1,x_scale='jac',max_nfev=3000)

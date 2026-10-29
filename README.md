@@ -13,6 +13,37 @@
 
 SpectralSweep is a PySide6 desktop application for spectra acquisition and sweep-driven optical measurement workflows. The repository is organized around the current desktop UI and its instrument-control runtime.
 
+## Qt Quick 界面（默认）
+
+`launch.bat` 和 `main.py` 默认打开 Qt Quick 前端：9 个工作区、仪器参数、
+表单与表格、科学图表、参考光谱、历史及业务弹窗采用统一的深浅主题。
+双栅序列优先展示，Apply plan、运行/停止固定在右侧预览栏底部；Dual Gate 不再保留全宽底部操作条。Batch Sweep Rows 保持在中间参数区，每条记录单行展示全部字段，无横向滚动或字段分页。其他宽表格按记录自动换行。
+Qt Widgets 仍提供窗口容器和隐藏的兼容状态；设备执行逻辑及实验数据格式继续复用。
+
+```powershell
+# 全部页面隔离预览：临时配置、设备断开、测量按钮禁用，F5 重载
+python main.py --preview-workspaces
+
+# 合成光谱、历史和序列演示
+python main.py --preview-quick
+
+# 默认 Quick 前端，连接同一实验后端
+python main.py
+
+# 原界面
+python main.py --ui widgets
+```
+
+Qt Quick 入口要求 PySide6 6.9 或更高版本；本轮验证版本为 6.11.0，
+可用 `python -m pip install -r requirements-quick.txt` 安装对应 Qt 版本。
+`launch.bat` 会转发相同参数；旧环境会按照更新的 `requirements.txt` 检查依赖。
+实现范围、基准和剩余迁移门槛见 [Qt Quick 迁移记录](docs/qt-quick-migration.md)。
+隔离预览的 **Dual Gate sequence** 标签提供交错扫描和 When 过滤两个例子；
+正式 `--ui quick` 的 Dual Gate 页面也使用相同预览。支持分页、跟随当前步、
+完整窗口逐步跳转及相邻步骤差异，详见 [序列预览设计与验证](docs/dual-gate-sequence-review.md)。
+布局检查与实施结果见 [布局审查](docs/qt-quick-layout-review.md)。模拟回放和界面验证不代表真机长时间采集已经验证。
+全页迁移补缺、启动/切页/输入优化与模拟连续谱结果见 [响应速度检查](docs/qt-quick-performance-20261026.md)。
+
 The application is intended for lab setups that combine either Princeton Instruments LightField or an Andor SDK2 camera with a Shamrock spectrograph, voltage control, motion control, and optional optical power measurements. The desktop UI keeps instrument connections, sweep setup, live preview, and data capture in one operator-facing workflow.
 
 ## Main Features
@@ -270,7 +301,7 @@ Preview scratch files are deleted when the preview closes. Use an explicitly
 chosen export location if you want to keep synthetic output. The preview is a
 UI development aid, not validation of hardware timing or driver behavior.
 
-**View > Reload current page** (`Ctrl+Alt+U`) replaces a supported page while
+**View > Refresh current interface** (`Ctrl+Alt+U`) replaces a supported page while
 retaining its instrument controllers and connections. The View menu also has
 explicit Spectrum, Dual Gate and Settings reload actions.
 
@@ -279,6 +310,15 @@ explicit Spectrum, Dual Gate and Settings reload actions.
 | Spectrum | `spectrum_panel`, `spectrum_plot`, `andor_controls_widget` | Acquired 1D/2D data, unsaved reference spectra, display ranges, settings and the existing Calibration editor |
 | Dual Gate | `presets_panel`, `preview_widget`, `loop_run_selection`, `setup_sequence_editor` | Separate drafts/applied plans, run selections, execution order, undo history, logs, completed-run progress and the spectrum viewer |
 | Settings | `settings_panel` | Editable values, notification-name draft, selected category and status messages |
+
+In Qt Quick mode, refresh also loads the registered Python layout helpers:
+the Dual Gate sweep calculator and gate sections, Spectrum acquisition sections
+and reference list, and Settings sections. The workspace layout, Quick table
+editor and parameter-form Python adapters are rebuilt with the page. Valid
+pending edits, table selections, disclosure choices, splitter sizes and scroll
+positions are preserved; an invalid edit must be corrected before refreshing.
+New Quick surfaces are checked before the old interface is retired. A layout
+that cannot be built leaves the existing page available.
 
 These modules are under `ui/`. Acquisition, instrument operations, calibration
 analysis and saving must finish first; reload never aborts them. Syntax,
@@ -291,8 +331,11 @@ The status bar's **Code** button and **View > Code update status…** show files
 changed since startup, the page/style reload that can apply them, and files that
 still require restart. A successful reload clears only the code applied to that
 page. Shared Spectrum plot/control modules may still have old instances on
-other pages, so their changes remain marked for a full restart. Other pages,
-shared helpers, controllers, drivers and the reload infrastructure require a
+other pages, so their changes remain marked for a full restart. Shared Quick
+helpers are tracked per supported page; refreshing one page does not confirm
+that every page has been updated. The Code button shows both refresh availability
+and a pending restart when applicable. Other pages, QML/JS components, the global
+window shell, controllers, drivers and the reload infrastructure require a
 safe restart. Constructors and restorers must remain free of instrument commands
 and event-loop pumping. A running older version needs one initial safe restart
 to load these development actions.

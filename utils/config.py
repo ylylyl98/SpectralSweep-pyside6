@@ -274,6 +274,7 @@ class RotationSlotConfig:
     com_port: str = ""
     visa_resource: str = ""
     esp300_axis: int = 1
+    esp301_baud: int = 921600
     esp300_velocity_fraction: float = 1.0
     esp300_acceleration_fraction: float = 0.5
 

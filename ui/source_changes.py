@@ -15,6 +15,13 @@ def source_digest(path: Path) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
+def _restart_only_asset(name: str) -> bool:
+    # All Quick surfaces share a QML engine and its compiled component/import
+    # cache. Rebuilding one Python page does not reload these shared assets.
+    path = Path(name)
+    return path.suffix in {".qml", ".js", ".mjs"} or path.name == "qmldir"
+
+
 class SourceChangeTracker(QObject):
     """Content fingerprints since startup/last successful, explicitly scoped reload.
 
@@ -25,9 +32,10 @@ class SourceChangeTracker(QObject):
     changed = Signal()
     style_path = "ui/styles/application.qss"
 
-    def __init__(self, root, groups, *, shared=(), parent=None):
+    def __init__(self, root, groups, *, shared=(), style_path=None, parent=None):
         super().__init__(parent)
         self.root = Path(root).resolve()
+        self.style_path = self._source_name(style_path or self.style_path)
         self.groups = {key: tuple(paths) for key, paths in groups.items()}
         self.shared = set(shared)
         self._file_cache = {}
@@ -45,6 +53,15 @@ class SourceChangeTracker(QObject):
         self._watcher.directoryChanged.connect(self._schedule)
         self._sync_watches()
 
+    def _source_name(self, path):
+        path = Path(path)
+        path = path if path.is_absolute() else self.root / path
+        try:
+            return path.resolve().relative_to(self.root).as_posix()
+        except ValueError:
+            # User-selected external stylesheets are not repository changes.
+            return None
+
     def _paths(self):
         # The legacy instrument adapters at the repository root are live
         # dependencies too (LF6, IV automation and TLPMX), not just main.py.
@@ -58,7 +75,8 @@ class SourceChangeTracker(QObject):
             folder = self.root / name
             if folder.is_dir():
                 for path in folder.rglob("*"):
-                    if path.is_file() and path.suffix in {".py", ".qss"}:
+                    if path.is_file() and (path.suffix in {".py", ".qss"}
+                                           or _restart_only_asset(path.name)):
                         yield path.relative_to(self.root).as_posix()
 
     def snapshot(self, paths=None):
@@ -121,7 +139,8 @@ class SourceChangeTracker(QObject):
         result = []
         for name in sorted(self._baseline.keys() | self._current.keys()):
             current = self._current.get(name)
-            owners = [key for key, paths in self.groups.items() if name in paths]
+            owners = [] if _restart_only_asset(name) else [
+                key for key, paths in self.groups.items() if name in paths]
             pages = [key for key in owners if self._page_loaded[key].get(name) != current]
             baseline_changed = self._baseline.get(name) != current
             if not baseline_changed and not pages:
@@ -135,14 +154,19 @@ class SourceChangeTracker(QObject):
     def mark_page_applied(self, page_id, snapshot):
         # A shared helper may still have old instances elsewhere in the shell.
         for name in self.groups.get(page_id, ()):
-            if name in snapshot:
+            if name in snapshot and not _restart_only_asset(name):
                 self._page_loaded[page_id][name] = snapshot[name]
                 if name not in self.shared:
                     self._baseline[name] = snapshot[name]
         self.refresh()
         self.changed.emit()
 
-    def mark_styles_applied(self, source):
-        self._baseline[self.style_path] = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    def mark_styles_applied(self, source, path=None):
+        # Quick mode can switch the application's stylesheet after tracking
+        # starts. Acknowledge the manager's actual file, not the default QSS.
+        if path is not None:
+            self.style_path = self._source_name(path)
+        if self.style_path is not None:
+            self._baseline[self.style_path] = hashlib.sha256(source.encode("utf-8")).hexdigest()
         self.refresh()
         self.changed.emit()

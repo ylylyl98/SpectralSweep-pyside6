@@ -4,7 +4,7 @@
 #
 # Supported adapter types (selected at connect time):
 #   "elliptec"  → app.devices.rotation_thorlabs_elliptec_adapter.ElliptecRotation
-#   "esp300"    → app.devices.rotation_eps300_adapter.NewportEPS300
+#   "esp300" / "esp301" → shared Newport controller session
 #
 # Slot names: "rot1", "rot2"  (arbitrary strings, must be unique)
 #
@@ -15,6 +15,7 @@
 #   position_ready(slot, float)     readback result
 #   move_done(slot, float)          after move_to completes
 #   axes_scanned(slot, list)        ESP300 axis scan result
+#   operation_finished(slot, op)    queued connect/scan/disconnect completed
 #
 # Public methods:
 #   connect_elliptec(slot, com_port)
@@ -22,7 +23,7 @@
 #   disconnect(slot)
 #   move_to(slot, angle_deg)
 #   get_position(slot)
-#   scan_axes(slot, visa_resource)      ← temporary open, no persistent state
+#   scan_axes(slot, visa_resource, model="esp300", baud=None)
 # ──────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ import traceback
 from pathlib import Path
 from typing import Dict, Optional
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from app.devices.motion_verification import move_and_verify
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,7 @@ class _RotationWorker(QObject):
     axes_scanned   = Signal(str, list)   # slot, [int]
     motion_profile_ready = Signal(str, object)  # slot, ESP300MotionProfile
     settings_saved = Signal(str, str)    # slot, resource
+    operation_finished = Signal(str, str)  # slot, scan/connect/disconnect
 
     def __init__(self) -> None:
         super().__init__()
@@ -73,8 +75,10 @@ class _RotationWorker(QObject):
                 f"Rotation {slot} (Elliptec) connect failed: {exc}\n"
                 f"{traceback.format_exc()}"
             )
+        finally:
+            self.operation_finished.emit(slot, "connect")
 
-    @Slot(str, str, int, float, float)
+    @Slot(str, str, int, float, float, str, object)
     def connect_esp300(
         self,
         slot: str,
@@ -82,27 +86,47 @@ class _RotationWorker(QObject):
         axis: int,
         velocity_fraction: float = 1.0,
         acceleration_fraction: float = 0.5,
+        model: str = "esp300",
+        baud: int | None = None,
     ) -> None:
-        self._close_slot(slot)
         try:
             from app.devices.rotation_esp300_shared_adapter import SharedESP300Rotation
 
+            model = str(model).strip().lower()
+            if model not in ("esp300", "esp301"):
+                raise ValueError(f"Unsupported Newport model: {model}")
+            # Check before closing the current mount or opening/enabling another
+            # adapter. The same physical axis cannot serve both rotation roles.
+            for other_slot, other in self._adapters.items():
+                if other_slot == slot:
+                    continue
+                if (str(getattr(other, "address", "")).strip().upper()
+                        == str(visa_resource).strip().upper()
+                        and getattr(other, "axis", None) == int(axis)):
+                    raise ValueError(
+                        f"{visa_resource} axis {axis} is already assigned to {other_slot}"
+                    )
+            self._close_slot(slot)
             adapter = SharedESP300Rotation(
                 visa_resource,
                 axis=axis,
                 role=slot,
                 velocity_fraction=velocity_fraction,
                 acceleration_fraction=acceleration_fraction,
+                model=model,
+                baud=baud,
             )
             self._adapters[slot] = adapter
-            print(f"[Rotation] {slot} mapped to shared ESP300 {visa_resource} axis {axis}")
-            self.connected.emit(slot, "esp300")
+            print(f"[Rotation] {slot} mapped to shared {model.upper()} {visa_resource} axis {axis}")
+            self.connected.emit(slot, model)
             self.motion_profile_ready.emit(slot, adapter.motion_profile)
         except Exception as exc:
             self.error.emit(
-                f"Rotation {slot} (ESP300) connect failed: {exc}\n"
+                f"Rotation {slot} ({model.upper()}) connect failed: {exc}\n"
                 f"{traceback.format_exc()}"
             )
+        finally:
+            self.operation_finished.emit(slot, "connect")
 
     # ── disconnect ────────────────────────────────────────────────────────────
 
@@ -110,6 +134,15 @@ class _RotationWorker(QObject):
     def disconnect_slot(self, slot: str) -> None:
         self._close_slot(slot)
         self.disconnected.emit(slot)
+        self.operation_finished.emit(slot, "disconnect")
+
+    @Slot()
+    def shutdown(self) -> None:
+        # Queued after pending connections and scans, so no adapter can appear
+        # after cleanup and no VISA call outlives its worker thread.
+        for slot in list(self._adapters):
+            self.disconnect_slot(slot)
+        self.thread().quit()
 
     def _close_slot(self, slot: str) -> None:
         adapter = self._adapters.pop(slot, None)
@@ -186,22 +219,27 @@ class _RotationWorker(QObject):
         except Exception as exc:
             self.error.emit(f"Rotation {slot} settings save failed: {exc}")
 
-    # ── axis scan (ESP300 only, temporary open) ───────────────────────────────
+    # ── axis scan (Newport, temporary open) ───────────────────────────────────
 
-    @Slot(str, str)
-    def scan_axes(self, slot: str, visa_resource: str) -> None:
+    @Slot(str, str, str, object)
+    def scan_axes(
+        self, slot: str, visa_resource: str,
+        model: str = "esp300", baud: int | None = None,
+    ) -> None:
         """
-        Open a temporary ESP300 connection, scan axes, close.
+        Borrow a Newport connection, scan axes, release.
         Does NOT affect the persistent slot state.
         """
         try:
             from app.devices.esp300_shared import scan_shared_esp300_axes
 
-            axes = scan_shared_esp300_axes(visa_resource, default_axis=1) or [1]
+            axes = scan_shared_esp300_axes(visa_resource, model=model, baud=baud)
             self.axes_scanned.emit(slot, axes)
         except Exception as exc:
             self.error.emit(f"Rotation {slot} axis scan failed: {exc}")
-            self.axes_scanned.emit(slot, [1])   # fallback
+            self.axes_scanned.emit(slot, [])
+        finally:
+            self.operation_finished.emit(slot, "scan")
 
     # ── accessors ─────────────────────────────────────────────────────────────
 
@@ -235,12 +273,19 @@ class RotationController(QObject):
     axes_scanned   = Signal(str, list)
     motion_profile_ready = Signal(str, object)
     settings_saved = Signal(str, str)
+    operation_finished = Signal(str, str)
+    _connect_elliptec_requested = Signal(str, str)
+    _connect_esp300_requested = Signal(str, str, int, float, float, str, object)
+    _scan_requested = Signal(str, str, str, object)
+    _disconnect_requested = Signal(str)
+    _shutdown_requested = Signal()
     ROTATION_SLOTS = ("rot1", "rot2")
     # Compatibility spelling retained for older panels.
     LOGICAL_SLOTS = ROTATION_SLOTS
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
+        self._shutting_down = False
 
         self._thread = QThread(self)
         self._worker = _RotationWorker()
@@ -254,6 +299,19 @@ class RotationController(QObject):
         self._worker.axes_scanned.connect(self.axes_scanned)
         self._worker.motion_profile_ready.connect(self.motion_profile_ready)
         self._worker.settings_saved.connect(self.settings_saved)
+        self._worker.operation_finished.connect(self.operation_finished)
+        self._connect_elliptec_requested.connect(
+            self._worker.connect_elliptec, Qt.ConnectionType.QueuedConnection
+        )
+        self._connect_esp300_requested.connect(
+            self._worker.connect_esp300, Qt.ConnectionType.QueuedConnection
+        )
+        self._scan_requested.connect(self._worker.scan_axes, Qt.ConnectionType.QueuedConnection)
+        self._disconnect_requested.connect(
+            self._worker.disconnect_slot, Qt.ConnectionType.QueuedConnection
+        )
+        self._shutdown_requested.connect(self._worker.shutdown, Qt.ConnectionType.QueuedConnection)
+        self._thread.finished.connect(self._worker.deleteLater)
 
         self._thread.start()
 
@@ -271,7 +329,8 @@ class RotationController(QObject):
     # ── public API ────────────────────────────────────────────────────────────
 
     def connect_elliptec(self, slot: str, com_port: str) -> None:
-        self._worker.connect_elliptec.__func__(self._worker, slot, com_port)
+        if not self._shutting_down:
+            self._connect_elliptec_requested.emit(slot, com_port)
 
     def connect_esp300(
         self,
@@ -280,18 +339,18 @@ class RotationController(QObject):
         axis: int = 1,
         velocity_fraction: float = 1.0,
         acceleration_fraction: float = 0.5,
+        *,
+        model: str = "esp300",
+        baud: int | None = None,
     ) -> None:
-        self._worker.connect_esp300.__func__(
-            self._worker,
-            slot,
-            visa_resource,
-            axis,
-            velocity_fraction,
-            acceleration_fraction,
-        )
+        if not self._shutting_down:
+            self._connect_esp300_requested.emit(
+                slot, visa_resource, axis, velocity_fraction, acceleration_fraction, model, baud
+            )
 
     def disconnect(self, slot: str) -> None:
-        self._worker.disconnect_slot.__func__(self._worker, slot)
+        if not self._shutting_down:
+            self._disconnect_requested.emit(slot)
 
     def move_to(self, slot: str, angle_deg: float) -> None:
         self._worker.move_to.__func__(self._worker, slot, float(angle_deg))
@@ -312,8 +371,12 @@ class RotationController(QObject):
     def save_esp300_settings(self, slot: str) -> None:
         self._worker.save_esp300_settings.__func__(self._worker, slot)
 
-    def scan_axes(self, slot: str, visa_resource: str) -> None:
-        self._worker.scan_axes.__func__(self._worker, slot, visa_resource)
+    def scan_axes(
+        self, slot: str, visa_resource: str, *,
+        model: str = "esp300", baud: int | None = None,
+    ) -> None:
+        if not self._shutting_down:
+            self._scan_requested.emit(slot, visa_resource, model, baud)
 
     # ── state ─────────────────────────────────────────────────────────────────
 
@@ -321,14 +384,16 @@ class RotationController(QObject):
         return self._worker.is_connected(slot)
 
     def adapter(self, slot: str):
-        """Raw adapter (ElliptecRotation or NewportEPS300); None if not connected."""
+        """Raw Elliptec/shared Newport adapter; None if not connected."""
         return self._worker.adapter(slot)
 
     # ── cleanup ───────────────────────────────────────────────────────────────
 
     def shutdown(self) -> None:
-        for slot in self.logical_slots():
-            if self._worker.is_connected(slot):
-                self._worker.disconnect_slot.__func__(self._worker, slot)
-        self._thread.quit()
-        self._thread.wait(3000)
+        if not self._shutting_down:
+            self._shutting_down = True
+            self._shutdown_requested.emit()
+        # Hardware operations have bounded I/O timeouts. A fixed short wait
+        # could destroy a running QThread while a slow scan is still finishing.
+        if QThread.currentThread() != self._thread:
+            self._thread.wait()

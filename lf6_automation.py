@@ -377,6 +377,23 @@ class LF6Setup:
 
     @property
     @_guard_setup_call
+    def sensor_readout_ready(self):
+        """Gate ROI preparation on sensor access without probing other controls."""
+        experiment = getattr(self, "experiment", None)
+        if getattr(self, "application", None) is None or experiment is None:
+            return False
+        if self.readiness_evidence is False or self.is_busy:
+            return False
+        setting = getattr(CameraSettings, "ReadoutControlRegionsOfInterestSelection", None)
+        if setting is None:
+            return False
+        try:
+            return bool(experiment.Exists(setting))
+        except builtins.Exception:
+            return False
+
+    @property
+    @_guard_setup_call
     def readiness_evidence(self):
         """Return True/False when LightField exposes explicit readiness evidence."""
         values = [
@@ -788,6 +805,10 @@ class LF6Setup:
                                   timeout_s=LIGHTFIELD_SETTING_TIMEOUT_S):
         """Apply the complete mutable run recipe immediately before acquisition."""
         self._acquisition_prepared = False
+        # A new run owns its next explicit ROI preparation. Do not carry a
+        # Spectrum policy into a later BFP/scan recipe.
+        self._sensor_intent = None
+        self._sensor_prepared = True
         timeout_s = float(timeout_s)
         if not np.isfinite(timeout_s) or timeout_s <= 0:
             raise ValueError('LightField optics timeout must be finite and positive')
@@ -901,6 +922,12 @@ class LF6Setup:
             get_capture_guard(self).check_available()
             if getattr(self, '_acquisition_recipe', None) is not None:
                 self._verify_acquisition_recipe()
+            if not getattr(self, '_sensor_prepared', True):
+                raise RuntimeError('LightField sensor preparation failed; prepare sensor settings again. Acquisition blocked.')
+            sensor_intent = getattr(self, '_sensor_intent', None)
+            if sensor_intent is not None:
+                from app.devices.lightfield_sensor import verify_sensor_readout
+                verify_sensor_readout(self.read_sensor_snapshot(), sensor_intent)
         except builtins.Exception:
             self._acquisition_prepared = False
             raise
@@ -925,7 +952,142 @@ class LF6Setup:
         }
 
     @_guard_setup_call
+    def read_sensor_snapshot(self):
+        """Read the selected physical ROI and binning without changing them."""
+        from app.devices.lightfield_sensor import read_sensor_snapshot
+        return read_sensor_snapshot(
+            self, CameraSettings, experiment_settings=ExperimentSettings,
+            check_access=lambda: get_capture_guard(self).check_available())
+
+    @_guard_setup_call
+    def prepare_sensor_readout(self, intent, stop_event=None, apply=True, *,
+                               timeout_s=LIGHTFIELD_SETTING_TIMEOUT_S,
+                               poll_interval_s=LIGHTFIELD_POLL_INTERVAL_S):
+        """Prepare one shared ROI intent; bind verified geometry to each capture."""
+        import copy
+        from app.devices.lightfield_sensor import prepare_sensor_readout
+        self._sensor_prepared = False
+        try:
+            result = prepare_sensor_readout(
+                self, intent, CameraSettings, RegionsOfInterestSelection,
+                stop_event=stop_event, apply=apply, timeout_s=timeout_s,
+                poll_interval_s=poll_interval_s, clock=time,
+                integer_type=Int32,
+                experiment_settings=ExperimentSettings,
+                check_access=lambda: get_capture_guard(self).check_available())
+            if apply:
+                self._sensor_intent = {
+                    'mode': result['mode'], 'snapshot': copy.deepcopy(result),
+                    '_verified_fingerprint': result['fingerprint'],
+                }
+            self._sensor_prepared = True
+            return result
+        except builtins.Exception:
+            self._sensor_prepared = False
+            raise
+
+    @_guard_setup_call
+    def ensure_spectrum_sensor_mode(
+        self, mode, *, stop_event=None, apply=True,
+        timeout_s=LIGHTFIELD_SETTING_TIMEOUT_S,
+        poll_interval_s=LIGHTFIELD_POLL_INTERVAL_S,
+    ) -> dict:
+        """Apply and verify Spectrum's ROI without changing scan/BFP defaults.
+
+        ``apply=False`` checks the captured frame's mode without repairing drift.
+        A successful SDK write is attempted only once; ignored writes must fail
+        readback verification instead of repeatedly mutating the experiment.
+        """
+        if mode not in {"1d", "2d"}:
+            raise ValueError("Spectrum sensor mode must be '1d' or '2d'")
+        requested = "LineSensor" if mode == "1d" else "FullSensor"
+        desired = getattr(RegionsOfInterestSelection, requested)
+        setting = CameraSettings.ReadoutControlRegionsOfInterestSelection
+        timeout_s, poll_interval_s = float(timeout_s), float(poll_interval_s)
+        if (not np.isfinite(timeout_s) or not np.isfinite(poll_interval_s)
+                or timeout_s <= 0 or poll_interval_s <= 0):
+            raise ValueError("Spectrum sensor mode timeout and polling interval must be finite and positive")
+        deadline = time.monotonic() + timeout_s
+        changed = False
+        last_evidence = "not checked"
+        advice = "Check LightField's ROI selection and experiment; acquisition is blocked."
+
+        def check_cancelled():
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError(f"Spectrum {requested} preparation cancelled; acquisition is blocked.")
+
+        def timeout_error():
+            return LightFieldSettingTimeoutError(
+                f"Spectrum {requested} was not verified within {timeout_s:g}s "
+                f"({last_evidence}). {advice}"
+            )
+
+        while True:
+            check_cancelled()
+            get_capture_guard(self).check_available()
+            available = self.setting_is_available(setting)
+            if available:
+                try:
+                    actual = self.experiment.GetValue(setting)
+                except builtins.Exception as exc:
+                    last_evidence = f"ROI readback failed: {exc}"
+                else:
+                    check_cancelled()
+                    ready, busy = self.is_ready, self.is_busy
+                    last_evidence = f"actual={actual}, ready={ready}, busy={busy}"
+                    if actual == desired and ready and not busy:
+                        check_cancelled()
+                        return {"requested": requested, "actual": requested, "changed": changed}
+                    if actual != desired and not apply:
+                        raise RuntimeError(
+                            f"Spectrum {requested} readback mismatch (actual={actual}). {advice}"
+                        )
+                    if (actual != desired and not changed and ready and not busy
+                            and time.monotonic() < deadline
+                            and self.setting_is_writable(setting) is not False):
+                        check_cancelled()
+                        # Capabilities can be transiently empty while LightField
+                        # updates. Query only when an idle mode change is needed;
+                        # a verified current mode also works when read-only.
+                        capabilities = getattr(self.experiment, "GetCurrentCapabilities", None)
+                        if callable(capabilities):
+                            try:
+                                supported = capabilities(setting)
+                                supported = None if supported is None else list(supported)
+                            except builtins.Exception as exc:
+                                raise RuntimeError(
+                                    f"Cannot verify Spectrum {requested} capabilities: {exc}. {advice}"
+                                ) from exc
+                            if supported is not None and desired not in supported:
+                                raise RuntimeError(f"Spectrum {requested} is unsupported by this experiment. {advice}")
+                        check_cancelled()
+                        get_capture_guard(self).check_available()
+                        # Synchronous SDK probes above may have consumed the
+                        # budget. Do not start a mutation after its deadline.
+                        if time.monotonic() >= deadline:
+                            raise timeout_error()
+                        try:
+                            self.experiment.SetValue(setting, desired)
+                        except builtins.Exception as exc:
+                            raise RuntimeError(f"Cannot select Spectrum {requested}: {exc}. {advice}") from exc
+                        changed = True
+                        # Read back after the SDK has had a chance to report its
+                        # updating state. Never assume SetValue applied the ROI.
+                        continue
+            else:
+                last_evidence = "ROI selection is unavailable"
+                if not apply:
+                    raise RuntimeError(f"Cannot verify Spectrum {requested}: {last_evidence}. {advice}")
+            check_cancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise timeout_error()
+            time.sleep(min(poll_interval_s, remaining))
+
+    @_guard_setup_call
     def change_roi_FullSensor(self):
+        self._sensor_intent = None
+        self._sensor_prepared = True
         if self.experiment.Exists(CameraSettings.ReadoutControlRegionsOfInterestSelection):
             self.experiment.SetValue(CameraSettings.ReadoutControlRegionsOfInterestSelection,
                                      RegionsOfInterestSelection.FullSensor)
@@ -933,6 +1095,8 @@ class LF6Setup:
 
     @_guard_setup_call
     def change_roi_LineSensor(self):
+        self._sensor_intent = None
+        self._sensor_prepared = True
         if self.experiment.Exists(CameraSettings.ReadoutControlRegionsOfInterestSelection):
             self.experiment.SetValue(CameraSettings.ReadoutControlRegionsOfInterestSelection,
                                      RegionsOfInterestSelection.LineSensor)

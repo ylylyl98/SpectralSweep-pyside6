@@ -301,6 +301,16 @@ def _make_item(
 
 # ── Main widget ───────────────────────────────────────────────────────────────
 
+def create_run_plan_preview(parent=None):
+    """Choose the sequence view without loading QML for the Widgets frontend."""
+    from PySide6.QtWidgets import QApplication
+    application = QApplication.instance()
+    if application is not None and application.property("spectralQuick"):
+        from ui.quick_dual_gate_sequence import QuickDualGateSequencePreview
+        return QuickDualGateSequencePreview(parent)
+    return RunPlanTree(parent)
+
+
 class RunPlanTree(QTreeWidget):
     """
     Tree view of a run plan.  Call update_plan() to refresh.
@@ -395,6 +405,7 @@ class RunPlanTree(QTreeWidget):
         run_outcome: str = "idle",
         completed_points: Optional[int] = None,
         preview_state: str = "Applied sequence",
+        prepared_sequence_index=None,    # Quick model hint; legacy tree owns its index.
     ) -> None:
         plan = locals().copy()
         plan.pop("self")

@@ -23,6 +23,8 @@ _DATA_FIELDS = (
 
 
 def dual_gate_reload_block_reason(panel):
+    if getattr(panel, "plan_build_running", lambda: False)():
+        return "Wait for the Dual Gate sequence build to finish before reloading."
     thread = panel._run_thread
     if (thread is not None and thread.isRunning()) or panel.metadata_finalizing or panel._stop_btn.isEnabled():
         return "Wait for Dual Gate acquisition and saving to finish before reloading."
@@ -65,6 +67,8 @@ def _restore_controls(owner, values):
 
 
 def capture_dual_gate_state(panel):
+    from ui.quick_editing import require_committed_quick_edits
+    require_committed_quick_edits(panel)
     # A shortcut can run before a table delegate commits its current text.
     focused = QApplication.focusWidget()
     for table in (panel._loop_table, panel._batch_table):
@@ -92,15 +96,20 @@ def capture_dual_gate_state(panel):
         "calculator_data": {name: getattr(panel._sweep_calc, name) for name in
                             ("_label_auto", "_body_visible", "_calculated_rows")},
         "tree_plan": panel._tree._last_plan,
-        "tree_expansion": _tree_expansion(panel._tree),
-        "tree_scroll": panel._tree.verticalScrollBar().value(),
+        "tree_expansion": _tree_expansion(panel._tree) if not hasattr(panel._tree, "capture_view_state") else [],
+        "tree_scroll": panel._tree.verticalScrollBar().value() if not hasattr(panel._tree, "capture_view_state") else 0,
+        "sequence_view": panel._tree.capture_view_state() if hasattr(panel._tree, "capture_view_state") else None,
         "tables": tables, "log": panel._log_text.toHtml(),
         "log_scroll": panel._log_text.verticalScrollBar().value(),
         "status": (panel._status_lbl.text(), {
             bytes(name).decode(): panel._status_lbl.property(bytes(name).decode())
             for name in panel._status_lbl.dynamicPropertyNames()
+            # Qt/PySide add private pointer-valued properties when Quick
+            # adapters subscribe. Those are not portable presentation state.
+            if not bytes(name).startswith(b"_")
         }),
         "progress": (panel._progress.minimum(), panel._progress.maximum(), panel._progress.value()),
+        "run_time_text": panel._run_time_lbl.text(),
         "scrolls": {name: getattr(panel, name).verticalScrollBar().value()
                     for name in ("_workflow_scroll", "_results_scroll")},
     })
@@ -160,13 +169,16 @@ def restore_dual_gate_state(panel, state):
     panel._update_batch_action_states()
     if state["tree_plan"]:
         panel._tree.update_plan(**state["tree_plan"])
-    for path, expanded in state["tree_expansion"]:
-        item = panel._tree.topLevelItem(path[0])
-        for index in path[1:]:
-            item = item.child(index) if item is not None else None
-        if item is not None:
-            item.setExpanded(expanded)
-    panel._tree.verticalScrollBar().setValue(state["tree_scroll"])
+    if state.get("sequence_view") is not None and hasattr(panel._tree, "restore_view_state"):
+        panel._tree.restore_view_state(state["sequence_view"])
+    elif hasattr(panel._tree, "topLevelItem"):
+        for path, expanded in state["tree_expansion"]:
+            item = panel._tree.topLevelItem(path[0])
+            for index in path[1:]:
+                item = item.child(index) if item is not None else None
+            if item is not None:
+                item.setExpanded(expanded)
+        panel._tree.verticalScrollBar().setValue(state["tree_scroll"])
     for name, saved in state["tables"].items():
         table = getattr(panel, name)
         with QSignalBlocker(table):
@@ -185,6 +197,7 @@ def restore_dual_gate_state(panel, state):
     panel._status_lbl.style().polish(panel._status_lbl)
     panel._progress.setRange(*state["progress"][:2])
     panel._progress.setValue(state["progress"][2])
+    panel._run_time_lbl.setText(state.get("run_time_text", "Elapsed 00:00 · Remaining —"))
     panel._filename_details.setVisible(panel._filename_details_toggle.isChecked())
     for toggle in (panel._filename_details_toggle, panel._log_toggle):
         toggle.setArrowType(Qt.ArrowType.DownArrow if toggle.isChecked() else Qt.ArrowType.RightArrow)

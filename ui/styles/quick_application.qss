@@ -1,0 +1,54 @@
+/* Native containers and retained dialogs share the Quick palette. */
+QWidget { color: palette(window-text); }
+QMainWindow, QDialog, QScrollArea { background: palette(window); }
+QStackedWidget { background: transparent; }
+QScrollArea { border: none; }
+/* Deliberate work areas only. Embedded form hosts remain transparent so that
+   section labels and controls sit on this shared surface without nested cards. */
+QWidget[quickWorkspaceSurface="true"] { background: palette(base); border: 1px solid palette(midlight); border-radius: 8px; padding: 0px; }
+/* QScrollArea enables autoFillBackground on its content. Let a nested tool
+   viewport and its direct content expose the owning work surface, while the
+   native scrollbars and all descendant editors keep their own rendering. */
+QWidget[quickWorkspaceSurface="true"] QScrollArea { background: transparent; }
+QWidget[quickWorkspaceSurface="true"] QScrollArea > QWidget#qt_scrollarea_viewport,
+QWidget[quickWorkspaceSurface="true"] QScrollArea > QWidget#qt_scrollarea_viewport > QWidget { background: transparent; }
+QWidget[quickSidebar="true"] { background: palette(alternate-base); border: none; border-right: 1px solid palette(midlight); }
+QGroupBox { border: none; margin-top: 20px; padding: 6px 0px 0px 0px; background: transparent; }
+QGroupBox::title { subcontrol-origin: margin; left: 0px; top: 2px; color: palette(window-text); font-weight: 600; }
+/* The calculator already has its own disclosure heading. */
+QGroupBox#SweepLineCalculator { margin: 0px; padding: 0px; border: none; }
+QGroupBox[quickWorkspaceSurface="true"] { margin-top: 0px; padding-top: 22px; }
+QGroupBox[quickWorkspaceSurface="true"]::title { subcontrol-origin: margin; left: 12px; top: 8px; }
+QLabel { background: transparent; }
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QPlainTextEdit {
+    background: palette(base); color: palette(text); border: 1px solid palette(mid);
+    border-radius: 4px; padding: 4px 7px; min-height: 18px; selection-background-color: palette(highlight);
+    selection-color: palette(highlighted-text);
+}
+QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover { border-color: palette(dark); }
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus { border: 1px solid palette(highlight); }
+QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled { background: palette(alternate-base); color: palette(disabled, text); }
+QPushButton, QToolButton { background: palette(base); color: palette(button-text); border: 1px solid palette(mid); border-radius: 4px; padding: 4px 10px; min-height: 18px; }
+QPushButton:hover, QToolButton:hover { background: palette(light); border-color: palette(dark); }
+QPushButton:pressed, QToolButton:pressed, QPushButton:checked, QToolButton:checked { background: palette(alternate-base); border-color: palette(highlight); }
+QPushButton:focus, QToolButton:focus { border: 2px solid palette(highlight); padding: 3px 9px; }
+QPushButton:disabled, QToolButton:disabled { color: palette(disabled, button-text); background: palette(alternate-base); }
+QCheckBox, QRadioButton { spacing: 7px; padding: 3px; background: transparent; }
+QCheckBox:disabled, QRadioButton:disabled { color: palette(disabled, text); }
+QTabWidget::pane { border: none; }
+QTabBar::tab { background: transparent; padding: 7px 14px; border-bottom: 2px solid transparent; color: palette(placeholder-text); }
+QTabBar[quickMultilineTabs="true"]::tab { min-height: 28px; }
+QTabBar::tab:selected { border-bottom-color: palette(highlight); color: palette(highlight); background: palette(base); }
+QTabBar::tab:hover { background: palette(alternate-base); }
+QHeaderView::section { background: palette(alternate-base); color: palette(text); border: none; border-bottom: 1px solid palette(midlight); padding: 6px; font-weight: 600; }
+QTableView, QTreeView, QListView { background: palette(base); alternate-background-color: palette(alternate-base); color: palette(text); border: 1px solid palette(mid); gridline-color: palette(mid); }
+QProgressBar { border: none; border-radius: 3px; background: palette(alternate-base); text-align: center; min-height: 16px; }
+QProgressBar::chunk { background: palette(highlight); border-radius: 3px; }
+QSplitter::handle { background: palette(window); }
+QSplitter::handle:hover { background: palette(mid); }
+QSplitter::handle:horizontal { width: 5px; }
+QSplitter::handle:vertical { height: 5px; }
+QMenu, QMenuBar { background: palette(base); color: palette(text); }
+QMenu::item:selected, QMenuBar::item:selected { background: palette(highlight); color: palette(highlighted-text); }
+QStatusBar { border-top: 1px solid palette(midlight); background: palette(alternate-base); padding: 2px 6px; }
+QToolTip { background: palette(tool-tip-base); color: palette(tool-tip-text); border: 1px solid palette(mid); padding: 5px; }

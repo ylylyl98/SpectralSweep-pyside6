@@ -123,3 +123,76 @@ def test_empty_record_columns_and_cyclic_values():
         encode_records([{"cycle": cycle}] * 64)
     with pytest.raises(ValueError, match="Cyclic"):
         decode_records({"count": 2, "columns": {"x": {"kind": "constant", "value": cycle}}})
+
+
+def test_uniform_float_columns_preserve_signed_zero_and_extreme_values():
+    values = [0.0, -0.0, 5e-324, -5e-324, 1.7976931348623157e308,
+              -1.7976931348623157e308, 0.1 + 0.2, 1.0]
+    rows = [{"value": values[index % len(values)]} for index in range(128)]
+    assert packed(decode_records(encode_records(rows))) == packed(rows)
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_uniform_float_columns_still_reject_nonfinite_values(invalid):
+    rows = [{"value": 1.0} for _ in range(128)]
+    rows[-1]["value"] = invalid
+    with pytest.raises(ValueError, match="finite"):
+        encode_records(rows)
+
+
+def test_uniform_records_ignore_key_order_without_changing_exact_values():
+    rows = []
+    for index in range(128):
+        fields = [("first", -0.0), ("second", True), ("third", 1.0)]
+        rows.append({"record": dict(fields if index % 2 else reversed(fields))})
+    table = encode_records(rows)
+    assert table["columns"]["record"]["kind"] == "constant"
+    assert json.dumps(decode_records(table), sort_keys=True) == json.dumps(rows, sort_keys=True)
+
+
+def test_later_nested_record_cannot_hide_non_native_string_keys():
+    class StringKey(str):
+        pass
+
+    rows = [{"record": {"key": 1}} for _ in range(128)]
+    rows[-1]["record"] = {StringKey("key"): 1}
+    with pytest.raises(ValueError, match="keys must be strings"):
+        encode_records(rows)
+
+
+def test_irregular_nested_columns_use_lossless_fallback():
+    values = [{"one": [1, 2]}, {"two": [True]}, [0.0, -0.0], [1], None,
+              {"one": {"kind": "records", "columns": {"literal": 1}}}]
+    rows = [{"value": copy.deepcopy(values[index % len(values)])} for index in range(128)]
+    before = packed(rows)
+    table = encode_records(rows)
+    assert packed(decode_records(table)) == before
+    assert packed(rows) == before
+
+
+def test_cross_row_shared_ancestors_are_valid_and_decode_without_aliases():
+    leaf = {"label": "leaf", "child": None}
+    middle = {"label": "middle", "child": leaf}
+    parent = {"label": "parent", "child": middle}
+    rows = [{"node": parent if index % 2 == 0 else middle} for index in range(128)]
+    before = packed(rows)
+    restored = decode_records(encode_records(rows))
+    assert packed(restored) == before
+    restored[0]["node"]["child"]["label"] = "changed"
+    assert restored[1]["node"]["label"] == "middle"
+    assert restored[2]["node"]["child"]["label"] == "middle"
+    assert packed(rows) == before
+
+
+@pytest.mark.parametrize("kind", ["records", "lists"])
+def test_uniform_columns_reject_cycles_across_distinct_containers(kind):
+    if kind == "records":
+        first, second = {"child": None}, {"child": None}
+        first["child"], second["child"] = second, first
+    else:
+        first, second = [], []
+        first.append(second)
+        second.append(first)
+    rows = [{"value": first if index % 2 == 0 else second} for index in range(128)]
+    with pytest.raises(ValueError, match="Cyclic"):
+        encode_records(rows)

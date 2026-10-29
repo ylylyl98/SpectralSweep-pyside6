@@ -42,16 +42,30 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--preview-spectrum", action="store_true",
                    help="Open an isolated Spectrum preview with synthetic data")
     p.add_argument("--preview-child", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--ui", choices=("widgets", "quick"), default="quick",
+                   help="Qt Quick workspaces by default; use widgets for the compatibility frontend")
+    p.add_argument("--preview-quick", action="store_true",
+                   help="Open the isolated Qt Quick preview with synthetic data")
+    p.add_argument("--preview-workspaces", action="store_true",
+                   help="Open all Qt Quick workspaces with isolated settings and disconnected devices")
+    p.add_argument("--preview-workspaces-child", action="store_true", help=argparse.SUPPRESS)
     return p.parse_args()
 
 
 def main():
     args = _parse_args()
+    if args.ui == "quick" or args.preview_quick or args.preview_workspaces or args.preview_workspaces_child:
+        from app.quick_runtime import require_quick_runtime
+        require_quick_runtime()
 
     # Branch before importing config, notifications, watchdogs or controllers.
-    if args.preview_spectrum or args.preview_child:
+    if args.preview_spectrum or args.preview_child or args.preview_quick or args.preview_workspaces or args.preview_workspaces_child:
         from app.ui_preview import run_preview, run_preview_child
-        sys.exit(run_preview_child() if args.preview_child else run_preview())
+        workspaces = args.preview_workspaces or args.preview_workspaces_child
+        quick = workspaces or args.preview_quick or args.ui == "quick"
+        if workspaces:
+            sys.exit(run_preview_child(quick=True, workspaces=True) if args.preview_workspaces_child else run_preview(quick=True, workspaces=True))
+        sys.exit(run_preview_child(quick=quick) if args.preview_child else run_preview(quick=quick))
 
     from app.ntfy_notifications import NtfyNotifier
     from app.runtime_exception_reporting import install as install_exception_reporting
@@ -71,6 +85,7 @@ def main():
     )
 
     app = QApplication(sys.argv)
+    app.setProperty("spectralQuick", args.ui == "quick")
     app.setApplicationName(_APP_NAME)
     app.setApplicationDisplayName(_APP_NAME)
     app.setOrganizationName(_APP_NAME)
@@ -91,7 +106,7 @@ def main():
     install_input_wheel_guard(app)
 
     from ui.main_window import MainWindow
-    win = MainWindow(notifier=notifier, watch_styles=args.watch_styles)
+    win = MainWindow(notifier=notifier, watch_styles=args.watch_styles, ui_mode=args.ui)
     win.notification_configured.connect(watchdog.enable)
     if not icon.isNull():
         win.setWindowIcon(icon)

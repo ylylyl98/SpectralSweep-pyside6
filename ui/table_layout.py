@@ -33,7 +33,11 @@ class _FittedColumns(QObject):
     def schedule(self, *_args):
         # Header/model notifications can arrive while PySide tears down the
         # parent table and clears this wrapper's Python attributes.
-        if not getattr(self, "_fitting", True) and isValid(self.table) and isValid(self._timer):
+        # One queued fit reads the final model and geometry. Restarting the
+        # timer for every cell in a bulk refill adds thousands of Qt calls.
+        if (not getattr(self, "_fitting", True)
+                and isValid(self.table) and isValid(self._timer)
+                and not self._timer.isActive()):
             self._timer.start(0)
 
     def eventFilter(self, watched, event):

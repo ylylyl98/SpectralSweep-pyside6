@@ -148,6 +148,8 @@ def start_blocked(startup, app):
     assert startup.begin_threads[0] != threading.get_ident()
     assert not startup.commands
     assert startup.widget._run_thread.isRunning()
+    assert startup.widget._run_time_timer.isActive()
+    assert "Estimating…" in startup.widget._run_time_lbl.text()
 
 
 def test_slow_metadata_keeps_gui_live_and_precedes_all_device_io(startup, app, monkeypatch):
@@ -164,6 +166,8 @@ def test_slow_metadata_keeps_gui_live_and_precedes_all_device_io(startup, app, m
     assert "acquire" in startup.commands
     assert startup.runs[0].metadata["status"] == "completed"
     assert startup.widget._run_outcome == "completed"
+    assert not startup.widget._run_time_timer.isActive()
+    assert not startup.widget._run_time_estimate.snapshot().running
 
 
 def test_slow_plan_validation_runs_on_worker_and_stop_prevents_metadata_and_io(startup, app, monkeypatch):
@@ -195,6 +199,7 @@ def test_slow_plan_validation_runs_on_worker_and_stop_prevents_metadata_and_io(s
     service.assert_not_called()
     assert not startup.commands
     assert startup.widget._run_outcome == "stopped"
+    assert not startup.widget._run_time_timer.isActive()
 
 
 def test_stop_during_startup_finishes_durable_metadata_without_device_commands(startup, app, monkeypatch):

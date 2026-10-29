@@ -74,6 +74,9 @@ class MotionConditionPanelTests(unittest.TestCase):
             def exec(self):
                 return QDialog.DialogCode.Accepted
 
+            def deleteLater(self):
+                pass
+
             def result_rows(self):
                 # Choose only the second planned source on the first open;
                 # subsequent opens return the dialog's checked rows.

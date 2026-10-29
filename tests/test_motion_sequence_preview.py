@@ -1,10 +1,12 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QSignalSpy
 
 from ui.motion_sequence_preview import MotionSequencePreviewDialog
 
@@ -37,8 +39,8 @@ class MotionSequencePreviewTests(unittest.TestCase):
 
     def test_deselect_and_select_all_update_result(self):
         dialog = MotionSequencePreviewDialog(self.rows())
-        dialog.table = dialog._table
-        dialog.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+        dialog.sequence_model.setData(dialog.sequence_model.index(0, 0),
+                                      Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
         self.assertEqual(len(dialog.selected_sequence()), 1)
         self.assertEqual(dialog.result_indices(), [1])
         dialog.select_all()
@@ -69,6 +71,51 @@ class MotionSequencePreviewTests(unittest.TestCase):
         self.assertEqual(dialog.result_indices(), [1, 0])
         self.assertEqual(dialog.result_rows()[0]["repeat"], 1)
         self.assertEqual(dialog.result(), 1)  # QDialog.Accepted
+
+    def test_apply_freezes_result_and_exports_do_not_mutate_it(self):
+        rows = self.rows()
+        rows[0]["nested"] = {"values": [1]}
+        dialog = MotionSequencePreviewDialog(rows)
+        self.addCleanup(dialog.close)
+        applied = QSignalSpy(dialog.selectionApplied)
+        result = dialog.apply_selection()
+        result[0]["nested"]["values"].append(2)
+        dialog.sequence_model.set_checked(0, False)
+        exported = dialog.result_rows()
+        self.assertEqual(exported[0]["nested"]["values"], [1])
+        self.assertEqual(dialog.result_indices(), [0, 1])
+        exported[0]["nested"]["values"].append(3)
+        self.assertEqual(dialog.result_rows()[0]["nested"]["values"], [1])
+        self.assertEqual(applied.count(), 1)
+
+    def test_cancel_keeps_callers_rows_and_emits_no_apply(self):
+        rows = self.rows()
+        dialog = MotionSequencePreviewDialog(rows)
+        self.addCleanup(dialog.close)
+        applied = QSignalSpy(dialog.selectionApplied)
+        dialog.sequence_model.set_checked(0, False)
+        dialog._table.selectRow(1)
+        dialog.move_up()
+        dialog._cancel_button.click()
+        self.assertEqual(dialog.result(), 0)
+        self.assertEqual(applied.count(), 0)
+        self.assertNotIn("enabled", rows[0])
+        self.assertEqual(rows[0]["source_token"], "second")
+
+    def test_100000_row_dialog_summary_checkbox_and_move_do_not_export_rows(self):
+        rows = [{"sequence": i, "repeat": 2} for i in range(100000)]
+        with patch("app.motion_sequence_model.MotionSequenceModel.selected_rows",
+                   side_effect=AssertionError("summary exported all rows")):
+            dialog = MotionSequencePreviewDialog(rows)
+            self.addCleanup(dialog.close)
+            self.assertEqual(dialog.table.rowCount(), 100000)
+            self.assertIn("100,000 selected", dialog._summary.text())
+            dialog.sequence_model.set_checked(50000, False)
+            self.assertIn("99,999 selected", dialog._summary.text())
+            dialog._table.selectRow(99999)
+            self.assertTrue(dialog.move_up())
+            self.assertEqual(dialog._table.currentRow(), 99998)
+            self.assertEqual(dialog.sequence_model.row_data(99998)["_source_index"], 99999)
 
 
 if __name__ == "__main__":

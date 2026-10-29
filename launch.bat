@@ -44,7 +44,9 @@ if errorlevel 1 (
 echo Python found on PATH. Using it directly without creating a managed venv.
 set "PYTHONPATH=%~dp0"
 python "%~dp0tools\launch_app.py" %*
-exit /b %errorlevel%
+set "LAUNCH_EXIT=%errorlevel%"
+if not "%LAUNCH_EXIT%"=="0" pause
+exit /b %LAUNCH_EXIT%
 
 :managed_python
 echo Python %PYVER% selected.
@@ -61,4 +63,6 @@ if not exist "%PY%" (
 
 set "PYTHONPATH=%~dp0"
 "%PY%" "%~dp0tools\launch_app.py" %*
-exit /b %errorlevel%
+set "LAUNCH_EXIT=%errorlevel%"
+if not "%LAUNCH_EXIT%"=="0" pause
+exit /b %LAUNCH_EXIT%

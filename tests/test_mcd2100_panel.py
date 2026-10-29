@@ -1446,6 +1446,38 @@ class MCD2100PanelTests(unittest.TestCase):
         self.assertEqual(len(factory.calls), 1)
         self.assertEqual(controller.stop_calls, 0)
 
+    def test_cancelled_display_handoff_blocks_restart_until_previous_interlock_drains(self):
+        controller = FakeController(True)
+        controller.has_pending_work = True
+        controller._display_slots = {"magnet": SimpleNamespace(request_id="display"),
+                                     "temperature": None}
+        panel, _, factory = self.make_panel(controller=controller, workers=[FakeWorker(), FakeWorker()])
+        ownership = []
+        panel.run_state_changed.connect(ownership.append)
+        panel.start()
+        panel.stop()
+        self.assertTrue(panel._workflow_waiting_drain)
+        self.assertTrue(panel._interlock_held)
+        self.assertFalse(panel.start_btn.isEnabled())
+        self.assertEqual(panel.status.text(), "Waiting for previous operation to finish")
+        with patch("ui.mcd2100_panel.ensure_sensor_readout") as sensor:
+            panel.start()
+        sensor.assert_not_called()
+        self.assertEqual(len(factory.calls), 1)
+        self.assertEqual(ownership, [True])
+
+        controller.has_pending_work = False
+        controller._display_slots["magnet"] = None
+        panel._on_work_status_changed()
+        self.assertFalse(panel._workflow_waiting_drain)
+        self.assertFalse(panel._interlock_held)
+        self.assertTrue(panel.start_btn.isEnabled())
+        self.assertEqual(ownership, [True, False])
+        panel.start()
+        self.wait_terminal(panel)
+        self.assertEqual(len(factory.calls), 2)
+        self.assertEqual(ownership, [True, False, True, False])
+
     def test_real_prepare_handoff_waits_for_display_owner_drain(self):
         adapter = EventGatedAdapter()
         controller = AttoDRY2100Controller(

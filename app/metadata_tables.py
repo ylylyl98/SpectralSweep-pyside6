@@ -83,13 +83,73 @@ def _same_keys(rows: list[dict]) -> bool:
     if not rows or type(rows[0]) is not dict:
         return False
     keys = rows[0].keys()
-    return (all(type(key) is str for key in keys)
-            and all(type(row) is dict and row.keys() == keys for row in rows))
+    return all(type(row) is dict and row.keys() == keys
+               and all(type(key) is str for key in row) for row in rows)
 
 
-def _column(values: list[Any], cache: _Values, infos=None) -> tuple[dict, int]:
+def _inspect_column(values: list[Any], cache: _Values, ancestors=frozenset()):
+    """Index a uniform column once, retaining its child columns for encoding.
+
+    A plan repeats the same dictionary/list shapes at each point. Sorting keys
+    and recursively indexing each parent, then revisiting its children while
+    choosing column encodings, duplicates that work. Index child columns first
+    and build the parent identities from their already validated tokens.
+    """
+    kind = type(values[0])
+    if kind in (str, int, bool, type(None), float) and all(type(value) is kind for value in values):
+        infos, seen = [], {}
+        for value in values:
+            # Native float equality merges signed zero, unlike JSON provenance.
+            key = value.hex() if kind is float and value == 0.0 else value
+            info = seen.get(key)
+            if info is None:
+                info = cache.inspect(value)
+                seen[key] = info
+            infos.append(info)
+        return infos, None
+
+    if kind in (dict, list) and all(value is values[0] for value in values):
+        return [cache.inspect(values[0])] * len(values), None
+    record_keys = tuple(values[0]) if kind is dict and _same_keys(values) else None
+    list_length = len(values[0]) if kind is list else None
+    is_list = list_length is not None and all(
+        type(value) is list and len(value) == list_length for value in values)
+    if record_keys is None and not is_list:
+        return [cache.inspect(value) for value in values], None
+
+    identities = {id(value) for value in values}
+    if identities & ancestors:
+        # A parent in another row may be a shared but acyclic child. Let the
+        # per-object traversal distinguish that case from an actual cycle.
+        return [cache.inspect(value) for value in values], None
+    nested = ancestors | identities
+    keys = record_keys if record_keys is not None else range(list_length)
+    children = {}
+    for key in keys:
+        items = [value[key] for value in values]
+        infos, subcolumns = _inspect_column(items, cache, nested)
+        children[key] = (items, infos, subcolumns)
+    child_infos = [(key, children[key][1]) for key in (sorted(keys) if kind is dict else keys)]
+    overhead = (_object_size((key, 0) for key in keys) if kind is dict else
+                2 + max(0, len(keys) - 1))
+    infos = []
+    for index, value in enumerate(values):
+        if kind is dict:
+            signature = ("dict", tuple((key, info[index][0]) for key, info in child_infos))
+        else:
+            signature = ("list", tuple(info[index][0] for key, info in child_infos))
+        result = cache._intern.get(signature)
+        if result is None:
+            result = (len(cache._intern), overhead + sum(info[index][1] for key, info in child_infos))
+            cache._intern[signature] = result
+        cache._containers[id(value)] = (value, result)
+        infos.append(result)
+    return infos, children if kind is dict else None
+
+
+def _column(values: list[Any], cache: _Values, infos=None, children=None) -> tuple[dict, int]:
     if infos is None:
-        infos = [cache.inspect(value) for value in values]
+        infos, children = _inspect_column(values, cache)
 
     def candidate(kind: str, payload: dict, sizes):
         return ({"kind": kind, **payload},
@@ -124,13 +184,17 @@ def _column(values: list[Any], cache: _Values, infos=None) -> tuple[dict, int]:
         if option[1] < best[1]:
             best = option
     option = candidate("runs", {"runs": runs}, [("runs", _array_size(
-        _array_size((len(str(run[0])), size)) for run, size in zip(runs, run_sizes)
+        len(str(run[0])) + size + 3 for run, size in zip(runs, run_sizes)
     ))])
     if option[1] < best[1]:
         best = option
 
-    if _same_keys(values):
-        columns = {key: _column([value[key] for value in values], cache) for key in values[0]}
+    if children is not None or _same_keys(values):
+        if children is None:
+            columns = {key: _column([value[key] for value in values], cache) for key in values[0]}
+        else:
+            columns = {key: _column(items, cache, info, subcolumns)
+                       for key, (items, info, subcolumns) in children.items()}
         option = candidate("records", {"columns": {key: col[0] for key, col in columns.items()}}, [
             ("columns", _object_size((key, col[1]) for key, col in columns.items())),
         ])
@@ -155,9 +219,9 @@ def encode_records(rows: list[dict]) -> dict | None:
     columns = {}
     for key in rows[0]:
         values = [row[key] for row in rows]
-        infos = [cache.inspect(value) for value in values]
+        infos, children = _inspect_column(values, cache)
         original_size += sum(info[1] for info in infos)
-        columns[key] = _column(values, cache, infos)
+        columns[key] = _column(values, cache, infos, children)
     table = {"count": len(rows), "columns": {key: col[0] for key, col in columns.items()}}
     size = _object_size([
         ("count", len(str(len(rows)))),

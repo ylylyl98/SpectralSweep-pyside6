@@ -5,11 +5,13 @@ import os
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QTableWidget, QTableWidgetItem
 
 from ui.table_layout import fit_table_columns
@@ -86,6 +88,54 @@ class FittedTableTests(unittest.TestCase):
             QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             self.settle()
         self.assertNotIn("Traceback", errors.getvalue())
+
+    def test_thousand_row_bulk_edit_coalesces_layout_and_uses_final_content(self):
+        table = QTableWidget(1000, 12)
+        self.addCleanup(table.close)
+        controller = fit_table_columns(table, (80,) * 12)
+        table.resize(950, 360)
+        table.show()
+        self.settle()
+        fits = QSignalSpy(controller._timer.timeout)
+        with patch.object(controller._timer, "start", wraps=controller._timer.start) as starts, \
+                patch.object(table, "resizeRowToContents", wraps=table.resizeRowToContents) as resize_rows:
+            # Real model signals from a full refill, rather than direct calls
+            # to schedule, reproduce undo/repopulate on large Batch tables.
+            for row in range(1000):
+                for column in range(12):
+                    table.setItem(row, column, QTableWidgetItem(f"{row}:{column}"))
+            table.item(0, 4).setText("Long condition with several words " * 12)
+            table.hideColumn(11)
+            fit_table_columns(table, (30, 30, 30, 180) + (80,) * 8)
+            table.resize(780, 360)
+            self.assertLessEqual(starts.call_count, 1)
+            self.assertEqual(fits.count(), 0)
+            self.assert_fits(table)
+            self.assertGreater(fits.count(), 0)
+            self.assertLessEqual(fits.count(), 3)
+            self.assertLessEqual(starts.call_count, 3)
+            self.assertLessEqual(resize_rows.call_count, 3 * 61)
+        self.assertGreater(table.rowHeight(0), table.verticalHeader().defaultSectionSize())
+        self.assertGreater(table.columnWidth(3), table.columnWidth(1))
+        self.assertTrue(table.isColumnHidden(11))
+        self.assertEqual(table.item(999, 11).text(), "999:11")
+
+    def test_queued_changes_while_hidden_fit_latest_geometry_on_show(self):
+        table = QTableWidget(1, 3)
+        self.addCleanup(table.close)
+        controller = fit_table_columns(table, (80, 80, 80))
+        self.settle()
+        table.setItem(0, 1, QTableWidgetItem("Long text while hidden " * 20))
+        table.hideColumn(2)
+        fit_table_columns(table, (30, 140, 80))
+        table.resize(650, 260)
+        self.assertTrue(controller._timer.isActive())
+        self.settle()
+        table.resize(380, 260)
+        table.show()
+        self.assert_fits(table)
+        self.assertGreater(table.columnWidth(1), table.columnWidth(0))
+        self.assertGreater(table.rowHeight(0), table.verticalHeader().defaultSectionSize())
 
     def test_motion_preview_fits_at_its_minimum_width_and_preserves_selection(self):
         from ui.motion_sequence_preview import MotionSequencePreviewDialog

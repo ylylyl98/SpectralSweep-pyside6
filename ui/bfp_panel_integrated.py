@@ -15,6 +15,7 @@ from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 import pyqtgraph as pg
+from ui.plot_factory import create_plot, create_image_view
 from PySide6.QtCore import Qt, QObject, QThread, Signal, Slot, QRectF
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -68,6 +69,8 @@ from utils.bfp_io import (
 )
 from utils.config import cfg
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
+from copy import deepcopy
+from ui.sensor_readout_preflight import ensure_sensor_readout
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.power_reading import power_correction_factor
 from ui.workflow_sections import compact_form_rows, divide_grid_fields
@@ -435,11 +438,16 @@ class _AcquireWorker(QObject):
                     if not callable(prepare):
                         raise RuntimeError("LF6 acquisition preparation surface is unavailable")
                     prepare(center_nm=float(self._center_nm), exposure_ms=float(self._exposure_ms), frames=int(self._epf))
-                roi = (self._roi_mode or "").strip().lower()
-                if roi.startswith("full") and hasattr(setup, "change_roi_FullSensor"):
-                    setup.change_roi_FullSensor()
-                elif ("bin" in roi or "line" in roi) and hasattr(setup, "change_roi_LineSensor"):
-                    setup.change_roi_LineSensor()
+                if getattr(self._ctrl, "backend", "lightfield") != "lightfield":
+                    roi = (self._roi_mode or "").strip().lower()
+                    if roi.startswith("full") and hasattr(setup, "change_roi_FullSensor"):
+                        setup.change_roi_FullSensor()
+                    elif ("bin" in roi or "line" in roi) and hasattr(setup, "change_roi_LineSensor"):
+                        setup.change_roi_LineSensor()
+            sensor_prepare = getattr(self._ctrl, "prepare_sensor_for_acquisition", None)
+            if callable(sensor_prepare):
+                mode = "2d" if (self._roi_mode or "").strip().lower().startswith("full") else "1d"
+                sensor_prepare(mode=mode)
             if self._warmup:
                 self.status.emit("Warm-up acquisition...")
                 try:
@@ -482,7 +490,7 @@ class _DisplayWidget(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         self._tabs = QTabWidget()
         lay.addWidget(self._tabs, stretch=1)
-        self._imgview = pg.ImageView(view=pg.PlotItem())
+        self._imgview = create_image_view(view=pg.PlotItem())
         self._imgview.ui.roiBtn.hide()
         self._imgview.ui.menuBtn.hide()
         self._imgview.setMinimumHeight(240)
@@ -491,7 +499,7 @@ class _DisplayWidget(QWidget):
         self._imgview.view.setLabel("left", "Y Pixel")
         self._imgview.view.showGrid(x=True, y=True, alpha=0.2)
         self._tabs.addTab(self._imgview, "2D Frame")
-        self._pw = pg.PlotWidget()
+        self._pw = create_plot()
         self._pw.setLabel("bottom", "Wavelength", units="nm")
         self._pw.setLabel("left", "Intensity")
         self._pw.showGrid(x=True, y=True, alpha=0.3)
@@ -701,12 +709,12 @@ class _BRCWidget(QWidget):
         divide_grid_fields(controls, 2, range(2, 6))
         root.addLayout(controls)
         plots = QHBoxLayout()
-        self._left_plot = pg.PlotWidget()
+        self._left_plot = create_plot()
         self._left_plot.showGrid(x=True, y=True, alpha=0.25)
         self._left_plot.addLegend()
         self._sample_curve = self._left_plot.plot(pen=pg.mkPen("#1565C0", width=1.5), name="Sample")
         self._bg_curve = self._left_plot.plot(pen=pg.mkPen("#C62828", width=1.5), name="Scaled BG")
-        self._right_plot = pg.PlotWidget()
+        self._right_plot = create_plot()
         self._right_plot.showGrid(x=True, y=True, alpha=0.25)
         self._result_curve = self._right_plot.plot(pen=pg.mkPen("#2E7D32", width=1.5))
         plots.addWidget(self._left_plot, 1)
@@ -1044,7 +1052,7 @@ class _FRCWidget(QWidget):
         controls.addWidget(self._save_png_btn, 6, 4)
         divide_grid_fields(controls, 2, range(2, 6))
         root.addLayout(controls)
-        self._image = pg.ImageView(view=pg.PlotItem())
+        self._image = create_image_view(view=pg.PlotItem())
         self._image.ui.roiBtn.hide()
         self._image.ui.menuBtn.hide()
         self._image.setMinimumHeight(520)
@@ -1795,6 +1803,8 @@ class BFPPanel(QWidget):
 
     @Slot()
     def _on_acquire(self):
+        if getattr(self, "_sensor_preflight_pending", False):
+            return
         if bool(getattr(self._ctrl, "switching_locked", False)):
             self._status_lbl.setText("Wait for the current device operation to finish")
             return
@@ -1807,12 +1817,16 @@ class BFPPanel(QWidget):
             self._status_lbl.setText("Sample ID is required before acquisition")
             set_style_role(self._status_lbl, 'text', tone='danger')
             return
+        sensor_mode = "2d" if self._roi_combo.currentText().strip().lower().startswith("full") else "1d"
+        if not ensure_sensor_readout(self, self._ctrl, mode=sensor_mode):
+            return
         try:
             self._experiment_run = ExperimentMetadataService(self._out_dir()).begin(
                 "bfp_acquisition", device_id, output_dir=self._out_dir(),
                 allow_post_completion=True,
                 instruments=instrument_inventory(lightfield=self._ctrl),
                 settings={"roi_mode": self._roi_combo.currentText(), "center_nm": self._center_spin.value(),
+                          "sensor_readout_intents": deepcopy(getattr(self._ctrl, "sensor_readout_intents", {})),
                           "exposure_ms": self._exp_spin.value(), "frames": self._epf_spin.value(),
                           "repeat": self._repeat_spin.value(), "auto_save_csv": self._auto_save_csv_chk.isChecked(),
                           "power_correction_factor": power_correction_factor(),

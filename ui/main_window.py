@@ -96,6 +96,8 @@ def _clamp_window_rect(rect: QRect, available: QRect, margin: int = 8) -> QRect:
 class _SharedSampleIdBinder(QObject):
     """Keep workflow Sample ID edits synchronized without recursive updates."""
 
+    valueChanged = Signal(str)
+
     def __init__(self, edits, initial: str = "", parent=None, *, commit_on_edit: bool = False):
         super().__init__(parent)
         self._edits = list(edits)
@@ -115,6 +117,7 @@ class _SharedSampleIdBinder(QObject):
 
     def set_value(self, value: str) -> None:
         value = str(value)
+        changed = value != self._value
         self._value = value
         self._updating = True
         try:
@@ -123,6 +126,8 @@ class _SharedSampleIdBinder(QObject):
                     edit.setText(value)
         finally:
             self._updating = False
+        if changed:
+            self.valueChanged.emit(value)
 
     def _on_text_changed(self, value: str) -> None:
         if self._updating:
@@ -186,8 +191,9 @@ class MainWindow(QMainWindow):
 
     notification_configured = Signal(str)
 
-    def __init__(self, parent: Optional[QWidget] = None, notifier=None, watch_styles=False):
+    def __init__(self, parent: Optional[QWidget] = None, notifier=None, watch_styles=False, *, ui_mode="widgets"):
         super().__init__(parent)
+        self._ui_mode = ui_mode
         self._ntfy_notifier = notifier if notifier is not None else NtfyNotifier()
         self.setWindowTitle("SpectralSweep — PySide6")
 
@@ -195,11 +201,15 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app:
             app.setStyle("Fusion")
+            if ui_mode == "quick":
+                app.setProperty("spectralQuick", True)
+                from ui.quick_style import apply_quick_style
+                apply_quick_style(app, app.property("quickThemeMode") or "system")
             self._application_style = application_style(app)
             if not app.styleSheet():
                 self._application_style.reload()
             self._application_style.set_watching(watch_styles)
-            app_font = QFont("Segoe UI", _valid_font_size(cfg.font_size_pt))
+            app_font = QFont("Segoe UI", 9 if ui_mode == "quick" else _valid_font_size(cfg.font_size_pt))
             app.setFont(app_font)
             screen = app.primaryScreen()
             if screen is not None:
@@ -375,7 +385,6 @@ class MainWindow(QMainWindow):
         self._initialize_shared_sample_id()
         self._initialize_history_ui()
         self._build_sidebar_splitter()
-        self._restore_geometry()
         legacy_state = {
             "schema_version": cfg.session.schema_version,
             "active_tab": cfg.session.active_tab,
@@ -413,6 +422,14 @@ class MainWindow(QMainWindow):
         self._tabs.currentChanged.connect(self._schedule_session_observation)
         self._session_poll_timer.start()
         self._initialize_source_tracking()
+        self._quick_workbench = None
+        if ui_mode == "quick":
+            from ui.quick_workbench import QuickWorkbench
+            self._quick_workbench = QuickWorkbench(self)
+        # Restore QMainWindow layout/state only after the Quick workbench has
+        # installed its final central widget. Restoring/maximizing the old
+        # central layout before reparenting it can crash Qt when first shown.
+        self._restore_geometry()
 
     def _initialize_style_actions(self) -> None:
         # Keep the Python wrappers alive too (PySide6 menu-bar ownership).
@@ -433,10 +450,12 @@ class MainWindow(QMainWindow):
         page_reload.setObjectName("ReloadSpectrumPage")
         page_reload.setStatusTip("Load Spectrum UI changes while idle; keep instrument connections and spectra")
         page_reload.triggered.connect(self._reload_spectrum_page)
-        current_reload = menu.addAction("Reload current page")
+        current_reload = menu.addAction("Refresh current interface")
         current_reload.setObjectName("ReloadCurrentPage")
         current_reload.setShortcut("Ctrl+Alt+U")
-        current_reload.setStatusTip("Reload a supported page while idle, preserving its state and instrument connections")
+        current_reload.setStatusTip(
+            "Refresh Dual Gate, Spectrum or Settings Python layouts, tables and forms while idle; "
+            "preserve state and instrument connections. QML, global shell, controllers and drivers require restart.")
         current_reload.triggered.connect(self._reload_current_page)
         dual_reload = menu.addAction("Reload Dual Gate page")
         dual_reload.setObjectName("ReloadDualGatePage")
@@ -483,13 +502,24 @@ class MainWindow(QMainWindow):
         snapshot = tracker.snapshot(tracker.groups.get(page_id, ())) if tracker else {}
         self._page_reload_in_progress = True
         try:
-            reload_page(self, page_id)
+            new = reload_page(self, page_id)
         except Exception as exc:
             self._status.showMessage(f"{title} unchanged — reload failed: {type(exc).__name__}: {exc}", 15000)
         else:
+            ui_error = getattr(new, "_page_reload_ui_error", None)
+            if ui_error:
+                self._status.showMessage(
+                    f"{title} page rebuilt, but Quick UI refresh failed: {ui_error}. "
+                    "Layout changes remain unconfirmed.", 15000)
+                return
             if tracker:
                 tracker.mark_page_applied(page_id, snapshot)
-            self._status.showMessage(f"{title} page reloaded — connections and data preserved", 8000)
+            if tracker and any(item["restart"] for item in tracker.pending()):
+                self._status.showMessage(
+                    f"{title} page code reloaded — shared UI/layout or device changes still require restart. "
+                    "See Code update status.", 12000)
+            else:
+                self._status.showMessage(f"{title} page reloaded — connections and data preserved", 8000)
         finally:
             self._page_reload_in_progress = False
 
@@ -521,13 +551,22 @@ class MainWindow(QMainWindow):
         if getattr(sys, "frozen", False):
             return
         from ui.page_reload import PAGE_RELOAD_REGISTRY
+        from ui.refresh_manifest import QUICK_PAGE_MODULES, QUICK_SHARED_RESTART_SOURCES
         from ui.source_changes import SourceChangeTracker
-        groups = {key: tuple(name.replace(".", "/") + ".py" for name in spec.modules)
-                  for key, spec in PAGE_RELOAD_REGISTRY.items()}
+        quick = getattr(self, "_ui_mode", "widgets") == "quick"
+        groups = {}
+        for key, spec in PAGE_RELOAD_REGISTRY.items():
+            helpers = QUICK_PAGE_MODULES.get(key, ()) if quick else ()
+            groups[key] = tuple(name.replace(".", "/") + ".py" for name in (*helpers, *spec.modules))
+        shared = {"ui/spectrum_plot.py", "ui/andor_controls_widget.py"}
+        if quick:
+            shared.update(QUICK_SHARED_RESTART_SOURCES)
         self._source_changes = SourceChangeTracker(
             _PROJECT_ROOT, groups,
-            shared=("ui/spectrum_plot.py", "ui/andor_controls_widget.py"), parent=self)
-        self._source_changes.mark_styles_applied(self._application_style._last_source or "")
+            shared=shared,
+            style_path=self._application_style.path, parent=self)
+        if self._application_style._last_source is not None:
+            self._source_changes.mark_styles_applied(self._application_style._last_source)
         self._source_status = QToolButton(self)
         self._source_status.setObjectName("SourceChangeStatusButton")
         self._source_status.setAccessibleName("Code update status")
@@ -539,9 +578,13 @@ class MainWindow(QMainWindow):
     def _update_source_status(self) -> None:
         pending = self._source_changes.pending()
         if any(item["restart"] for item in pending):
-            text = "Code: restart required"
+            can_refresh = any(item["pages"] or item["styles"] for item in pending)
+            text = "Code: refresh available; restart pending" if can_refresh else "Code: restart required"
         elif pending:
-            text = "Code: reload available"
+            pages = any(item["pages"] for item in pending)
+            styles = any(item["styles"] for item in pending)
+            text = ("Code: page/style reload available" if pages and styles else
+                    "Code: page reload available" if pages else "Code: style reload available")
         else:
             text = "Code: up to date"
         self._source_status.setText(text)
@@ -564,13 +607,15 @@ class MainWindow(QMainWindow):
                 action = "Reload styles (Ctrl+Alt+R)"
             else:
                 pages = ", ".join(PAGE_RELOAD_REGISTRY[key].title for key in item["pages"])
-                action = f"Reload {pages}" if pages else "Restart application when idle"
+                action = f"Refresh {pages}" if pages else "Restart application when idle"
                 if item["restart"] and pages:
                     action += "; other users of this shared module still require restart"
                 if item["path"] in {"launch.bat", "tools/launch_app.py"}:
                     action = "Applies on the next launch.bat start"
                 elif item["path"] == "requirements.txt":
                     action = "Restart through launch.bat to check updated dependencies"
+                elif item["restart"] and not pages and item["path"].startswith(("ui/qml/", "ui/quick_")):
+                    action = "Restart application when idle — Qt Quick components or other page instances still use earlier code"
             lines.append(f"{item['path']}\n  {action}")
         return "\n\n".join(lines)
 
@@ -583,8 +628,11 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("Code update status")
         dialog.resize(720, 460)
         layout = QVBoxLayout(dialog)
-        explanation = QLabel("Reload supported pages while idle. Instrument connections stay open. "
-                             "Changes to shared code, controllers and drivers require a safe restart.")
+        explanation = QLabel(
+            "Refresh current interface (Ctrl+Alt+U) refreshes registered Dual Gate, Spectrum and Settings "
+            "Python layouts, tables and forms while idle and keeps instrument connections open. "
+            "Other pages using shared helpers still require restart. QML components, the global shell, "
+            "controllers and drivers require an application restart.")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         details = QPlainTextEdit(self._source_changes_text())
@@ -625,7 +673,7 @@ class MainWindow(QMainWindow):
     def _styles_reloaded(self, _path: str) -> None:
         tracker = getattr(self, "_source_changes", None)
         if tracker is not None and self._application_style._last_source is not None:
-            tracker.mark_styles_applied(self._application_style._last_source)
+            tracker.mark_styles_applied(self._application_style._last_source, path=_path)
         self._status.showMessage("Styles reloaded", 4000)
 
     @Slot(str)
@@ -902,6 +950,10 @@ class MainWindow(QMainWindow):
         self._commit_sample_selection(target)
 
     def _show_run_history(self) -> None:
+        quick = getattr(self, "_quick_workbench", None)
+        if quick is not None:
+            quick.showHistory()
+            return
         dialog = getattr(self, "_run_history_dialog", None)
         if dialog is not None and not dialog.isHidden():
             dialog.raise_()
@@ -1024,6 +1076,10 @@ class MainWindow(QMainWindow):
 
     def _toggle_sidebar(self) -> None:
         if not hasattr(self, "_sidebar_splitter"):
+            return
+        quick = getattr(self, "_quick_workbench", None)
+        if quick is not None and self.width() < 1200:
+            quick.toggleSidebar()
             return
         sizes = self._sidebar_splitter.sizes()
         collapsed = not sizes or sizes[0] <= 16
@@ -1291,6 +1347,9 @@ class MainWindow(QMainWindow):
                     continue
                 try:
                     restore(state)
+                    if getattr(self, "_ui_mode", "widgets") == "quick":
+                        from ui.quick_workspace_layouts import remember_workspace_layout
+                        remember_workspace_layout(panel, state)
                 except Exception as exc:
                     self._status.showMessage(
                         f"Some saved {key.replace('_', ' ')} settings were skipped: {exc}",
@@ -1508,8 +1567,11 @@ class MainWindow(QMainWindow):
         s = QSettings(_ORG, _APP)
         geom = s.value("geometry")
         state = s.value("windowState")
-        if geom is not None:
-            self.restoreGeometry(geom)
+        restored = bool(geom is not None and self.restoreGeometry(geom))
+        if not restored and getattr(self, "_ui_mode", "widgets") == "quick":
+            # A new desktop workspace uses the actual monitor's available area;
+            # valid saved geometry still wins on subsequent launches.
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
         if state is not None:
             self.restoreState(state)
         self._clamp_to_available_screen()
@@ -1607,15 +1669,29 @@ class MainWindow(QMainWindow):
             key=("lightfield-capture-stalled", status.get("incident_id")),
         )
 
+    def _resume_close_after_plan_build(self):
+        self._plan_close_retry_pending = False
+        self.close()
+
     def closeEvent(self, event: QCloseEvent) -> None:
         status = getattr(getattr(self, "_lf6", None), "capture_status", {})
         if ((isinstance(status, dict) and status.get("active")) or
-                getattr(getattr(self, "_lf6", None), "acquisition_in_progress", False) is True):
+                getattr(getattr(self, "_lf6", None), "acquisition_in_progress", False) is True or
+                getattr(getattr(self, "_lf6", None), "sensor_preflight_pending", False) is True):
             self._status.showMessage(
-                "LightField acquisition still owns the device; wait for the hardware call before closing.", 5000)
+                "LightField still owns the device; wait for the hardware call before closing.", 5000)
             event.ignore()
             return
         presets = getattr(self, "_presets", None)
+        if getattr(presets, "plan_build_running", lambda: False)():
+            presets.cancel_plan_builds()
+            if not getattr(self, "_plan_close_retry_pending", False):
+                self._plan_close_retry_pending = True
+                presets.plan_build_idle.connect(
+                    self._resume_close_after_plan_build, Qt.ConnectionType.SingleShotConnection)
+            self._status.showMessage("Cancelling the Dual Gate sequence build before closing…", 5000)
+            event.ignore()
+            return
         thread = getattr(presets, "_run_thread", None)
         finalizing = getattr(presets, "metadata_finalizing", False)
         if finalizing or (thread is not None and thread.isRunning()):
@@ -1766,4 +1842,7 @@ class MainWindow(QMainWindow):
         for name in ("_history_query_timer", "_history_event_timer"):
             if hasattr(self, name):
                 getattr(self, name).stop()
+        quick = getattr(self, "_quick_workbench", None)
+        if quick is not None:
+            quick.shutdown()
         super().closeEvent(event)

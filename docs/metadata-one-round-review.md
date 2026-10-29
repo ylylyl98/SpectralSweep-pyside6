@@ -102,3 +102,36 @@ approximate timings, not a controlled speedup ratio or a hardware startup
 measurement. The deterministic reduction is two table encodings to one per
 sidecar/history save. Evidence is under ignored
 `tmp/metadata-start-profile-20261025/`.
+
+### Further startup CPU reduction
+
+The next profile-driven pass keeps the same synchronous save policy and table
+format. Native strings and sequences now bypass generic type-protocol checks
+while portable paths, Enum values and typed arrays retain their normalization.
+Table encoding indexes uniform nested values by column and reuses the validated
+child identities and sizes when selecting parent and child encodings. Repeated
+scalar values are indexed once per column, with separate identities for numeric
+types and positive/negative zero. Irregular values and shared ancestor graphs
+retain the validated fallback; non-native dictionary keys and cycles are still
+rejected.
+
+These indexes exist only during the current encoding. Each save builds fresh
+state; no asynchronous write queue or cross-save plan cache is introduced.
+The existing fsync, atomic replacement and history-update order is unchanged.
+
+Three alternating comparisons against committed version `2ef45074` used the
+same 16,804-point historical input, separate temporary output/history paths, and
+equally warmed process-wide software identity. Timings include plan
+normalization, table encoding, synchronous sidecar publication and history
+update, but exclude reading/expanding the benchmark input and verifying output.
+The prior version took 9.76–10.78 seconds (median 10.51); the optimized version
+took 7.39–9.65 seconds (median 7.63), a 27% median reduction. Table encoding's
+median changed from 6.58 to 4.62 seconds. System load still varied, so these are
+local reference timings, not a guaranteed acquisition or device-startup time.
+
+All six outputs had the same byte size. Exact typed-JSON checks matched the
+in-memory metadata, sidecar reload and history settings, and the input hash was
+unchanged. Regression coverage also checks non-finite values, float extremes,
+signed zero, dictionary key validation, cyclic/shared graphs, portable paths,
+independent copies and fsync failure without publication. The comparison
+script, raw runs and summary remain under ignored `tmp/metadata-startup-v2/`.

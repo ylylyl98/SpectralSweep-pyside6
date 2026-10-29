@@ -8,6 +8,19 @@ from PySide6.QtWidgets import (
 )
 
 
+def _copy_baseline(baseline):
+    """Detach flat parsed values without recursively copying immutable scalars."""
+    return {
+        row_id: {
+            **{key: deepcopy(value) for key, value in spec.items() if key != "values"},
+            "values": ([value if isinstance(value, (str, int, float, bool, type(None)))
+                        else deepcopy(value) for value in spec["values"]]
+                       if spec.get("values") is not None else None),
+        }
+        for row_id, spec in baseline.items()
+    }
+
+
 class LoopRunSelections:
     """Keep explicit positions tied to a complete group definition.
 
@@ -53,12 +66,12 @@ class LoopRunSelections:
                 overlap = any(set(key) & set(old) and state.get("positions") is not None
                               for old, state in self.states.items())
                 self.states[key] = dict(rows=list(key), positions=[] if overlap else None,
-                                        baseline=deepcopy(baseline), stale=overlap)
+                                        baseline=_copy_baseline(baseline), stale=overlap)
             state = self.states[key]
             if state.get("positions") is not None and valid and state.get("baseline") != baseline:
                 state["stale"] = True
             if state.get("positions") is None and valid:
-                state["baseline"] = deepcopy(baseline)
+                state["baseline"] = _copy_baseline(baseline)
             self.groups[level] = dict(key=key, members=members, baseline=baseline, valid=valid)
         return self.groups
 
@@ -69,7 +82,7 @@ class LoopRunSelections:
         self.states = {old: state for old, state in self.states.items()
                        if old == key or not (set(old) & set(key))}
         self.states[key] = dict(rows=list(key), positions=None if positions is None else sorted(set(positions)),
-                                baseline=deepcopy(group["baseline"]), stale=False)
+                                baseline=_copy_baseline(group["baseline"]), stale=False)
 
     def positions(self):
         return {level: "reselect" if self.states[group["key"]].get("stale") else self.states[group["key"]]["positions"]
@@ -109,7 +122,8 @@ class RunSelectionCombo(QComboBox):
         self.setToolTip(summary + "\nPaired rows share the same positions. Values remain unchanged.")
         self.setAccessibleDescription(self.toolTip())
 
-    def showPopup(self):
+    def prepare_choices(self):
+        """Populate bounded options without opening a native popup."""
         blocked = self.blockSignals(True)
         self.clear()
         self.addItem("All values", "all")
@@ -122,6 +136,9 @@ class RunSelectionCombo(QComboBox):
             index = self.count() - 1
         self.setCurrentIndex(index)
         self.blockSignals(blocked)
+
+    def showPopup(self):
+        self.prepare_choices()
         super().showPopup()
 
 

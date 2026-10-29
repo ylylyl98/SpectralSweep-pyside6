@@ -46,7 +46,11 @@ def acquisition(monkeypatch):
         return np.ones((2, 3))
 
     setup = SimpleNamespace(close=lambda: None, is_ready=True, is_busy=False,
-        configure_for_acquisition=lambda **settings: {}, acquire_2d=acquire_2d)
+        configure_for_acquisition=lambda **settings: {}, acquire_2d=acquire_2d,
+        read_sensor_snapshot=lambda: dict(selection='LineSensor', fingerprint='mock-bin-all', regions=[]),
+        prepare_sensor_readout=lambda intent, **kwargs: dict(
+            selection="FullSensor" if intent['mode'] == "full_sensor" else "LineSensor",
+            fingerprint='mock-bin-all', regions=[], changed=False))
     adapter = SimpleNamespace(acquire=acquire_1d, abort_acquisition=lambda: False,
         calibration_wavelengths=lambda **kw: axis, invalidate_wavelengths=lambda: None)
     worker = controller._worker

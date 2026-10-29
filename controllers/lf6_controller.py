@@ -35,6 +35,8 @@ import traceback
 import time
 import logging
 import threading
+from copy import deepcopy
+from uuid import uuid4
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -91,6 +93,7 @@ class _LF6Worker(QObject):
     andor_controls_applied = Signal(object)
     shamrock_connection_changed = Signal(bool)
     backend_temperature_snapshot = Signal(object)
+    sensor_preflight_finished = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -107,6 +110,82 @@ class _LF6Worker(QObject):
         self._parked = {}
         self._experiments = []
         self.flipper = None
+        self._sensor_readout_intents = {}
+
+    def _sensor_session(self, setup):
+        if not getattr(setup, '_sensor_preflight_session_id', None):
+            setup._sensor_preflight_session_id = uuid4().hex
+        return setup._sensor_preflight_session_id
+
+    @Slot(object)
+    def sensor_preflight(self, request):
+        """Read before asking; mutate only the subsequently confirmed intent."""
+        stop = request['cancel_event']
+        try:
+            self._require_spectrum_access()
+            if stop.is_set():
+                raise RuntimeError('Sensor check cancelled')
+            requested = request.get('backends')
+            backends = {self._backend} if requested is None else set(requested)
+            snapshots = {}
+            staged = {}
+            if 'lightfield' in backends:
+                if self._backend == 'lightfield' and self._setup is not None:
+                    setup, adapter, identity = self._setup, self._adapter, self._identity
+                elif 'lightfield' in self._parked:
+                    setup, adapter, identity, _ = self._parked['lightfield']
+                else:
+                    raise RuntimeError('Connect LightField before checking its sensor readout.')
+                if request['action'] == 'read':
+                    snapshot = setup.read_sensor_snapshot()
+                elif request['action'] == 'apply':
+                    intent = deepcopy(request['intents']['lightfield'])
+                    if request.get('session_id') not in (None, self._sensor_session(setup)):
+                        raise RuntimeError('The detector connection changed; check sensor settings again.')
+                    snapshot = setup.prepare_sensor_readout(intent, stop_event=stop)
+                    if adapter is not None and snapshot.get('changed'):
+                        adapter.invalidate_wavelengths()
+                    # Permission to replace one observed custom ROI is consumed.
+                    # Future external Custom Region changes require a new prompt.
+                    if intent['mode'] != 'custom':
+                        intent.pop('expected_fingerprint', None)
+                        intent.pop('allow_custom', None)
+                    staged['lightfield'] = intent
+                else:
+                    raise ValueError('Unknown sensor preflight action')
+                snapshots['lightfield'] = dict(snapshot, session_id=self._sensor_session(setup),
+                                              identity=deepcopy(identity))
+            if stop.is_set():
+                raise RuntimeError('Sensor check cancelled')
+            if request['action'] == 'apply':
+                self._sensor_readout_intents = staged
+            request['snapshots'] = snapshots
+        except Exception as exc:
+            request['error'] = str(exc)
+            if not stop.is_set():
+                _LOG.warning('Sensor readout preflight (%s) failed: %s', request.get('action'), exc)
+        finally:
+            self.sensor_preflight_finished.emit(request)
+
+    def prepare_sensor_for_acquisition(self, mode=None, *, stop_event=None, apply=True):
+        if self._backend != 'lightfield':
+            return None
+        intent = deepcopy(self._sensor_readout_intents.get('lightfield'))
+        if mode == '2d':
+            intent = {'mode': 'full_sensor'}
+        elif mode == '1d' and (intent is None or intent.get('mode') == 'full_sensor'):
+            intent = {'mode': 'bin_all'}
+        if intent is None:
+            return None
+        method = getattr(self._setup, 'prepare_sensor_readout', None)
+        if not callable(method):
+            raise RuntimeError('LightField sensor readout verification is unavailable; reconnect with the updated app.')
+        result = method(intent, stop_event=stop_event, apply=apply)
+        if not isinstance(result, dict) or not result.get('fingerprint'):
+            raise RuntimeError('LightField sensor readout was not verified; acquisition blocked.')
+        if apply and result.get('changed') and self._adapter is not None:
+            self._adapter.invalidate_wavelengths()
+        return result
 
     def setup_uses_mock(self, backend, fallback=False):
         identity = (self._identity if backend == self._backend and self._setup is not None
@@ -592,6 +671,9 @@ class _LF6Worker(QObject):
         if not callable(method):
             raise RuntimeError("LightField acquisition preparation is unavailable")
         result = method(center_nm=center_nm, exposure_ms=exposure_ms, frames=frames)
+        sensor = self.prepare_sensor_for_acquisition()
+        if sensor is not None:
+            result = dict(result or {}, lightfield_sensor_mode=sensor)
         if self._adapter is not None:
             self._adapter.invalidate_wavelengths()
         return result
@@ -647,6 +729,9 @@ class _LF6Worker(QObject):
 
     # ── acquisition ──────────────────────────────────────────────────────────
 
+    def _spectrum_sensor_mode(self, mode, stop_event, *, apply=True):
+        return self.prepare_sensor_for_acquisition(mode, stop_event=stop_event, apply=apply)
+
     def _emit_acquisition_result(self, stop_event, result):
         if stop_event is not None:
             # Keep the event with the payload until the GUI handles it: Abort
@@ -675,10 +760,16 @@ class _LF6Worker(QObject):
             self.ensure_light_path(stop_event=stop_event)
             if stop_event is not None and stop_event.is_set():
                 return
+            sensor = self._spectrum_sensor_mode("1d", stop_event)
+            if stop_event is not None and stop_event.is_set():
+                return
             wl, cts = self._adapter.acquire()
             if stop_event is not None and stop_event.is_set():
                 return
             readback = None
+            if sensor is not None:
+                verified = self._spectrum_sensor_mode("1d", stop_event, apply=False)
+                readback = {"lightfield_sensor_mode": dict(verified, changed=sensor.get("changed", False))}
             if self._backend == 'winspec_ingaas':
                 frame = self._setup.read_metadata_snapshot()['observed']['last_frame']
                 readback = {
@@ -720,12 +811,17 @@ class _LF6Worker(QObject):
                 change_mode = getattr(self._setup, "change_roi_FullSensor", None)
                 if callable(change_mode):
                     change_mode()
+            sensor = self._spectrum_sensor_mode("2d", stop_event)
             if stop_event is not None and stop_event.is_set():
                 return
             img = self._setup.acquire_2d()
             if stop_event is not None and stop_event.is_set():
                 return
-            self._emit_acquisition_result(stop_event, {"frame": img})
+            readback = None
+            if sensor is not None:
+                verified = self._spectrum_sensor_mode("2d", stop_event, apply=False)
+                readback = {"lightfield_sensor_mode": dict(verified, changed=sensor.get("changed", False))}
+            self._emit_acquisition_result(stop_event, {"frame": img, "readback": readback})
         except Exception as exc:
             self._emit_acquisition_result(stop_event, {"error": f"Spectrometer acquire_2d failed: {exc}"})
         finally:
@@ -913,6 +1009,7 @@ class LF6Controller(QObject):
     switching_lock_changed = Signal(bool)
     capture_status_changed = Signal(object)
     capture_stalled = Signal(object)
+    sensor_preflight_finished = Signal(object)
 
     _connect_requested = Signal(bool, str)
     _disconnect_requested = Signal()
@@ -927,6 +1024,7 @@ class LF6Controller(QObject):
     _andor_controls_requested = Signal(object)
     _shamrock_connection_requested = Signal(bool)
     _lightfield_optics_requested = Signal(object)
+    _sensor_preflight_requested = Signal(object)
 
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -941,6 +1039,7 @@ class LF6Controller(QObject):
         self._acquisition_requests = 0
         self._acquisition_cancellations: set[threading.Event] = set()
         self._acquisition_abort_error = None
+        self._sensor_preflight_requests = set()
         self._flipper_busy = False
         self._temperature_pause_sources: set[str] = set()
         self._last_temperature_monitor_state = None
@@ -979,6 +1078,7 @@ class LF6Controller(QObject):
         self._worker.andor_controls_applied.connect(self._clear_pending_operations)
         self._worker.shamrock_connection_changed.connect(self.shamrock_connection_changed)
         self._worker.backend_temperature_snapshot.connect(self.backend_temperature_snapshot)
+        self._worker.sensor_preflight_finished.connect(self._on_sensor_preflight_finished)
 
         self._connect_requested.connect(self._worker.connect_instrument)
         self._disconnect_requested.connect(self._worker.disconnect_instrument)
@@ -993,10 +1093,43 @@ class LF6Controller(QObject):
         self._andor_controls_requested.connect(self._worker.apply_andor_controls)
         self._shamrock_connection_requested.connect(self._worker.set_shamrock_connected)
         self._lightfield_optics_requested.connect(self._worker.lightfield_optics)
+        self._sensor_preflight_requested.connect(self._worker.sensor_preflight)
 
         self._thread.start()
 
     # ── public API (called from main thread) ──────────────────────────────────
+
+    @property
+    def sensor_preflight_pending(self):
+        return bool(self._sensor_preflight_requests)
+
+    @property
+    def sensor_readout_intents(self):
+        return deepcopy(self._worker._sensor_readout_intents)
+
+    def request_sensor_preflight(self, request):
+        stop = request.setdefault('cancel_event', threading.Event())
+        cancelled_capture = (bool(self._acquisition_cancellations)
+                             and all(event.is_set() for event in self._acquisition_cancellations))
+        blocked_capture = (bool(self.capture_status) or self._acquisition_requests) and not cancelled_capture
+        if (self._worker.external_measurement_active.is_set() or blocked_capture
+                or self._connection_pending or self._settings_pending or self.sensor_preflight_pending):
+            request['error'] = 'Wait for the current detector operation before checking sensor readout.'
+            QTimer.singleShot(0, self, lambda: self.sensor_preflight_finished.emit(request))
+            return
+        self._sensor_preflight_requests.add(stop)
+        self.switching_lock_changed.emit(True)
+        self._sensor_preflight_requested.emit(request)
+
+    @Slot(object)
+    def _on_sensor_preflight_finished(self, request):
+        self._sensor_preflight_requests.discard(request['cancel_event'])
+        self.sensor_preflight_finished.emit(request)
+        self.switching_lock_changed.emit(self._cached_switching_lock(self.capture_status))
+
+    def prepare_sensor_for_acquisition(self, mode=None):
+        """Worker-only readout preparation for direct acquisition workflows."""
+        return self._worker.prepare_sensor_for_acquisition(mode)
 
     @property
     def capture_status(self):
@@ -1266,7 +1399,7 @@ class LF6Controller(QObject):
 
     @Slot()
     def poll_temperature(self) -> None:
-        if self.capture_status:
+        if self.sensor_preflight_pending or self.capture_status:
             return
         active_detector = self.is_connected and self.identity.get("backend") in {"andor_sdk2", "winspec_ingaas"}
         parked_andor = any(key != self.backend for key in self._worker.andor_setups())
@@ -1305,6 +1438,12 @@ class LF6Controller(QObject):
     def abort_acquisition(self) -> bool:
         """Cancel pending requests even when the detector cannot confirm Stop."""
         self._acquisition_abort_error = None
+        if self.sensor_preflight_pending:
+            for event in self._sensor_preflight_requests:
+                event.set()
+            # Never invoke a second SDK call on the GUI thread while a sensor
+            # query is running. The original worker retains its lease to drain.
+            return True
         pending = bool(self._acquisition_cancellations)
         for stop_event in self._acquisition_cancellations:
             stop_event.set()
@@ -1346,7 +1485,8 @@ class LF6Controller(QObject):
     @property
     def spectrum_actions_blocked(self):
         """Other measurement owners block Spectrum, including queued requests."""
-        return self._worker.external_measurement_active.is_set() or bool(self.capture_status)
+        return (self._worker.external_measurement_active.is_set() or bool(self.capture_status)
+                or self.sensor_preflight_pending)
 
     @property
     def switching_locked(self):
@@ -1356,6 +1496,7 @@ class LF6Controller(QObject):
         # The progress observer must not probe SDK busy flags, even at the
         # transition back to idle after an otherwise healthy acquisition.
         return (bool(capture.get("active")) or self._flipper_busy or self._connection_pending or self._settings_pending or self._acquisition_requests > 0
+                or self.sensor_preflight_pending
                 or bool(self._temperature_pause_sources - {"disconnect"})
                 or self.state in {LightFieldLifecycleState.STARTING, LightFieldLifecycleState.INITIALIZING})
 
@@ -1380,17 +1521,17 @@ class LF6Controller(QObject):
 
     @property
     def is_ready(self) -> bool:
-        return self.is_connected and bool(self._worker.is_ready)
+        return not self.sensor_preflight_pending and self.is_connected and bool(self._worker.is_ready)
 
     @property
     def is_busy(self) -> bool:
-        return bool(self._worker.is_busy)
+        return self.sensor_preflight_pending or bool(self._worker.is_busy)
 
     def setting_is_available(self, setting) -> bool:
-        return self._worker.setting_is_available(setting)
+        return not self.sensor_preflight_pending and self._worker.setting_is_available(setting)
 
     def setting_is_writable(self, setting):
-        return self._worker.setting_is_writable(setting)
+        return False if self.sensor_preflight_pending else self._worker.setting_is_writable(setting)
 
     @property
     def center_wavelength_write_stats(self):
@@ -1419,7 +1560,7 @@ class LF6Controller(QObject):
 
     def shutdown(self) -> None:
         """Call from main.py on application exit."""
-        if self.acquisition_in_progress:
+        if self.acquisition_in_progress or self.sensor_preflight_pending:
             raise RuntimeError("LightField acquisition is still active; application must remain open.")
         self._capture_timer.stop()
         self._temperature_timer.stop()

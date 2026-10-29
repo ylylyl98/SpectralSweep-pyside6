@@ -146,7 +146,8 @@ def test_apply_builds_the_validated_sequence_and_each_schedule_once(widget, nest
          patch.object(panel, "_build_nested_execution_schedule", wraps=panel._build_nested_execution_schedule) as nested_schedule:
         widget._on_apply()
     assert build.call_count == 1
-    assert schedule.call_count == 1
+    # Nested plans no longer build and discard a second, legacy schedule.
+    assert schedule.call_count == int(not nested)
     assert nested_schedule.call_count == int(nested)
     assert len(widget._final_seq) == 4
     assert len(widget._acquisition_schedule) == 4

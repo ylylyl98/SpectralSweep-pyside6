@@ -22,7 +22,8 @@ from ui.settings_reload_state import (
 
 _MODULES = ("ui.andor_controls_widget", "ui.spectrum_plot", "ui.spectrum_panel")
 _DUAL_GATE_MODULES = (
-    "ui.preview_widget", "ui.loop_run_selection", "ui.setup_sequence_editor", "ui.presets_panel",
+    "ui.quick_dual_gate_sequence", "ui.preview_widget", "ui.loop_run_selection",
+    "ui.setup_sequence_editor", "ui.presets_panel",
 )
 
 
@@ -128,7 +129,18 @@ def reload_page(window, page_id):
         raise RuntimeError(reason)
     if QApplication.activeModalWidget() is not None:
         raise RuntimeError(f"Close the open dialog before reloading {spec.title}.")
+    if callable(getattr(window, "_acquisition_active", None)) and window._acquisition_active():
+        raise RuntimeError("Wait for acquisition and saving to finish before refreshing the interface.")
     state = spec.capture(old)
+    quick = getattr(window, "_quick_workbench", None)
+    staged_quick = quick is not None and callable(getattr(quick, "prepare_page_refresh", None))
+    view_state = None
+    modules = spec.modules
+    if staged_quick:
+        from ui.quick_reload_state import capture_quick_view_state
+        from ui.refresh_manifest import QUICK_PAGE_MODULES
+        view_state = capture_quick_view_state(old)
+        modules = tuple(dict.fromkeys((*QUICK_PAGE_MODULES.get(page_id, ()), *spec.modules)))
     focused = QApplication.focusWidget()
     focus_attr = next((name for name, value in vars(old).items() if value is focused), None)
     focus_ref = next((r["id"] for r in getattr(old, "_references", []) if r.get("_row_name") is focused), None)
@@ -144,8 +156,11 @@ def reload_page(window, page_id):
     new = None
     resource = None
     shell_rebound = False
+    prepared = None
+    quick_rebound = False
     rebind = getattr(window, "_rebind_reloaded_page", None)
-    loader = _fresh_spectrum_modules() if page_id == "spectrum" else _fresh_page_modules(spec.modules, spec.class_name)
+    loader = (_fresh_spectrum_modules() if page_id == "spectrum" and not staged_quick
+              else _fresh_page_modules(modules, spec.class_name))
     try:
         with loader as panel_class:
             new = spec.construct(panel_class, old, staging)
@@ -153,10 +168,14 @@ def reload_page(window, page_id):
             # Keep the existing public test hook for restoration failures.
             restore = restore_spectrum_state if page_id == "spectrum" else spec.restore
             restore(new, state)
+            if staged_quick:
+                prepared = quick.prepare_page_refresh(page_id, old, new, view_state)
             # A controller worker can change state while widgets are constructed.
             reason = spec.block_reason(old)
             if reason:
                 raise RuntimeError(reason)
+            if callable(getattr(window, "_acquisition_active", None)) and window._acquisition_active():
+                raise RuntimeError("An acquisition started while preparing the interface; refresh cancelled.")
             with QSignalBlocker(tabs):
                 try:
                     old.unbind_controller_signals()
@@ -177,6 +196,9 @@ def reload_page(window, page_id):
                     window._tab_ids.pop(old)
                     window._tab_ids[new] = page_id
                     tabs.setCurrentWidget(new if active is old else active)
+                    if prepared is not None:
+                        quick_rebound = True
+                        quick.commit_page_refresh(page_id, old, new, prepared)
                 except Exception:
                     new.unbind_controller_signals()
                     if spec.detach is not None:
@@ -198,11 +220,32 @@ def reload_page(window, page_id):
                     window._tab_ids.pop(new, None)
                     window._tab_ids[old] = page_id
                     tabs.setCurrentWidget(active)
+                    if quick_rebound:
+                        quick.rollback_page_refresh(page_id, old, new, prepared)
                     raise
         # Commit complete. No event-loop pumping occurs during the transaction.
+        new._page_reload_ui_error = None
+        if prepared is not None:
+            try:
+                quick.finish_page_refresh(page_id, new, prepared)
+            except Exception as exc:
+                # Replacement is committed. Never report "unchanged" or try
+                # to resurrect old adapters after retirement has started.
+                new._page_reload_ui_error = f"Interface cleanup failed: {type(exc).__name__}: {exc}"
+        elif quick is not None:
+            try:
+                quick.rebind_page(page_id, old, new)
+            except Exception as exc:
+                # Backend ownership has already transferred. Report a partial
+                # rebuild, without claiming that the Quick layout was applied.
+                new._page_reload_ui_error = f"{type(exc).__name__}: {exc}"
+                window._status.showMessage(f"{spec.title} Quick UI refresh failed: {new._page_reload_ui_error}", 15000)
         dispose = getattr(old, "dispose_reloaded_page", None)
         if dispose is not None:
-            dispose()
+            try:
+                dispose()
+            except Exception as exc:
+                new._page_reload_ui_error = f"Previous page cleanup failed: {type(exc).__name__}: {exc}"
         old.hide()
         old.deleteLater()
         if active is old:
@@ -217,6 +260,8 @@ def reload_page(window, page_id):
     finally:
         # Failed construction remains parented here and has no subscriptions.
         if new is not None and getattr(window, spec.window_attr) is not new:
+            if staged_quick:
+                quick.discard_page_refresh(new)
             new.unbind_controller_signals()
             dispose = getattr(new, "dispose_reloaded_page", None)
             if dispose is not None:

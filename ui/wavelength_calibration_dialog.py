@@ -5,13 +5,13 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
-import pyqtgraph as pg
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QCheckBox,
     QTableWidget,QTableWidgetItem,QComboBox,QDoubleSpinBox,QPlainTextEdit,
     QWidget,QTabWidget,QScrollArea,QHeaderView,QToolButton)
 from app.wavelength_calibration import fit_calibration, reference_lines, valid_context
 from ui.table_layout import fit_table_columns
+from ui.plot_factory import create_plot
 
 REFERENCE = Path(__file__).resolve().parents[1]/'calibrations/ingaas-2026-09-26/LightField-SourceSpectra.xml'
 
@@ -44,7 +44,7 @@ class WavelengthCalibrationDialog(QDialog):
         broad=QPushButton('Broad calibration: 900–1700 nm…');broad.clicked.connect(self.open_broad);layout.addWidget(broad)
         self.broad_dialog=None
         load=QPushButton('Load saved raw calibration capture…');load.clicked.connect(self.load_raw);layout.addWidget(load)
-        self.plot=pg.PlotWidget(); self.plot.setLabel('bottom','Pixel'); self.plot.setLabel('left','Counts')
+        self.plot=create_plot(); self.plot.setLabel('bottom','Pixel'); self.plot.setLabel('left','Counts')
         self.plot.getPlotItem().layout.setContentsMargins(8, 12, 8, 8)
         layout.addWidget(self.plot,2)
         self.table=QTableWidget(0,3); self.table.setHorizontalHeaderLabels(['Use','Peak pixel (1-based)','Known wavelength nm'])

@@ -47,6 +47,7 @@ def _preview_double():
         _preview_note_lbl=_Text(), _upcoming_preview=_Text(),
         _sync_filename_parts_from_loop_table=lambda: None,
     )
+    fake._draft_loop_groups = MethodType(panel.PresetsPanel._draft_loop_groups, fake)
     fake._draft_loop_and_batch = MethodType(panel.PresetsPanel._draft_loop_and_batch, fake)
     return fake
 

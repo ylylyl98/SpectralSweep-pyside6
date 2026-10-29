@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import pyqtgraph as pg
+from ui.plot_factory import create_plot, create_image_view
 from PySide6.QtCore import QEvent, QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -31,9 +32,10 @@ from app.engine.magnet_preparation import (
     MagnetPreparationWorker, format_preparation_progress, preparation_mode_observation,
 )
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
+from copy import deepcopy
+from ui.sensor_readout_preflight import ensure_sensor_readout
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.engine.mcd_metadata import finalize_mcd_metadata
-from controllers.rotation_controller import RotationController
 from utils.config import cfg
 from utils.filename_builder import sanitize_token, make_unique_stem
 from ui.mcd_panel import (
@@ -566,7 +568,9 @@ class MCD2100Panel(QWidget):
         slots = getattr(self._rotation, "logical_slots", None)
         if callable(slots):
             slots = slots()
-        slots = tuple(slots or RotationController.ROTATION_SLOTS)
+        # The controller supplies runtime slots; disconnected presentation
+        # needs only default labels and must not import a device backend.
+        slots = tuple(slots or ("rot1", "rot2"))
         self.rotator.addItems([str(slot) for slot in slots])
         self.rotator.setEditable(False)
         self._compact(self.angles, 160, 240)
@@ -959,7 +963,7 @@ class MCD2100Panel(QWidget):
         display_layout.addLayout(display_header)
         display_layout.addWidget(self.run_activity)
         display_layout.addWidget(self.spectrum_activity)
-        self._plot = pg.PlotWidget()
+        self._plot = create_plot()
         self._plot.setMinimumHeight(180)
         self._plot.setLabel("bottom", "Wavelength", units="nm")
         self._plot.setLabel("left", "Intensity", units="counts")
@@ -3113,6 +3117,12 @@ class MCD2100Panel(QWidget):
 
     @Slot()
     def start(self):
+        if getattr(self, "_sensor_preflight_pending", False):
+            return
+        if self._workflow_waiting_drain or (
+                self._interlock_held and self.worker is None and self._workflow_intent is None):
+            self.status.setText("Waiting for previous operation to finish")
+            return
         admission_error = self._workflow_admission_error("measurement")
         if admission_error is not None:
             self._show_error(admission_error)
@@ -3190,6 +3200,9 @@ class MCD2100Panel(QWidget):
                 connected = getattr(self._rotation, "is_connected", None)
                 if not callable(connected) or not connected(rotator_name):
                     raise ValueError(f"{rotator_name.upper()} is not connected")
+                if not ensure_sensor_readout(self, self._lf6, mode="1d"):
+                    return
+            sensor_intents = deepcopy(getattr(self._lf6, "sensor_readout_intents", {}))
             self._save_config_from_ui()
             self._experiment_run = None
             if device_id:
@@ -3201,6 +3214,7 @@ class MCD2100Panel(QWidget):
                     "angles_deg": angles, "rotator": rotator_name,
                     "lf_center_nm": self.lf_center.value(), "lf_exposure_ms": self.lf_exposure.value(),
                     "lf_frames": self.lf_frames.value(), "gate_ratio": self._gate_ratio(),
+                    "sensor_readout_intents": sensor_intents,
                     "gate_vtg_factor": self.gate_vtg_factor.value(),
                     "gate_vbg_factor": self.gate_vbg_factor.value(),
                     "initial_voltage_settle_s": self.initial_voltage_settle.value(),
@@ -3264,6 +3278,7 @@ class MCD2100Panel(QWidget):
                 **self._continuous_settings(),
                 metadata={
                     "device_id": self._sample_id.text().strip(),
+                    "sensor_readout_intents": sensor_intents,
                     "point": point,
                     "filename_temperature_k": filename_temperature_k,
                     "filename_temperature_source": filename_temperature_source,
@@ -3288,6 +3303,12 @@ class MCD2100Panel(QWidget):
 
     @Slot()
     def stop(self):
+        if getattr(self, "_sensor_preflight_pending", False):
+            self._sensor_preflight_cancelled = True
+            abort = getattr(self._lf6, "abort_acquisition", None)
+            if getattr(self._lf6, "sensor_preflight_pending", False) and callable(abort):
+                abort()
+            return
         if self.worker is None:
             intent = self._workflow_intent
             if intent is not None:
@@ -3535,12 +3556,20 @@ class MCD2100Panel(QWidget):
         control_pending = pending_snapshot.control_pending
         refreshing = self._telemetry_cycle is not None
         waiting_intent = self._workflow_intent is not None
+        previous_draining = self._workflow_waiting_drain or (
+            self._interlock_held and not running and not waiting_intent)
         # An in-flight display cycle is admissible for a workflow handoff;
         # the intent pauses its continuations and waits for both owners.
         blocked = recovery or control_pending or reading_ramp or waiting_intent
         self.start_btn.setEnabled(
-            self._connected and not running and not blocked and not self._externally_busy and not applying_temperature
+            self._connected and not running and not blocked and not previous_draining
+            and not self._externally_busy and not applying_temperature
         )
+        waiting_status = "Waiting for previous operation to finish"
+        if previous_draining and not running and not waiting_intent:
+            self.status.setText(waiting_status)
+        elif self.status.text() == waiting_status:
+            self.status.setText(self._terminal_status)
         self.prepare_magnet_btn.setEnabled(
             self._connected and not running and not control_pending and not reading_ramp
             and not waiting_intent and not self._externally_busy and not applying_temperature
@@ -3593,6 +3622,9 @@ class MCD2100Panel(QWidget):
             return
         self._interlock_held = False
         self.run_state_changed.emit(False)
+        # Admission can change only at this final owner-drain boundary. State
+        # callbacks may have refreshed controls before reaching this release.
+        self._refresh_controls()
 
     def shutdown(self, timeout_ms=30_000):
         restore_state = self._workflow_restore_state or SimpleNamespace(

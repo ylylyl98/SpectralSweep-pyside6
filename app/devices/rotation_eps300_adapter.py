@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import deque
 import math
+import re
 from typing import Iterable, List, Optional, Union
 from threading import RLock
 import time
+
+from app.devices.motion_verification import MotionHardwareFault, MotionVerificationError
 
 try:
     import pyvisa
@@ -24,27 +28,55 @@ class ESP300MotionProfile:
     deceleration: float
 
 
+@dataclass(frozen=True)
+class ESPControllerError:
+    code: int
+    timestamp: str
+    message: str
+    raw: str
+
+    @property
+    def axis(self) -> int | None:
+        return self.code // 100 if self.code >= 100 else None
+
+
 class NewportEPS300:
     """
-    Minimal Newport ESP/EPS-300 style controller adapter (VISA GPIB/RS-232).
+    Newport ESP300/ESP301 native ASCII adapter (VISA GPIB/serial/USB COM).
     """
 
     #: Default VISA timeouts (ms)
     DEFAULT_TIMEOUT_MS = 3000
     #: Default serial baud for EPS/ESP-300
     DEFAULT_BAUD = 19200
+    ESP301_USB_BAUD = 921600
+
+    @classmethod
+    def connection_settings(cls, model: str = "esp300", baud: Optional[int] = None) -> tuple[str, int]:
+        """Resolve host communication settings without contacting a controller."""
+        model = str(model).strip().lower()
+        if model not in ("esp300", "esp301"):
+            raise ValueError(f"Unsupported Newport controller model: {model!r}")
+        resolved_baud = int(baud) if baud is not None else (
+            cls.ESP301_USB_BAUD if model == "esp301" else cls.DEFAULT_BAUD
+        )
+        if resolved_baud <= 0:
+            raise ValueError("Newport serial baud must be positive")
+        return model, resolved_baud
     
     def __init__(
         self,
         resource: str,
         *,
         rm: "pyvisa.ResourceManager" = None,
+        model: str = "esp300",
         baud: Optional[int] = None,
         axis: Optional[int] = 1,
         connect_only: bool = False,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
     ):
-        if pyvisa is None:  # pragma: no cover
+        self.model, self.baud = self.connection_settings(model, baud)
+        if pyvisa is None and rm is None:  # pragma: no cover
             raise RuntimeError("pyvisa not installed")
 
         self.resource_name = resource
@@ -53,8 +85,10 @@ class NewportEPS300:
         self._io_lock = RLock()
         self._timeout_ms = int(timeout_ms)
         self._axis = int(axis) if axis is not None else 1
+        self._identity: str | None = None
+        self._controller_error_history: deque[ESPControllerError] = deque(maxlen=100)
 
-        self._open(baud=baud)
+        self._open(baud=self.baud)
         time.sleep(0.05)
 
     # ---------------------------
@@ -75,28 +109,20 @@ class NewportEPS300:
     # ---------------------------
     def _open(self, *, baud: Optional[int]):
         inst = self.rm.open_resource(self.resource_name)
-        inst.timeout = self._timeout_ms
-
-        if self.resource_name.upper().startswith("ASRL"):
-            # Serial (RS-232): uses \r
-            try:
+        try:
+            inst.timeout = self._timeout_ms
+            if self.resource_name.upper().startswith("ASRL"):
+                # ESP301 native USB COM uses a different baud from RS-232.
                 inst.baud_rate = int(baud or self.DEFAULT_BAUD)
-            except Exception:
-                pass
-            term = "\r"
+            # Both native serial and GPIB receive CR and send CRLF.
+            inst.read_termination = "\r\n"
+            inst.write_termination = "\r"
+        except Exception:
             try:
-                inst.read_termination = term
-                inst.write_termination = term
+                inst.close()
             except Exception:
                 pass
-        else:
-            # GPIB: uses \r\n
-            term = "\r\n"
-            try:
-                inst.read_termination = term
-                inst.write_termination = term
-            except Exception:
-                pass
+            raise
 
         self._inst = inst
 
@@ -147,7 +173,95 @@ class NewportEPS300:
     # ---------------------------
     def motor_on(self, axis: Optional[int] = None):
         ax = int(self._axis if axis is None else axis)
+        # Enable once, then verify. Never repeat MO as fault recovery.
         self._write(f"{ax}MO")
+        state = None
+        for attempt in range(3):
+            state = self.motor_power(axis=ax)
+            if state is True:
+                return
+            if attempt < 2:
+                time.sleep(0.05)
+        self._raise_motor_power_error(ax, state, "after motor enable")
+
+    def motor_power(self, *, axis: Optional[int] = None) -> Optional[bool]:
+        """Read selected-axis power, preserving unknown communication state."""
+        ax = int(self._axis if axis is None else axis)
+        command = f"{ax}MO?"
+        try:
+            response = self._discovery_payload(self._query(command), command)
+        except Exception:
+            return None
+        return {"0": False, "1": True}.get(response)
+
+    @property
+    def error_history(self) -> tuple[ESPControllerError, ...]:
+        """Errors consumed for fault diagnostics, retained for all shared axes."""
+        with self._io_lock:
+            return tuple(self._controller_error_history)
+
+    def _capture_fault_errors(self) -> str:
+        """Consume at most the documented ten-entry FIFO, retaining evidence.
+
+        Called only after an observed motor-off fault. No TE query or blanket
+        clear is sent, and errors for other axes remain in local history.
+        """
+        with self._io_lock:
+            for _ in range(10):
+                try:
+                    raw = self._discovery_payload(self._query("TB?"), "TB?")
+                    fields = raw.split(",", 2)
+                    if len(fields) != 3 or not re.fullmatch(r"\d{1,3}", fields[0].strip()):
+                        return f"error diagnostics unreadable: {raw!r}"
+                    code = int(fields[0].strip())
+                    if code == 0:
+                        break
+                    self._controller_error_history.append(ESPControllerError(
+                        code=code, timestamp=fields[1].strip(),
+                        message=fields[2].strip(), raw=raw,
+                    ))
+                except Exception as exc:
+                    return f"error diagnostics unavailable: {exc}"
+        return ""
+
+    def _raise_motor_power_error(self, axis: int, state: Optional[bool], context: str) -> None:
+        label = f"{self.model.upper()} axis {axis} on {self.resource_name}"
+        if state is None:
+            raise MotionVerificationError(f"{label}: motor power could not be verified {context}; no further move issued")
+        diagnostic_error = self._capture_fault_errors()
+        selected = [entry for entry in self.error_history if entry.axis == axis]
+        global_errors = [entry for entry in self.error_history if entry.axis is None]
+        details = []
+        if selected:
+            details.append("recorded axis errors: " + "; ".join(
+                f"{entry.code} {entry.message} (time {entry.timestamp})" for entry in selected
+            ))
+        if global_errors:
+            details.append("controller errors (not axis-specific): " + "; ".join(
+                f"{entry.code} {entry.message} (time {entry.timestamp})" for entry in global_errors
+            ))
+        if diagnostic_error:
+            details.append(diagnostic_error)
+        if not details:
+            details.append("no recorded error for this axis; inspect the controller")
+        summary = f"{label}: motor power is OFF {context}"
+        if selected:
+            # Prefer the originating fault over follow-up MOTOR NOT ENABLED
+            # entries, without presenting historical evidence as newly raised.
+            primary = next((entry for entry in reversed(selected) if entry.code % 100 != 13), selected[-1])
+            summary += f"; recorded {primary.code} {primary.message}"
+        elif global_errors:
+            primary = global_errors[-1]
+            summary += f"; recorded controller error {primary.code} {primary.message}"
+        if len(summary) > 220:
+            summary = summary[:217] + "..."
+        raise MotionHardwareFault(summary + "\n" + "\n".join(details))
+
+    def require_motor_enabled(self, *, axis: Optional[int] = None) -> None:
+        ax = int(self._axis if axis is None else axis)
+        state = self.motor_power(axis=ax)
+        if state is not True:
+            self._raise_motor_power_error(ax, state, "during motion verification")
 
     def motor_off(self, axis: Optional[int] = None):
         ax = int(self._axis if axis is None else axis)
@@ -201,6 +315,7 @@ class NewportEPS300:
             raise RuntimeError("motion cancelled before command")
         if not math.isfinite(float(position_deg)) or not math.isfinite(float(timeout_s)) or timeout_s <= 0:
             raise ValueError("motion target and positive timeout must be finite")
+        self.require_motor_enabled(axis=ax)
         self._write(f"{ax}PA{float(position_deg)}")
         
         if wait:
@@ -213,6 +328,9 @@ class NewportEPS300:
                         raise RuntimeError("motion cancelled")
                 # Poll device status
                 status = self.motion_status(axis=ax)
+                # MD=1 also occurs after a following-error shutdown. A stopped
+                # but unpowered axis must not permit corrective PA retries.
+                self.require_motor_enabled(axis=ax)
                 # A late status reply cannot turn an expired deadline into success.
                 # Timeout safety
                 remaining = deadline - time.monotonic()
@@ -407,39 +525,88 @@ class NewportEPS300:
     # Public Discovery
     # ---------------------------
     def get_axes(self, conservative: bool = True, *, max_axes: int = 3) -> list[int]:
-        """
-        Discover connected axes.
-        Checks Motor Type (QM) AND Stage ID (ID).
-        """
-        found: list[int] = []
-        for ax in range(1, max_axes + 1):
-            # 1. Check Motor Type (QM?)
-            # Returns: 0 = No Motor, 1 = DC, 2 = Stepper.
-            # If the controller defaults to "2" for everything, this check passes.
-            ok_qm, type_code = self._try_query_float(f"{ax}QM?")
-            
-            if not ok_qm or int(type_code) == 0:
-                continue
+        """Read installed drivers and ESP stages, without changing motor state.
 
-            # 2. Check Stage ID (ID?) - The Stricter Check
-            # Real stages usually return a name like "URM100".
-            # Unplugged axes often return "Unconfigured", "Unknown", or echoes.
-            ok_id, id_str = self._try_query_text(f"{ax}ID?")
-            
-            # If ID failed or explicitly says unconfigured, skip it
-            # (Adjust "UNCONFIGURED" if your specific controller uses a different word)
-            if ok_id and "UNCONFIGURED" not in id_str.upper() and "UNKNOWN" not in id_str.upper():
+        ESP300/301 ``ZU`` reports driver bits 0..2 and stage bits 8..10.
+        Some ESP300 and ESP301 controllers return 0H despite attached stages.
+        An all-zero bitmap therefore uses a bounded QM?/ID? scan only after
+        native VE? identity confirms the configured model. Unavailable ZU
+        responses also use the bounded scan, requiring motor and stage proof.
+        Neither a configured axis nor a timeout establishes stage presence.
+        """
+        limit = min(3, int(max_axes))
+        if limit < 1:
+            raise ValueError("max_axes must be positive")
+        try:
+            payload = self._discovery_payload(self._query("ZU"), "ZU")
+            if not re.fullmatch(r"(?:0[xX])?[0-9a-fA-F]+[hH]?", payload):
+                raise ValueError("Invalid ZU bitmap")
+            bitmap = int(payload.rstrip("hH"), 16)
+            if not 0 <= bitmap <= 0xFFFFFFFF:
+                raise ValueError("Invalid ZU bitmap range")
+        except Exception:
+            return self._legacy_axes(limit)
+
+        if bitmap == 0 and self._has_verified_native_identity():
+            # Observed on ESP300 3.09 and ESP301 1.1.1: a version whitelist
+            # cannot establish reliable ZU support. Require controller identity
+            # plus per-axis corroboration instead of interpreting zero as proof
+            # of absence or assuming an axis exists.
+            # Even for conservative=False, require actual stage corroboration.
+            return self._legacy_axes(limit)
+
+        return [
+            ax for ax in range(1, limit + 1)
+            if bitmap & (1 << (ax - 1))
+            and (not conservative or bitmap & (1 << (ax + 7)))
+        ]
+
+    def _has_verified_native_identity(self) -> bool:
+        return bool(re.fullmatch(
+            rf"{re.escape(self.model)}\s+Version\s+\d+(?:\.\d+)+"
+            r"(?:\s+\d{1,2}/\d{1,2}/\d{2,4})?",
+            self.idn(), re.IGNORECASE,
+        ))
+
+    @staticmethod
+    def _discovery_payload(response: str, command: str) -> str:
+        """Remove only this command's echo, never pieces of a stage name."""
+        payload = str(response).strip()
+        if payload.upper().startswith(command.upper()):
+            payload = payload[len(command):].strip()
+        return payload
+
+    def _legacy_axes(self, limit: int) -> list[int]:
+        found = []
+        absent = (
+            "UNKNOWN", "UNCONFIGURED", "NO STAGE", "NO MOTOR", "NOT CONNECTED",
+            "DISCONNECTED", "NOT DETECTED", "UNAVAILABLE", "UNDEFINED", "NO DEVICE",
+            "NOT PRESENT", "NO AXIS", "OUT OF RANGE", "NOT AVAILABLE", "MISSING",
+            "ERROR", "ERR",
+        )
+        for ax in range(1, limit + 1):
+            try:
+                qm = f"{ax}QM?"
+                motor = self._discovery_payload(self._query(qm), qm)
+                # Motor type is an integer enum, never a float or error number.
+                if motor not in ("1", "2", "3", "4"):
+                    continue
+                command = f"{ax}ID?"
+                stage = self._discovery_payload(self._query(command), command)
+                upper = stage.upper()
+                if (
+                    not stage or upper in (
+                        "NONE", "NULL", "N/A", "?", "ID", "ID?", "NAN", "INF",
+                        "+INF", "-INF", "INFINITY", "+INFINITY", "-INFINITY",
+                    )
+                    or any(marker in upper for marker in absent)
+                    or not re.search(r"[a-zA-Z]", stage)
+                    or "?" in stage or "\n" in stage or "\r" in stage
+                ):
+                    continue
                 found.append(ax)
-            elif not ok_id and int(type_code) > 0:
-                 # Fallback: If ID? isn't supported but QM says there is a motor,
-                 # we might hesitantly accept it, but for your case, let's be strict.
-                 # Change to True if you have 'dumb' motors without ID chips.
-                 pass
-
-        # Fallback: If scan found nothing, assume the manually configured axis exists
-        if not found:
-            return [int(self._axis)]
-
+            except Exception:
+                continue
         return found
 
     def motor_on_all(self, axes=None):
@@ -451,7 +618,12 @@ class NewportEPS300:
                 pass
 
     def idn(self) -> str:
+        if self._identity is not None:
+            return self._identity
         try:
-            return self._query("*IDN?")
+            identity = self._discovery_payload(self._query("VE?"), "VE?")
+            if identity and identity.upper() != "UNKNOWN":
+                self._identity = identity
+            return identity or "UNKNOWN"
         except Exception:
             return "UNKNOWN"

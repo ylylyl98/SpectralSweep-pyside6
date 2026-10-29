@@ -12,6 +12,38 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
 
 
+def launch_log_path() -> Path:
+    root = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".cache"))
+    return root / "SpectralSweep" / "logs" / f"launch-{os.getpid()}.log"
+
+
+def run_application(args: list[str]) -> int:
+    # Native Qt faults do not reach sys.excepthook. Keep faulthandler's stderr
+    # in a per-launch file, including when Explorer closes the batch console.
+    command = [sys.executable, "-X", "faulthandler", str(PROJECT_ROOT / "main.py"), *args]
+    path = launch_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        log = path.open("wb")
+    except OSError as exc:
+        print(f"Could not create startup diagnostic log: {exc}", file=sys.stderr)
+        return subprocess.run(command, cwd=PROJECT_ROOT).returncode
+    with log:
+        result = subprocess.run(command, cwd=PROJECT_ROOT, stderr=log)
+    if result.returncode:
+        try:
+            with path.open("rb") as reader:
+                reader.seek(max(0, path.stat().st_size - 16_384))
+                tail = reader.read().decode("utf-8", errors="replace").strip()
+            if tail:
+                print(tail, file=sys.stderr)
+        except OSError:
+            pass
+        print(f"SpectralSweep exited with code {result.returncode}. Startup log: {path}",
+              file=sys.stderr)
+    return result.returncode
+
+
 def dependency_fingerprint(requirements: Path) -> str:
     digest = hashlib.sha256(requirements.read_bytes())
     # A recreated/upgraded interpreter must establish its own install record.
@@ -71,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     result = ensure_dependencies(refresh=install_only, upgrade=upgrade)
     if result or install_only:
         return result
-    return subprocess.run([sys.executable, str(PROJECT_ROOT / "main.py"), *app_args], cwd=PROJECT_ROOT).returncode
+    return run_application(app_args)
 
 
 if __name__ == "__main__":

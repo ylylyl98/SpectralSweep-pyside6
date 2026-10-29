@@ -2,7 +2,14 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tools import launch_app
+
+
+@pytest.fixture(autouse=True)
+def isolated_launch_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(launch_app, "launch_log_path", lambda: tmp_path / "logs" / "launch.log")
 
 
 def test_successful_install_is_cached_and_changed_requirements_reinstall(tmp_path, monkeypatch):
@@ -46,3 +53,31 @@ def test_launcher_flags_are_consumed_and_app_arguments_are_forwarded(monkeypatch
     assert launch_app.main(["--install"]) == 0
     assert dependency_calls[-1] == {"refresh": True, "upgrade": False}
     assert len(app_calls) == 1
+
+
+def test_native_crash_output_is_retained_and_reported(monkeypatch, capsys):
+    def crash(command, **kwargs):
+        assert command[1:3] == ["-X", "faulthandler"]
+        assert command[-1] == "--ui=quick"
+        kwargs["stderr"].write(b"Windows fatal exception: access violation\n")
+        return SimpleNamespace(returncode=0xC0000005)
+
+    monkeypatch.setattr(launch_app.subprocess, "run", crash)
+    assert launch_app.run_application(["--ui=quick"]) == 0xC0000005
+    path = launch_app.launch_log_path()
+    assert "access violation" in path.read_text()
+    diagnostic = capsys.readouterr().err
+    assert "access violation" in diagnostic
+    assert str(path) in diagnostic
+
+
+def test_unwritable_log_does_not_prevent_application_launch(monkeypatch, tmp_path):
+    unavailable = tmp_path / "file-instead-of-directory"
+    unavailable.write_text("keep")
+    monkeypatch.setattr(launch_app, "launch_log_path", lambda: unavailable / "launch.log")
+    calls = []
+    monkeypatch.setattr(launch_app.subprocess, "run", lambda *args, **kwargs:
+                        calls.append((args, kwargs)) or SimpleNamespace(returncode=0))
+    assert launch_app.run_application([]) == 0
+    assert len(calls) == 1 and "stderr" not in calls[0][1]
+    assert unavailable.read_text() == "keep"

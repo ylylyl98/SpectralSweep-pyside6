@@ -105,7 +105,8 @@ class _FramePlot(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        self._view = pg.ImageView()
+        from ui.plot_factory import create_image_view
+        self._view = create_image_view()
         self._view.ui.roiBtn.hide()
         self._view.ui.menuBtn.hide()
         self._display_stack = QStackedWidget()
@@ -371,6 +372,14 @@ class SpectrumPanel(QWidget):
         self._device_status_row.addWidget(self._status_lbl)
         acquisition_layout.addLayout(btn_row, 1, 0)
         acquisition_layout.addLayout(run_row, 2, 0)
+        self._sensor_mode_hint = QLabel()
+        self._sensor_mode_hint.setObjectName("SpectrumSensorModeHint")
+        self._sensor_mode_hint.setTextFormat(Qt.TextFormat.PlainText)
+        self._sensor_mode_hint.setWordWrap(True)
+        self._sensor_mode_hint.hide()
+        # The Quick workbench replaces the acquisition group with a command
+        # bar. Keep this live readback beside device status in both shells.
+        root.insertWidget(1, self._sensor_mode_hint)
 
         calibration_row = QHBoxLayout()
         self._wavelength_calibration_btn = QPushButton('WinSpec wavelength calibration…')
@@ -509,7 +518,8 @@ class SpectrumPanel(QWidget):
         view_row.addWidget(self._references_toggle)
         root.addLayout(view_row)
         self._tabs = QTabWidget()
-        self._spec_plot  = _SpectrumPlot()
+        from ui.plot_factory import create_spectrum_plot
+        self._spec_plot  = create_spectrum_plot()
         self._frame_plot = _FramePlot()
         self._tabs.addTab(self._spec_plot,  "1D Spectrum")
         self._tabs.addTab(self._frame_plot, "2D Frame")
@@ -834,6 +844,20 @@ class SpectrumPanel(QWidget):
             self._winspec_capture_timing = copy.deepcopy(data.get('winspec_capture_timing'))
             return
         data = dict(data or {})
+        sensor = data.get("lightfield_sensor_mode")
+        if isinstance(sensor, dict):
+            if sensor.get('regions'):
+                from ui.sensor_readout_preflight import format_sensor_summary
+                self._sensor_mode_hint.setText('LightField verified: ' + format_sensor_summary(sensor))
+            else:
+                actual = sensor.get("actual", "Unknown")
+                action = "switched to" if sensor.get("changed") else "verified"
+                self._sensor_mode_hint.setText(f"LightField sensor: {action} {actual}.")
+            for snapshot in (self._pending_acquisition_snapshot, self._acquisition_settings_snapshot):
+                if snapshot is not None:
+                    snapshot["lightfield_sensor_mode"] = copy.deepcopy(sensor)
+            if len(data) == 1:
+                return
         center = (data.get("center_wavelength") or {}).get("readback")
         self._optics_readback.setText(
             f"Actual center: {_wavelength_energy_text(center)} | Grating: {data.get('grating', 'Not available')} | Output port: {data.get('output_port') or 'Not read'}"
@@ -1429,6 +1453,15 @@ class SpectrumPanel(QWidget):
     def _apply_settings_then(self, acquisition: Optional[str]) -> None:
         if self._ctrl is None or not self._connected:
             return
+        if acquisition:
+            from ui.sensor_readout_preflight import ensure_sensor_readout
+            mode = '2d' if acquisition in {'2d', 'run_2d'} else '1d'
+            if not ensure_sensor_readout(self, self._ctrl, mode=mode):
+                self._continuous_mode = None
+                self._add_pending = False
+                self._stop_btn.setEnabled(False)
+                self._andor_controls.set_controls_locked(False)
+                return
         if acquisition and not self._calibration_capture_pending:
             from ui.detector_wavelength_advice import confirm_detector_wavelength
             if not confirm_detector_wavelength(self, getattr(self._ctrl, 'identity', {}), [self._center.value()]):
@@ -1438,6 +1471,10 @@ class SpectrumPanel(QWidget):
                 self._andor_controls.set_controls_locked(False)
                 return
         self._pending_acquisition = acquisition
+        if not self._sensor_mode_hint.isHidden():
+            sensor = "Full sensor" if acquisition in {"2d", "run_2d"} else "Bin All / confirmed Custom Region"
+            if acquisition is not None:
+                self._sensor_mode_hint.setText(f"LightField: {sensor} will be set and verified before acquisition.")
         # Freeze the request at dispatch time.  The controls remain editable
         # while the asynchronous controller applies settings; reading them in
         # the completion callback can otherwise attribute a later UI edit to
@@ -1446,6 +1483,7 @@ class SpectrumPanel(QWidget):
         self._pending_acquisition_snapshot = {
             "sample_id": str(getattr(cfg.session, "sample_id", "") or ""),
             "instrument_identity": copy.deepcopy(getattr(self._ctrl, "identity", {}) or {}),
+            "sensor_readout_intents": copy.deepcopy(getattr(self._ctrl, "sensor_readout_intents", {})),
             "center_nm": float(self._center.value()),
             "exposure_ms": float(self._exposure.value()),
             "accumulations": int(self._accumulations.value()),
@@ -1511,6 +1549,8 @@ class SpectrumPanel(QWidget):
         self._continuous_mode = None
         self._add_pending = False
         full = str(message)
+        if any(name in full for name in ("sensor mode", "FullSensor", "LineSensor")):
+            self._sensor_mode_hint.setText("Sensor mode not verified — acquisition stopped. See error details.")
         if self._wavelength_dialog is not None and self._wavelength_dialog.isVisible():
             self._wavelength_dialog.result.setText(full)
             self._wavelength_dialog.steps.setCurrentIndex(2)
@@ -1527,6 +1567,8 @@ class SpectrumPanel(QWidget):
 
     @Slot()
     def _on_abort(self) -> None:
+        if getattr(self, '_sensor_preflight_pending', False):
+            self._sensor_preflight_cancelled = True
         method = getattr(self._ctrl, "abort_acquisition", None)
         try:
             if callable(method) and method():
@@ -1574,6 +1616,8 @@ class SpectrumPanel(QWidget):
 
     @Slot()
     def _stop_continuous(self) -> None:
+        if getattr(self, '_sensor_preflight_pending', False):
+            self._sensor_preflight_cancelled = True
         was_running = self._continuous_mode is not None
         self._continuous_mode = None
         self._pending_acquisition = None
@@ -1693,6 +1737,11 @@ class SpectrumPanel(QWidget):
             str(identity.get("backend", "")) in {"andor_sdk2", "winspec_ingaas"}
             and str(identity.get("camera_role", "")) == "ingaas"
         )
+        is_lightfield = str(identity.get("backend", "")) in {"lightfield", "mock_lightfield"}
+        self._sensor_mode_hint.setVisible(is_lightfield)
+        self._sensor_mode_hint.setText(
+            "LightField: 1D → Bin All (ask before replacing Custom Region) · 2D → Full sensor."
+            if is_lightfield else "")
         self._acquire_2d_btn.setToolTip(
             "The connected InGaAs detector is a one-dimensional 512-pixel array."
             if not self._supports_2d
@@ -1737,7 +1786,7 @@ class SpectrumPanel(QWidget):
         if identity.get("backend") in {"lightfield", "winspec_ingaas"}:
             refresh = getattr(self._ctrl, "lightfield_optics", None)
             if callable(refresh):
-                QTimer.singleShot(0, refresh)
+                QTimer.singleShot(0, self, refresh)
 
     @Slot()
     def _on_lf6_disconnected(self):
@@ -1754,6 +1803,8 @@ class SpectrumPanel(QWidget):
             self._wavelength_dialog.frame = None
             self._wavelength_dialog.invalidate()
         self._connected = False
+        self._sensor_mode_hint.hide()
+        self._sensor_mode_hint.clear()
         self._refresh_temperature_visibility()
         self._device_status.setText("Acquisition device: disconnected")
         self._pending_acquisition = None

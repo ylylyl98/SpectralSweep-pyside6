@@ -52,22 +52,23 @@ def prepare_preview_environment(root: Path) -> dict[str, str]:
     return env
 
 
-def run_preview() -> int:
+def run_preview(*, quick=False, workspaces=False) -> int:
     # The supervisor owns this directory across F5 restarts. Ordinary close
     # removes the scratch config and synthetic outputs, never production data.
     with tempfile.TemporaryDirectory(prefix="spectralsweep-preview-") as folder:
         root = Path(folder)
         env = prepare_preview_environment(root)
         while True:
-            result = subprocess.run(app_command("--preview-child"), env=env, cwd=root)
+            command = app_command("--preview-workspaces-child" if workspaces else "--preview-child", "--ui", "quick" if quick else "widgets")
+            result = subprocess.run(command, env=env, cwd=root)
             if result.returncode != RELOAD_EXIT_CODE:
                 return result.returncode
 
 
-def run_preview_child() -> int:
+def run_preview_child(*, quick=False, workspaces=False) -> int:
     root_text = os.environ.get(PREVIEW_ROOT_ENV, "")
     if not root_text:
-        raise RuntimeError("Start previews with --preview-spectrum")
+        raise RuntimeError("Start previews with --preview-spectrum, --preview-quick or --preview-workspaces")
     root = Path(root_text).resolve()
     config = root / "config.json"
     if not config.is_file():
@@ -86,6 +87,7 @@ def run_preview_child() -> int:
 
     set_windows_app_user_model_id(PREVIEW_APP_ID)
     app = QApplication(sys.argv)
+    app.setProperty("spectralQuick", quick)
     app.setApplicationName("SpectralSweep Preview")
     app.setApplicationDisplayName("SpectralSweep Preview")
     app.setOrganizationName("SpectralSweepPreview")
@@ -96,14 +98,26 @@ def run_preview_child() -> int:
     app.setStyle("Fusion")
     app.setFont(QFont("Segoe UI", 9))
     try:
-        from ui.spectrum_preview import SpectrumPreviewWindow
-        window = SpectrumPreviewWindow(root)
+        if workspaces:
+            from ui.quick_workspaces_preview import build_preview_window
+            from PySide6.QtGui import QAction
+            window = build_preview_window(root, app)
+            reload_action = QAction("Reload preview", window)
+            reload_action.setShortcut("F5")
+            reload_action.triggered.connect(lambda: app.exit(RELOAD_EXIT_CODE))
+            window.addAction(reload_action)
+        else:
+            from ui.spectrum_preview import SpectrumPreviewWindow
+            window = SpectrumPreviewWindow(root)
+            if quick:
+                from ui.quick_preview import enhance_preview
+                enhance_preview(window, root)
     except Exception as exc:
         # A syntax/import error while editing must not start a crash/retry loop.
         import traceback
         traceback.print_exc()
         choice = QMessageBox.critical(
-            None, "Spectrum preview could not load",
+            None, "Preview could not load",
             f"{type(exc).__name__}: {exc}\n\nFix the source, then choose Retry. The measurement app is unaffected.",
             QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Close,
         )
@@ -114,4 +128,7 @@ def run_preview_child() -> int:
     try:
         return app.exec()
     finally:
-        window.controller.abort_acquisition()
+        if workspaces:
+            window.shutdown()
+        else:
+            window.controller.abort_acquisition()
