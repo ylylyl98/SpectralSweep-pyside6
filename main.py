@@ -117,6 +117,9 @@ def main():
         win.setWindowIcon(icon)
     configure_window_taskbar(win)
     win.show()
+    updates = getattr(win, '_software_updates', None)
+    if updates is not None:
+        updates.start_automatic()
 
     try:
         exit_code = app.exec()

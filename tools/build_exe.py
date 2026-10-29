@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -15,15 +16,32 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def build_metadata(version: str, commit: str, *, build_number=0, channel=None) -> dict:
+    if type(build_number) is not int or build_number < 0:
+        raise ValueError("build_number must be a nonnegative integer")
+    if channel is None:
+        channel = "stable" if version.startswith("v") else "preview" if version.startswith("build-") else "local"
+    if channel not in {"stable", "preview", "local"}:
+        raise ValueError("Unknown release channel")
+    return {"schema_version": 1, "version": version, "commit": commit, "python": sys.version,
+            "build_number": build_number, "channel": channel,
+            "repository": "ylylyl98/SpectralSweep-pyside6",
+            "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", default="local")
     parser.add_argument("--clean", action="store_true", help="Recompute PyInstaller's dependency cache")
+    parser.add_argument("--build-number", type=int, default=int(os.environ.get("GITHUB_RUN_NUMBER", "0")))
+    parser.add_argument("--channel", choices=("preview", "stable", "local"))
     args = parser.parse_args()
     if sys.platform != "win32":
         parser.error("Build the Windows EXE on Windows")
     if not args.version or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in args.version):
         parser.error("Version must contain only letters, digits, dot, underscore or hyphen")
+    if args.build_number < 0:
+        parser.error("Build number must be nonnegative")
     # Native helper tools on a developer's PATH can contain incompatible ICU
     # and Windows CRT DLLs. Only resolve build dependencies from Python/Windows.
     windows = Path(os.environ.get("WINDIR", "C:/Windows"))
@@ -36,9 +54,9 @@ def main():
                     str(ROOT / "packaging/SpectralSweep.spec")], cwd=ROOT, env=build_env, check=True)
     bundle = ROOT / "dist/SpectralSweep"
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    (bundle / "version.json").write_text(json.dumps({
-        "version": args.version, "commit": commit, "python": sys.version,
-    }, indent=2), encoding="utf-8")
+    (bundle / "version.json").write_text(json.dumps(build_metadata(
+        args.version, commit, build_number=args.build_number, channel=args.channel),
+        indent=2), encoding="utf-8")
     shutil.copy2(ROOT / "packaging/PORTABLE_README.txt", bundle / "README.txt")
     # Launch outside the checkout. A successful import from the source tree must
     # never conceal a missing module/resource in the EXE.

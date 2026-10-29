@@ -431,6 +431,8 @@ class MainWindow(QMainWindow):
         # installed its final central widget. Restoring/maximizing the old
         # central layout before reparenting it can crash Qt when first shown.
         self._restore_geometry()
+        from ui.software_updates import SoftwareUpdateController
+        self._software_updates = SoftwareUpdateController(self)
 
     def _initialize_style_actions(self) -> None:
         # Keep the Python wrappers alive too (PySide6 menu-bar ownership).
@@ -1866,4 +1868,7 @@ class MainWindow(QMainWindow):
         quick = getattr(self, "_quick_workbench", None)
         if quick is not None:
             quick.shutdown()
+        updates = getattr(self, '_software_updates', None)
+        if updates is not None:
+            updates.shutdown()
         super().closeEvent(event)

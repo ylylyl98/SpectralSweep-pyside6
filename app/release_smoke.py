@@ -8,6 +8,44 @@ import sys
 import traceback
 
 
+def verify_update_ui(output):
+    """Exercise frozen QtNetwork/UI imports and metadata without network/device I/O."""
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication, QMainWindow
+    from app.application_updates import read_installed_version
+    from app.update_service import UpdateService
+    from ui.software_updates import SoftwareUpdateController
+
+    class OfflineManager:
+        def get(self, request):
+            raise AssertionError('Update UI smoke must not access the network')
+
+    app = QApplication.instance() or QApplication([])
+    current = read_installed_version()
+    if getattr(sys, 'frozen', False):
+        metadata = json.loads(Path(sys.executable).with_name('version.json').read_text(encoding='utf-8'))
+        if metadata['channel'] in ('preview', 'stable') and not current.can_check:
+            raise RuntimeError('Published EXE cannot identify its installed version')
+        if current.version != metadata['version'] and metadata['channel'] != 'local':
+            raise RuntimeError('Update service read the wrong installed version')
+    settings = QSettings(str(output / 'update-smoke.ini'), QSettings.Format.IniFormat)
+    window = QMainWindow()
+    service = UpdateService(window, installed=current, settings=settings, manager=OfflineManager())
+    controller = SoftwareUpdateController(window, service=service, open_url=lambda url: False)
+    try:
+        controller.show_dialog()
+        app.processEvents()
+        if controller.dialog.channel.count() != 2 or not controller.dialog.notes.isReadOnly():
+            raise RuntimeError('Update UI controls are incomplete')
+        controller.dialog.grab().save(str(output / 'software-updates.png'))
+    finally:
+        controller.shutdown()
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+    return True
+
+
 def run(output: Path) -> int:
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -45,6 +83,7 @@ def run(output: Path) -> int:
                 if not callable(page_class):
                     raise RuntimeError(f"Packaged reload did not produce a page class: {page}")
             reloaded.append(page)
+        updates_verified = verify_update_ui(output)
         passed = (report["pages"] == 9 and not report["qml_warnings"]
                   and not report["python_callback_errors"]
                   and not report["hardware_import_attempts"]
@@ -55,6 +94,7 @@ def run(output: Path) -> int:
         (output / "smoke-result.json").write_text(json.dumps({
             "passed": passed, "worker_protocol": True, "watchdog_entry": True,
             "pages": report["pages"], "reload_modules": reloaded, "winusb_manifests": manifests,
+            "updates_ui_offline": updates_verified,
             "hardware_validated": False,
         }, indent=2), encoding="utf-8")
         return 0 if passed else 1

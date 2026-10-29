@@ -6,7 +6,7 @@
 
 用于光谱采集及电压、位移、磁场联动测量的 Windows 桌面程序，采用 PySide6 和 Qt Quick。
 
-[下载 Windows EXE](https://github.com/ylylyl98/SpectralSweep-pyside6/releases) ·
+[下载 Windows 安装器](https://github.com/ylylyl98/SpectralSweep-pyside6/releases) ·
 [安装与官方下载](docs/installation.zh-CN.md) ·
 [反馈问题](https://github.com/ylylyl98/SpectralSweep-pyside6/issues)
 
@@ -26,26 +26,43 @@
 
 | 使用目的 | 需要准备什么 |
 | --- | --- |
-| 直接使用桌面程序 | 从 **Releases** 下载便携 ZIP，已包含 Python、Qt 和应用需要的 Python 包。 |
+| 直接使用桌面程序 | 推荐从 **Releases** 下载 **Setup.exe**，也可使用便携 ZIP；两者均包含 Python、Qt 和应用需要的 Python 包。 |
 | 连接真实仪器 | **只安装自己实际使用设备对应的驱动和厂商软件**，见下表。 |
 | 从源码运行或开发 | **Python 3.13 x64** 和仓库源码；推荐使用 Git 更新。 |
 | 配置已支持的 ST133 WinUSB 后端 | 私下提供的运行库 ZIP；目前文档中的安装/验证流程使用源码和 Python。 |
 
-### 使用 Windows EXE
+### 使用 Windows 安装器（推荐）
 
 1. 打开 [Releases](https://github.com/ylylyl98/SpectralSweep-pyside6/releases)。main 自动构建版本标为 **Pre-release（预发布）**。
-2. 在 **Assets** 下载 `SpectralSweep-<版本>-windows-x64.zip` 及对应的 `.sha256` 文件。
-3. **完整解压**后运行 `SpectralSweep.exe`，保留同目录的 `SpectralSweep-worker.exe` 和 `_internal`。
+2. 在 **Assets** 下载 `SpectralSweep-<版本>-windows-x64-Setup.exe` 及对应的 `.exe.sha256` 文件。
+3. 正常关闭 SpectralSweep 及其 worker 后运行 Setup。安装器只安装到当前 Windows 用户，创建开始菜单快捷方式，可选桌面快捷方式；应用安装本身不要求管理员权限。
 4. 连接仪器前，完成[首次配置检查](docs/installation.zh-CN.md#first-run)。
 
+默认安装目录为 `%LOCALAPPDATA%\Programs\SpectralSweep`。
+升级和卸载均保留用户配置与采集数据。检测到主程序或 worker 仍在运行时，安装器会停止，
+要求正常退出；不会替你关闭仪器进程，也不会安装后自动启动程序。
 发布包面向 Windows x64；本项目记录的实验室部署环境为 Windows 11 x64。
 普通 EXE 用户无需另装 Python、Git、pip、PySide6 或 PyInstaller。
 
-仅浏览界面、保持仪器断开时，在解压目录中运行：
+便携版仍提供 `SpectralSweep-<版本>-windows-x64.zip` 和 `.zip.sha256`。
+使用时完整解压，保留主 EXE 旁的 `SpectralSweep-worker.exe` 和 `_internal`。
+仅浏览界面、保持仪器断开时，在安装目录或解压目录中运行：
 
 ```powershell
 .\SpectralSweep.exe --preview-workspaces
 ```
+
+### 更新程序
+
+通过 **Help > Check for updates…** 手动检查。发布版默认在程序运行期间检查，
+通常每 6 小时最多一次；预发布版默认包含后续预发布，稳定版默认只检查正式版。
+可在该对话框中调整自动检查和通道；状态栏的 **Updates** 打开同一窗口。
+测量进行时，自动更新提示会延后显示。
+
+检查更新只提示并打开[官方 Release 页面](https://github.com/ylylyl98/SpectralSweep-pyside6/releases)，
+不会自动下载、安装或重启。升级前先结束测量并正常关闭程序，再运行新 Setup。
+**旧版本需要先手动升级一次，才能获得应用内更新提醒。** 源码用户继续通过 Git 更新。
+详见[升级与更新检查](docs/installation.zh-CN.md#updates)。
 
 ### 使用源码
 
@@ -115,11 +132,15 @@ py -3.13 -m venv .venv-pyside6-313
 .\.venv-pyside6-313\Scripts\python.exe -m pip install -r requirements-ci.txt
 .\.venv-pyside6-313\Scripts\python.exe tools/run_ci_tests.py
 .\.venv-pyside6-313\Scripts\python.exe tools/build_exe.py --version local
+.\.venv-pyside6-313\Scripts\python.exe tools/build_installer.py
 ```
+
+构建 Setup 另需 Inno Setup 编译器；普通用户无需安装它。
 
 [GitHub Actions](https://github.com/ylylyl98/SpectralSweep-pyside6/actions/workflows/windows-release.yml)
 把完整测试集按模块隔离并分成四组，与 Windows 打包并行运行。
 测试与实际 EXE 迁移启动检查全部通过后才发布；检查覆盖 9 个工作区、资源、后台进程入口及页面重载源码。
+安装器还需通过临时安装、覆盖升级、安装后应用 smoke 及卸载检查。
 缺少先决条件的测试会显示跳过原因。CI 不验证真实采集、温控或磁场运动。
 
 推送 `main` 后自动生成带版本号的**预发布版**；`v*` 标签生成正式版，见[发布说明](docs/windows-release.md)。

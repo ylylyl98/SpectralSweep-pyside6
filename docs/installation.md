@@ -8,9 +8,9 @@ and Python packages; Windows device drivers and vendor applications are separate
 
 ## Choose an installation path
 
-| Component | Portable EXE | Source / development |
+| Component | Setup / portable EXE | Source / development |
 | --- | --- | --- |
-| SpectralSweep | Extract the complete release ZIP | Obtain the repository |
+| SpectralSweep | Run the recommended Setup.exe, or extract the complete release ZIP | Obtain the repository |
 | Python, PySide6, NumPy and application Python packages | Included | Install Python 3.13 x64, then `requirements-quick.txt` |
 | Git | Not required | Recommended for cloning and updates; a source archive also works |
 | PyInstaller / pytest | Not required | Only needed to build EXEs / run tests, via `requirements-ci.txt` |
@@ -21,7 +21,34 @@ Downloads may require a vendor account, an instrument serial number or an
 existing software entitlement. Use the package matching the instrument and
 Windows version; the newest SDK is not automatically compatible with older hardware.
 
-## Portable EXE
+<a id="installer"></a>
+## Windows installer (recommended)
+
+1. Open [GitHub Releases](https://github.com/ylylyl98/SpectralSweep-pyside6/releases).
+   `main` builds are **pre-releases**; a formal release is published from a `v*` tag.
+2. Download `SpectralSweep-<version>-windows-x64-Setup.exe` and the matching `.exe.sha256` file.
+3. Compare the downloaded installer's SHA256 with the companion file if desired:
+
+   ```powershell
+   Get-FileHash .\SpectralSweep-*-windows-x64-Setup.exe -Algorithm SHA256
+   Get-Content .\SpectralSweep-*-windows-x64-Setup.exe.sha256
+   ```
+
+4. Finish acquisition and saving, then close SpectralSweep and its worker normally.
+   Setup refuses to continue while either process is running; it does not terminate them.
+5. Run Setup. The default destination is `%LOCALAPPDATA%\Programs\SpectralSweep`.
+   Installation is for the current Windows user and does not require administrator rights.
+   A Start menu shortcut is created; a desktop shortcut is optional. Setup does not launch the app afterward.
+6. Start SpectralSweep from the shortcut and complete the device-specific setup below.
+
+Run a newer Setup to upgrade the existing installation. Windows **Installed apps**
+can uninstall it. Upgrades and uninstalling retain `%APPDATA%\SpectralSweep` and
+acquired data; vendor drivers/software remain separate and may require their own administrator permissions.
+The default installation folder is not an experiment output folder: choose a separate writable data directory.
+
+<a id="portable"></a>
+<a id="portable-exe"></a>
+## Portable EXE alternative
 
 1. Open [GitHub Releases](https://github.com/ylylyl98/SpectralSweep-pyside6/releases).
    `main` builds are **pre-releases**; a formal release is published from a `v*` tag.
@@ -50,6 +77,37 @@ For an offline UI/worker audit that writes a report and screenshots:
 ```
 
 Neither command connects instruments. A successful audit does not verify hardware drivers or acquisition.
+
+<a id="updates"></a>
+## Upgrading and update checks
+
+**An older build needs one manual upgrade from the official Releases page before
+it can offer the new in-app update reminder.** Install the new Setup or extract the
+new portable ZIP into a separate folder. Preserve your configuration and data;
+do not extract a new ZIP into a running application directory.
+
+In a published build, open **Help > Check for updates…** or the status bar's **Updates** item.
+The dialog offers **Update channel** (**Stable releases** / **Include prereleases**)
+and **Check automatically (every 6 hours while running)**. Automatic checks are enabled
+by default: a check can run after startup and subsequent successful checks are normally
+at least six hours apart while the app stays open. Network failures or GitHub rate limits
+can delay checks. No background check runs while the app is closed.
+
+Preview builds default to including later pre-releases; stable builds default to stable
+releases only. You can change the selection in the dialog. An automatic update dialog
+waits until measurement is idle; a manual check is available whenever you choose to open it.
+Checking does not interrupt acquisition or reconnect devices.
+
+The reminder only displays release information and offers the
+[official repository's release page](https://github.com/ylylyl98/SpectralSweep-pyside6/releases).
+It does not download or execute Setup, install files, or restart the app or Windows.
+Choose when to finish measurement, close the application normally, download the new
+Setup and install it. Offline/check errors do not prevent normal use.
+
+Source/local builds are updated through Git rather than the EXE update reminder.
+Review local changes, commit or otherwise preserve them, then fetch/pull the intended
+branch before restarting through `launch.bat`. Do not overwrite another computer's
+instrument addresses, SDK paths or output settings during an upgrade.
 
 <a id="source"></a>
 ## Source setup
@@ -282,7 +340,9 @@ The older text quick-start is [here](../00_启动说明.txt).
 
 | Symptom | Check first |
 | --- | --- |
-| Missing DLL/module when starting the EXE | Extract the complete ZIP and keep the worker/`_internal` files with the main EXE. |
+| Missing DLL/module when starting the EXE | For Setup installs, rerun the matching installer after closing the app. For ZIPs, extract everything and keep the worker/`_internal` files with the main EXE. |
+| Setup reports SpectralSweep/worker is running | Finish acquisition and saving, then close the application normally. Setup will not terminate instrument processes. |
+| An older build has no update menu | Manually install a current Setup once; see [update checks](#updates). |
 | LightField cannot load | Vendor installation, Automation assemblies, required .NET Framework and `LIGHTFIELD_ROOT`; restart the launching process after changing environment variables. |
 | PM100D works in OPM but is absent in VISA | Driver Switcher assignment and VISA installation; see [PM100D](#pm100d). |
 | No USB/COM/VISA device | Matching device/interface driver, Device Manager, actual serial/address and vendor discovery utility. Python package installation alone is insufficient. |

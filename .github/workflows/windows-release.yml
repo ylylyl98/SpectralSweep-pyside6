@@ -59,7 +59,7 @@ jobs:
           retention-days: 30
 
   build:
-    name: Build and smoke-test Windows EXE
+    name: Build and verify portable EXE and Windows installer
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
@@ -87,12 +87,16 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.value }}
         run: python tools/build_exe.py --version "$env:RELEASE_VERSION"
+      - name: Build Setup and verify isolated install, upgrade and uninstall
+        run: python tools/build_installer.py
       - name: Retain packaged UI verification
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: windows-exe-smoke-results
-          path: tmp/release-smoke/
+          path: |
+            tmp/release-smoke/
+            tmp/installer-smoke/
           if-no-files-found: warn
           retention-days: 30
       - name: Upload verified release files
@@ -102,6 +106,8 @@ jobs:
           path: |
             dist/SpectralSweep-*-windows-x64.zip
             dist/SpectralSweep-*-windows-x64.zip.sha256
+            dist/SpectralSweep-*-windows-x64-Setup.exe
+            dist/SpectralSweep-*-windows-x64-Setup.exe.sha256
           compression-level: 0
           if-no-files-found: error
           retention-days: 14
@@ -135,13 +141,17 @@ jobs:
             flags=(--verify-tag --latest)
           fi
           cat > release-notes.md <<EOF
-          Windows x64 portable build of commit ${GITHUB_SHA}.
+          Windows x64 build of commit ${GITHUB_SHA}.
 
-          Download and extract the entire ZIP, then run SpectralSweep.exe.
-          Keep the worker EXE and _internal directory beside it. Python is included.
+          Recommended: download the Setup.exe for a per-user installation with shortcuts and uninstall support.
+          Close SpectralSweep and its worker normally before installing or upgrading.
+          Setup never closes acquisition processes, launches the app, or removes user settings/data.
+          The ZIP is also available: extract it entirely, then run SpectralSweep.exe.
+          Keep the worker EXE and _internal directory beside it. Python is included in both formats.
 
           Release gates: full Windows pytest suite (with reported prerequisite skips),
-          EXE build, relocated nine-workspace UI audit and console-worker protocol check.
+          EXE build, relocated nine-workspace UI audit and console-worker protocol check,
+          isolated Setup install/upgrade/uninstall and installed-app smoke verification.
           Physical instruments, vendor drivers and licensed SDKs are not validated by CI.
           Install the required instrument software/drivers on the target PC.
 

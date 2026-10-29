@@ -7,9 +7,9 @@ EXE 已包含 Python 运行时和 Python 包，Windows 设备驱动及厂商应�
 
 ## 选择安装方式
 
-| 组件 | EXE 便携版 | 源码 / 开发 |
+| 组件 | Setup / EXE 便携版 | 源码 / 开发 |
 | --- | --- | --- |
-| SpectralSweep | 完整解压 Release ZIP | 取得仓库源码 |
+| SpectralSweep | 推荐运行 Setup.exe，也可完整解压 Release ZIP | 取得仓库源码 |
 | Python、PySide6、NumPy 等应用 Python 包 | 已包含 | 安装 Python 3.13 x64，再安装 `requirements-quick.txt` |
 | Git | 不需要 | 推荐用于克隆与更新，也可以使用源码压缩包 |
 | PyInstaller / pytest | 不需要 | 仅打包 / 测试时需要，通过 `requirements-ci.txt` 安装 |
@@ -19,7 +19,34 @@ EXE 已包含 Python 运行时和 Python 包，Windows 设备驱动及厂商应�
 厂商下载可能需要账号、仪器序列号或已有软件授权。
 请选择匹配设备和 Windows 版本的安装包；最新版 SDK 不一定适用于旧硬件。
 
-## EXE 便携版
+<a id="installer"></a>
+## Windows 安装器（推荐）
+
+1. 打开 [GitHub Releases](https://github.com/ylylyl98/SpectralSweep-pyside6/releases)。
+   main 构建标为 **Pre-release（预发布）**；正式版由 `v*` 标签发布。
+2. 下载 `SpectralSweep-<版本>-windows-x64-Setup.exe` 和配套的 `.exe.sha256` 文件。
+3. 如需校验，计算下载的安装器 SHA256，与配套文件比较：
+
+   ```powershell
+   Get-FileHash .\SpectralSweep-*-windows-x64-Setup.exe -Algorithm SHA256
+   Get-Content .\SpectralSweep-*-windows-x64-Setup.exe.sha256
+   ```
+
+4. 完成采集及保存，正常关闭 SpectralSweep 和 worker。
+   检测到任一进程仍在运行时，安装器会停止，不会替你结束仪器进程。
+5. 运行 Setup。默认目录为 `%LOCALAPPDATA%\Programs\SpectralSweep`，
+   只安装到当前 Windows 用户，应用安装本身不要求管理员权限。
+   默认创建开始菜单快捷方式，可选桌面快捷方式；完成后不会自动启动程序。
+6. 从快捷方式启动，再按下文完成实际设备的安装与配置。
+
+升级时运行较新的 Setup，卸载时使用 Windows **已安装的应用**。
+升级和卸载都保留 `%APPDATA%\SpectralSweep` 中的用户设置，也保留另存的采集数据；
+厂商驱动/软件需要另行安装，可能有自己的管理员权限要求。
+默认程序目录不作为实验输出目录，应另选可写的数据文件夹。
+
+<a id="portable"></a>
+<a id="exe-便携版"></a>
+## EXE 便携版（备选）
 
 1. 打开 [GitHub Releases](https://github.com/ylylyl98/SpectralSweep-pyside6/releases)。
    main 构建标为 **Pre-release（预发布）**；正式版由 `v*` 标签发布。
@@ -48,6 +75,31 @@ EXE 已包含 Python 运行时和 Python 包，Windows 设备驱动及厂商应�
 ```
 
 这两种检查都不连接仪器；检查成功不代表驱动或真实采集已通过验证。
+
+<a id="updates"></a>
+## 升级与更新检查
+
+**旧版需要先从官方 Releases 手动升级一次，才能获得应用内更新提醒。**
+可安装新 Setup，或把新版 ZIP 完整解压到独立目录。保留已有配置及数据，
+不要把 ZIP 覆盖解压到仍在运行的程序目录。
+
+发布版中通过 **Help > Check for updates…**，或状态栏 **Updates** 打开更新窗口。
+其中 **Update channel** 可选择 **Stable releases**（只检查正式版）或
+**Include prereleases**（包含预发布）；**Check automatically (every 6 hours while running)**
+控制自动检查，默认开启。程序启动后可检查一次，后续成功检查通常至少间隔 6 小时；
+网络异常或 GitHub 限流可能延后检查，程序关闭时不会在后台检查。
+
+预发布版默认包含后续预发布，稳定版默认只检查正式版，可在该窗口切换。
+测量进行时自动更新提示会延后到空闲；手动检查可按需要打开。
+检查不会中断采集或重新连接设备。
+
+提醒仅显示版本信息并打开[本仓库官方 Release 页面](https://github.com/ylylyl98/SpectralSweep-pyside6/releases)，
+不会下载或执行 Setup、安装文件、重启应用或 Windows。由你决定何时完成测量、
+正常退出程序，再下载新 Setup 并安装。离线或检查失败不影响正常使用。
+
+源码/本地构建继续通过 Git 更新，不使用 EXE 更新提醒。
+先检查并提交或妥善保留本机改动，再获取/拉取目标分支，最后通过 `launch.bat` 重启。
+升级时不要覆盖另一台电脑的仪器地址、SDK 路径和输出设置。
 
 <a id="source"></a>
 ## 源码安装
@@ -253,7 +305,9 @@ USB 驱动按实际开发板选择，参考
 
 | 现象 | 优先检查 |
 | --- | --- |
-| EXE 启动缺 DLL/模块 | 是否完整解压，主 EXE、worker 与 `_internal` 是否仍在一起。 |
+| EXE 启动缺 DLL/模块 | Setup 安装可在关闭程序后重跑对应安装器；ZIP 检查是否完整解压，主 EXE、worker 与 `_internal` 是否仍在一起。 |
+| Setup 提示主程序或 worker 仍在运行 | 完成采集及保存，再正常退出；安装器不会结束仪器进程。 |
+| 旧版没有检查更新菜单 | 先手动安装一次新版 Setup，见[更新检查](#updates)。 |
 | LightField 无法加载 | 厂商安装、Automation 程序集、要求的 .NET Framework、`LIGHTFIELD_ROOT`；修改环境变量后重启启动进程。 |
 | PM100D 在 OPM 中可用，但 VISA 找不到 | Driver Switcher 的驱动选择及 VISA 安装，见 [PM100D](#pm100d)。 |
 | USB/COM/VISA 中没有目标设备 | 设备/接口驱动、设备管理器、真实序列号/地址及厂商工具；安装 Python 包不能代替驱动。 |

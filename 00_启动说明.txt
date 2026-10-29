@@ -1,9 +1,26 @@
 SpectralSweep 启动说明
 ====================
 
-EXE 用户：从 GitHub Releases 下载完整便携 ZIP，全部解压后运行 SpectralSweep.exe。
-保留同目录的 SpectralSweep-worker.exe 和 _internal；无需另装 Python。
+EXE 用户：推荐从 GitHub Releases 下载 SpectralSweep-<版本>-windows-x64-Setup.exe
+及配套 .exe.sha256。正常结束测量并关闭主程序和 worker 后运行安装器。
+安装器只安装到当前用户，默认目录 %LOCALAPPDATA%\Programs\SpectralSweep，
+不要求管理员权限；有开始菜单和可选桌面快捷方式。完成后请自行启动。
+升级可运行新 Setup，卸载可使用 Windows“已安装的应用”；保留用户设置与实验数据。
+检测到程序仍运行时安装器会停止，不自动关闭仪器进程，不自动重启。
+
+便携 ZIP 仍保留：全部解压后运行 SpectralSweep.exe，保留同目录的
+SpectralSweep-worker.exe 和 _internal。Setup 与 ZIP 均无需另装 Python。
 仪器驱动、厂商软件和本机配置仍需按实际设备准备。
+官方下载：https://github.com/ylylyl98/SpectralSweep-pyside6/releases
+
+更新程序
+--------
+旧版先手动安装一次新 Setup（或换用新版完整 ZIP），才能获得应用内更新提醒。
+Help > Check for updates… 或状态栏 Updates 打开检查窗口，也可调整更新通道和自动检查。
+发布版默认运行期间每 6 小时检查；预发布版默认包含预发布，稳定版只检查正式版。
+程序关闭时不检查；网络异常或 GitHub 限流可能延后检查，测量中延后自动弹窗。
+检查仅提示并打开本仓库官方发布页，不自动下载、安装或重启。
+结束测量并正常退出后，再自行下载、运行新 Setup；源码版本继续通过 Git 更新。
 
 源码用户：双击本说明旁边的 launch.bat。
 这是源码项目的主程序 BAT 入口，会打开 SpectralSweep 测量界面。
@@ -20,6 +37,8 @@ launch.bat                  源码日常启动
 README.md                   English 项目首页
 README.zh-CN.md             中文项目首页
 docs/installation.zh-CN.md  用户需自行下载安装的驱动/软件与首次配置
+docs/installation.md        English 安装、升级与驱动指南
+docs/windows-release.md     自动测试、Setup/ZIP 验证与发布流程
 docs/usage-reference.md     原 README 的详细操作与开发参考
 docs/manuals/               仪器手册
 docs/screenshots/           界面参考截图

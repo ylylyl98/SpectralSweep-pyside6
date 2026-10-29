@@ -7,7 +7,7 @@
 A Windows desktop application for spectrum acquisition and coordinated voltage,
 motion and magnet measurements, built with PySide6 and Qt Quick.
 
-[Download Windows EXE](https://github.com/ylylyl98/SpectralSweep-pyside6/releases) ·
+[Download Windows Setup](https://github.com/ylylyl98/SpectralSweep-pyside6/releases) ·
 [Installation and official downloads](docs/installation.md) ·
 [Report a problem](https://github.com/ylylyl98/SpectralSweep-pyside6/issues)
 
@@ -27,26 +27,45 @@ motion and magnet measurements, built with PySide6 and Qt Quick.
 
 | Your goal | What you need |
 | --- | --- |
-| Run the desktop app | The portable ZIP from **Releases**. Python, Qt and application Python packages are included. |
+| Run the desktop app | The recommended **Setup.exe** from **Releases**, or the portable ZIP. Both include Python, Qt and application Python packages. |
 | Connect instruments | Install **only the drivers and vendor software for your equipment**, listed below. |
 | Run or modify the source | **Python 3.13 x64** and the repository; Git is recommended for updates. |
 | Set up the supported ST133 WinUSB backend | A separately supplied private runtime ZIP; the documented setup/validation workflow currently uses source and Python. |
 
-### Windows EXE
+### Windows installer (recommended)
 
 1. Open [Releases](https://github.com/ylylyl98/SpectralSweep-pyside6/releases). Builds from `main` are marked **Pre-release**.
-2. Under **Assets**, download `SpectralSweep-<version>-windows-x64.zip` and its `.sha256` file.
-3. Extract the entire ZIP and run `SpectralSweep.exe`. Keep `SpectralSweep-worker.exe` and `_internal` beside it.
+2. Under **Assets**, download `SpectralSweep-<version>-windows-x64-Setup.exe` and its `.exe.sha256` file.
+3. Close SpectralSweep and its worker normally, then run Setup. It installs for the current user, adds a Start menu shortcut and offers an optional desktop shortcut. Administrator rights are not required for the app installation.
 4. Complete the [first-run checklist](docs/installation.md#first-run) before connecting equipment.
 
+The default installation folder is `%LOCALAPPDATA%\Programs\SpectralSweep`.
+Upgrading and uninstalling preserve user configuration and acquired data.
+Setup requires running app/worker processes to close; it does not close them for you or launch the app afterward.
 The published app targets Windows x64; Windows 11 x64 is the documented lab deployment.
 EXE users do not need a separate Python, Git, pip, PySide6 or PyInstaller installation.
 
-To explore the interface with disconnected devices, run from the extracted folder:
+The portable alternative remains `SpectralSweep-<version>-windows-x64.zip` plus `.zip.sha256`.
+Extract it completely and retain `SpectralSweep-worker.exe` and `_internal` beside `SpectralSweep.exe`.
+To explore the interface with disconnected devices, run from the installed or extracted folder:
 
 ```powershell
 .\SpectralSweep.exe --preview-workspaces
 ```
+
+### Updates
+
+Use **Help > Check for updates…** for a manual check. Published builds check by default
+while running, normally no more than once every six hours. Preview builds include
+pre-releases by default; stable builds check stable releases only. This dialog also provides
+automatic-check and channel options; the status bar's **Updates** item opens the same dialog.
+Automatic update dialogs wait while a measurement is active.
+
+An update check only offers the [official release page](https://github.com/ylylyl98/SpectralSweep-pyside6/releases).
+It does not download, install or restart anything. Stop measurement and close the app
+normally before running the new Setup. **Older builds need one manual upgrade to
+obtain this update reminder.** Source checkouts are updated through Git.
+See [upgrading and update checks](docs/installation.md#updates).
 
 ### Source checkout
 
@@ -121,12 +140,16 @@ The current Windows CI baseline is **Python 3.13 + PySide6 6.11.0**.
 .\.venv-pyside6-313\Scripts\python.exe -m pip install -r requirements-ci.txt
 .\.venv-pyside6-313\Scripts\python.exe tools/run_ci_tests.py
 .\.venv-pyside6-313\Scripts\python.exe tools/build_exe.py --version local
+.\.venv-pyside6-313\Scripts\python.exe tools/build_installer.py
 ```
+
+Building Setup additionally requires the Inno Setup compiler; ordinary users do not need it.
 
 [GitHub Actions](https://github.com/ylylyl98/SpectralSweep-pyside6/actions/workflows/windows-release.yml)
 runs the full test set in four isolated module groups alongside the Windows build.
 Publication requires successful tests and a relocated EXE audit covering all nine
 workspaces, resources, worker entry points and page-reload sources.
+The installer must also pass isolated install, upgrade, installed-app smoke and uninstall checks.
 Tests with unmet prerequisites report their skips. CI does not validate physical
 acquisition, temperature control or magnet motion.
 
