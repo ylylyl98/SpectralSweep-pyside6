@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -46,10 +47,54 @@ def verify_update_ui(output):
     return True
 
 
+def verify_startup_import(output: Path) -> None:
+    """Import the normal main-window chain in a clean, isolated process.
+
+    The separate process prevents real controller modules from contaminating the
+    preview audit's hardware-import guard. Import only: no window or devices.
+    """
+    probe_output = output / "startup-import"
+    probe_output.mkdir(parents=True, exist_ok=True)
+    for name in ("startup-import.json", "smoke-error.txt"):
+        (probe_output / name).unlink(missing_ok=True)
+    env = os.environ.copy()
+    env["SPECTRALSWEEP_SMOKE_STARTUP_IMPORT"] = "1"
+    # Imports may initialize configuration singletons; keep those away from
+    # the developer's profile and any settings on the installation target.
+    profile = probe_output / "profile"
+    profile.mkdir(exist_ok=True)
+    config = profile / "config.json"
+    config.write_text("{}", encoding="utf-8")
+    env["SPECTRALSWEEP_CONFIG_PATH"] = str(config)
+    env["SPECTRALSWEEP_HISTORY_PATH"] = str(profile / "history.sqlite3")
+    command = ([sys.executable] if getattr(sys, "frozen", False)
+               else [sys.executable, str(Path(__file__).resolve().parents[1] / "main.py")])
+    result = subprocess.run([*command, "--smoke-test", str(probe_output)], env=env,
+                            capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            timeout=120, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if result.returncode != 0:
+        error_path = probe_output / "smoke-error.txt"
+        detail = error_path.read_text(encoding="utf-8") if error_path.is_file() else result.stderr
+        raise RuntimeError(f"Normal startup import failed: {detail}")
+    marker = probe_output / "startup-import.json"
+    if not marker.is_file() or json.loads(marker.read_text(encoding="utf-8")) != {"main_window_import": True}:
+        raise RuntimeError("Normal startup import did not produce its success marker")
+
+
 def run(output: Path) -> int:
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     try:
+        if os.environ.get("SPECTRALSWEEP_SMOKE_STARTUP_IMPORT") == "1":
+            # Match normal startup's import without constructing MainWindow or
+            # starting notification services, controllers, or hardware.
+            from ui.main_window import MainWindow
+            if not callable(MainWindow):
+                raise RuntimeError("Normal startup did not import MainWindow")
+            (output / "startup-import.json").write_text(
+                json.dumps({"main_window_import": True}), encoding="utf-8")
+            return 0
+        verify_startup_import(output)
         from app.subprocess_command import module_command
         resource_root = Path(__file__).resolve().parents[1]
         worker_cwd = output if getattr(sys, "frozen", False) else resource_root
@@ -92,12 +137,13 @@ def run(output: Path) -> int:
                   and report["all_visible_bounds_clear"]
                   and report["all_horizontal_ranges_zero"] and report["all_tab_headers_unpaged"])
         (output / "smoke-result.json").write_text(json.dumps({
-            "passed": passed, "worker_protocol": True, "watchdog_entry": True,
+            "passed": passed, "main_window_import": True, "worker_protocol": True, "watchdog_entry": True,
             "pages": report["pages"], "reload_modules": reloaded, "winusb_manifests": manifests,
             "updates_ui_offline": updates_verified,
             "hardware_validated": False,
         }, indent=2), encoding="utf-8")
         return 0 if passed else 1
     except Exception:
+        (output / "smoke-result.json").write_text(json.dumps({"passed": False}), encoding="utf-8")
         (output / "smoke-error.txt").write_text(traceback.format_exc(), encoding="utf-8")
         return 1

@@ -1,6 +1,6 @@
 # Build on Windows with the same Python/Qt versions used by CI.
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files, copy_metadata
 
 root = Path(SPECPATH).parent
 datas = [
@@ -13,6 +13,9 @@ datas = [
     (str(root / "CRYO2100"), "CRYO2100"),
 ]
 datas += collect_data_files("pylablib", includes=["**/*.json", "**/*.cfg"])
+# NI packages obtain their version through importlib.metadata at import time.
+# Include dependency metadata too: nidaqmx imports nitypes before its own check.
+datas += copy_metadata("nidaqmx", recursive=True)
 datas += [(str(path), "app/devices") for path in (root / "app/devices").glob("winusb_*_runtime.json")]
 # Workspace reload compiles its UI module source directly (ui/page_reload.py).
 datas += [(str(path), str(path.parent.relative_to(root)))

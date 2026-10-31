@@ -98,6 +98,10 @@ def main():
     if not icon.isNull():
         app.setWindowIcon(icon)
 
+    # Resolve startup dependencies before starting the background watchdog, so
+    # an import failure cannot leave an orphan worker that blocks installation.
+    from ui.main_window import MainWindow
+
     from app.ntfy_notifications import NTFY_URL
     from app.process_watchdog import WatchdogSession
     watchdog = WatchdogSession(NTFY_URL)
@@ -110,7 +114,6 @@ def main():
     from ui.input_safety import install_input_wheel_guard
     install_input_wheel_guard(app)
 
-    from ui.main_window import MainWindow
     win = MainWindow(notifier=notifier, watch_styles=args.watch_styles, ui_mode=args.ui)
     win.notification_configured.connect(watchdog.enable)
     if not icon.isNull():

@@ -33,7 +33,8 @@ Setup 默认安装到 `%LOCALAPPDATA%\Programs\SpectralSweep`，不要求管理�
 LightField、NI/VISA/DAQ、相机/USB/FTDI 驱动、指定的 attoDRY SDK 或 WinUSB 运行时。
 用户配置保存在 `%APPDATA%/SpectralSweep`，开发者本机配置和实验数据不会进入构建。
 
-打包验证先将产物复制到仓库外，再启动真正的 EXE，检查九个工作区、QML 资源、布局、
+打包验证先将产物复制到仓库外，启动真正的 EXE，在独立子进程中检查正常主窗口的真实依赖导入
+（不创建控制器或连接设备），再检查九个工作区、QML 资源、布局、
 Python 回调错误及历史后台进程的 JSON 管道协议。测试报告和截图保留在 Actions artifacts。
 同时验证 WinUSB 版本清单、页面重载需要的 Python 源资源，以及 watchdog 辅助程序入口。
 之后编译 Setup，用独立验证身份、临时安装目录和隔离配置做静默安装，
