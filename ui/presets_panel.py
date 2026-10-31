@@ -4433,7 +4433,7 @@ class PresetsPanel(QWidget):
         self._batch_down_btn = QPushButton("↓ Down"); self._batch_down_btn.setFixedWidth(72)
         self._batch_down_btn.setToolTip("Move selected batch rows down one position, keeping their order.")
         self._batch_actions_btn = QToolButton()
-        self._batch_actions_btn.setText("Actions")
+        self._batch_actions_btn.setText("Batch Actions")
         self._batch_actions_btn.setToolTip(
             "More batch tools: run-state controls, copy/paste, arrangement, "
             "auto-frames, validation, and undo/redo."
@@ -5644,43 +5644,51 @@ class PresetsPanel(QWidget):
             (target_menu or menu).addAction(action)
             return action
 
+        edit_menu = menu.addMenu("Edit")
+        edit_menu.setToolTipsVisible(True)
         self._batch_undo_action = add_action(
             "Undo Batch Edit",
             self._undo_batch_edit,
             tooltip="Restore the previous batch-table state.",
             shortcut=QKeySequence.StandardKey.Undo,
+            target_menu=edit_menu,
         )
         self._batch_redo_action = add_action(
             "Redo Batch Edit",
             self._redo_batch_edit,
             tooltip="Reapply the most recently undone batch-table edit.",
             shortcut=QKeySequence.StandardKey.Redo,
+            target_menu=edit_menu,
         )
-        menu.addSeparator()
+        edit_menu.addSeparator()
         self._batch_copy_action = add_action(
             "Copy Selected Rows",
             self._copy_batch_rows,
             tooltip="Copy all selected rows to the internal row clipboard.",
             shortcut=QKeySequence.StandardKey.Copy,
+            target_menu=edit_menu,
         )
         self._batch_paste_action = add_action(
             "Paste Rows Below",
             self._paste_batch_rows,
             tooltip="Paste copied rows below the selection, or append them.",
             shortcut=QKeySequence.StandardKey.Paste,
+            target_menu=edit_menu,
         )
         self._batch_duplicate_action = add_action(
             "Duplicate Selected Row",
             self._duplicate_batch_row,
             tooltip="Insert an exact copy below the selected row.",
+            target_menu=edit_menu,
         )
         self._batch_rev_action = add_action(
             "Create Rev Sweep",
             self._create_rev_batch_row,
             tooltip="Duplicate the row, swap start/stop values, and append _Rev.",
+            target_menu=edit_menu,
         )
-        menu.addSeparator()
-        run_menu = menu.addMenu("Run State")
+        run_menu = menu.addMenu("Rows to Run")
+        run_menu.setToolTipsVisible(True)
         self._batch_enable_selected_action = add_action(
             "Enable Selected Rows",
             lambda: self._set_selected_rows_run_state(True),
@@ -5692,7 +5700,7 @@ class PresetsPanel(QWidget):
             target_menu=run_menu,
         )
         self._batch_only_selected_action = add_action(
-            "Run Only Selected Rows",
+            "Enable Only Selected Rows",
             self._run_only_selected_rows,
             tooltip="Enable selected rows and disable every other row.",
             target_menu=run_menu,
@@ -5708,6 +5716,7 @@ class PresetsPanel(QWidget):
             target_menu=run_menu,
         )
         arrange_menu = menu.addMenu("Arrange and Clean Up")
+        arrange_menu.setToolTipsVisible(True)
         self._batch_move_top_action = add_action(
             "Move Selected Rows to Top",
             lambda: self._move_batch_row_to_edge(top=True),
@@ -5724,6 +5733,7 @@ class PresetsPanel(QWidget):
             target_menu=arrange_menu,
         )
         tools_menu = menu.addMenu("Sweep Tools")
+        tools_menu.setToolTipsVisible(True)
         self._batch_auto_frames_action = add_action(
             "Auto Frames for Selected",
             self._auto_frames_for_selected_rows,
@@ -5740,9 +5750,15 @@ class PresetsPanel(QWidget):
         self._batch_actions_menu = menu
         self._batch_actions_btn.setMenu(menu)
         self._batch_table.setContextMenuPolicy(
-            Qt.ContextMenuPolicy.ActionsContextMenu
+            Qt.ContextMenuPolicy.CustomContextMenu
         )
-        self._batch_table.addActions(menu.actions())
+        self._batch_table.customContextMenuRequested.connect(
+            lambda pos: menu.popup(self._batch_table.viewport().mapToGlobal(pos))
+        )
+        # Shortcut actions must also be attached to the table after grouping.
+        for action in (self._batch_undo_action, self._batch_redo_action,
+                       self._batch_copy_action, self._batch_paste_action):
+            self._batch_table.addAction(action)
 
     def _refresh_tables(self):
         _populate_loop_table(self._loop_table, self._loop_src)
@@ -7220,26 +7236,41 @@ class PresetsPanel(QWidget):
         has_rows = bool(rows)
         single_row = rows[0] if len(rows) == 1 else -1
         row_count = self._batch_table.rowCount()
-        self._batch_undo_action.setEnabled(self._batch_history_index > 0)
-        self._batch_redo_action.setEnabled(
-            0 <= self._batch_history_index < len(self._batch_history) - 1
-        )
-        self._batch_copy_action.setEnabled(has_rows)
-        self._batch_paste_action.setEnabled(bool(self._batch_row_clipboard))
-        self._batch_duplicate_action.setEnabled(single_row >= 0)
-        self._batch_rev_action.setEnabled(single_row >= 0)
-        self._batch_enable_selected_action.setEnabled(has_rows)
-        self._batch_disable_selected_action.setEnabled(has_rows)
-        self._batch_only_selected_action.setEnabled(has_rows)
-        self._batch_enable_all_action.setEnabled(row_count > 0)
-        self._batch_disable_all_action.setEnabled(row_count > 0)
-        self._batch_auto_frames_action.setEnabled(has_rows)
-        self._batch_move_top_action.setEnabled(
-            has_rows and rows != list(range(len(rows)))
-        )
-        self._batch_move_bottom_action.setEnabled(
-            has_rows and rows != list(range(row_count - len(rows), row_count))
-        )
+        def update(action, enabled, reason, normal_tip=""):
+            action.setEnabled(enabled)
+            tip = normal_tip if enabled else reason
+            action.setToolTip(tip)
+            action.setStatusTip(tip)
+
+        update(self._batch_undo_action, self._batch_history_index > 0,
+               "No batch edit to undo.", "Restore the previous batch-table state.")
+        update(self._batch_redo_action,
+               0 <= self._batch_history_index < len(self._batch_history) - 1,
+               "No batch edit to redo.", "Reapply the most recently undone batch-table edit.")
+        update(self._batch_copy_action, has_rows, "Select one or more rows first.",
+               "Copy all selected rows to the internal row clipboard.")
+        update(self._batch_paste_action, bool(self._batch_row_clipboard),
+               "Copy rows first; the row clipboard is empty.",
+               "Paste copied rows below the selection, or append them.")
+        single_reason = "Select exactly one row first."
+        update(self._batch_duplicate_action, single_row >= 0, single_reason,
+               "Insert an exact copy below the selected row.")
+        update(self._batch_rev_action, single_row >= 0, single_reason,
+               "Duplicate the row, swap start/stop values, and append _Rev.")
+        for action in (self._batch_enable_selected_action, self._batch_disable_selected_action,
+                       self._batch_only_selected_action):
+            update(action, has_rows, "Select one or more rows first.",
+                   "Enable selected rows and disable every other row."
+                   if action is self._batch_only_selected_action else "")
+        for action in (self._batch_enable_all_action, self._batch_disable_all_action):
+            update(action, row_count > 0, "The batch table is empty.")
+        update(self._batch_auto_frames_action, has_rows, "Select one or more rows first.",
+               "Set the minimum frame count that satisfies the max jump/step.")
+        update(self._batch_move_top_action, has_rows and rows != list(range(len(rows))),
+               "Select one or more rows first." if not has_rows else "Selected rows are already at the top.")
+        update(self._batch_move_bottom_action,
+               has_rows and rows != list(range(row_count - len(rows), row_count)),
+               "Select one or more rows first." if not has_rows else "Selected rows are already at the bottom.")
         has_disabled = any(
             self._batch_table.item(row_index, BATCH_SCHEMA.index("Run"))
             and self._batch_table.item(
@@ -7247,7 +7278,8 @@ class PresetsPanel(QWidget):
             ).checkState() != Qt.CheckState.Checked
             for row_index in range(row_count)
         )
-        self._batch_delete_disabled_action.setEnabled(has_disabled)
+        update(self._batch_delete_disabled_action, has_disabled,
+               "The batch table is empty." if not row_count else "There are no disabled rows.")
 
     @Slot()
     def _duplicate_batch_row(self):

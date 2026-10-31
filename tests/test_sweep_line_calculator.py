@@ -12,7 +12,7 @@ import pandas as pd
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtTest import QSignalSpy
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractSpinBox,
@@ -781,6 +781,53 @@ class SweepLinePanelTests(unittest.TestCase):
             [table.item(row, repeat_col).text() for row in range(3)],
             ["6", "6", "6"],
         )
+
+    def test_batch_actions_shortcuts_and_disabled_reasons(self):
+        panel = PresetsPanel()
+        self.addCleanup(panel.deleteLater)
+        self.addCleanup(panel.close)
+        table = panel._batch_table
+        # The offscreen Qt test backend can retain the synthetic Ctrl state.
+        self.addCleanup(QTest.keyRelease, table, Qt.Key.Key_Control)
+        panel.show()
+        table.setFocus()
+        table.clearSelection()
+        panel._update_batch_action_states()
+        self.assertFalse(panel._batch_copy_action.isEnabled())
+        self.assertIn("Select", panel._batch_copy_action.toolTip())
+        self.assertFalse(panel._batch_paste_action.isEnabled())
+        self.assertIn("empty", panel._batch_paste_action.toolTip())
+
+        table.selectRow(0)
+        self.app.processEvents()
+        self.assertTrue(panel._batch_copy_action.isEnabled())
+        QTest.keyClick(table, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        self.assertTrue(panel._batch_paste_action.isEnabled())
+        QTest.keyClick(table, Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(table.rowCount(), 2)
+        QTest.keyClick(table, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(table.rowCount(), 1)
+        QTest.keyRelease(table, Qt.Key.Key_Control)
+        self.assertEqual(self.app.keyboardModifiers(), Qt.KeyboardModifier.NoModifier)
+
+    def test_enable_only_selected_menu_action_does_not_start_run(self):
+        panel = PresetsPanel()
+        self.addCleanup(panel.deleteLater)
+        table = panel._batch_table
+        table.selectRow(0)
+        panel._add_batch_row()
+        panel._add_batch_row()
+        table.clearSelection()
+        table.selectRow(1)
+        panel._update_batch_action_states()
+        run_clicked = QSignalSpy(panel._run_btn.clicked)
+        self.assertEqual(panel._batch_only_selected_action.text(), "Enable Only Selected Rows")
+        panel._batch_only_selected_action.trigger()
+        self.assertEqual([table.item(row, BATCH_SCHEMA.index("Run")).checkState()
+                          for row in range(table.rowCount())],
+                         [Qt.CheckState.Unchecked, Qt.CheckState.Checked,
+                          Qt.CheckState.Unchecked])
+        self.assertEqual(run_clicked.count(), 0)
 
     def test_row_clipboard_paste_and_undo_redo(self):
         panel = PresetsPanel()

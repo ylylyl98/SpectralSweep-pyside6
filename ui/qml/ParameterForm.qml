@@ -38,7 +38,7 @@ AppPane {
                             groupMetrics.advanceWidth(editorField.minimum.toFixed(Math.min(20, editorField.decimals))),
                             groupMetrics.advanceWidth(editorField.maximum.toFixed(Math.min(20, editorField.decimals))))) + 20))
                         readonly property real numericEditorWidth: numericInputWidth + Math.ceil(groupMetrics.advanceWidth(editorField.prefix + editorField.suffix)) + 30
-                        readonly property real editorWidth: editorField.kind === "number" ? Math.max(editorField.preferredWidth || 156, numericEditorWidth) : editorField.preferredWidth > 0 ? editorField.preferredWidth : editorField.kind === "divider" ? 1 : editorField.kind === "label" ? Math.max(1, Math.ceil(labelMetrics.advanceWidth(editorField.text)) + 4) : editorField.kind === "text" ? 208 : editorField.kind === "choice" ? 188 : Math.max(64, Math.min(300, Math.ceil(groupMetrics.advanceWidth(editorField.text)) + (editorField.kind === "check" ? 36 : 32)))
+                        readonly property real editorWidth: editorField.kind === "number" ? Math.max(editorField.preferredWidth || 156, numericEditorWidth) : editorField.preferredWidth > 0 ? editorField.preferredWidth : editorField.kind === "divider" ? 1 : editorField.kind === "label" ? Math.max(1, Math.ceil(labelMetrics.advanceWidth(editorField.text)) + 4) : editorField.kind === "text" ? 208 : editorField.kind === "choice" ? 188 : Math.max(64, Math.min(300, Math.ceil(groupMetrics.advanceWidth(editorField.text)) + (editorField.kind === "check" ? 36 : editorField.kind === "menu" ? 48 : 32)))
                         readonly property real minimumEditorWidth: editorField.kind === "number" ? numericEditorWidth : Math.min(editorWidth, 140)
                         readonly property bool stacked: paired && (editorField.labelAbove || width < labelWidth + 6 + minimumEditorWidth)
                         readonly property real allocatedLabelWidth: stacked ? width : labelWidth
@@ -107,38 +107,154 @@ AppPane {
             text: field.text
             appearance: field.appearance
             enabled: field.enabled
-            onClicked: { if (field.openMenu()) { popup.path = [field]; popup.open() } }
+            tooltipText: field.tooltip
+            Accessible.name: field.text
+            rightPadding: 28
+            Canvas {
+                id: menuChevron
+                x: parent.width - width - 10; y: (parent.height - height) / 2
+                width: 10; height: 6
+                onPaint: { const ctx = getContext("2d"); ctx.reset(); ctx.strokeStyle = menuButton.enabled ? Theme.textSecondary : Theme.textDisabled; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(1,1); ctx.lineTo(5,5); ctx.lineTo(9,1); ctx.stroke() }
+                Connections { target: Theme; function onDarkChanged() { menuChevron.requestPaint() } }
+                Connections { target: menuButton; function onEnabledChanged() { menuChevron.requestPaint() } }
+            }
+            onClicked: { if (field.openMenu()) { popup.path = [field]; popup.returnIndices = []; popup.errorText = ""; popup.restoreButtonFocus = false; popup.open() } }
             Basic.Popup {
                 id: popup
+                objectName: "parameterMenu_" + menuButton.field.fieldId
+                // A parameter form can be only one button high. Render outside
+                // that embedded Quick surface, as AppComboBox already does.
+                popupType: Basic.Popup.Window
                 property var path: []
+                property var returnIndices: []
+                property string errorText: ""
+                property bool restoreButtonFocus: false
                 readonly property var current: path.length ? path[path.length - 1] : menuButton.field
+                function moveSelection(step) {
+                    const entries = current.actions
+                    for (let offset = 1; offset <= entries.length; ++offset) {
+                        const index = (menuList.currentIndex + step * offset + entries.length) % entries.length
+                        const entry = entries[index]
+                        if (entry.visible && entry.enabled && !entry.separator) {
+                            menuList.currentIndex = index
+                            menuList.positionViewAtIndex(index, ListView.Contain)
+                            return
+                        }
+                    }
+                    menuList.currentIndex = -1
+                }
+                function focusFirst() {
+                    menuList.currentIndex = -1
+                    moveSelection(1)
+                    menuList.forceActiveFocus()
+                }
+                function activate(entry) {
+                    if (!entry || !entry.enabled || !entry.visible || entry.separator) return
+                    errorText = ""
+                    if (entry.actions.length) {
+                        if (entry.openMenu()) {
+                            returnIndices = returnIndices.concat([menuList.currentIndex])
+                            path = path.concat([entry])
+                            Qt.callLater(focusFirst)
+                        }
+                    } else if (entry.trigger()) {
+                        dismiss()
+                    } else {
+                        errorText = entry.error || "This action is no longer available. Review the highlighted value."
+                        menuList.forceActiveFocus()
+                    }
+                }
+                function goBack() {
+                    if (path.length <= 1) return
+                    const index = returnIndices[returnIndices.length - 1]
+                    path = path.slice(0, -1)
+                    returnIndices = returnIndices.slice(0, -1)
+                    errorText = ""
+                    Qt.callLater(function() { menuList.currentIndex = index; menuList.forceActiveFocus() })
+                }
+                function dismiss() {
+                    restoreButtonFocus = true
+                    close()
+                }
                 y: menuButton.height + 2
-                width: Math.max(240, menuButton.width)
+                width: Math.max(300, menuButton.width)
                 height: Math.min(420, menuRows.implicitHeight + 12)
                 padding: 6
+                margins: 6
+                focus: true
                 closePolicy: Basic.Popup.CloseOnEscape | Basic.Popup.CloseOnPressOutside
+                onOpened: focusFirst()
+                onClosed: { if (restoreButtonFocus) menuButton.forceActiveFocus() }
                 background: Rectangle { color: Theme.surface; border.color: Theme.border; radius: Theme.radius }
-                contentItem: Basic.ScrollView {
-                    Column {
-                        id: menuRows
-                        width: popup.availableWidth
-                        AppButton { visible: popup.path.length > 1; width: parent.width; text: "Back"; onClicked: popup.path = popup.path.slice(0, -1) }
-                        Repeater {
-                            model: popup.current.actions
-                            delegate: Basic.MenuItem {
-                                required property var modelData
-                                width: menuRows.width
-                                visible: modelData.visible
-                                height: !visible ? 0 : modelData.separator ? 9 : implicitHeight
-                                text: modelData.text + (modelData.actions.length ? "  ›" : "")
-                                enabled: modelData.enabled && !modelData.separator
-                                checkable: modelData.checkable
-                                checked: modelData.checked
-                                font.family: Theme.fontFamily
-                                contentItem: AppLabel { text: (parent.checked ? "✓  " : "") + parent.text; color: parent.enabled ? Theme.text : Theme.textDisabled; verticalAlignment: Text.AlignVCenter }
-                                background: Rectangle { color: parent.highlighted ? Theme.selection : "transparent"; Rectangle { visible: modelData.separator; anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 1; color: Theme.divider } }
-                                onTriggered: { if (modelData.actions.length) { if (modelData.openMenu()) popup.path = popup.path.concat([modelData]) } else { modelData.trigger(); popup.close() } }
+                contentItem: Column {
+                    id: menuRows
+                    spacing: 4
+                    Keys.onEscapePressed: popup.dismiss()
+                    AppLabel {
+                        id: menuError
+                        objectName: "parameterMenuError"
+                        visible: popup.errorText.length > 0
+                        width: parent.width
+                        text: popup.errorText
+                        color: Theme.danger
+                        wrapMode: Text.Wrap
+                    }
+                    AppButton {
+                        id: backButton
+                        objectName: "parameterMenuBack"
+                        visible: popup.path.length > 1
+                        width: parent.width
+                        text: "Back"
+                        onClicked: popup.goBack()
+                    }
+                    ListView {
+                        id: menuList
+                        objectName: "parameterMenuList"
+                        width: parent.width
+                        height: Math.min(contentHeight, 408 - (menuError.visible ? menuError.height + 4 : 0) - (backButton.visible ? backButton.height + 4 : 0))
+                        model: popup.current.actions
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        Basic.ScrollBar.vertical: Basic.ScrollBar {}
+                        Keys.onPressed: event => {
+                            if (event.key === Qt.Key_Down) popup.moveSelection(1)
+                            else if (event.key === Qt.Key_Up) popup.moveSelection(-1)
+                            else if (event.key === Qt.Key_Home) { currentIndex = -1; popup.moveSelection(1) }
+                            else if (event.key === Qt.Key_End) { currentIndex = 0; popup.moveSelection(-1) }
+                            else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space || event.key === Qt.Key_Right) {
+                                if (currentIndex >= 0) {
+                                    const entry = popup.current.actions[currentIndex]
+                                    if (event.key !== Qt.Key_Right || entry.actions.length) popup.activate(entry)
+                                }
+                            } else if (event.key === Qt.Key_Left) popup.goBack()
+                            else return
+                            event.accepted = true
+                        }
+                        delegate: Basic.MenuItem {
+                            id: menuItem
+                            required property var modelData
+                            required property int index
+                            objectName: "parameterMenuItem_" + index
+                            width: menuList.width
+                            visible: modelData.visible
+                            height: !visible ? 0 : modelData.separator ? 9 : implicitHeight
+                            text: modelData.text + (modelData.actions.length ? "  ›" : "")
+                            enabled: modelData.enabled && !modelData.separator
+                            checkable: modelData.checkable
+                            checked: modelData.checked
+                            highlighted: index === menuList.currentIndex
+                            hoverEnabled: true
+                            onHoveredChanged: { if (hovered && enabled) menuList.currentIndex = index }
+                            font.family: Theme.fontFamily
+                            Accessible.description: modelData.tooltip
+                            AppToolTip { text: menuItem.modelData.tooltip; active: menuItem.hovered && menuItem.enabled }
+                            contentItem: Column {
+                                spacing: 2
+                                AppLabel { width: parent.width; text: (menuItem.checked ? "✓  " : "") + menuItem.text; color: menuItem.enabled ? Theme.text : Theme.textDisabled; wrapMode: Text.Wrap }
+                                AppLabel { objectName: "parameterMenuHint_" + menuItem.index; visible: !menuItem.modelData.enabled && !menuItem.modelData.separator && text.length > 0; width: parent.width; text: menuItem.modelData.tooltip; color: Theme.textSecondary; font.pixelSize: 11; wrapMode: Text.Wrap }
                             }
+                            background: Rectangle { color: menuItem.highlighted ? Theme.selection : "transparent"; Rectangle { visible: menuItem.modelData.separator; anchors.verticalCenter: parent.verticalCenter; width: parent.width; height: 1; color: Theme.divider } }
+                            onTriggered: popup.activate(modelData)
                         }
                     }
                 }

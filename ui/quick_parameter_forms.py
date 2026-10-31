@@ -130,6 +130,7 @@ class ParameterMenuAction(QObject):
         self.action, self.adapter = action, adapter
         self._state = {}
         self._actions = []
+        self._error = ""
         action.changed.connect(self.refresh)
         action.destroyed.connect(self._destroyed)
         self.refresh(force=True)
@@ -146,7 +147,8 @@ class ParameterMenuAction(QObject):
         actions = self.adapter.menu_actions(action.menu()) if action.menu() else []
         state = dict(text=action.text().replace("&", ""), enabled=action.isEnabled(),
                      visible=action.isVisible(), checked=action.isChecked(),
-                     checkable=action.isCheckable(), separator=action.isSeparator())
+                     checkable=action.isCheckable(), separator=action.isSeparator(),
+                     tooltip=action.toolTip())
         if state != self._state or actions != self._actions:
             self._state, self._actions = state, actions
             self.changed.emit()
@@ -157,7 +159,14 @@ class ParameterMenuAction(QObject):
     checked = Property(bool, lambda s: s._state.get("checked", False), notify=changed)
     checkable = Property(bool, lambda s: s._state.get("checkable", False), notify=changed)
     separator = Property(bool, lambda s: s._state.get("separator", False), notify=changed)
+    tooltip = Property(str, lambda s: s._state.get("tooltip", ""), notify=changed)
+    error = Property(str, lambda s: s._error, notify=changed)
     actions = Property("QVariantList", lambda s: s._actions, notify=changed)
+
+    def _set_error(self, message):
+        if message != self._error:
+            self._error = message
+            self.changed.emit()
 
     @Slot(result=bool)
     def openMenu(self):
@@ -170,6 +179,7 @@ class ParameterMenuAction(QObject):
 
     @Slot(result=bool)
     def trigger(self):
+        self._set_error("")
         if (self.action is None or self.adapter._closed or not self.action.isEnabled()
                 or not self.action.isVisible() or self.action.isSeparator()):
             return False
@@ -178,11 +188,18 @@ class ParameterMenuAction(QObject):
         if policy == "commit":
             from ui.quick_editing import commit_quick_edits
             if not commit_quick_edits(panel):
+                errors = [view.model.error for view in getattr(panel, "_quick_table_editors", [])
+                          if not view.model._closed and view.source_table.isEnabled() and view.model.error]
+                errors.extend(field.error
+                              for form in getattr(panel, "_quick_parameter_forms", {}).get("forms", [])
+                              for field in form.adapter._fields if field.invalid and field.error)
+                self._set_error(next(iter(errors), "Correct the highlighted value before continuing."))
                 return False
         elif policy == "discard":
             from ui.quick_editing import discard_quick_edits
             discard_quick_edits(panel)
         if not self.action.isEnabled():
+            self._set_error(self.action.toolTip() or "This action is no longer available.")
             return False
         self.action.trigger()
         self.refresh(force=True)
