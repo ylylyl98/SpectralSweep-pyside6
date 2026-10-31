@@ -49,6 +49,26 @@ def bundle(tmp_path):
     return folder
 
 
+def test_real_inno_compiles_complete_installer_script(bundle, tmp_path):
+    try:
+        compiler = installer.find_compiler()
+    except FileNotFoundError:
+        pytest.skip("Inno Setup compiler is not installed")
+    icon = bundle / "_internal/assets/icons/spectralsweep.ico"
+    icon.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(installer.ROOT / "assets/icons/spectralsweep.ico", icon)
+    metadata = installer.load_metadata(bundle)
+    output = tmp_path / "output"
+    output.mkdir()
+    command = [str(compiler), f"/DSourceDir={bundle}", f"/DOutputDir={output}",
+               f"/DReleaseVersion={metadata['version']}",
+               f"/DFileVersion={installer.installer_file_version(metadata)}",
+               str(installer.ROOT / "packaging/SpectralSweep.iss")]
+    result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=600)
+    assert result.returncode == 0, f"ISCC failed:\n{result.stdout}\n{result.stderr}"
+    assert (output / f"SpectralSweep-{metadata['version']}-windows-x64-Setup.exe").is_file()
+
+
 @pytest.mark.parametrize("value", ["../escaped", "version with spaces", "", "a/b"])
 def test_installer_rejects_unsafe_asset_names_before_compiling(bundle, value):
     data = installer.load_metadata(bundle)

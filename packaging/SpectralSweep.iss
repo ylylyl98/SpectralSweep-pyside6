@@ -14,6 +14,7 @@
 
 [Setup]
 AppId={code:InstallerAppId}
+UsePreviousLanguage=no
 AppName=SpectralSweep
 AppVersion={#ReleaseVersion}
 AppPublisher=SpectralSweep
