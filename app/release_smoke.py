@@ -15,6 +15,7 @@ def verify_update_ui(output):
     from PySide6.QtWidgets import QApplication, QMainWindow
     from app.application_updates import read_installed_version
     from app.update_service import UpdateService
+    from app import update_install
     from ui.software_updates import SoftwareUpdateController
 
     class OfflineManager:
@@ -22,6 +23,8 @@ def verify_update_ui(output):
             raise AssertionError('Update UI smoke must not access the network')
 
     app = QApplication.instance() or QApplication([])
+    if not Path(update_install.__file__).with_suffix('.ps1').is_file():
+        raise RuntimeError('The external update installer helper is missing')
     current = read_installed_version()
     if getattr(sys, 'frozen', False):
         metadata = json.loads(Path(sys.executable).with_name('version.json').read_text(encoding='utf-8'))
@@ -36,7 +39,9 @@ def verify_update_ui(output):
     try:
         controller.show_dialog()
         app.processEvents()
-        if controller.dialog.channel.count() != 2 or not controller.dialog.notes.isReadOnly():
+        if (controller.dialog.channel.count() != 2 or not controller.dialog.notes.isReadOnly()
+                or not controller.dialog.download_button.text()
+                or not controller.dialog.install_button.text()):
             raise RuntimeError('Update UI controls are incomplete')
         controller.dialog.grab().save(str(output / 'software-updates.png'))
     finally:

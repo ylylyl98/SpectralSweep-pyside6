@@ -4,6 +4,7 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files, copy
 
 root = Path(SPECPATH).parent
 datas = [
+    (str(root / "app/update_install.ps1"), "app"),
     (str(root / "ui/qml"), "ui/qml"),
     (str(root / "ui/styles"), "ui/styles"),
     (str(root / "assets/icons"), "assets/icons"),

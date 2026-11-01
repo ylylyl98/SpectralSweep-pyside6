@@ -1,14 +1,19 @@
-"""Native, nonmodal update notices. Downloads remain an explicit browser action."""
+"""Native update notices, verified downloads and explicit install handoff."""
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QTimer, Qt, QUrl
+from pathlib import Path
+import sys
+
+from PySide6.QtCore import QObject, QSignalBlocker, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel,
-    QPlainTextEdit, QPushButton, QToolButton, QVBoxLayout,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QToolButton, QVBoxLayout,
 )
 
-from app.application_updates import RELEASES_URL, REPOSITORY, UpdateRelease
+from app.application_updates import RELEASES_URL, REPOSITORY, UpdateRelease, validate_download_release
+from app.update_download import UpdateDownload
+from app.update_install import InstallHandoff
 from app.update_service import UpdateService
 
 
@@ -48,34 +53,67 @@ class SoftwareUpdateDialog(QDialog):
         self.notes.setAccessibleName('Release notes')
         self.notes.setPlaceholderText('Release notes appear here when an update is available.')
         layout.addWidget(self.notes, 1)
-        hint = QLabel('Your browser opens the official release page. Install after stopping measurements and closing SpectralSweep.')
+        self.progress = QProgressBar()
+        self.progress.setAccessibleName('Update download progress')
+        self.progress.setRange(0, 1000)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+        hint = QLabel('Download in the background. Install and restart saves your settings and closes SpectralSweep normally. Stop measurements before installing.')
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        primary = QHBoxLayout()
+        self.download_button = QPushButton('&Download update')
+        self.install_button = QPushButton('Install and &restart')
+        self.cancel_button = QPushButton('Cancel &download')
+        self.cancel_button.hide()
+        for button in (self.download_button, self.install_button, self.cancel_button):
+            primary.addWidget(button)
+        primary.addStretch()
+        layout.addLayout(primary)
         buttons = QHBoxLayout()
         self.check_button = QPushButton('&Check now')
-        self.download_button = QPushButton('&Open download page')
+        self.release_page_button = QPushButton('Release &page')
         self.ignore_button = QPushButton('&Ignore version')
         close = QPushButton('C&lose')
-        for button in (self.check_button, self.download_button, self.ignore_button, close):
+        for button in (self.check_button, self.release_page_button, self.ignore_button, close):
             buttons.addWidget(button)
         layout.addLayout(buttons)
         self.check_button.clicked.connect(controller.check_manual)
-        self.download_button.clicked.connect(controller.open_download)
+        self.download_button.clicked.connect(controller.start_download)
+        self.install_button.clicked.connect(controller.install_update)
+        self.cancel_button.clicked.connect(controller.cancel_pending)
+        self.release_page_button.clicked.connect(controller.open_download)
         self.ignore_button.clicked.connect(controller.ignore_version)
         close.clicked.connect(self.close)
         self.channel.currentIndexChanged.connect(controller.change_channel)
         self.automatic.toggled.connect(controller.set_automatic)
-        self.download_button.setEnabled(True)
+        self.download_button.setEnabled(False)
+        self.install_button.setEnabled(False)
         self.ignore_button.setEnabled(False)
+
+    def closeEvent(self, event):
+        if self.controller._closing_for_update and not self.controller._closed:
+            event.ignore()
+            return
+        self.controller._activity_timer.stop()
+        if not self.controller._closing_for_update and not self.controller._closed:
+            self.controller.cancel_install()
+        super().closeEvent(event)
 
 
 class SoftwareUpdateController(QObject):
-    def __init__(self, window, *, service=None, busy=None, open_url=None):
+    def __init__(self, window, *, service=None, busy=None, open_url=None,
+                 downloader=None, handoff=None, install_dir=None):
         super().__init__(window)
         self.window = window
         self.service = service if service is not None else UpdateService(self)
         self._busy = busy or self._measurement_active
         self._open_url = open_url or QDesktopServices.openUrl
+        self.downloader = downloader if downloader is not None else UpdateDownload(self)
+        self.handoff = handoff if handoff is not None else InstallHandoff(self)
+        self._install_dir = Path(install_dir) if install_dir is not None else Path(sys.executable).parent
+        self._installing = False
+        self._closing_for_update = False
         self.dialog = None
         self.release = None
         self._closed = False
@@ -105,6 +143,14 @@ class SoftwareUpdateController(QObject):
         window.statusBar().addPermanentWidget(self.indicator)
         self.service.finished.connect(self._finished)
         self.service.busyChanged.connect(self._set_busy)
+        self.downloader.progress.connect(self._download_progress)
+        self.downloader.busyChanged.connect(lambda *_: self._refresh_actions())
+        self.downloader.finished.connect(self._download_finished)
+        self.handoff.ready.connect(self._handoff_ready)
+        self.handoff.failed.connect(self._handoff_failed)
+        self._activity_timer = QTimer(self)
+        self._activity_timer.setInterval(1000)
+        self._activity_timer.timeout.connect(self._refresh_actions)
         app = QApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.shutdown)
@@ -122,9 +168,21 @@ class SoftwareUpdateController(QObject):
                 'acquisition_in_progress', 'sensor_preflight_pending')):
             return True
         presets = getattr(self.window, '_presets', None)
-        return (bool(getattr(presets, 'metadata_finalizing', False)) or
-                any(getattr(panel, '_metadata_finalizing', False)
-                    for panel in getattr(self.window, '_session_panels', {}).values()))
+        panels = [presets, *getattr(self.window, '_session_panels', {}).values()]
+        for panel in panels:
+            if (getattr(panel, 'metadata_finalizing', False)
+                    or getattr(panel, '_metadata_finalizing', False)
+                    or getattr(panel, '_safe_magnet_operation_active', False)):
+                return True
+            building = getattr(panel, 'plan_build_running', None)
+            if callable(building) and building():
+                return True
+            for name in ('_run_thread', '_thread', 'thread'):
+                thread = getattr(panel, name, None)
+                running = getattr(thread, 'isRunning', None)
+                if callable(running) and running():
+                    return True
+        return False
 
     def start_automatic(self):
         if not self._closed and self.service.current.can_check:
@@ -139,6 +197,8 @@ class SoftwareUpdateController(QObject):
             if self.release:
                 self._render_result()
         self.dialog.show()
+        self._activity_timer.start()
+        self._refresh_actions()
         self.dialog.raise_()
         self.dialog.activateWindow()
 
@@ -151,15 +211,143 @@ class SoftwareUpdateController(QObject):
 
     def _set_busy(self, busy):
         self._checking = bool(busy)
+        self._refresh_actions()
+
+    def _download_ready(self):
+        return (self.release is not None and self.downloader.verified_path is not None
+                and Path(self.downloader.verified_path).is_file()
+                and self.downloader.verified_release == self.release)
+
+    def _refresh_actions(self):
+        if self._closed or self.dialog is None:
+            return
+        downloading = self.downloader.busy
+        locked = downloading or self._installing or self._checking
+        self.dialog.check_button.setEnabled(not locked)
+        self.dialog.channel.setEnabled(not locked)
+        self.dialog.ignore_button.setEnabled(self.release is not None and not locked)
+        downloadable = False
+        download_error = ''
+        if self.release is not None:
+            try:
+                validate_download_release(self.release)
+                downloadable = True
+            except ValueError as exc:
+                download_error = str(exc)
+        ready = self._download_ready()
+        self.dialog.download_button.setEnabled(downloadable and not locked and not ready)
+        self.dialog.download_button.setToolTip(download_error)
+        self.dialog.cancel_button.setVisible(downloading or self._installing)
+        self.dialog.cancel_button.setText('Cancel &download' if downloading else 'Cancel &installation')
+        self.dialog.install_button.setEnabled(ready and not locked and not self._busy())
+        self.dialog.install_button.setToolTip(
+            'Stop measurements and wait for saving to finish before installing.' if self._busy()
+            else 'Close safely, install the verified update, and reopen SpectralSweep.')
+
+    def start_download(self):
+        if self._closed or self._installing or self.downloader.busy or self.release is None:
+            return False
+        self.show_dialog()
+        self.dialog.progress.setRange(0, 0)
+        self.dialog.progress.show()
+        self.dialog.status.setText('Downloading and verifying the update…')
+        result = self.downloader.start(self.release)
+        self._refresh_actions()
+        return result
+
+    def cancel_download(self):
+        if not self._closed:
+            self.downloader.cancel()
+
+    def cancel_pending(self):
+        if self.downloader.busy:
+            self.cancel_download()
+        else:
+            self.cancel_install()
+
+    def cancel_install(self):
+        if self._closed or self._closing_for_update or not self._installing:
+            return
+        self.handoff.cancel()
+        self._installing = False
         if self.dialog:
-            self.dialog.check_button.setEnabled(not busy)
-            self.dialog.channel.setEnabled(not busy)
+            self.dialog.status.setText('Installation cancelled. The verified download is ready when you are.')
+        self._refresh_actions()
+
+    def _download_progress(self, received, total):
+        if self._closed or self.dialog is None:
+            return
+        self.dialog.progress.setRange(0, 1000)
+        self.dialog.progress.setValue(round(1000 * received / total) if total else 0)
+        self.dialog.status.setText(f'Downloading update: {received / 1024**2:.1f} / {total / 1024**2:.1f} MB')
+
+    def _download_finished(self, path, error):
+        if self._closed:
+            return
+        if self.dialog is not None:
+            self.dialog.progress.setRange(0, 1000)
+            if error:
+                self.dialog.progress.hide()
+                self.dialog.status.setText(error)
+            else:
+                self.dialog.progress.setValue(1000)
+                self.dialog.status.setText('Download verified. Stop measurements before installing.' if self._busy()
+                                           else 'Download verified. Ready to install and restart.')
+        self.indicator.setText('Update ready' if path is not None and not error else 'Update available')
+        self._refresh_actions()
+
+    def install_update(self):
+        if self._closed or self._installing or not self._download_ready():
+            return False
+        if self._busy():
+            self.dialog.status.setText('Stop measurements and wait for saving to finish before installing.')
+            return False
+        self._installing = True
+        self.dialog.status.setText('Preparing installation. SpectralSweep will close safely before Setup starts…')
+        self._refresh_actions()
+        mode = getattr(self.window, '_ui_mode', 'quick')
+        return self.handoff.prepare(self.downloader.verified_path, self.downloader.verified_sha256,
+                                    self._install_dir, ['--ui', mode])
+
+    def _handoff_ready(self):
+        if self._closed or not self._installing:
+            return
+        if self._busy():
+            self.handoff.cancel()
+            self._handoff_failed('A measurement started. Stop it before installing the update.')
+            return
+        self._closing_for_update = True
+        self.dialog.setEnabled(False)
+        try:
+            accepted = self.window.close()
+        except Exception as exc:
+            self.handoff.cancel()
+            self._handoff_failed(f'Could not close safely: {exc}')
+            return
+        finally:
+            self._closing_for_update = False
+            if not self._closed:
+                self.dialog.setEnabled(True)
+        if not accepted:
+            self.handoff.cancel()
+            self._handoff_failed('Installation cancelled because SpectralSweep stayed open. You can try again when ready.')
+        elif not self.handoff.arm():
+            QMessageBox.critical(None, 'Update could not start',
+                                 'The update could not be started. Reopen SpectralSweep and try again.')
+
+    def _handoff_failed(self, message):
+        self._installing = False
+        if self._closed:
+            return
+        self.show_dialog()
+        self.dialog.status.setText(message)
+        self._refresh_actions()
 
     def _ignored(self):
         return self.service.settings.value('updates/ignoredTag/' + self.service.channel, '')
 
     def _finished(self, release, error, manual):
-        if self._closed:
+        if self._closed or self.downloader.busy or self._installing:
             return
         if error:
             if manual:
@@ -191,6 +379,7 @@ class SoftwareUpdateController(QObject):
             'No newer compatible Windows installer was found in this channel.')
         self.dialog.notes.setPlainText(release.body if release else '')
         self.dialog.ignore_button.setEnabled(release is not None)
+        self._refresh_actions()
 
     def _show_pending(self):
         if self._closed or not self._pending or not self.service.automatic_enabled:
@@ -205,6 +394,10 @@ class SoftwareUpdateController(QObject):
         self._render_result()
 
     def change_channel(self):
+        if self.downloader.busy or self._installing:
+            with QSignalBlocker(self.dialog.channel):
+                self.dialog.channel.setCurrentIndex(self.dialog.channel.findData(self.service.channel))
+            return
         self.service.set_channel(self.dialog.channel.currentData())
         self.release = None
         self._pending = False
@@ -213,6 +406,8 @@ class SoftwareUpdateController(QObject):
         self.dialog.notes.clear()
         self.dialog.ignore_button.setEnabled(False)
         self.dialog.status.setText('Channel changed. Check now to refresh the available version.')
+        self.dialog.progress.hide()
+        self._refresh_actions()
 
     def set_automatic(self, enabled):
         self.service.set_automatic_enabled(enabled)
@@ -242,6 +437,10 @@ class SoftwareUpdateController(QObject):
         self._closed = True
         self._startup.stop()
         self._notice_timer.stop()
+        self._activity_timer.stop()
         self.service.shutdown()
+        self.downloader.shutdown()
+        if not self._closing_for_update:
+            self.handoff.shutdown()
         if self.dialog:
             self.dialog.close()

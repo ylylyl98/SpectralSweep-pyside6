@@ -1,5 +1,7 @@
 """Offline update notices on a dummy window, without hardware services."""
 from types import SimpleNamespace
+import hashlib
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QObject, Signal, Qt
@@ -61,24 +63,92 @@ def new_release(*, body='Release notes', html_url=None):
     return UpdateRelease(tag, 'New release',
                          html_url or f'https://github.com/{REPOSITORY}/releases/tag/{tag}',
                          f'https://github.com/{REPOSITORY}/releases/download/{tag}/SpectralSweep-{tag}-windows-x64-Setup.exe',
-                         123456, body, '2026-10-29T00:00:00Z')
+                         9, body, '2026-10-29T00:00:00Z', hashlib.sha256(b'installer').hexdigest())
+
+
+class FakeDownload(QObject):
+    progress = Signal(int, int)
+    busyChanged = Signal(bool)
+    finished = Signal(object, str)
+
+    def __init__(self, folder):
+        super().__init__()
+        self.folder = folder
+        self.busy = False
+        self.verified_path = self.verified_release = None
+        self.verified_sha256 = ''
+        self.starts = []
+        self.stops = 0
+
+    def start(self, release):
+        self.starts.append(release)
+        self.busy = True
+        self.busyChanged.emit(True)
+        return True
+
+    def complete(self):
+        self.verified_path = self.folder / 'setup.exe'
+        self.verified_path.write_bytes(b'installer')
+        self.verified_release = self.starts[-1]
+        self.verified_sha256 = hashlib.sha256(b'installer').hexdigest()
+        self.busy = False
+        self.busyChanged.emit(False)
+        self.finished.emit(self.verified_path, '')
+
+    def cancel(self):
+        self.busy = False
+        self.busyChanged.emit(False)
+        self.finished.emit(None, 'Download cancelled.')
+
+    def shutdown(self):
+        self.stops += 1
+        if self.busy:
+            self.cancel()
+
+
+class FakeHandoff(QObject):
+    ready = Signal()
+    failed = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.requests = []
+        self.arms = self.cancels = self.stops = 0
+
+    def prepare(self, *args):
+        self.requests.append(args)
+        return True
+
+    def arm(self):
+        self.arms += 1
+        return True
+
+    def cancel(self):
+        self.cancels += 1
+
+    def shutdown(self):
+        self.stops += 1
 
 
 @pytest.fixture
-def harness():
+def harness(tmp_path):
     application = quick_application()
     window = QMainWindow()
     service = FakeService()
     opened = []
     activity = {'busy': False}
+    downloader = FakeDownload(tmp_path)
+    handoff = FakeHandoff()
     controller = SoftwareUpdateController(window, service=service,
                                           busy=lambda: activity['busy'],
-                                          open_url=lambda url: opened.append(url.toString()))
+                                          open_url=lambda url: opened.append(url.toString()),
+                                          downloader=downloader, handoff=handoff)
     state = SimpleNamespace(app=application, window=window, service=service,
-                            controller=controller, opened=opened, activity=activity)
+                            controller=controller, opened=opened, activity=activity,
+                            downloader=downloader, handoff=handoff)
     yield state
     controller.shutdown()
-    window.close()
+    QMainWindow.close(window)
     window.deleteLater()
     service.deleteLater()
     drain_qt_deletions()
@@ -189,7 +259,7 @@ def test_release_notes_remain_literal_plain_text(harness):
     assert dialog.status.textFormat() == Qt.TextFormat.PlainText
 
 
-def test_download_only_opens_official_release_page_and_does_not_shutdown(harness, monkeypatch):
+def test_secondary_release_page_opens_browser_without_installing(harness, monkeypatch):
     import os
     import subprocess
     from PySide6.QtCore import QProcess
@@ -204,7 +274,7 @@ def test_download_only_opens_official_release_page_and_does_not_shutdown(harness
     h = harness
     candidate = new_release()
     h.service.finished.emit(candidate, '', True)
-    h.controller.dialog.download_button.click()
+    h.controller.dialog.release_page_button.click()
     assert h.opened == [candidate.html_url]
     assert h.service.stops == 0
     assert h.controller.dialog.isVisible()
@@ -214,6 +284,137 @@ def test_download_only_opens_official_release_page_and_does_not_shutdown(harness
 def test_no_selected_release_opens_official_release_index(harness):
     harness.controller.open_download()
     assert harness.opened == [RELEASES_URL]
+
+
+def test_direct_download_progress_completion_and_no_browser_or_install(harness):
+    h = harness
+    release = new_release()
+    h.service.finished.emit(release, '', True)
+    dialog = h.controller.dialog
+    assert dialog.download_button.isEnabled() and not dialog.install_button.isEnabled()
+    dialog.download_button.click()
+    assert h.downloader.starts == [release] and h.opened == []
+    assert dialog.cancel_button.isVisible()
+    assert not dialog.check_button.isEnabled() and not dialog.channel.isEnabled()
+    assert not h.controller.start_download()
+    h.downloader.progress.emit(4, 9)
+    assert dialog.progress.value() == 444
+    h.downloader.complete()
+    assert dialog.progress.value() == 1000
+    assert dialog.install_button.isEnabled() and not dialog.download_button.isEnabled()
+    assert h.handoff.requests == [] and h.handoff.arms == 0
+
+
+def test_cancel_download_and_retry(harness):
+    h = harness
+    h.service.finished.emit(new_release(), '', True)
+    h.controller.dialog.download_button.click()
+    h.controller.dialog.cancel_button.click()
+    assert 'cancelled' in h.controller.dialog.status.text()
+    assert h.controller.dialog.download_button.isEnabled()
+    assert h.controller.start_download()
+    assert len(h.downloader.starts) == 2 and not h.handoff.requests
+
+
+def test_download_during_measurement_but_install_waits_for_idle(harness):
+    h = harness
+    h.activity['busy'] = True
+    h.service.finished.emit(new_release(), '', True)
+    assert h.controller.start_download()
+    h.downloader.complete()
+    assert not h.controller.dialog.install_button.isEnabled()
+    assert not h.controller.install_update() and not h.handoff.requests
+    h.activity['busy'] = False
+    h.controller._refresh_actions()
+    assert h.controller.dialog.install_button.isEnabled()
+
+
+def prepare_install(h):
+    h.service.finished.emit(new_release(), '', True)
+    h.controller.start_download()
+    h.downloader.complete()
+    assert h.controller.install_update()
+
+
+def test_new_measurement_blocks_pending_install_before_close(harness, monkeypatch):
+    h = harness
+    prepare_install(h)
+    monkeypatch.setattr(h.window, 'close', lambda: pytest.fail('Active acquisition must not be closed'))
+    h.activity['busy'] = True
+    h.handoff.ready.emit()
+    assert h.handoff.cancels == 1 and h.handoff.arms == 0
+    assert not h.controller._installing
+
+
+def test_close_veto_cancels_handoff_and_preserves_app(harness, monkeypatch):
+    h = harness
+    prepare_install(h)
+    monkeypatch.setattr(h.window, 'close', lambda: False)
+    h.handoff.ready.emit()
+    assert h.handoff.cancels == 1 and h.handoff.arms == 0
+    assert not h.controller._closed and not h.controller._installing
+    assert h.controller.dialog.install_button.isEnabled()
+
+
+def test_accepted_close_arms_helper_after_normal_controller_shutdown(harness, monkeypatch):
+    h = harness
+    prepare_install(h)
+    def normal_close():
+        h.controller.shutdown()
+        return True
+    monkeypatch.setattr(h.window, 'close', normal_close)
+    h.handoff.ready.emit()
+    assert h.controller._closed
+    assert h.handoff.arms == 1 and h.handoff.stops == 0 and h.handoff.cancels == 0
+    assert h.service.stops == 1 and h.downloader.stops == 1
+
+
+def test_nested_close_confirmation_cannot_cancel_an_accepted_install(harness, monkeypatch):
+    h = harness
+    prepare_install(h)
+    def normal_close():
+        h.controller.cancel_install()  # A nested modal event loop can deliver queued clicks.
+        h.controller.dialog.close()
+        assert h.controller._installing and h.handoff.cancels == 0
+        h.controller.shutdown()
+        return True
+    monkeypatch.setattr(h.window, 'close', normal_close)
+    h.handoff.ready.emit()
+    assert h.handoff.arms == 1 and h.handoff.cancels == 0
+
+
+def test_missing_cached_file_can_be_downloaded_again(harness):
+    h = harness
+    h.service.finished.emit(new_release(), '', True)
+    h.controller.start_download()
+    h.downloader.complete()
+    Path(h.downloader.verified_path).unlink()
+    h.controller._refresh_actions()
+    assert not h.controller.dialog.install_button.isEnabled()
+    assert h.controller.dialog.download_button.isEnabled()
+
+
+def test_cancel_preparation_keeps_verified_download_and_rejects_late_ready(harness):
+    h = harness
+    prepare_install(h)
+    h.controller.dialog.cancel_button.click()
+    assert h.handoff.cancels == 1 and not h.controller._installing
+    h.handoff.ready.emit()
+    assert h.handoff.arms == 0 and not h.controller._closed
+    assert h.controller.dialog.install_button.isEnabled()
+
+
+def test_closing_dialog_cancels_install_preparation_but_not_background_download(harness):
+    h = harness
+    h.service.finished.emit(new_release(), '', True)
+    h.controller.start_download()
+    h.controller.dialog.close()
+    assert h.downloader.busy
+    h.downloader.complete()
+    h.controller.show_dialog()
+    assert h.controller.install_update()
+    h.controller.dialog.close()
+    assert h.handoff.cancels == 1 and not h.controller._installing
 
 
 @pytest.mark.parametrize('url', [
@@ -248,7 +449,8 @@ def test_shutdown_blocks_late_results_and_is_idempotent(harness):
 
 
 @pytest.mark.parametrize('state', ['acquisition', 'sensor-preflight', 'capture', 'direct-preflight', 'direct-capture',
-                                   'metadata-finalization', 'session-finalization'])
+                                   'metadata-finalization', 'session-finalization', 'plan-build',
+                                   'mcd-thread', 'mcd2100-thread', 'mcd-preparation'])
 def test_default_busy_guard_defers_without_constructing_hardware(harness, state):
     h = harness
     h.controller._busy = h.controller._measurement_active
@@ -261,6 +463,13 @@ def test_default_busy_guard_defers_without_constructing_hardware(harness, state)
         h.window._presets = SimpleNamespace(metadata_finalizing=True)
     elif state == 'session-finalization':
         h.window._session_panels = {'page': SimpleNamespace(_metadata_finalizing=True)}
+    elif state == 'plan-build':
+        h.window._presets = SimpleNamespace(plan_build_running=lambda: True)
+    elif state in ('mcd-thread', 'mcd2100-thread'):
+        key = '_thread' if state == 'mcd-thread' else 'thread'
+        h.window._session_panels = {'page': SimpleNamespace(**{key: SimpleNamespace(isRunning=lambda: True)})}
+    elif state == 'mcd-preparation':
+        h.window._session_panels = {'page': SimpleNamespace(_safe_magnet_operation_active=True)}
     else:
         key = 'sensor_preflight_pending' if state == 'sensor-preflight' else 'acquisition_in_progress'
         h.window._lf6 = SimpleNamespace(capture_status={key: True})

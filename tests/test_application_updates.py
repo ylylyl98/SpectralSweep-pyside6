@@ -1,5 +1,5 @@
 """Offline release protocol and upgrade policy tests; no Qt or network services."""
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 import json
 from pathlib import Path
 
@@ -8,6 +8,7 @@ import pytest
 from app.application_updates import (
     InstalledVersion, MAX_RESPONSE_BYTES, REPOSITORY, UpdateProtocolError,
     decode_releases, read_installed_version, select_update,
+    MAX_INSTALLER_BYTES, validate_download_release,
 )
 
 
@@ -43,6 +44,41 @@ def test_installed_version_is_immutable():
     assert current.can_check
     with pytest.raises(FrozenInstanceError):
         current.version = "build-100-aaaaaaaa"
+
+
+def downloadable_release():
+    data = release()
+    data['assets'][0]['digest'] = 'sha256:' + 'c' * 64
+    return data, select_update([data], installed(), 'preview')
+
+
+def test_release_download_uses_github_digest_and_official_checksum_sidecar():
+    data, candidate = downloadable_release()
+    assert candidate.setup_sha256 == 'c' * 64
+    assert validate_download_release(candidate) is candidate
+    setup = data['assets'][0]
+    data['assets'].append({**setup, 'name': setup['name'] + '.sha256', 'size': 110,
+                           'browser_download_url': setup['browser_download_url'] + '.sha256'})
+    del setup['digest']
+    candidate = select_update([data], installed(), 'preview')
+    assert not candidate.setup_sha256
+    assert candidate.checksum_url.endswith('.exe.sha256')
+    assert validate_download_release(candidate) is candidate
+
+
+@pytest.mark.parametrize('change', [
+    {'setup_url': 'https://evil.example/setup.exe'},
+    {'html_url': 'https://github.com/other/repository/releases/tag/v1.0.0'},
+    {'setup_sha256': 'sha256:' + 'c' * 64},
+    {'setup_sha256': '', 'checksum_url': ''},
+    {'setup_sha256': '', 'checksum_url': 'https://evil.example/checksum'},
+    {'setup_size': True}, {'setup_size': 0}, {'setup_size': MAX_INSTALLER_BYTES + 1},
+    {'tag': '../escape'},
+])
+def test_untrusted_or_unbounded_installer_download_is_rejected(change):
+    _, candidate = downloadable_release()
+    with pytest.raises(ValueError):
+        validate_download_release(replace(candidate, **change))
 
 
 @pytest.mark.parametrize("version,channel,packaged,expected", [

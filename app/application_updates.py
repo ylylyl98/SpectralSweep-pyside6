@@ -17,6 +17,7 @@ RELEASES_URL = f"https://github.com/{REPOSITORY}/releases"
 RELEASES_API = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=50"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_INSTALLER_BYTES = 1024 * 1024 * 1024
 _BUILD = re.compile(r"build-([1-9][0-9]*)-([0-9a-f]{7,40})\Z")
 _STABLE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -71,6 +72,8 @@ class UpdateRelease:
     setup_size: int
     body: str
     published_at: str
+    setup_sha256: str = ""
+    checksum_url: str = ""
 
 
 def read_installed_version(executable=None, frozen=None):
@@ -122,6 +125,26 @@ def _official_url(value, path):
         return False
 
 
+def validate_download_release(release):
+    """Bind a downloadable installer and checksum to one official release."""
+    if not isinstance(release, UpdateRelease) or not _version_key(release.tag):
+        raise ValueError("Select a published release before downloading.")
+    prefix = f"/{REPOSITORY}/releases"
+    name = f"SpectralSweep-{release.tag}-windows-x64-Setup.exe"
+    path = f"{prefix}/download/{release.tag}/{name}"
+    if (not _official_url(release.html_url, f"{prefix}/tag/{release.tag}")
+            or not _official_url(release.setup_url, path)):
+        raise ValueError("The installer is not from the official release.")
+    if type(release.setup_size) is not int or not 0 < release.setup_size <= MAX_INSTALLER_BYTES:
+        raise ValueError("The installer size is invalid or exceeds 1 GiB.")
+    if release.setup_sha256:
+        if not isinstance(release.setup_sha256, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", release.setup_sha256):
+            raise ValueError("The installer checksum is invalid.")
+    elif not _official_url(release.checksum_url, path + ".sha256"):
+        raise ValueError("This release has no usable installer checksum.")
+    return release
+
+
 def _candidate(data):
     if not isinstance(data, dict) or data.get("draft") is not False:
         return None
@@ -144,9 +167,17 @@ def _candidate(data):
         if (type(size) is not int or size <= 0
                 or not _official_url(asset.get("browser_download_url"), path)):
             continue
+        digest = asset.get("digest", "")
+        sha256 = (digest[7:] if isinstance(digest, str)
+                  and re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest) else "")
+        checksum_url = next((item["browser_download_url"] for item in assets
+                             if isinstance(item, dict) and item.get("name") == filename + ".sha256"
+                             and item.get("state") == "uploaded"
+                             and type(item.get("size")) is int and 0 < item["size"] <= 4096
+                             and _official_url(item.get("browser_download_url"), path + ".sha256")), "")
         return UpdateRelease(tag, str(data.get("name") or tag)[:200], data["html_url"],
                              asset["browser_download_url"], size,
-                             str(data.get("body") or "")[:60000], data["published_at"])
+                             str(data.get("body") or "")[:60000], data["published_at"], sha256, checksum_url)
     return None
 
 

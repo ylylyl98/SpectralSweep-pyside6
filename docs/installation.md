@@ -81,8 +81,8 @@ Neither command connects instruments. A successful audit does not verify hardwar
 <a id="updates"></a>
 ## Upgrading and update checks
 
-**An older build needs one manual upgrade from the official Releases page before
-it can offer the new in-app update reminder.** Install the new Setup or extract the
+**Older builds that only open GitHub need one manual upgrade before they can
+download and install updates inside the app.** Install the new Setup or extract the
 new portable ZIP into a separate folder. Preserve your configuration and data;
 do not extract a new ZIP into a running application directory.
 
@@ -98,11 +98,17 @@ releases only. You can change the selection in the dialog. An automatic update d
 waits until measurement is idle; a manual check is available whenever you choose to open it.
 Checking does not interrupt acquisition or reconnect devices.
 
-The reminder only displays release information and offers the
-[official repository's release page](https://github.com/ylylyl98/SpectralSweep-pyside6/releases).
-It does not download or execute Setup, install files, or restart the app or Windows.
-Choose when to finish measurement, close the application normally, download the new
-Setup and install it. Offline/check errors do not prevent normal use.
+Choose **Download update** to download directly in the background, with progress and
+cancellation. The installer must match the release's size and SHA-256 before
+**Install and restart** becomes available. A checksum failure leaves installation disabled.
+Downloads can continue during measurement; installation waits for acquisition and
+saving to finish. Installing uses the normal application shutdown checks and saves
+your settings. If you cancel closing, installation is cancelled and the app stays open.
+An external helper waits for the app and its workers to exit, checks the installer
+again, runs Setup, and reopens SpectralSweep after successful installation. It never
+terminates acquisition processes or restarts Windows. Installation errors are shown
+with a log path. **Release page** remains available for manual downloads.
+Offline/check errors do not prevent normal use.
 
 Source/local builds are updated through Git rather than the EXE update reminder.
 Review local changes, commit or otherwise preserve them, then fetch/pull the intended

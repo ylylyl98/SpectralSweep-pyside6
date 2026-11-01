@@ -64,8 +64,10 @@ CI 的构建号来自 `GITHUB_RUN_NUMBER`，可用 `--build-number` 显式指定
 `v*` 默认为 `stable`，`build-*` 为 `preview`，本机构建为 `local`，可用 `--channel` 指定。
 用户可用 **Help > Check for updates…** 或状态栏 **Updates** 检查更新，
 并在同一窗口选择稳定/预发布通道及运行期间每 6 小时的自动检查。
-检查只提示并打开官方发布页，不下载、安装或重启；测量期间延后自动弹窗。
-旧版需要手动升级一次才能获得此功能，源码仍通过 Git 更新。
+**Download update** 在后台直接下载安装器，核对大小及 SHA-256；
+**Install and restart** 在测量和保存结束后通过正常退出检查，由外部辅助程序等待应用及
+后台进程退出，运行 Setup，并在成功后重新打开应用。不会终止采集进程或重启 Windows。
+测量期间延后自动提示；只会打开发布页的旧版需要手动升级一次，源码仍通过 Git 更新。
 详见[中文用户说明](installation.zh-CN.md#updates)与[English guide](installation.md#updates)。
 
 正式发布示例（对已审查并在 main 的提交打标签）：

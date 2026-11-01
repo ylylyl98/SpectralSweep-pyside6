@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PACKAGES = ("app", "ui", "utils")
 MINIMUM_QT = (6, 9)
 REQUIRED_RESOURCES = (
+    "app/update_install.ps1",
     "main.py", "requirements.txt", "tools/verify_quick_ui.py", "app/quick_runtime.py",
     "ui/quick_controls.py", "ui/quick_history.py", "ui/quick_preview.py",
     "ui/qml/CommandBar.qml", "ui/qml/HistoryPage.qml", "ui/qml/Navigation.qml",
