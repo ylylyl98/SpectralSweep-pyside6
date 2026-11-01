@@ -8,7 +8,7 @@ from types import MethodType
 
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt
 from PySide6.QtWidgets import (QApplication, QBoxLayout, QFormLayout, QGridLayout,
-                               QGroupBox, QLabel, QSizePolicy, QVBoxLayout, QWidget)
+                               QFrame, QGroupBox, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from ui.workflow_sections import DisclosureSection
 
@@ -168,6 +168,45 @@ def _workspace_surface(widget):
     if type(widget) is QWidget and widget.layout() is not None:
         widget.layout().setContentsMargins(12, 12, 12, 12)
         widget.layout().setSpacing(8)
+
+
+class _RunDetailsHeight(QObject):
+    """Bound upward-opening details while retaining room for live run controls."""
+
+    def __init__(self, pane, preview, section, scroll, content):
+        super().__init__(section)
+        self.pane, self.preview, self.section = pane, preview, section
+        self.scroll, self.content = scroll, content
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.fit)
+        for widget in (pane, content, scroll.viewport(), section):
+            widget.installEventFilter(self)
+        section.toggle.toggled.connect(lambda *_: self.timer.start(0))
+        self.timer.start(0)
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.LayoutRequest, QEvent.Type.Show):
+            self.timer.start(0)
+        return False
+
+    def fit(self):
+        if not self.section.toggle.isChecked():
+            return
+        layout = self.pane.layout()
+        fixed = sum(item.sizeHint().height() for item in
+                    (layout.itemAt(i) for i in range(layout.count()))
+                    if item.widget() not in (self.preview, self.section) and not item.isEmpty())
+        header = self.section.toggle.sizeHint().height() + self.section.layout().spacing()
+        # At most a third of the pane belongs to optional details. Also reserve
+        # a preview header when wrapped commands/status need additional room.
+        budget = max(0, min(self.pane.height() // 3, self.pane.height() - fixed - header - 36))
+        body = self.content.layout()
+        width = max(1, self.scroll.viewport().width())
+        wanted = body.totalHeightForWidth(width) if body.hasHeightForWidth() else body.sizeHint().height()
+        height = min(max(0, wanted), budget)
+        if self.scroll.minimumHeight() != height or self.scroll.maximumHeight() != height:
+            self.scroll.setFixedHeight(height)
 
 
 class _WideOpticalFooter(QObject):
@@ -556,6 +595,8 @@ def _dual_gate_layout(panel):
     panel._execution_order_group.setTitle("")
 
     sequence_panel = panel._tree.parentWidget()
+    panel._sequence_toggle.setProperty("quickDisclosure", True)
+    panel._filename_details_toggle.setProperty("quickDisclosure", True)
 
     def fit_execution(*args):
         # The compact Quick view publishes a content height: short plans need
@@ -578,6 +619,12 @@ def _dual_gate_layout(panel):
         preview_splitter.setSizes([execution_height, sequence_height])
 
     execution.toggle.toggled.connect(fit_execution)
+    panel._sequence_toggle.toggled.connect(fit_execution)
+    # Scalar headers can wrap after their QML form has been laid out. Refit
+    # the fixed-height splitter when that measured content height changes too.
+    panel._quick_preview_height_timer = QTimer(panel)
+    panel._quick_preview_height_timer.setSingleShot(True)
+    panel._quick_preview_height_timer.timeout.connect(fit_execution)
     if hasattr(panel._tree, "preferredHeightChanged"):
         panel._tree.preferredHeightChanged.connect(fit_execution)
     panel._tree.setMinimumHeight(0)
@@ -594,17 +641,18 @@ def _dual_gate_layout(panel):
     filename = DisclosureSection("Filename preview", filename_group, expanded=False)
     filename.setObjectName("QuickDualGateFilenameDisclosure")
     filename_group.setTitle("")
-    layout.insertWidget(2, filename)
+    filename_group.setObjectName("QuickDualGateFilenameContent")
+    filename_group.layout().setContentsMargins(0, 0, 0, 0)
+    layout.insertWidget(0, filename)
 
     # QuickWorkbench mounts compact Apply/Run/Stop below the right scroll area.
-    # Keeping the former tall footer fixed would clip a 768px laptop viewport.
-    # Keep live progress beside those fixed actions; optional tools can scroll
-    # inside Run details without hiding acquisition feedback.
+    # Keep optional run tools beside those actions, with their own bounded
+    # upward-opening body so progress and Stop remain visible on laptops.
     results_layout = panel._results_pane.layout()
     footer = results_layout.itemAt(1).widget()
     results_layout.removeWidget(footer)
     footer.layout().removeWidget(panel._readiness_lbl)
-    layout.insertWidget(1, panel._readiness_lbl)
+    layout.insertWidget(0, panel._readiness_lbl)
     run_status = QWidget(panel._results_pane)
     run_status.setObjectName("QuickDualGateRunStatus")
     run_status.setProperty("quickSectionBoundary", True)
@@ -617,14 +665,27 @@ def _dual_gate_layout(panel):
             footer.layout().removeWidget(source)
             status_layout.addWidget(source)
     run_status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-    results_layout.addWidget(run_status)
-    run_details = DisclosureSection("Run details", footer, expanded=False)
+    details_scroll = QScrollArea()
+    details_scroll.setObjectName("QuickDualGateRunDetailsScroll")
+    details_scroll.setFrameShape(QFrame.Shape.NoFrame)
+    details_scroll.setWidgetResizable(True)
+    details_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    details_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    details_scroll.setMinimumHeight(0)
+    details_scroll.setWidget(footer)
+    run_details = DisclosureSection("Run details", details_scroll, expanded=False)
     run_details.setObjectName("QuickDualGateRunDetailsDisclosure")
-    layout.addWidget(run_details)
+    run_details.layout().removeWidget(details_scroll)
+    run_details.layout().insertWidget(0, details_scroll)
+    results_layout.addWidget(run_details)
+    results_layout.addWidget(run_status)
+    panel._quick_run_details_height = _RunDetailsHeight(
+        panel._results_pane, panel._results_scroll, run_details, details_scroll, footer)
     panel._quick_safety_disclosure = safety
     panel._quick_execution_disclosure = execution
     panel._quick_filename_disclosure = filename
     panel._quick_run_details_disclosure = run_details
+    panel._quick_run_details_scroll = details_scroll
     panel._quick_run_status = run_status
     for section in (safety, filename, run_details):
         section.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)

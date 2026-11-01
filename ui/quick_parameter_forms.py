@@ -1117,6 +1117,10 @@ def install_parameter_forms(panel, page_id, *, refresh=False):
                 return commit_quick_edits(panel)
             adapter.validate_page = commit_page
             form = QuickParameterForm(adapter, owner)
+            preview_timer = getattr(panel, "_quick_preview_height_timer", None)
+            preview_splitter = getattr(panel, "_preview_splitter", None)
+            if preview_timer is not None and preview_splitter is not None and preview_splitter.isAncestorOf(owner):
+                form.heightHintChanged.connect(lambda: preview_timer.start(0))
             if refresh_mega_geometry:
                 form.heightHintChanged.connect(lambda: panel._quick_form_geometry_timer.start(0))
             replacement.addWidget(form)

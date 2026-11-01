@@ -232,3 +232,90 @@ def test_load_dialog_opens_selected_sample_spectrum_folder(workspace, tmp_path):
         host._commit_sample_selection("brand new sample")
         host._spectrum._load_spectra_dialog()
         assert Path(dialog.call_args.args[2]) == tmp_path
+
+
+def test_renamed_saved_reference_survives_manual_reload_and_old_session(workspace):
+    make_panel, _ = workspace
+    panel = make_panel()
+    ref = add(panel, "original")
+    state = round_trip(panel)
+    csv = Path(ref["path"])
+    original_csv = csv.read_bytes()
+    original_metadata = Path(ref["metadata_path"]).read_bytes()
+    assert panel.rename_reference(ref["id"], "My permanent label")
+    reopened = make_panel()
+    assert reopened.load_spectra([csv])[0]["name"] == "My permanent label"
+    reopened.restore_sample_references("sample A", state)
+    assert reopened.references[0]["name"] == "My permanent label"
+    reopened.restore_sample_references("sample A", {})
+    assert reopened.references[0]["name"] == "My permanent label"
+    assert csv.read_bytes() == original_csv
+    assert Path(ref["metadata_path"]).read_bytes() == original_metadata
+
+
+def test_imported_csv_name_is_portable_and_shared_by_duplicate_rows(workspace, tmp_path):
+    make_panel, _ = workspace
+    path = tmp_path / "imported.csv"
+    path.write_text("wavelength_nm,intensity_counts\n700,3\n701,6\n", encoding="utf-8")
+    panel = make_panel()
+    first, second = panel.load_spectra([path, path])
+    assert panel.rename_reference(first["id"], "Custom imported spectrum")
+    assert second["name"] == "Custom imported spectrum"
+    assert make_panel().load_spectra([path])[0]["name"] == "Custom imported spectrum"
+
+
+def test_rename_write_failure_reports_error_and_preserves_name(workspace):
+    make_panel, _ = workspace
+    panel = make_panel()
+    ref = add(panel, "original")
+    with patch("ui.spectrum_panel.save_reference_name", side_effect=OSError("read only")):
+        assert not panel.rename_reference(ref["id"], "new name")
+    assert ref["name"] == "original"
+    assert "read only" in panel._status_lbl.text()
+    assert make_panel().load_spectra([ref["path"]])[0]["name"] == "original"
+
+
+def test_invalid_label_file_falls_back_to_saved_acquisition_name(workspace):
+    make_panel, _ = workspace
+    panel = make_panel()
+    ref = add(panel, "original")
+    Path(ref["path"] + ".reference.json").write_text("broken json", encoding="utf-8")
+    assert make_panel().load_spectra([ref["path"]])[0]["name"] == "original"
+
+
+def test_sample_switch_commits_quick_name_but_background_save_does_not(workspace):
+    from ui.quick_reference_list import install_reference_list
+    make_panel, window = workspace
+    host = window()
+    panel = host._spectrum
+    ref = add(panel, "original")
+    view = install_reference_list(panel)
+    try:
+        view.model.rows[0].stageName("Still typing")
+        host._persist_session()
+        assert ref["name"] == "original"
+        assert not Path(ref["path"] + ".reference.json").exists()
+        assert host._commit_sample_selection("sample B")
+        assert make_panel().load_spectra([ref["path"]])[0]["name"] == "Still typing"
+        assert host._commit_sample_selection("sample A")
+        assert panel.references[0]["name"] == "Still typing"
+    finally:
+        view.shutdown()
+
+
+def test_sample_switch_keeps_current_sample_when_pending_rename_cannot_save(workspace):
+    from ui.quick_reference_list import install_reference_list
+    _, window = workspace
+    host = window()
+    panel = host._spectrum
+    ref = add(panel, "original")
+    view = install_reference_list(panel)
+    try:
+        view.model.rows[0].stageName("Cannot save")
+        with patch("ui.spectrum_panel.save_reference_name", side_effect=OSError("read only")):
+            assert not host._commit_sample_selection("sample B")
+        assert host._sample_id_binder.value == "sample A"
+        assert ref["name"] == "original"
+        assert "read only" in host._status.currentMessage()
+    finally:
+        view.shutdown()

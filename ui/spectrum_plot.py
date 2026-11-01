@@ -255,18 +255,25 @@ class _SpectrumPlot(QWidget):
         curve = self._reference_curves.get(key)
         if curve is None:
             curve = self._plot.plot(connect="finite")
+            # A cached continuous path avoids thousands of QPainter.drawLines
+            # calls when toggling overlays on the Windows raster renderer.
+            curve.curve.setSegmentedLineMode("off")
             self._reference_curves[key] = curve
         curve.setPen(pg.mkPen(color, width=REFERENCE_SPECTRUM_WIDTH, style=Qt.PenStyle.SolidLine))
         curve.setData(np.asarray(wl, dtype=float), np.asarray(cts, dtype=float))
         self._reference_units[key] = axis_unit
         self._reference_visible[key] = bool(visible)
-        self._refresh()
+        self._refresh(changed_reference=key)
 
     def set_reference_visible(self, reference_id, visible):
-        key = str(reference_id)
-        if self._reference_visible.get(key) == bool(visible):
+        self.set_references_visible({str(reference_id): visible})
+
+    def set_references_visible(self, visibility):
+        changes = {str(key): bool(value) for key, value in visibility.items()
+                   if self._reference_visible.get(str(key)) != bool(value)}
+        if not changes:
             return
-        self._reference_visible[key] = bool(visible)
+        self._reference_visible.update(changes)
         self._refresh()
 
     def remove_reference(self, reference_id):
@@ -281,8 +288,8 @@ class _SpectrumPlot(QWidget):
     def update_spectrum(self, wl, cts):
         self._wl = np.asarray(wl, dtype=float)
         self._cts = np.asarray(cts, dtype=float)
-        self._curve.setData(self._wl, self._cts)
-        self._refresh()
+        self._curve.setData(self._wl, self._cts, connect=self._connections(self._wl))
+        self._refresh(live_changed=True)
         self._update_info()
 
     def _update_info(self):
@@ -308,7 +315,7 @@ class _SpectrumPlot(QWidget):
             return [(self._wl, self._cts)]
         return self._visible_series()
 
-    def _refresh(self, force=False):
+    def _refresh(self, force=False, changed_reference=None, live_changed=False):
         for key, curve in self._reference_curves.items():
             curve.setVisible(self._reference_visible.get(key, False) and self._reference_units.get(key) == self.axis_unit)
         self._refresh_empty_state()
@@ -318,16 +325,20 @@ class _SpectrumPlot(QWidget):
         if segments and not (self._compare and self._hide_gaps and self.axis_unit == "nm" and self._range_mode == "visible"):
             segments = [(segments[0][0], segments[-1][1])]
         geometry_changed = segments != self._segments
+        connections_changed = geometry_changed and (len(segments) > 1 or len(self._segments) > 1)
         self._setting_range = True
         try:
             if geometry_changed:
                 self._rebuild_segments(segments)
             self._segments = segments
-            self._curve.setData(self._wl, self._cts, connect=self._connections(self._wl))
-            for curve in self._reference_curves.values():
-                curve.setData(curve.xData, curve.yData, connect=self._connections(curve.xData))
+            if connections_changed:
+                self._curve.setData(self._wl, self._cts, connect=self._connections(self._wl))
+            for key, curve in self._reference_curves.items():
+                if connections_changed or (key == changed_reference and len(self._segments) > 1):
+                    curve.setData(curve.xData, curve.yData, connect=self._connections(curve.xData))
             for index, (live, references) in enumerate(self._extra_curves):
-                live.setData(self._wl, self._cts, connect=self._connections(self._wl))
+                if geometry_changed or live_changed:
+                    live.setData(self._wl, self._cts, connect=self._connections(self._wl))
                 for key in list(references):
                     if key not in self._reference_curves:
                         self.segment_plots[index + 1].removeItem(references.pop(key))
@@ -336,9 +347,11 @@ class _SpectrumPlot(QWidget):
                     if curve is None:
                         plot = self.segment_plots[index + 1]
                         curve = plot.plot(connect="finite")
+                        curve.curve.setSegmentedLineMode("off")
                         references[key] = curve
-                    curve.setPen(source.opts['pen'])
-                    curve.setData(source.xData, source.yData, connect=self._connections(source.xData))
+                    if geometry_changed or key == changed_reference:
+                        curve.setPen(source.opts['pen'])
+                        curve.setData(source.xData, source.yData, connect=self._connections(source.xData))
                     curve.setVisible(source.isVisible())
             if force:
                 self._follow_x = self._follow_y = True

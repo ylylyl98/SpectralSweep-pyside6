@@ -17,6 +17,8 @@ QGroupBox { border: none; margin-top: 20px; padding: 6px 0px 0px 0px; background
 QGroupBox::title { subcontrol-origin: margin; left: 0px; top: 2px; color: palette(window-text); font-weight: 600; }
 /* The calculator already has its own disclosure heading. */
 QGroupBox#SweepLineCalculator { margin: 0px; padding: 0px; border: none; }
+/* Filename preview already has a disclosure heading; its body has no title. */
+QGroupBox#QuickDualGateFilenameContent { margin: 0px; padding: 0px; }
 QGroupBox[quickWorkspaceSurface="true"] { margin-top: 0px; padding-top: 22px; }
 QGroupBox[quickWorkspaceSurface="true"]::title { subcontrol-origin: margin; left: 12px; top: 8px; }
 QLabel { background: transparent; }

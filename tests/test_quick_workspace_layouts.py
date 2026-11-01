@@ -1,5 +1,6 @@
 """Quick assembly exposes sequence review while preserving recipe controls."""
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ from PySide6.QtTest import QTest
 
 from tests.quick_helpers import quick_application, drain_qt_deletions
 from tests.test_dual_gate_sequence_model import nested_plan
+from tests.test_quick_parameter_forms import find_item
 from ui.presets_panel import PresetsPanel
 from ui.megasweep_panel import MegaSweepPanel
 from ui.quick_table_editor import install_table_editors
@@ -152,6 +154,63 @@ def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app
         panel.deleteLater()
 
 
+@pytest.mark.parametrize("width,height", [(1136, 850), (896, 580)])
+def test_dual_gate_filename_is_compact_and_precedes_collapsible_sequence(app, width, height):
+    original_style = app.styleSheet()
+    app.setStyleSheet((Path(__file__).parents[1] / "ui/styles/quick_application.qss").read_text())
+    panel = PresetsPanel()
+    original_plan = panel._acquisition_schedule
+    try:
+        install_table_editors(panel)
+        assembly = configure_workspace_layout(panel, "dual_gate")
+        coverage = install_parameter_forms(panel, "dual_gate")
+        panel.setProperty("quickEditorsInstalled", True)
+        panel.resize(width, height)
+        assembly["filename"].set_expanded(True)
+        panel.show()
+        QTest.qWait(150)
+        fields = {source: (form, field) for form in coverage["forms"]
+                  for field, source in form.adapter._fields.items()}
+        filename = assembly["filename"]
+        form, _ = fields[panel._filename_preview_lbl]
+        assert form.mapTo(filename.content, QPoint()).y() <= 4
+        assert filename.y() + filename.height() <= panel._preview_splitter.y()
+        assert fields[panel._filename_details_toggle][1].kind == "disclosure"
+        sequence_form, sequence_field = fields[panel._sequence_toggle]
+        assert sequence_field.kind == "disclosure"
+        panel._results_scroll.ensureWidgetVisible(sequence_form)
+        QTest.qWait(100)
+        button = find_item(sequence_form.rootObject(), "parameter_" + sequence_field.fieldId)
+        expanded_height = panel._preview_splitter.height()
+        position = button.mapToScene(button.boundingRect().center()).toPoint()
+        QTest.mouseClick(sequence_form, Qt.MouseButton.LeftButton, pos=position)
+        QTest.qWait(100)
+        assert not panel._sequence_toggle.isChecked()
+        assert panel._tree.isHidden()
+        assert panel._preview_splitter.height() < expanded_height
+        collapsed = panel._preview_splitter.widget(1)
+        assert collapsed.height() <= sequence_form.height() + 8
+        QTest.mouseClick(sequence_form, Qt.MouseButton.LeftButton, pos=position)
+        QTest.qWait(100)
+        assert panel._sequence_toggle.isChecked()
+        assert not panel._tree.isHidden()
+        assert panel._preview_splitter.height() >= expanded_height
+        sequence_panel = panel._preview_splitter.widget(1)
+        assert panel._tree.mapTo(sequence_panel, QPoint()).y() + panel._tree.height() <= sequence_panel.height()
+        assert panel._acquisition_schedule is original_plan
+        assert panel._results_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        for form in getattr(panel, "_quick_parameter_forms", {}).get("forms", []):
+            form.shutdown()
+        for table in getattr(panel, "_quick_table_editors", []):
+            table.shutdown()
+        panel.dispose_reloaded_page()
+        panel.close()
+        panel.deleteLater()
+        drain_qt_deletions()
+        app.setStyleSheet(original_style)
+
+
 @pytest.mark.parametrize("width,height", [(1700, 850), (1136, 700), (896, 580)])
 def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, height):
     from PySide6.QtCore import QPointF
@@ -234,6 +293,81 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         assert (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint())) == before
         assert progress_form.isVisibleTo(panel)
         assert not assembly["run_details"].toggle.isChecked()
+
+        details = assembly["run_details"]
+        details_scroll = panel._quick_run_details_scroll
+        header_form, header_field = fields[details.toggle]
+        assert details.parentWidget() is pane
+        assert header_field.kind == "disclosure"
+        assert details.y() >= scroll.y() + scroll.height()
+        assert status.y() >= details.y() + details.height()
+        header_before = header_form.mapTo(panel, QPoint())
+        header_button = find_item(header_form.rootObject(), "parameter_" + header_field.fieldId)
+        header_position = header_button.mapToScene(header_button.boundingRect().center()).toPoint()
+        QTest.mouseClick(header_form, Qt.MouseButton.LeftButton, pos=header_position)
+        QTest.qWait(100)
+        assert details.toggle.isChecked()
+        assert details_scroll.isVisibleTo(panel)
+        assert header_form.mapTo(panel, QPoint()) == header_before
+        assert (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint())) == before
+        assert details_scroll.mapTo(details, QPoint()).y() < header_form.mapTo(details, QPoint()).y()
+        for source in (panel._discard_btn, panel._spectrum_btn):
+            form, field = fields[source]
+            assert field.visible and form.isVisibleTo(panel)
+
+        # Long detail text scrolls internally without moving the disclosure,
+        # telemetry or command buttons down out of the fixed footer.
+        panel._draft_detail_lbl.setText("\n".join(["Run detail line"] * 40))
+        panel._draft_detail_lbl.show()
+        fields[panel._draft_detail_lbl][0].adapter.refresh()
+        QTest.qWait(100)
+        assert details_scroll.height() <= pane.height() // 3
+        assert details_scroll.verticalScrollBar().maximum() > 0
+        details_scroll.verticalScrollBar().setValue(details_scroll.verticalScrollBar().maximum())
+        QTest.qWait(30)
+        assert header_form.mapTo(panel, QPoint()) == header_before
+        assert (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint())) == before
+        assert command.y() + command.height() <= pane.height()
+
+        bottom_offsets = (pane.height() - header_form.mapTo(pane, QPoint()).y(),
+                          pane.height() - status.y(), pane.height() - command.y())
+        panel.resize(max(896, width - 240), height + 120)
+        QTest.qWait(100)
+        assert details_scroll.height() <= pane.height() // 3
+        assert command.y() + command.height() <= pane.height()
+        assert details_scroll.horizontalScrollBar().maximum() == 0
+        panel.resize(width, height)
+        QTest.qWait(100)
+        assert (pane.height() - header_form.mapTo(pane, QPoint()).y(),
+                pane.height() - status.y(), pane.height() - command.y()) == bottom_offsets
+        header_before = header_form.mapTo(panel, QPoint())
+        before = (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint()))
+
+        from ui.quick_reload_state import capture_quick_view_state, restore_quick_view_state
+        details_scroll.verticalScrollBar().setValue(details_scroll.verticalScrollBar().maximum())
+        view_state = capture_quick_view_state(panel)
+        saved_scroll = details_scroll.verticalScrollBar().value()
+        details.set_expanded(False)
+        restore_quick_view_state(panel, view_state)
+        QTest.qWait(100)
+        assert details.toggle.isChecked()
+        assert details_scroll.verticalScrollBar().value() == saved_scroll
+        assert command.y() + command.height() <= pane.height()
+
+        panel._stop_btn.setEnabled(True)
+        command.adapter.refresh()
+        QTest.qWait(30)
+        stop = find_item(command.rootObject(), "command_stop")
+        assert stop.isVisible() and stop.isEnabled()
+        stop_position = stop.mapToScene(stop.boundingRect().center()).toPoint()
+        QTest.mouseClick(command, Qt.MouseButton.LeftButton, pos=stop_position)
+        assert panel._stop_event.is_set()
+
+        QTest.mouseClick(header_form, Qt.MouseButton.LeftButton, pos=header_position)
+        QTest.qWait(100)
+        assert not details.toggle.isChecked() and details_scroll.isHidden()
+        assert header_form.mapTo(panel, QPoint()) == header_before
+        assert (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint())) == before
     finally:
         command.shutdown()
         for form in getattr(panel, "_quick_parameter_forms", {}).get("forms", []):

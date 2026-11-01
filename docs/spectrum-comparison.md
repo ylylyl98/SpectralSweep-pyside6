@@ -15,6 +15,14 @@ Changing Sample ID clears the previous sample's live display and restores only
 the selected sample's reference list. New or duplicated sample settings do not
 inherit another sample's spectra.
 
+Rename a reference and press Enter or move focus to another control to save its
+label. For a saved CSV, the label is stored beside it in
+`<filename>.csv.reference.json`, so **Load spectra** and older sample profiles
+also use the new name. Keep this small file with the CSV when moving data to
+another computer. The CSV and acquisition metadata are unchanged. If the label
+cannot be written, the page reports the error and retains the previous name.
+Changing Sample ID or closing the application also commits pending names.
+
 On first use with an older profile, the page recovers prior **Add spectrum**
 exports under `<output root>/<sample>/Spectrum/<date>/` whose sidecars confirm
 the exact Sample ID. Removing a reference affects only the list and remains

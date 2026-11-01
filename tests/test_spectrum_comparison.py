@@ -1,6 +1,7 @@
 """Setup ownership and real plot geometry regressions (no hardware)."""
 import numpy as np
 import pytest
+from unittest.mock import patch
 from PySide6.QtWidgets import QApplication
 
 from tests.test_spectrum_panel_controls import _FakeSpectrumController
@@ -58,6 +59,42 @@ def test_switch_filters_references_without_changing_user_visibility(panel):
     switch(panel, 'lightfield')
     assert panel._spec_plot._reference_curves[a['id']].isVisible()
     assert not panel._spec_plot._reference_curves[b['id']].isVisible()
+
+
+def test_visibility_toggle_reuses_unchanged_curve_data(panel):
+    ref = reference(panel)
+    other = reference(panel)
+    plot = panel._spec_plot
+    curve = plot._reference_curves[other['id']]
+    with patch.object(curve, "setData", wraps=curve.setData) as set_data:
+        ref['_row_checkbox'].setChecked(False)
+        ref['_row_checkbox'].setChecked(True)
+    assert set_data.call_count == 0
+    assert plot._reference_curves[ref['id']].isVisible()
+
+
+def test_bulk_visibility_refreshes_plot_once_and_syncs_checkboxes(panel):
+    refs = [reference(panel) for _ in range(4)]
+    plot = panel._spec_plot
+    with patch.object(plot, "_refresh", wraps=plot._refresh) as refresh:
+        panel._set_all_references_visible(False)
+    assert refresh.call_count == 1
+    assert all(not ref['visible'] and not ref['_row_checkbox'].isChecked() for ref in refs)
+    assert all(not plot._reference_curves[ref['id']].isVisible() for ref in refs)
+
+
+def test_segment_toggle_keeps_curves_when_bands_stay_the_same(panel):
+    a = reference(panel)
+    spectrum(panel, 1100, 1300)
+    b = panel.add_reference(np.linspace(650, 750, 101), np.ones(101), auto_save=False)
+    panel._comparison_mode.setCurrentText('Compare')
+    plot = panel._spec_plot
+    extra = plot._extra_curves[0][1][b['id']]
+    with patch.object(extra, "setData", wraps=extra.setData) as set_data:
+        a['_row_checkbox'].setChecked(False)
+        a['_row_checkbox'].setChecked(True)
+    assert set_data.call_count == 0
+    assert extra.isVisible()
 
 
 def test_switch_restores_both_frames_and_manual_view(panel):

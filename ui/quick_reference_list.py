@@ -16,11 +16,11 @@ from shiboken6 import isValid
 class ReferenceRow(QObject):
     changed = Signal()
 
-    def __init__(self, reference_id, model):
+    def __init__(self, reference_id, model, resolved=None):
         super().__init__(model)
         self.model, self._id = model, reference_id
         self._state = {}
-        self.refresh()
+        self.refresh(resolved)
 
     referenceId = Property(str, lambda s: s._id, constant=True)
     name = Property(str, lambda s: s._state.get("name", ""), notify=changed)
@@ -42,8 +42,8 @@ class ReferenceRow(QObject):
                      if str(table.item(i).data(Qt.ItemDataRole.UserRole)) == self._id), None)
         return ref, item
 
-    def refresh(self):
-        ref, item = self._resolve()
+    def refresh(self, resolved=None):
+        ref, item = self._resolve() if resolved is None else resolved
         if ref is None or item is None:
             state = dict(enabled=False, visible=False)
         else:
@@ -77,17 +77,17 @@ class ReferenceRow(QObject):
     @Slot(str, result=bool)
     def rename(self, text):
         if not text.strip():
+            self.model._drafts.pop(self._id, None)
+            self.model.refresh()
             return False
         control = self._control("_row_name")
         if control is None or control.isReadOnly():
             return False
         self.select()
-        control.setText(text)
-        control.textEdited.emit(text)
-        control.editingFinished.emit()
+        accepted = self.model.panel.rename_reference(self._id, text)
         self.model._drafts.pop(self._id, None)
         self.model.refresh()
-        return True
+        return accepted
 
     @Slot(str)
     def stageName(self, text):
@@ -125,10 +125,13 @@ class ReferenceListModel(QObject):
         self.panel, self._closed = panel, False
         self._rows, self._cache, self._drafts = [], {}, {}
         self._connections = []
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self.refresh)
         source = panel._reference_list
         for signal in (source.itemSelectionChanged, source.itemChanged,
                        source.model().rowsInserted, source.model().rowsRemoved, source.model().modelReset):
-            callback = lambda *args: QTimer.singleShot(0, self.refresh)
+            callback = lambda *args: self._refresh_timer.start(0)
             signal.connect(callback)
             self._connections.append((signal, callback))
         panel._rename_reference_btn.clicked.connect(self.request_rename)
@@ -140,20 +143,24 @@ class ReferenceListModel(QObject):
     def refresh(self):
         if self._closed:
             return
+        self._refresh_timer.stop()
         live_ids = {str(ref["id"]) for ref in self.panel._references}
         self._drafts = {key: value for key, value in self._drafts.items() if key in live_ids}
         rows = []
+        source = self.panel._reference_list
+        items = {str(source.item(i).data(Qt.ItemDataRole.UserRole)): source.item(i)
+                 for i in range(source.count())}
         for ref in self.panel._references:
             key = str(ref["id"])
             row = self._cache.get(key)
             if row is None:
-                row = ReferenceRow(key, self)
+                row = ReferenceRow(key, self, (ref, items.get(key)))
                 self._cache[key] = row
-            row.refresh()
+            row.refresh((ref, items.get(key)))
             rows.append(row)
         for key, row in self._cache.items():
-            if row not in rows:
-                row.refresh()
+            if key not in live_ids:
+                row.refresh((None, None))
         if rows != self._rows:
             self._rows = rows
             self.changed.emit()
@@ -168,7 +175,12 @@ class ReferenceListModel(QObject):
             return False
         for key, text in list(self._drafts.items()):
             row = self._cache.get(key)
-            if not text.strip() or row is None or not row.rename(text):
+            if row is None:
+                return False
+            if not text.strip():
+                row.rename(text)  # An empty edit cancels the rename.
+                continue
+            if not row.rename(text):
                 return False
         return True
 
@@ -178,6 +190,7 @@ class ReferenceListModel(QObject):
 
     def shutdown(self):
         self._closed = True
+        self._refresh_timer.stop()
         self._drafts.clear()
         for signal, callback in self._connections:
             try:

@@ -1,14 +1,33 @@
 """Portable reference-list preferences and recovery of pre-list autosaves."""
 from pathlib import Path
+import json
 import re
 
-from app.experiment_metadata import ExperimentMetadataService, _jsonable
+from app.experiment_metadata import ExperimentMetadataService, _atomic_json, _jsonable
 
 
 REFERENCE_FIELDS = (
     "name", "color", "visible", "source", "path", "metadata_path", "axis_unit",
     "setup_key", "sample_id", "save_root", "saved", "save_error",
 )
+
+
+def reference_name(path, default=None):
+    """Read the portable display label without changing acquisition metadata."""
+    try:
+        label = Path(path).with_name(Path(path).name + ".reference.json")
+        payload = json.loads(label.read_text(encoding="utf-8"))
+        name = payload.get("name") if isinstance(payload, dict) else None
+        return name.strip() if isinstance(name, str) and name.strip() else default
+    except (OSError, ValueError):
+        return default
+
+
+def save_reference_name(path, name):
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Spectrum file is unavailable: {path}")
+    _atomic_json(path.with_name(path.name + ".reference.json"), {"name": name})
 
 
 def capture_reference(ref):
@@ -53,7 +72,7 @@ def discover_sample_references(root, sample_id):
                     continue
                 seen.add(str(path))
                 records.append({"path": str(path), "metadata_path": str(sidecar),
-                                "name": settings["reference_name"], "source": "acquired",
+                                "name": reference_name(path, settings["reference_name"]), "source": "acquired",
                                 "saved": True, "sample_id": sample_id})
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             errors.append(f"{sidecar.name}: {exc}")

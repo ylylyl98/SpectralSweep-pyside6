@@ -1507,6 +1507,11 @@ class MainWindow(QMainWindow):
             return True
         # Persist the outgoing sample synchronously before any controls are
         # restored, preventing a debounce timer from crossing profile keys.
+        spectrum = getattr(self, "_spectrum", None)
+        if spectrum is not None and not spectrum.commit_reference_edits():
+            self._status.showMessage(spectrum._status_lbl.text(), 8000)
+            self._refresh_sample_selector()
+            return False
         self._persist_session()
         self._sample_restore_in_progress = True
         try:
@@ -1721,6 +1726,11 @@ class MainWindow(QMainWindow):
             message = ("Saving experiment metadata; wait before closing." if finalizing else
                        "Dual Gate is still running; stop the measurement and wait before closing.")
             self._status.showMessage(message, 5000)
+            event.ignore()
+            return
+        spectrum = getattr(self, "_spectrum", None)
+        if spectrum is not None and not spectrum.commit_reference_edits():
+            self._status.showMessage(spectrum._status_lbl.text(), 8000)
             event.ignore()
             return
         try:

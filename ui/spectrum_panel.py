@@ -65,6 +65,7 @@ from app.experiment_metadata import instrument_inventory
 from app.power_reading import power_correction_factor
 from app.spectrum_reference_state import (
     REFERENCE_FIELDS, capture_reference, discover_sample_references, sample_spectrum_folder,
+    reference_name, save_reference_name,
 )
 
 # Use a dark-on-white look that reads well in lab conditions
@@ -667,7 +668,8 @@ class SpectrumPanel(QWidget):
         self._retry_reference_btn.setEnabled(ref is not None and not ref["saved"])
         self._retry_reference_btn.setToolTip("Select an unsaved reference to retry saving it.")
         self._reference_title.setText(f"Reference spectra ({len(scoped)})")
-        self._reference_stack.setCurrentWidget(self._reference_list if scoped else self._reference_empty)
+        reference_view = getattr(self, "_quick_reference_list", self._reference_list)
+        self._reference_stack.setCurrentWidget(reference_view if scoped else self._reference_empty)
         self._reference_empty.setText(
             "No references for this setup\n\nChoose Compare to see spectra from other setups."
             if self._references else "No reference spectra\n\nUse Add spectrum or Load spectra to build a comparison."
@@ -763,6 +765,16 @@ class SpectrumPanel(QWidget):
             },
         }
 
+    def commit_reference_edits(self) -> bool:
+        quick = getattr(self, "_quick_reference_list", None)
+        if quick is not None and not quick.model._closed and not quick.commitEdits():
+            return False
+        for ref in self._references:
+            text = ref["_row_name"].text().strip()
+            if text and text != ref["name"] and not self.rename_reference(ref["id"], text):
+                return False
+        return True
+
     def restore_sample_references(self, sample_id, state=None) -> None:
         """Restore data only after the owning window has chosen the sample.
 
@@ -815,6 +827,8 @@ class SpectrumPanel(QWidget):
                 for key in REFERENCE_FIELDS:
                     if key in entry:
                         ref[key] = entry[key]
+                if ref.get("saved") and ref.get("path"):
+                    ref["name"] = reference_name(ref["path"], ref["name"])
                 ref["_row_checkbox"].setChecked(bool(ref["visible"]))
                 self._refresh_reference_item(ref)
             except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -1306,7 +1320,7 @@ class SpectrumPanel(QWidget):
             return
         edited_name = item.text().strip()
         if edited_name and edited_name != ref["name"]:
-            ref["name"] = edited_name
+            self.rename_reference(reference_id, edited_name)
         ref["visible"] = bool(item.data(Qt.ItemDataRole.UserRole + 1))
         self._spec_plot.set_reference_visible(reference_id, self._reference_display_visible(ref))
         row_checkbox = ref.get("_row_checkbox")
@@ -1325,9 +1339,19 @@ class SpectrumPanel(QWidget):
             item.setData(Qt.ItemDataRole.UserRole + 1, bool(visible))
 
     def _set_all_references_visible(self, visible: bool) -> None:
-        for ref in self._references:
-            if self._reference_in_scope(ref):
-                self._set_reference_visible(ref["id"], visible)
+        visibility = {}
+        with QSignalBlocker(self._reference_list):
+            for index, ref in enumerate(self._references):
+                if self._reference_in_scope(ref):
+                    ref["visible"] = bool(visible)
+                    visibility[ref["id"]] = self._reference_display_visible(ref)
+                    with QSignalBlocker(ref["_row_checkbox"]):
+                        ref["_row_checkbox"].setChecked(bool(visible))
+                    self._reference_list.item(index).setData(Qt.ItemDataRole.UserRole + 1, bool(visible))
+        self._spec_plot.set_references_visible(visibility)
+        quick = getattr(self, "_quick_reference_list", None)
+        if quick is not None:
+            quick.model.refresh()
 
     def _selected_reference(self) -> Optional[dict]:
         item = self._reference_list.currentItem()
@@ -1395,8 +1419,21 @@ class SpectrumPanel(QWidget):
         value = str(name).strip()
         if ref is None or not value:
             return False
+        if value == ref["name"]:
+            return True
+        if ref.get("saved") and ref.get("path"):
+            try:
+                save_reference_name(ref["path"], value)
+            except (OSError, ValueError) as exc:
+                self._refresh_reference_item(ref)
+                self._status_lbl.setText(f"Reference rename could not be saved: {exc}")
+                return False
         ref["name"] = value
         self._refresh_reference_item(ref)
+        for other in self._references:
+            if other is not ref and ref.get("path") and other.get("path") == ref["path"]:
+                other["name"] = value
+                self._refresh_reference_item(other)
         return True
 
     def set_reference_color(self, reference_id: str, color: str) -> bool:
@@ -2364,6 +2401,7 @@ class SpectrumPanel(QWidget):
             snapshot = {}
         ref = self.add_reference(
             wavelengths, counts, source="loaded", path=path,
+            name=reference_name(path, settings.get("reference_name")),
             settings_snapshot=snapshot, axis_unit=axis_unit, metadata=metadata, auto_save=False,
         )
         ref["metadata_path"] = metadata.get("metadata_path")

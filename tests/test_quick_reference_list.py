@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
+from unittest.mock import patch
 
 from tests.quick_helpers import quick_application, drain_qt_deletions
 from tests.test_quick_parameter_forms import find_item
@@ -81,3 +82,46 @@ def test_removed_reference_and_shutdown_reject_stale_row_commands(references):
     assert not row.chooseColor()
     view.shutdown()
     assert not row.select()
+
+
+def test_name_edit_is_committed_on_focus_loss_without_enter(references):
+    panel, view, ref = references
+    editor = find_item(view.rootObject(), "referenceName_" + ref["id"])
+    QTest.mouseClick(view, Qt.MouseButton.LeftButton,
+                    pos=editor.mapToScene(editor.boundingRect().center()).toPoint())
+    QTest.keyClick(view, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    QTest.keyClicks(view, "Focus loss name")
+    panel._center.setFocus()
+    QTest.qWait(10)
+    assert ref["name"] == "Focus loss name"
+
+
+def test_draft_is_committed_at_explicit_boundary_before_session_save(references):
+    panel, view, ref = references
+    row = view.model.rows[0]
+    row.stageName("Saved on close")
+    assert panel.capture_session_state()["reference_library"]["entries"][0]["name"] == "Original"
+    assert panel.commit_reference_edits()
+    assert ref["name"] == "Saved on close"
+    assert panel.capture_session_state()["reference_library"]["entries"][0]["name"] == "Saved on close"
+    assert not view.model._drafts
+
+
+def test_rename_failure_is_returned_and_draft_reverted(references):
+    panel, view, ref = references
+    row = view.model.rows[0]
+    row.stageName("Cannot save")
+    with patch.object(panel, "rename_reference", return_value=False):
+        assert not row.rename("Cannot save")
+    assert row.name == "Original"
+    assert not view.model._drafts
+
+
+def test_empty_name_cancels_edit_without_blocking_session_commit(references):
+    panel, view, ref = references
+    row = view.model.rows[0]
+    row.stageName("   ")
+    assert panel.commit_reference_edits()
+    assert row.name == "Original"
+    assert ref["name"] == "Original"
+    assert not view.model._drafts

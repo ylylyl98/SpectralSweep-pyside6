@@ -37,7 +37,12 @@ AppPane {
                     Accessible.name: "Reference name"
                     onActiveFocusChanged: { if (activeFocus) row.modelData.select(); else cursorPosition = 0 }
                     onTextEdited: row.modelData.stageName(text)
-                    onAccepted: row.modelData.rename(text)
+                    onEditingFinished: {
+                        if (!row.modelData.rename(text)) {
+                            text = row.modelData.name
+                            cursorPosition = 0
+                        }
+                    }
                     Component.onCompleted: cursorPosition = 0
                     Connections { target: row.modelData; function onChanged() { if (!nameEditor.activeFocus) { nameEditor.text = row.modelData.name; nameEditor.cursorPosition = 0 } } }
                     Connections { target: root.bridge; function onRenameRequested(referenceId) { if (referenceId === row.modelData.referenceId) { nameEditor.forceActiveFocus(); nameEditor.selectAll() } } }
