@@ -179,8 +179,10 @@ class MCD2100BatchTests(unittest.TestCase):
                     {"enabled": True, "vtg_v": 3.0, "vbg_v": 4.0},
                     {"enabled": True, "vtg_v": 5.0, "vbg_v": 6.0},
                 ],
-                poll_interval_s=0.001, gate_timeout_s=0.2,
-                operation_timeout_s=1.0, cleanup_timeout_s=1.0,
+                # This test checks file durability and ordering, not timing;
+                # leave room for slow CI scheduling around endpoint polling.
+                poll_interval_s=0.001, gate_timeout_s=10.0,
+                operation_timeout_s=30.0, cleanup_timeout_s=30.0,
                 metadata={"device_id": "YZ365", "point": "p5n2"},
             )
             durable_row_counts = []
@@ -190,7 +192,7 @@ class MCD2100BatchTests(unittest.TestCase):
                     durable_row_counts.append(len(list(csv.reader(stream))) - 1)
             worker.set_callbacks(spectrum_event=observe)
             result = worker.run()
-            self.assertEqual(result["status"], "COMPLETED")
+            self.assertEqual(result["status"], "COMPLETED", result)
             self.assertEqual(controller.detach_calls, 1)
             self.assertEqual(controller.stop_calls, 0)
             self.assertEqual(len(result["csv_paths"]), 3)

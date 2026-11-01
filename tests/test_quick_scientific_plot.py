@@ -201,6 +201,8 @@ def test_spectrum_bands_references_follow_and_manual_shared_y():
         wl = np.arange(1100., 1301.)
         view.update_spectrum(wl, np.ones(wl.size) * 10)
         view.set_reference("si", np.arange(650., 751.), np.ones(101) * 100, "#d13438")
+        np.testing.assert_array_equal(view._curve.xData, wl)
+        np.testing.assert_array_equal(view._curve.yData, np.ones(wl.size) * 10)
         assert view._plot.viewRange()[0][0] > 1000
         view.set_comparison(True, True)
         view.show()
@@ -213,6 +215,8 @@ def test_spectrum_bands_references_follow_and_manual_shared_y():
         np.testing.assert_array_equal(view._reference_curves["si"].xData, np.arange(650., 751.))
         right.setYRange(2, 4)
         view.update_spectrum(wl, np.ones(wl.size) * 1000)
+        np.testing.assert_array_equal(view._curve.yData, np.ones(wl.size) * 1000)
+        np.testing.assert_array_equal(view._extra_curves[0][0].yData, view._curve.yData)
         for segment in view.segment_plots:
             np.testing.assert_allclose(segment.viewRange()[1], [2, 4])
         state = view.capture_view()

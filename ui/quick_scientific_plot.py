@@ -799,14 +799,6 @@ def quick_spectrum_plot_class():
             self._label_plot(plot)
             return plot
 
-        def update_spectrum(self, wl, cts):
-            # The inherited refresh publishes the live curve; avoid the
-            # legacy initial setData followed by a second identical publish.
-            self._wl = np.asarray(wl, dtype=float)
-            self._cts = np.asarray(cts, dtype=float)
-            self._refresh()
-            self._update_info()
-
         def set_theme(self, mode):
             self._quick_theme = mode
             for plot in self.segment_plots:

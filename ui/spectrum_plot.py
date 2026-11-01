@@ -257,7 +257,8 @@ class _SpectrumPlot(QWidget):
             curve = self._plot.plot(connect="finite")
             # A cached continuous path avoids thousands of QPainter.drawLines
             # calls when toggling overlays on the Windows raster renderer.
-            curve.curve.setSegmentedLineMode("off")
+            if isinstance(curve, pg.PlotDataItem):
+                curve.curve.setSegmentedLineMode("off")
             self._reference_curves[key] = curve
         curve.setPen(pg.mkPen(color, width=REFERENCE_SPECTRUM_WIDTH, style=Qt.PenStyle.SolidLine))
         curve.setData(np.asarray(wl, dtype=float), np.asarray(cts, dtype=float))
@@ -347,7 +348,8 @@ class _SpectrumPlot(QWidget):
                     if curve is None:
                         plot = self.segment_plots[index + 1]
                         curve = plot.plot(connect="finite")
-                        curve.curve.setSegmentedLineMode("off")
+                        if isinstance(curve, pg.PlotDataItem):
+                            curve.curve.setSegmentedLineMode("off")
                         references[key] = curve
                     if geometry_changed or key == changed_reference:
                         curve.setPen(source.opts['pen'])

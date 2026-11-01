@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -290,15 +291,24 @@ def test_running_order_path_keeps_delegates_while_live_values_change(app):
         destroyed = []
         for item in initial:
             item.destroyed.connect(lambda: destroyed.append(True))
+
+        def wait_for_text(expected):
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                if expected in [item.property("text") for item in subtree(path)]:
+                    return
+                QTest.qWait(10)
+            pytest.fail(f"Timed out waiting for {expected!r} in execution path")
+
         widget.update_plan(contexts, rows, current_seq_i=0, current_frame_i=2, **kwargs)
-        QTest.qWait(90)
+        wait_for_text("Frame 2 / 3")
         assert subtree(path) == initial
         assert not destroyed
         assert "Frame 2 / 3" in [item.property("text") for item in subtree(path)]
 
         # The next task has the same structure but different requested values.
         widget.update_plan(contexts, rows, current_seq_i=1, current_frame_i=1, **kwargs)
-        QTest.qWait(90)
+        wait_for_text("810 nm")
         assert subtree(path) == initial
         assert not destroyed
         assert "810 nm" in [item.property("text") for item in subtree(path)]

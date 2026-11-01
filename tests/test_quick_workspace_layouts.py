@@ -1,5 +1,6 @@
 """Quick assembly exposes sequence review while preserving recipe controls."""
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -333,6 +334,10 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
                           pane.height() - status.y(), pane.height() - command.y())
         panel.resize(max(896, width - 240), height + 120)
         QTest.qWait(100)
+        # Resize and the coalesced height calculation run on the Qt event loop.
+        deadline = time.monotonic() + 3.0
+        while details_scroll.height() > pane.height() // 3 and time.monotonic() < deadline:
+            QTest.qWait(10)
         assert details_scroll.height() <= pane.height() // 3
         assert command.y() + command.height() <= pane.height()
         assert details_scroll.horizontalScrollBar().maximum() == 0

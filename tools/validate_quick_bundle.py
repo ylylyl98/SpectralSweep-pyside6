@@ -144,7 +144,7 @@ report.update({'qt':qVersion(),'bundle_root':str(bundle),'application_module_pat
 '''
 
 
-def validate_bundle(source_root, output, *, native=False, timeout=90):
+def validate_bundle(source_root, output, *, native=False, timeout=90, workspace_timeout=180):
     source_root, output = Path(source_root).resolve(), Path(output).resolve()
     version = check_runtime()
     manifest = resource_manifest(source_root)
@@ -182,9 +182,11 @@ def validate_bundle(source_root, output, *, native=False, timeout=90):
         workspace_output = output / "workspaces"
         workspace_output.mkdir(exist_ok=True)
         (workspace_output / "report.json").unlink(missing_ok=True)
+        # The full audit captures every workspace at two sizes in both themes,
+        # including bounded layout settling. Give it a separate time budget.
         result = subprocess.run([sys.executable, "-I", str(probe), str(bundle), str(workspace_output),
                                  "1" if native else "0", "workspaces"], cwd=external_cwd, env=env,
-                                capture_output=True, text=True, encoding="utf-8", timeout=timeout)
+                                capture_output=True, text=True, encoding="utf-8", timeout=workspace_timeout)
         (workspace_output / "stdout.txt").write_text(result.stdout, encoding="utf-8")
         (workspace_output / "stderr.txt").write_text(result.stderr, encoding="utf-8")
         if result.returncode:
