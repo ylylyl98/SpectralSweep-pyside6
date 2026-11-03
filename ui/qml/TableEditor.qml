@@ -123,6 +123,39 @@ AppPane {
     function readCell(row, column) {
         return root.tableModel.cellAt(row, column)
     }
+    property real savedScrollOffset: -1
+    property bool revealCurrentRowPending: false
+    function restoreViewport() {
+        // A toolbar action can reset once per inserted/deleted row. Reconcile
+        // only after the whole action, using its final selection and row count.
+        rows.forceLayout()
+        if (savedScrollOffset >= 0) {
+            rows.contentY = rows.originY + Math.max(0, Math.min(savedScrollOffset,
+                rows.contentHeight - rows.height))
+            savedScrollOffset = -1
+        }
+        if (revealCurrentRowPending) {
+            revealCurrentRowPending = false
+            const row = root.tableModel.currentRow()
+            if (row >= 0 && row < rows.count)
+                rows.positionViewAtIndex(row, ListView.Contain)
+        }
+    }
+    Connections {
+        target: root.tableModel
+        function onModelAboutToBeReset() {
+            // Later resets in the same action already see a view at the top.
+            if (root.savedScrollOffset < 0)
+                root.savedScrollOffset = Math.max(0, rows.contentY - rows.originY)
+        }
+        function onModelReset() {
+            Qt.callLater(root.restoreViewport)
+        }
+        function onRevealCurrentRowRequested() {
+            root.revealCurrentRowPending = true
+            Qt.callLater(root.restoreViewport)
+        }
+    }
     component CellPressHandler: PointHandler {
         required property int row
         acceptedButtons: Qt.LeftButton

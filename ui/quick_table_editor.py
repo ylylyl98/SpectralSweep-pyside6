@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 from PySide6.QtCore import (QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
@@ -28,6 +29,7 @@ class TableEditorModel(QAbstractTableModel):
     schemaChanged = Signal()
     cellChanged = Signal(int, int)
     rowSelectionChanged = Signal(int, bool)
+    revealCurrentRowRequested = Signal()
     CellRole = int(Qt.ItemDataRole.UserRole) + 1
 
     def __init__(self, table, parent=None):
@@ -36,6 +38,7 @@ class TableEditorModel(QAbstractTableModel):
         self._single_line_rows = bool(table.property("quickSingleLineRows"))
         self._closed = False
         self._resetting = False
+        self._batch_update_depth = 0
         self._error = ""
         self._drafts = {}
         self._generation = 0
@@ -373,8 +376,23 @@ class TableEditorModel(QAbstractTableModel):
             self._resetting = True
             self.beginResetModel()
 
+    @contextmanager
+    def batch_updates(self):
+        """Rebuild Quick delegates once after a synchronous structural edit.
+
+        Source model signals stay intact for selection and other consumers.
+        A value-only edit never starts a reset and keeps its live editors.
+        """
+        self._batch_update_depth += 1
+        try:
+            yield
+        finally:
+            self._batch_update_depth -= 1
+            if not self._batch_update_depth:
+                self._end_reset()
+
     def _end_reset(self, *_args):
-        if self._resetting:
+        if self._resetting and not self._batch_update_depth:
             self._columns = self._visible_columns()
             self._widths = [self._column_width(column) for column in self._columns]
             self._titles = [self.headerData(column, Qt.Orientation.Horizontal) for column in range(len(self._columns))]
@@ -412,6 +430,11 @@ class TableEditorModel(QAbstractTableModel):
         # Shift selection must start there rather than at a stale row number.
         if not self._selecting_rows:
             self._selection_anchor = current.row()
+            self.revealCurrentRowRequested.emit()
+
+    @Slot(result=int)
+    def currentRow(self):
+        return -1 if self._closed else self.table.currentRow()
 
     @Slot(int, result=bool)
     def rowSelected(self, row):

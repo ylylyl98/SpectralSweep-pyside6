@@ -149,6 +149,62 @@ def test_structural_change_discards_tokens_without_writing_a_different_row(panel
     assert panel._batch_table.item(1, BATCH_SCHEMA.index("repeat")).text() != "91"
 
 
+def test_nested_table_updates_reset_once_and_invalidate_staged_tokens(selection_table):
+    source, view = selection_table
+    model = view.model
+    token = model.cellAt(1, 1)["token"]
+    original = source.item(1, 1).text()
+    model.stageEdit(token, "stale value")
+    before = QSignalSpy(model.modelAboutToBeReset)
+    after = QSignalSpy(model.modelReset)
+    inserted = QSignalSpy(source.model().rowsInserted)
+    with model.batch_updates():
+        source.insertRow(2)
+        with model.batch_updates():
+            source.insertRow(3)
+        assert before.count() == 1 and after.count() == 0
+        source.setItem(2, 1, QTableWidgetItem("new row"))
+    assert before.count() == after.count() == 1
+    assert inserted.count() == 2
+    assert model.rowCount() == 10
+    assert model.commitCell(token)
+    assert not model._drafts
+    assert source.item(1, 1).text() == original
+    assert model.cellAt(2, 1)["value"] == "new row"
+    assert not view.qml_warnings
+
+
+def test_table_updates_preserve_incremental_edits_without_structure_change(selection_table):
+    source, view = selection_table
+    model = view.model
+    resets = QSignalSpy(model.modelReset)
+    with model.batch_updates():
+        pass
+    with model.batch_updates():
+        source.item(1, 1).setText("changed")
+    model.refresh()
+    assert resets.count() == 0
+    assert model.cellAt(1, 1)["value"] == "changed"
+    assert not model._resetting
+
+
+def test_table_updates_finish_reset_after_exception_and_allow_next_edit(selection_table):
+    source, view = selection_table
+    before = QSignalSpy(view.model.modelAboutToBeReset)
+    after = QSignalSpy(view.model.modelReset)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        with view.model.batch_updates():
+            source.insertRow(2)
+            raise RuntimeError("interrupted")
+    assert before.count() == after.count() == 1
+    assert not view.model._resetting
+    assert view.model.rowCount() == source.rowCount() == 9
+    source.removeRow(2)
+    assert before.count() == after.count() == 2
+    assert view.model.rowCount() == 8
+    assert not view.qml_warnings
+
+
 def test_batch_table_keeps_one_line_without_horizontal_scrolling_or_field_pages(panel):
     view = panel._batch_table._quick_editor
     view.resize(450, 260)
@@ -393,6 +449,197 @@ def test_batch_quick_multiselection_buttons_keep_highlight_current_and_shift_anc
     check_selected([0, 2], 2)
     _click_table_item(view, f"tableCell_4_{column}", Qt.KeyboardModifier.ShiftModifier)
     check_selected([2, 3, 4], 4)
+    assert not view.qml_warnings
+
+
+@pytest.fixture
+def scrolled_batch(panel):
+    import pandas as pd
+    from ui.presets_panel import _populate_batch_table
+
+    source = panel._batch_table
+    view = source._quick_editor
+    defaults = panel._batch_row_values(0)
+    _populate_batch_table(source, pd.DataFrame([
+        dict(defaults, condition_label=f"row {row}") for row in range(100)]))
+    panel._reset_batch_history()
+    QTest.qWait(30)
+    grid = view.quick_widget.rootObject().findChild(QObject, "QuickEditableTable")
+    view.model.selectRow(65)
+    grid.setProperty("contentY", 64 * 38.)
+    QTest.qWait(30)
+    offset = grid.property("contentY") - grid.property("originY")
+    assert offset > 1000
+    _assert_batch_current_visible(panel, grid)
+    return panel, grid, offset
+
+
+def _assert_batch_current_visible(panel, grid):
+    from tests.test_quick_parameter_forms import find_item
+
+    view = panel._batch_table._quick_editor
+    row = panel._batch_table.currentRow()
+    record = find_item(view.quick_widget.rootObject(), f"tableRecord_{row}")
+    assert record is not None
+    y = record.mapToItem(grid, QPointF()).y()
+    assert y >= -1 and y + record.height() <= grid.height() + 1
+    assert not view.qml_warnings
+
+
+def test_batch_bulk_edits_and_structural_history_rebuild_quick_only_once(scrolled_batch):
+    panel, grid, _ = scrolled_batch
+    source = panel._batch_table
+    model = source._quick_editor.model
+    resets = QSignalSpy(model.modelReset)
+    inserted = QSignalSpy(source.model().rowsInserted)
+    removed = QSignalSpy(source.model().rowsRemoved)
+    rows = [panel._batch_row_values(65) for _ in range(10)]
+    panel._insert_batch_rows(66, rows)
+    assert inserted.count() == 10 and resets.count() == 1
+    QTest.qWait(30)
+    _assert_batch_current_visible(panel, grid)
+    panel._undo_batch_edit()
+    assert removed.count() == 10 and resets.count() == 2
+    panel._redo_batch_edit()
+    assert inserted.count() == 20 and resets.count() == 3
+    model.selectRow(66)
+    model.selectRowWithModifiers(75, Qt.KeyboardModifier.ShiftModifier.value)
+    panel._del_batch_row()
+    assert removed.count() == 20 and resets.count() == 4
+    QTest.qWait(30)
+    _assert_batch_current_visible(panel, grid)
+    # Value-only history restores keep the existing incremental path.
+    panel._set_rows_repeat([source.currentRow()], 3)
+    panel._undo_batch_edit()
+    panel._redo_batch_edit()
+    assert resets.count() == 4
+
+
+def test_delete_disabled_batch_rows_coalesces_noncontiguous_removals(scrolled_batch):
+    panel, grid, _ = scrolled_batch
+    panel._set_rows_run_state([10, 30, 50, 70, 90], False)
+    source = panel._batch_table
+    model = source._quick_editor.model
+    resets = QSignalSpy(model.modelReset)
+    removed = QSignalSpy(source.model().rowsRemoved)
+    panel._delete_disabled_batch_rows()
+    assert source.rowCount() == 95
+    assert removed.count() == 5 and resets.count() == 1
+    QTest.qWait(30)
+    _assert_batch_current_visible(panel, grid)
+    panel._undo_batch_edit()
+    assert source.rowCount() == 100
+    assert resets.count() == 2
+
+
+@pytest.mark.parametrize("operation,expected_row,expected_count", [
+    ("duplicate", 66, 101), ("add", 66, 101), ("paste", 68, 103),
+    ("delete", 65, 99), ("delete_many", 65, 97),
+    ("up", 64, 100), ("down", 66, 100),
+    ("top", 0, 100), ("bottom", 99, 100),
+    ("repeat", 65, 100), ("edit", 65, 100),
+])
+def test_batch_operations_keep_current_row_in_scrolled_quick_view(
+        scrolled_batch, operation, expected_row, expected_count):
+    panel, grid, offset = scrolled_batch
+    source = panel._batch_table
+    view = source._quick_editor
+
+    if operation == "paste":
+        panel._batch_row_clipboard = [panel._batch_row_values(65) for _ in range(3)]
+        panel._paste_batch_rows()
+    elif operation == "delete_many":
+        view.model.selectRowWithModifiers(67, Qt.KeyboardModifier.ShiftModifier.value)
+        panel._del_batch_row()
+    elif operation == "repeat":
+        panel._set_rows_repeat([65], 3)
+    elif operation == "edit":
+        column = view.model._columns.index(BATCH_SCHEMA.index("condition_label"))
+        assert view.model.editCell(65, column, "changed")
+    elif operation in {"top", "bottom"}:
+        panel._move_batch_row_to_edge(top=operation == "top")
+    else:
+        getattr(panel, {"duplicate": "_duplicate_batch_row", "add": "_add_batch_row",
+                        "delete": "_del_batch_row", "up": "_move_batch_row_up",
+                        "down": "_move_batch_row_down"}[operation])()
+    QTest.qWait(60)
+
+    assert source.rowCount() == expected_count
+    assert source.currentRow() == expected_row
+    _assert_batch_current_visible(panel, grid)
+    if operation not in {"top", "bottom"}:
+        assert grid.property("contentY") - grid.property("originY") == pytest.approx(offset)
+    assert not view.qml_warnings
+
+
+@pytest.mark.parametrize("delete", [False, True])
+def test_batch_structural_undo_redo_preserves_scrolled_position(scrolled_batch, delete):
+    panel, grid, offset = scrolled_batch
+    before = panel._batch_snapshot()
+    if delete:
+        panel._del_batch_row()
+    else:
+        panel._insert_batch_rows(66, [panel._batch_row_values(65) for _ in range(3)])
+    after = panel._batch_snapshot()
+    QTest.qWait(40)
+    for action, expected in [(panel._undo_batch_edit, before), (panel._redo_batch_edit, after)]:
+        action()
+        QTest.qWait(40)
+        assert panel._batch_snapshot().equals(expected)
+        _assert_batch_current_visible(panel, grid)
+        assert grid.property("contentY") - grid.property("originY") == pytest.approx(offset)
+
+
+def test_batch_undo_with_current_cell_but_no_selection_keeps_location(scrolled_batch):
+    panel, grid, offset = scrolled_batch
+    source = panel._batch_table
+    panel._set_rows_repeat([65], 3)
+    source.clearSelection()
+    assert source.currentRow() == 65
+    assert not panel._selected_batch_rows()
+    panel._undo_batch_edit()
+    QTest.qWait(40)
+    assert source.currentRow() == 65
+    _assert_batch_current_visible(panel, grid)
+    assert grid.property("contentY") - grid.property("originY") == pytest.approx(offset)
+
+
+def test_unrelated_row_insertion_keeps_viewport_away_from_old_selection(scrolled_batch):
+    panel, grid, offset = scrolled_batch
+    source = panel._batch_table
+    view = source._quick_editor
+    view.model.selectRow(0)
+    source.insertRow(source.rowCount())
+    QTest.qWait(40)
+    assert source.currentRow() == 0
+    assert grid.property("contentY") - grid.property("originY") == pytest.approx(offset)
+    assert not view.qml_warnings
+
+
+@pytest.mark.parametrize("delete_all", [False, True])
+def test_batch_deletion_clamps_viewport_at_end_and_handles_empty_table(scrolled_batch, delete_all):
+    panel, grid, _ = scrolled_batch
+    source = panel._batch_table
+    view = source._quick_editor
+    view.model.selectRow(94)
+    view.model.selectRowWithModifiers(99, Qt.KeyboardModifier.ShiftModifier.value)
+    grid.setProperty("contentY", grid.property("originY") + grid.property("contentHeight") - grid.height())
+    QTest.qWait(30)
+    if delete_all:
+        source.selectAll()
+    panel._del_batch_row()
+    QTest.qWait(40)
+    assert source.rowCount() == (0 if delete_all else 94)
+    if delete_all:
+        assert source.currentRow() == -1
+        assert grid.property("contentY") == grid.property("originY")
+    else:
+        assert source.currentRow() == 93
+        _assert_batch_current_visible(panel, grid)
+    panel._undo_batch_edit()
+    QTest.qWait(40)
+    assert source.rowCount() == 100
+    _assert_batch_current_visible(panel, grid)
     assert not view.qml_warnings
 
 

@@ -37,6 +37,7 @@ import threading
 import traceback
 import uuid
 from copy import deepcopy
+from contextlib import nullcontext
 from ui.sensor_readout_preflight import ensure_sensor_readout
 from collections import Counter
 from functools import lru_cache, wraps
@@ -3925,6 +3926,17 @@ def _read_batch_table(table: QTableWidget) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=BATCH_SCHEMA) if rows else pd.DataFrame(columns=BATCH_SCHEMA)
 
 
+def _coalesce_batch_updates(method):
+    """Keep an installed Quick editor from rebuilding intermediate row states."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        editor = getattr(self._batch_table, "_quick_editor", None)
+        batch_updates = getattr(getattr(editor, "model", None), "batch_updates", nullcontext)
+        with batch_updates():
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 def _batch_read_transaction(method):
     """Read Batch cells once during a synchronous, non-editing refresh chain."""
     @wraps(method)
@@ -5800,7 +5812,9 @@ class PresetsPanel(QWidget):
         if not (0 <= index < len(self._batch_history)):
             return
         selected = self._selected_batch_rows()
-        preferred_row = selected[0] if selected else 0
+        # Ctrl-deselecting keeps a current cell even with no selected rows.
+        # Undo should retain that location instead of falling back to row 0.
+        preferred_row = selected[0] if selected else max(0, self._batch_table.currentRow())
         self._batch_history_restoring = True
         try:
             self._restore_batch_values(self._batch_history[index])
@@ -5814,6 +5828,7 @@ class PresetsPanel(QWidget):
         self._update_batch_row_buttons()
         self._on_batch_draft_edited()
 
+    @_coalesce_batch_updates
     def _restore_batch_values(self, snapshot):
         """Undo only the changed row span, retaining all unaffected cell items."""
         table = self._batch_table
@@ -7140,6 +7155,7 @@ class PresetsPanel(QWidget):
         self._insert_batch_rows(r, [defaults])
 
     @Slot()
+    @_coalesce_batch_updates
     def _del_batch_row(self):
         rows = {i.row() for i in self._batch_table.selectedIndexes()}
         signals_were_blocked = self._batch_table.blockSignals(True)
@@ -7179,6 +7195,7 @@ class PresetsPanel(QWidget):
                 values[name] = item.text() if item is not None else ""
         return values
 
+    @_coalesce_batch_updates
     def _insert_batch_rows(
         self,
         target: int,
@@ -7448,6 +7465,7 @@ class PresetsPanel(QWidget):
         )
 
     @Slot()
+    @_coalesce_batch_updates
     def _delete_disabled_batch_rows(self):
         run_column = BATCH_SCHEMA.index("Run")
         disabled = [
