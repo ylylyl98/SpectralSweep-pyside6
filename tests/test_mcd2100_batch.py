@@ -234,6 +234,12 @@ class MCD2100BatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             controller = _Controller(-0.01, 0.01)
             optical = _FailOnSecondGate()
+            # Endpoint confirmation needs five samples within its deadline.
+            # A simulated clock keeps this gate-failure test independent of
+            # host scheduling pauses while retaining the timeout logic.
+            now = [0.0]
+            def sleep(seconds):
+                now[0] += seconds
             worker = MCD2100Worker(
                 controller, optical, -0.01, 0.01, [0.0], td,
                 bidirectional=True, apply_voltages=True,
@@ -242,9 +248,11 @@ class MCD2100BatchTests(unittest.TestCase):
                             {"enabled": True, "vtg_v": 5.0, "vbg_v": 6.0}],
                 poll_interval_s=0.001, gate_timeout_s=0.2,
                 operation_timeout_s=1.0, cleanup_timeout_s=1.0,
+                clock=lambda: now[0], sleep=sleep,
             )
             result = worker.run()
-            self.assertEqual(result["status"], "FAILED")
+            self.assertEqual(result["status"], "FAILED", result)
+            self.assertIn("simulated gate fault", result["error"])
             self.assertEqual(controller.stop_calls, 1)
             self.assertEqual(len(optical.gates), 1)
             self.assertTrue(result["file_details"])
