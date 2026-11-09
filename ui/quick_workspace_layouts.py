@@ -11,14 +11,7 @@ from PySide6.QtWidgets import (QApplication, QBoxLayout, QFormLayout, QGridLayou
                                QFrame, QGroupBox, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from ui.workflow_sections import DisclosureSection
-
-
-def _valid_splitter_sizes(value):
-    if (isinstance(value, (list, tuple)) and len(value) == 2
-            and all(isinstance(size, (int, float)) and not isinstance(size, bool)
-                    and math.isfinite(size) and size > 0 for size in value)):
-        return tuple(value)
-    return None
+from ui.workspace_pane import WorkspacePaneWidth as _WorkspacePaneWidth, valid_splitter_sizes as _valid_splitter_sizes
 
 
 def remember_workspace_layout(panel, state):
@@ -43,104 +36,6 @@ def remember_workspace_layout(panel, state):
             "sizes": sizes, "ratio": ratio,
             "orientation": state.get("splitter_orientation"),
         }
-
-
-class _WorkspacePaneWidth(QObject):
-    """Choose a readable initial pane width once the real viewport exists.
-
-    QSplitter's construction-time sizes are weights, so applying [600, 340]
-    before a desktop window is laid out can produce a 1000px settings pane.
-    Normally seed only the initial geometry. A responsive default can follow
-    the viewport until dragging or explicit session restoration takes over.
-    """
-
-    def __init__(self, panel, splitter, preferred, *, index=0, state_key="splitter_sizes", responsive=False):
-        super().__init__(splitter)
-        self.splitter = splitter
-        self.preferred = preferred
-        self.index = index
-        self.responsive = responsive
-        self.initialized = False
-        self.last_width = None
-        self.on_width_applied = None
-        restored = getattr(panel, "_quick_restored_workspace_layout", {})
-        self.restored_sizes = restored.get("sizes") if state_key else None
-        self.restored_orientation = restored.get("orientation") if state_key else None
-        splitter.setStretchFactor(index, 0)
-        splitter.setStretchFactor(1 - index, 1)
-        splitter.installEventFilter(self)
-        splitter.splitterMoved.connect(self._moved)
-        restore = getattr(panel, "restore_session_state", None)
-        if callable(restore) and state_key:
-            def restore_state(_panel, state):
-                sizes = _valid_splitter_sizes(state.get(state_key)) if isinstance(state, dict) else None
-                if sizes is not None:
-                    # A caller restoring its own layout takes precedence over
-                    # the presentation default, even before the first show.
-                    self.initialized = splitter.isVisible()
-                    self.responsive = False
-                    self.restored_sizes = sizes
-                    self.restored_orientation = state.get("splitter_orientation")
-                result = restore(state)
-                if self.initialized and splitter.orientation() == Qt.Orientation.Horizontal:
-                    self.last_width = splitter.sizes()[index]
-                return result
-            panel.restore_session_state = MethodType(restore_state, panel)
-        QTimer.singleShot(0, self, self.initialize)
-
-    def eventFilter(self, watched, event):
-        if event.type() in (QEvent.Type.Show, QEvent.Type.Resize):
-            callback = self.recover_width if self.initialized else self.initialize
-            QTimer.singleShot(0, self, callback)
-        return False
-
-    def initialize(self):
-        splitter = self.splitter
-        if self.initialized or not splitter.isVisible() or splitter.orientation() != Qt.Orientation.Horizontal:
-            return
-        available = splitter.width() - splitter.handleWidth()
-        if available <= 0:
-            return
-        preferred = self.preferred(available) if callable(self.preferred) else self.preferred
-        if self.restored_sizes and self.restored_orientation in (None, "Horizontal"):
-            preferred = available * self.restored_sizes[self.index] / sum(self.restored_sizes)
-        other = splitter.widget(1 - self.index)
-        width = min(int(preferred), max(0, available - other.minimumWidth()))
-        sizes = [available - width, available - width]
-        sizes[self.index] = width
-        if splitter.sizes() != sizes:
-            splitter.setSizes(sizes)
-        self.initialized = True
-        self.last_width = splitter.sizes()[self.index]
-        if self.on_width_applied is not None:
-            self.on_width_applied()
-
-    def recover_width(self):
-        """Recover a drag preference after a temporary minimum-width clamp."""
-        splitter = self.splitter
-        if self.last_width is None or splitter.orientation() != Qt.Orientation.Horizontal:
-            return
-        if self.responsive and not self.restored_sizes:
-            self.initialized = False
-            self.initialize()
-            return
-        available = splitter.width() - splitter.handleWidth()
-        other = splitter.widget(1 - self.index)
-        other_minimum = max(other.minimumWidth(), other.minimumSizeHint().width())
-        # Qt handles constrained windows. Only restore once there is room for
-        # the original width again; ordinary resize events keep native sizing.
-        if available >= self.last_width + other_minimum and splitter.sizes()[self.index] != self.last_width:
-            sizes = [available - self.last_width, available - self.last_width]
-            sizes[self.index] = self.last_width
-            splitter.setSizes(sizes)
-            if self.on_width_applied is not None:
-                self.on_width_applied()
-
-    def _moved(self, *_args):
-        if self.splitter.orientation() == Qt.Orientation.Horizontal:
-            self.responsive = False
-            self.initialized = True
-            self.last_width = self.splitter.sizes()[self.index]
 
 
 def _readable_pane(panel, splitter, preferred, **kwargs):
@@ -312,6 +207,17 @@ def _layout_slot(layout, widget):
     return None
 
 
+def _clear_group_title(widget):
+    widget.setTitle("")
+    widget.setProperty("quickDisclosureContent", True)
+    # The group can already have cached its styled title margins. Re-polish
+    # the disclosure rule and notify QGroupBox to recompute its frame geometry.
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+    QApplication.sendEvent(widget, QEvent(QEvent.Type.StyleChange))
+    widget.updateGeometry()
+
+
 def _fold(widget, title, *, expanded=False):
     owner = widget.parentWidget()
     found = _layout_slot(owner.layout(), widget) if owner and owner.layout() else None
@@ -326,7 +232,7 @@ def _fold(widget, title, *, expanded=False):
     section.setObjectName("QuickOptional_" + title.split(" · ")[0].replace(" ", ""))
     section.toggle.setToolTip(title + ". Expand to review or edit these settings.")
     if isinstance(widget, QGroupBox) and not widget.isCheckable():
-        widget.setTitle("")
+        _clear_group_title(widget)
     if isinstance(layout, QGridLayout):
         layout.addWidget(section, *position, alignment)
     elif isinstance(layout, QFormLayout):
@@ -397,6 +303,9 @@ def _mcd_layout(panel, page_id):
                         "_start_t": 120, "_stop_t": 120, "_angle_a": 120,
                         "_angle_b": 120, "_rotator": 120, "_sweep_mode": 120,
                         "_start_settle": 120, "_rotation_settle": 120,
+                        "_acquisition_mode": 180, "_point_step_mt": 120,
+                        "_point_tolerance_mt": 120, "_point_hold_s": 120,
+                        "point_step": 120, "point_tolerance": 120, "point_stable": 120,
                         "_center": 120, "_exposure": 120, "_frames": 100,
                         "start_field": 120, "stop_field": 120, "angles": 140,
                         "rotator": 120, "lf_center": 120, "lf_exposure": 120,
@@ -407,6 +316,8 @@ def _mcd_layout(panel, page_id):
     # Paired sweep/rotation sections have room for two compact fields per row
     # when their labels sit above the controls instead of consuming a column.
     for name in ("_start_t", "_stop_t", "_start_settle", "_sweep_mode",
+                 "_acquisition_mode", "_point_step_mt", "_point_tolerance_mt", "_point_hold_s",
+                 "point_step", "point_tolerance", "point_stable",
                  "_rotator", "_rotation_settle", "_angle_a", "_angle_b",
                  "start_field", "stop_field", "angles", "rotator",
                  "_center", "_exposure", "_frames",
@@ -415,12 +326,25 @@ def _mcd_layout(panel, page_id):
         if isinstance(widget, QWidget):
             widget.setProperty("quickLabelAbove", True)
     result = _fold_groups(panel, [
-        ("APS100 — attoDRY1000", "Magnet connection and diagnostics"),
-        ("attoDRY2100 connection and telemetry", "Magnet connection and telemetry"),
-        ("New gate rows", "Add gate conditions · optional editor"),
+        ("APS100 — attoDRY1000", "Magnet connection"),
+        ("attoDRY2100 connection and telemetry", "Magnet connection"),
+        ("New gate rows", "Add gate conditions"),
         ("Gate run preview", "Gate plan details · selected condition"),
         ("Filename", "Output filename · preview and tokens"),
     ])
+    # Batch entry is a primary gate-table action in both MCD workspaces.
+    if result.get("New gate rows") is not None:
+        entry = result["New gate rows"]
+        entry.set_expanded(True)
+        # The 1000 page wraps this editor beside a stretching spacer. Quick
+        # forms have no native width hint, so give the editor that row's space.
+        slot = _layout_slot(entry.parentWidget().layout(), entry)
+        if slot is not None and isinstance(slot[0], QBoxLayout):
+            row, index = slot
+            row.setStretch(index, 1)
+            for other in range(row.count()):
+                if row.itemAt(other).spacerItem() is not None:
+                    row.setStretch(other, 0)
     if page_id == "mcd2100":
         panel._workflow_layout.setSpacing(4)
         # The notice already describes the round trip under "Field Sweep";
@@ -432,33 +356,11 @@ def _mcd_layout(panel, page_id):
         if temperature is not None:
             result["Temperature"] = _fold(temperature, "Temperature control · optional",
                 expanded=panel.temperature_control_enabled.isChecked())
+    # Source pages retain the same full-width section order in both shells.
+    for section in result.values():
+        if section is not None:
+            section.setProperty("quickSectionBoundary", True)
     scroll = getattr(panel, "_settings_scroll", getattr(panel, "_scroll", None))
-    if scroll is not None:
-        scroll.setMinimumWidth(440)
-    rows = [getattr(panel, name, None) for name in ("_row_a", "_field_rotation_row", "_temperature_lightfield_row")]
-    rows = [row for row in rows if row is not None]
-    if rows:
-        for row in rows:
-            # Keep these semantic columns available after scalar migration,
-            # including when a narrow or collapsed initial state is stacked.
-            row.setProperty("quickSectionColumns", True)
-        panel._quick_legacy_responsive_layout = panel._apply_responsive_layout
-        def fit(self):
-            side_by_side = scroll.viewport().width() >= 500
-            for row in rows:
-                columns = side_by_side
-                if row is getattr(self, "_temperature_lightfield_row", None):
-                    section = result.get("Temperature")
-                    # A collapsed temperature header should not reserve half
-                    # the row while the optical fields stack in the other half.
-                    columns = columns and bool(section and section.toggle.isChecked())
-                row.setDirection(QBoxLayout.Direction.LeftToRight if columns else QBoxLayout.Direction.TopToBottom)
-                row.setStretch(0, 1 if columns else 0)
-                row.setStretch(1, 1 if columns else 0)
-        panel._apply_responsive_layout = MethodType(fit, panel)
-        if result.get("Temperature") is not None:
-            result["Temperature"].toggle.toggled.connect(lambda _: panel._apply_responsive_layout())
-        panel._apply_responsive_layout()
     if scroll is not None:
         _compact_sections(scroll.widget())
         _workspace_surface(scroll.widget())
@@ -466,16 +368,12 @@ def _mcd_layout(panel, page_id):
     _workspace_surface(panel._splitter.widget(1))
     # The 2100 condition table includes its input-mode selector and an index;
     # a little more width keeps every gate value on one inline band.
-    _readable_pane(panel, panel._splitter, 660 if page_id == "mcd2100" else 620)
+    panel._quick_pane_width = panel._mcd_pane_width
     return result
 
 
 def _motion_layout(panel):
     result = {}
-    for group in (panel._conditions_grp, panel._cal_grp):
-        # Both original handlers hide their entire bodies when unchecked.
-        # The Quick enable header remains visible outside that empty body.
-        group.setProperty("quickCollapseWhenUnchecked", True)
     # These choices and bounded voltage values do not need path-sized editors.
     # Retain their ranges/precision while keeping the three gates on one row.
     for name, width in {"_input_mode": 140, "_vbg_spin": 130,
@@ -592,7 +490,7 @@ def _dual_gate_layout(panel):
     # disclosure in the same slot so saved two-part splitter state remains valid.
     preview_splitter.insertWidget(0, execution)
     execution.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-    panel._execution_order_group.setTitle("")
+    _clear_group_title(panel._execution_order_group)
 
     sequence_panel = panel._tree.parentWidget()
     panel._sequence_toggle.setProperty("quickDisclosure", True)
@@ -640,7 +538,7 @@ def _dual_gate_layout(panel):
     layout.removeWidget(filename_group)
     filename = DisclosureSection("Filename preview", filename_group, expanded=False)
     filename.setObjectName("QuickDualGateFilenameDisclosure")
-    filename_group.setTitle("")
+    _clear_group_title(filename_group)
     filename_group.setObjectName("QuickDualGateFilenameContent")
     filename_group.layout().setContentsMargins(0, 0, 0, 0)
     layout.insertWidget(0, filename)

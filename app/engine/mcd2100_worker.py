@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 from utils.mcd_common import build_mcd2100_filename, resolve_gate_conditions
 from app.engine.magnet_preparation import MagnetPreparation, MagnetPreparationCancelled
 from app.engine.mcd_metadata import condition_metadata_summary
+from app.engine.mcd_point_pairing import field_points, FieldStability, validate_pair_fields
 
 
 def _optical_acquire(optical: Any, angle: float, label: str, stop_event: Any,
@@ -403,6 +404,10 @@ class MCD2100Worker:
         *,
         stem: str = "mcd2100_continuous",
         bidirectional: bool = False,
+        point_pairing: bool = False,
+        point_step_t: float = 0.05,
+        point_tolerance_t: float = 0.01,
+        point_stable_s: float = 1.0,
         gate_t: Optional[float] = None,
         vtg_v: float = 0.0,
         vbg_v: float = 0.0,
@@ -443,6 +448,17 @@ class MCD2100Worker:
         self.output_dir = Path(output_dir)
         self.stem = stem
         self.bidirectional = bool(bidirectional)
+        self.point_pairing = bool(point_pairing)
+        self.point_step_t = float(point_step_t)
+        self.point_tolerance_t = float(point_tolerance_t)
+        self.point_stable_s = float(point_stable_s)
+        if self.point_pairing:
+            if len(self.angles) != 2:
+                raise ValueError("Point pairing requires exactly two angles")
+            if (not all(math.isfinite(v) for v in (self.point_step_t, self.point_tolerance_t, self.point_stable_s))
+                    or self.point_step_t <= 0 or self.point_tolerance_t <= 0 or self.point_stable_s < 0):
+                raise ValueError("Invalid point-pairing step, tolerance or stable duration")
+            field_points(self.start_field_t, self.stop_field_t, self.point_step_t)
         self.gate_t = None if gate_t is None else float(gate_t)
         self.vtg_v, self.vbg_v, self.vbias_v = float(vtg_v), float(vbg_v), float(vbias_v)
         self.gate_ratio = float(gate_ratio)
@@ -1059,6 +1075,143 @@ class MCD2100Worker:
         )
         return min(100.0, max(0.0, 100.0 * completed_units / total_units))
 
+    def _point_leg(self, *, leg, start, target, writer, stream, wavelengths, metadata,
+                   condition_index=1, condition_count=1, verified_start_snapshot=None):
+        points = field_points(start, target, self.point_step_t)
+        direction = "forward" if leg == 1 else "backward"
+        last = None
+        def idle_at_setpoint(snapshot, point):
+            status = getattr(snapshot, "status", None)
+            details = getattr(status, "backend_details", {})
+            state = details.get("h_state") if isinstance(details, Mapping) else None
+            if state is None:
+                state = getattr(status, "field_control_state", None)
+            setpoint = getattr(snapshot, "setpoint_t", None)
+            # IDLE is a conservative arrival check, independent of Driven mode;
+            # it is not a manufacturer-defined field stability criterion.
+            return (str(state).strip().upper() == "IDLE" and isinstance(setpoint, (int, float))
+                    and math.isfinite(float(setpoint)) and abs(float(setpoint) - point) <= 1e-6)
+        for index, point in enumerate(points):
+            self._check_cancelled()
+            self._set_and_start(point)
+            stability = FieldStability(self.point_tolerance_t, self.point_stable_s)
+            def wait_stable():
+                nonlocal last
+                deadline = self.clock() + self.gate_timeout_s
+                while True:
+                    self._check_cancelled()
+                    if self.clock() > deadline:
+                        raise MCD2100StabilizationError(f"field did not stabilize at {point:g} T")
+                    last = self._read_snapshot()
+                    value, _ = self._snapshot_values(last)
+                    if not idle_at_setpoint(last, point):
+                        stability.reset()
+                        self._sleep_checked(self.poll_interval_s)
+                        continue
+                    if stability.observe(value, point, self.clock()):
+                        return value
+                    self._sleep_checked(self.poll_interval_s)
+            self._emit_phase(f"Stabilizing field at {point:+g} T for A/B pair")
+            pair_id = str(uuid.uuid4())
+            fields = []
+            pair_records = metadata.setdefault("point_pairs", [])
+            pair = {"pair_id": pair_id, "target_t": point, "direction": direction,
+                    "condition_index": condition_index, "status": "incomplete", "spectra": []}
+            pair_records.append(pair)
+            for angle_index, angle in enumerate(self.angles):
+                self._check_cancelled()
+                move = getattr(self.optical, "move_to", None)
+                if callable(move):
+                    move(float(angle))
+                position = getattr(self.optical, "get_position", None)
+                if not callable(position):
+                    raise RuntimeError("Point pairing requires rotation position readback")
+                observed_angle = float(position())
+                if not math.isfinite(observed_angle) or abs((observed_angle - float(angle) + 180.0) % 360.0 - 180.0) > 0.25:
+                    raise RuntimeError("Rotation did not reach the requested angle within 0.25 degrees")
+                stability.reset()  # Rotation is not continuously monitored.
+                sample_t0 = self._read_sample_temperature() if self.temperature_control_enabled else None
+                before = wait_stable()
+                timestamp_start = _utc_now()
+                acquisition_id = str(uuid.uuid4())
+                acquired = _optical_acquire(self.optical, angle, str(angle), self.stop_event, acquisition_id)
+                timestamp_end = _utc_now()
+                raw_wavelengths, raw_counts, measured_angle = acquired
+                raw_wavelengths = [float(v) for v in raw_wavelengths]
+                counts = [float(v) for v in raw_counts]
+                if not counts or any(not math.isfinite(v) for v in counts + raw_wavelengths):
+                    raise RuntimeError("optical spectrum is invalid")
+                counts = self._align_counts(wavelengths, raw_wavelengths, counts)
+                # Preserve acquired data even if post-exposure telemetry fails.
+                after = None
+                error = None
+                try:
+                    last = self._read_snapshot()
+                    after, _ = self._snapshot_values(last)
+                    if not idle_at_setpoint(last, point):
+                        raise MCD2100StabilizationError("magnet lost idle or target setpoint during exposure")
+                    stability.observe(after, point, self.clock())
+                except Exception as exc:
+                    error = str(exc)
+                sample_t1 = None
+                if self.temperature_control_enabled:
+                    try:
+                        sample_t1 = self._read_sample_temperature()
+                    except Exception as exc:
+                        error = (error + "; " if error else "") + str(exc)
+                sample_tmid = (sample_t0 + sample_t1) / 2 if sample_t0 is not None and sample_t1 is not None else None
+                doping = self.vtg_v + self.gate_ratio * self.vbg_v
+                efield = self.vtg_v - self.gate_ratio * self.vbg_v
+                writer.writerow([timestamp_start, timestamp_end, direction, "increasing" if target > start else "decreasing", measured_angle,
+                                 before, after, (before + after) / 2 if after is not None else "",
+                                 self.vtg_v, self.vbg_v, self.vbias_v, doping, efield,
+                                 sample_t0, sample_t1, sample_tmid, pair_id, point, *counts])
+                stream.flush(); os.fsync(stream.fileno())
+                metadata["spectra_written"] += 1
+                pair["spectra"].append({"acquisition_id": acquisition_id, "angle": angle,
+                                        "field_before_t": before, "field_after_t": after})
+                self._emit_spectrum(wavelengths, counts, "AB"[angle_index], after if after is not None else before)
+                if self.metadata_run is not None:
+                    self.metadata_run.record_observation(
+                        {"spectrum_index": metadata["spectra_written"], "acquisition_id": acquisition_id,
+                         "pair_id": pair_id, "field_target_t": point, "B0_T": before, "B1_T": after,
+                         "label": "AB"[angle_index], "measured_angle_deg": measured_angle,
+                         "direction": direction, "file_path": metadata.get("current_file_path")},
+                        acquisition_id=acquisition_id, condition_id=f"condition-{condition_index}")
+                if error:
+                    pair.update(status="rejected", error=error)
+                    raise MCD2100StabilizationError(error)
+                self._check_cancelled()
+                if not isinstance(measured_angle, (int, float)) or not math.isfinite(float(measured_angle)):
+                    pair.update(status="rejected", error="invalid rotation readback")
+                    raise RuntimeError(pair["error"])
+                if abs((float(measured_angle) - float(angle) + 180.0) % 360.0 - 180.0) > 0.25:
+                    pair.update(status="rejected", error="rotation readback outside tolerance")
+                    raise RuntimeError(pair["error"])
+                fields.extend([before, after])
+                if not validate_pair_fields(fields, point, self.point_tolerance_t):
+                    pair.update(status="rejected", error="field outside pairing tolerance")
+                    raise MCD2100StabilizationError(pair["error"])
+            pair["status"] = "accepted"
+            if metadata.get("_path"):
+                self._write_legacy_metadata(metadata["_path"], metadata,
+                                            materialize=self.metadata_run is None)
+            detail = metadata.get("current_file_detail")
+            if isinstance(detail, dict):
+                field_detail = detail.setdefault("field", {})
+                if index == 0:
+                    field_detail[f"{direction}_actual_start_T"] = fields[0]
+                    if leg == 1:
+                        field_detail["actual_start_T"] = fields[0]
+                field_detail[f"{direction}_actual_stop_T"] = fields[-1]
+                field_detail["actual_stop_T"] = fields[-1]
+            metadata["last_field_t"] = fields[-1]
+            metadata["last_direction"] = direction
+            self._emit_progress(point, self._overall_progress_percent(leg=leg,
+                leg_fraction=(index + 1) / len(points), condition_index=condition_index,
+                condition_count=condition_count), condition_index, condition_count)
+        return last
+
     def _leg(self, *, leg: int, start: float, target: float, writer: csv.writer,
              stream: Any, wavelengths: list[float], metadata: dict[str, Any],
              condition_index: int = 1, condition_count: int = 1,
@@ -1305,6 +1458,8 @@ class MCD2100Worker:
             "measurement_mode": "continuous", "magnet_backend": "attodry2100",
             "start_field_t": self.start_field_t, "stop_field_t": self.stop_field_t,
             "bidirectional": self.bidirectional, "spectra_written": 0,
+            "point_pairing": self.point_pairing, "point_step_t": self.point_step_t,
+            "point_tolerance_t": self.point_tolerance_t, "point_stable_s": self.point_stable_s,
             "completed_legs": 0, "snapshots": [], "_path": metadata_path,
             "requested_endpoints_t": [self.start_field_t, self.stop_field_t],
             "angles_deg": list(self.angles), "start_utc": _utc_now(),
@@ -1434,9 +1589,9 @@ class MCD2100Worker:
                     )
                 with csv_path.open("w", newline="", encoding="utf-8") as stream:
                     writer = csv.writer(stream)
-                    writer.writerow(CONTINUOUS_SCALAR_FIELDS + wavelengths)
+                    writer.writerow(CONTINUOUS_SCALAR_FIELDS + (["pair_id", "field_target_t"] if self.point_pairing else []) + wavelengths)
                     stream.flush(); os.fsync(stream.fileno())
-                    turnaround_snapshot = self._leg(
+                    turnaround_snapshot = (self._point_leg if self.point_pairing else self._leg)(
                         leg=1, start=self.start_field_t, target=self.stop_field_t,
                         writer=writer, stream=stream, wavelengths=wavelengths,
                         metadata=metadata,
@@ -1444,7 +1599,7 @@ class MCD2100Worker:
                     completion_snapshot = turnaround_snapshot
                     metadata["completed_legs"] = 1
                     if self.bidirectional:
-                        completion_snapshot = self._leg(
+                        completion_snapshot = (self._point_leg if self.point_pairing else self._leg)(
                             leg=2, start=self.stop_field_t, target=self.start_field_t,
                             writer=writer, stream=stream, wavelengths=wavelengths,
                             metadata=metadata,
@@ -1541,11 +1696,11 @@ class MCD2100Worker:
                     turnaround_snapshot = None
                     with batch_path.open("w", newline="", encoding="utf-8") as stream:
                         writer = csv.writer(stream)
-                        writer.writerow(CONTINUOUS_SCALAR_FIELDS + wavelengths)
+                        writer.writerow(CONTINUOUS_SCALAR_FIELDS + (["pair_id", "field_target_t"] if self.point_pairing else []) + wavelengths)
                         stream.flush(); os.fsync(stream.fileno())
                         for leg, start, target, _direction in legs:
                             self._check_cancelled()
-                            endpoint_snapshot = self._leg(
+                            endpoint_snapshot = (self._point_leg if self.point_pairing else self._leg)(
                                 leg=leg, start=start, target=target, writer=writer,
                                 stream=stream, wavelengths=wavelengths, metadata=metadata,
                                 condition_index=condition_index, condition_count=len(enabled),

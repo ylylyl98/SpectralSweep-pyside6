@@ -254,12 +254,15 @@ class QuickWorkbench(QObject):
         panel._quick_output_actions = holder
 
     def _dock_page_commands(self, panel, page_id):
-        """Dock actions at the lower right, matching the Dual Gate workspace."""
+        """Dock actions in the monitoring pane, keeping Stop reachable."""
         command = self._commands.get(page_id)
         if command is None:
             return False
         pane = self._command_pane(panel, page_id) if panel is not None else None
-        use_header = self._instrument_focus and page_id in {"mcd", "mcd2100"}
+        top_dock = page_id in {"mcd", "mcd2100"}
+        # The narrow instrument view hides the entire workspace, so its
+        # monitoring pane cannot host accessible commands even when idle.
+        use_header = top_dock and self._instrument_focus
         if isinstance(pane, QWidget) and not use_header:
             # A running measurement's Stop must remain reachable when the
             # outer laptop viewport scrolls the lower action area off screen.
@@ -267,9 +270,10 @@ class QuickWorkbench(QObject):
                                 if key in {"stop", "abort"})
             top = pane.mapTo(self.body_scroll.viewport(), QPoint()).y()
             bottom = top + pane.height()
+            action_top = top if top_dock else bottom - command.height()
+            action_bottom = top + command.height() if top_dock else bottom
             use_header = safety_active and (
-                bottom - command.height() < -4
-                or bottom > self.body_scroll.viewport().height() + 4)
+                action_top < -4 or action_bottom > self.body_scroll.viewport().height() + 4)
         if use_header:
             pane = None
         if command is None or not isinstance(pane, QWidget) or pane.layout() is None:
@@ -278,11 +282,15 @@ class QuickWorkbench(QObject):
             return False
         # A responsive source page can append optional content after a dock
         # (for example Mega Sweep's optical sequence). Keep actions last.
-        if command.parentWidget() is not pane or pane.layout().indexOf(command) != pane.layout().count() - 1:
+        target_index = 0 if top_dock else pane.layout().count() - 1
+        if command.parentWidget() is not pane or pane.layout().indexOf(command) != target_index:
             old_parent = command.parentWidget()
             if old_parent is not None and old_parent.layout() is not None:
                 old_parent.layout().removeWidget(command)
-            pane.layout().addWidget(command, 0, Qt.AlignmentFlag.AlignRight)
+            if top_dock:
+                pane.layout().insertWidget(0, command, 0, Qt.AlignmentFlag.AlignRight)
+            else:
+                pane.layout().addWidget(command, 0, Qt.AlignmentFlag.AlignRight)
             command.set_docked(compact=True)
             command.show()
         return True
@@ -607,7 +615,7 @@ class QuickWorkbench(QObject):
             ("mega_sweep", window._mega, "2D Sweep", {"run": "_run_btn", "stop": "_stop_btn"}),
             ("power_sweep", window._power_sweep, "Motion Sweep", {"run": "_run_btn", "stop": "_stop_btn"}),
             ("mcd", window._mcd, "MCD 1000", {"run": "_run_btn", "stop": "_stop_btn", "pause": "_pause_btn"}),
-            ("mcd2100", window._mcd2100, "MCD 2100", {"run": "start_btn", "prepare": "prepare_magnet_btn", "stop": "stop_btn"}),
+            ("mcd2100", window._mcd2100, "MCD 2100", {"run": "start_btn", "stop": "stop_btn", "prepare": "prepare_magnet_btn"}),
             ("bfp", window._bfp, "BFP acquisition", {"acquire": "_acquire_btn"}),
         )
         for page_id, panel, title, mapping in specs:

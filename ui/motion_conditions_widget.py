@@ -21,6 +21,7 @@ from utils.mcd_common import (
     validate_gate_conditions, vtg_vbg_from_doping_efield,
 )
 from utils.motion_conditions import build_conditions, expand_sequence, resolve_rotation_plan
+from ui.workflow_sections import DisclosureSection
 
 _ROW_ROLE = Qt.ItemDataRole.UserRole
 _FALSE_TEXT = {"0", "false", "no", "off", "unchecked"}
@@ -116,9 +117,6 @@ class MotionConditionsWidget(QWidget):
         self._preview_label.setWordWrap(True)
         root.addWidget(self._preview_label)
 
-        self._advanced_group = QGroupBox("Advanced")
-        self._advanced_group.setCheckable(True)
-        self._advanced_group.setChecked(False)
         advanced_body = QWidget()
         advanced = QFormLayout(advanced_body)
         advanced.setContentsMargins(6, 2, 6, 2)
@@ -128,11 +126,9 @@ class MotionConditionsWidget(QWidget):
         self._bias_spin.setDecimals(6)
         self.bias = self._bias_spin
         advanced.addRow("Vbias:", self.bias)
-        advanced_container = QVBoxLayout(self._advanced_group)
-        advanced_container.setContentsMargins(0, 0, 0, 0)
-        advanced_container.addWidget(advanced_body)
+        self._advanced_section = DisclosureSection("Advanced", advanced_body)
+        self._advanced_group = self._advanced_section.toggle
         self._advanced_body = advanced_body
-        self._advanced_body.setVisible(False)
         self._sequence_group = QGroupBox("Outer rotation / sequence")
         self._sequence_group.setToolTip("Optional rotations between complete sweeps. Choose the per-point scan axis at the top of Motion Sweep.")
         sequence_form = QFormLayout(self._sequence_group)
@@ -182,7 +178,7 @@ class MotionConditionsWidget(QWidget):
         timing_row.setSpacing(5)
         timing_row.addWidget(self.rotation_settle)
         sequence_form.addRow("Settle:", timing_row)
-        root.addWidget(self._advanced_group)
+        root.addWidget(self._advanced_section)
         root.addWidget(self._sequence_group)
 
         self._add_button = QPushButton("Add conditions")
@@ -234,7 +230,6 @@ class MotionConditionsWidget(QWidget):
         self.order.currentIndexChanged.connect(self._sequence_changed)
         self.repeats.valueChanged.connect(self._sequence_changed)
         self._advanced_group.toggled.connect(self._sequence_changed)
-        self._advanced_group.toggled.connect(self._advanced_body.setVisible)
         self._add_button.clicked.connect(self.add_batch)
         self._duplicate_button.clicked.connect(self.duplicate)
         self._remove_button.clicked.connect(self.remove)
@@ -262,16 +257,21 @@ class MotionConditionsWidget(QWidget):
 
     def _set_derived_flags(self) -> None:
         direct = self.mode.currentData() == MODE_DIRECT
-        for row in range(self.table.rowCount()):
-            for column in (2, 3, 4, 5):
-                item = self.table.item(row, column)
-                if item is None:
-                    continue
-                editable = (column in (4, 5)) if direct else (column in (2, 3))
-                flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-                if editable:
-                    flags |= Qt.ItemFlag.ItemIsEditable
-                item.setFlags(flags)
+        # Flag updates are presentation changes, not edits to gate values.
+        # QTableWidget emits itemChanged for setFlags, so block its signal while
+        # retaining model dataChanged notifications for Quick views.
+        with QSignalBlocker(self.table):
+            for row in range(self.table.rowCount()):
+                for column in (2, 3, 4, 5):
+                    item = self.table.item(row, column)
+                    if item is None:
+                        continue
+                    editable = (column in (4, 5)) if direct else (column in (2, 3))
+                    flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                    if editable:
+                        flags |= Qt.ItemFlag.ItemIsEditable
+                    if item.flags() != flags:
+                        item.setFlags(flags)
 
     def _parsed_inputs(self) -> tuple[list[float], list[float]]:
         direct = self.mode.currentData() == MODE_DIRECT
@@ -491,8 +491,22 @@ class MotionConditionsWidget(QWidget):
     def duplicate(self) -> None:
         row = self.table.currentRow()
         if row < 0: return
-        self._push_undo(); rows = self._snapshot(); rows.append(copy.deepcopy(rows[row]))
-        self._restore(rows); self.table.selectRow(self.table.rowCount() - 1); self.changed.emit()
+        self._push_undo()
+        self._busy = True
+        try:
+            with QSignalBlocker(self.table):
+                target = self.table.rowCount()
+                self.table.insertRow(target)
+                for column in range(self.table.columnCount()):
+                    original = self.table.item(row, column)
+                    if original is not None:
+                        item = QTableWidgetItem(original)
+                        if column == 1:
+                            item.setData(_ROW_ROLE, self._row_bundle(row))
+                        self.table.setItem(target, column, item)
+        finally:
+            self._busy = False
+        self.table.selectRow(target); self.changed.emit()
 
     def remove(self) -> None:
         row = self.table.currentRow()
@@ -506,7 +520,16 @@ class MotionConditionsWidget(QWidget):
     def reorder(self, delta: int) -> None:
         row = self.table.currentRow(); target = row + int(delta)
         if row < 0 or target < 0 or target >= self.table.rowCount(): return
-        self._push_undo(); rows = self._snapshot(); rows.insert(target, rows.pop(row)); self._restore(rows)
+        self._push_undo(); self._busy = True
+        try:
+            with QSignalBlocker(self.table):
+                for column in range(self.table.columnCount()):
+                    first = self.table.takeItem(row, column)
+                    second = self.table.takeItem(target, column)
+                    if second is not None: self.table.setItem(row, column, second)
+                    if first is not None: self.table.setItem(target, column, first)
+        finally:
+            self._busy = False
         self.table.selectRow(target); self.changed.emit()
 
     def undo_add(self) -> None:

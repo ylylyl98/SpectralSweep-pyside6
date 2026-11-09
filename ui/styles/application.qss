@@ -166,6 +166,20 @@ QGroupBox::title {
 QFrame[frameShape="4"], QFrame[frameShape="5"] {
     color: #dce2ea;
 }
+/* Stable, full-width MCD sections use headings and dividers rather than cards. */
+QGroupBox[mcdSection="true"] {
+    background: transparent;
+    border: none;
+    border-top: 1px solid palette(midlight);
+    border-radius: 0px;
+    margin-top: 22px;
+    padding: 8px 0px 0px 0px;
+}
+QGroupBox[mcdSection="true"]::title {
+    left: 0px;
+    color: palette(window-text);
+    background: palette(window);
+}
 
 /* Inputs */
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox,

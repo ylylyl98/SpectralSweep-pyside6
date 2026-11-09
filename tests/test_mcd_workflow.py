@@ -349,7 +349,7 @@ class MCDWorkflowTests(unittest.TestCase):
         self.assertTrue({
             "Sample / Device", "Field Sweep", "Rotation",
             "LightField", "Gate / SMU", "Filename",
-            "Run control", "Status / Progress / Log", "Continuous APS100 MCD",
+            "Run control", "Status / Progress / Log", "APS100 MCD",
             "Safe Magnet Control",
         }.issubset(titles))
 

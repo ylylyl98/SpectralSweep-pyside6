@@ -197,7 +197,7 @@ def test_mcd_status_and_display_actions_remain_separate_and_log_signal_works(qui
         assert sections["display_options"].isAncestorOf(forms[id(panel._show_log_chk)])
         assert not sections["display_options"].isAncestorOf(field)
         assert sections["telemetry"].isAncestorOf(field)
-        assert sections["header_row"].direction() == QBoxLayout.Direction.LeftToRight
+        assert sections["header_row"].direction() == QBoxLayout.Direction.TopToBottom
         assert sections["status_body"].direction() == QBoxLayout.Direction.TopToBottom
         toggle = next(field for form in coverage["forms"]
                       for field, source in form.adapter._fields.items()
@@ -265,13 +265,17 @@ def test_narrow_mcd_header_keeps_progress_readbacks_and_actions_compact(quick_ap
         assert len(items) == len(controls)
         assert len({item.mapToScene(QPointF()).y() for item in items}) == 1
         assert all(item.height() >= 28 and item.isVisible() for item in items)
+        for item in items:
+            label = find_item(item, "disclosureLabel")
+            if label is not None:
+                assert label.property("lineCount") == 1
         assert all(0 <= item.mapToScene(QPointF()).x()
                    and item.mapToScene(QPointF()).x() + item.width() <= action_form.width() + 1
                    for item in items)
         if page_id == "mcd2100":
             # A longer gate count must reclaim the progress row. This is
             # driven by label geometry updates, without a window resize.
-            panel.progress.setText("Gate 999999/1000000 · 73.5%")
+            panel.progress.setText("Gate 99999999/100000000 · 73.5%")
             QTest.qWait(100)
             assert sections["status_body"].direction() == QBoxLayout.Direction.TopToBottom, (
                 panel._splitter.widget(1).width(), sections["telemetry"].minimumSizeHint().width())

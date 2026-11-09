@@ -114,11 +114,12 @@ class _McdSectionsFit(QObject):
         self.fit()
 
     def fit(self):
+        # Status and display options are stable sections at every pane width.
+        # Only the progress/readback fields within Run status may share a row.
         horizontal = self.display.width() >= 750
-        self.row.setDirection(QBoxLayout.Direction.LeftToRight if horizontal
-                              else QBoxLayout.Direction.TopToBottom)
+        self.row.setDirection(QBoxLayout.Direction.TopToBottom)
         for index in range(self.row.count()):
-            self.row.setStretch(index, 1 if horizontal else 0)
+            self.row.setStretch(index, 0)
         # The narrow pane already stacks the two sections. Keep its progress
         # beside the readbacks when they fit, rather than paying for a third
         # full-width header row above the plot. Below that natural minimum,
@@ -246,7 +247,7 @@ def _mcd(panel, page_id):
         old_title.setParent(panel)
         layout.removeWidget(panel.run_activity)
         layout.removeWidget(panel.spectrum_activity)
-        actions, action_layout = _section("Live spectrum and log", display)
+        actions, action_layout = _section("Spectrum and log", display)
         action_layout.addLayout(header)
         activity, activity_layout = _row("QuickMcdSpectrumActivity", actions)
         activity_line = QHBoxLayout()

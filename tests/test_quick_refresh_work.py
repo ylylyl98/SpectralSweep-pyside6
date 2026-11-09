@@ -25,6 +25,45 @@ class CountedCombo(QComboBox):
         return super().itemText(index)
 
 
+def test_collapsed_form_loads_on_first_show_and_reuses_scene_with_fresh_values():
+    quick_application()
+    panel = QWidget()
+    layout = QVBoxLayout(panel)
+    section = QWidget(panel)
+    section.setProperty("quickSectionBoundary", True)
+    layout.addWidget(section)
+    source = QDoubleSpinBox(section)
+    QFormLayout(section).addRow("Value", source)
+    section.hide()
+    coverage = install_parameter_forms(panel, "settings")
+    surface = next(form for form in coverage["forms"] if source in form.adapter._fields.values())
+    try:
+        panel.show()
+        QTest.qWait(20)
+        assert surface.rootObject() is None
+        source.setValue(12.5)
+        section.show()
+        QTest.qWait(30)
+        root = surface.rootObject()
+        assert root is not None
+        field = next(field for field, widget in surface.adapter._fields.items() if widget is source)
+        assert field.text == "12.50"
+        section.hide()
+        source.blockSignals(True)
+        source.setValue(37.5)
+        source.blockSignals(False)
+        section.show()
+        QTest.qWait(30)
+        assert surface.rootObject() is root
+        assert field.text == "37.50"
+    finally:
+        for form in coverage["forms"]:
+            form.shutdown()
+        panel.close()
+        panel.deleteLater()
+        drain_qt_deletions()
+
+
 @pytest.fixture
 def table_view():
     quick_application()

@@ -444,7 +444,7 @@ def test_mcd2100_active_temperature_and_scan_controls_survive_disclosures(app):
         panel.temperature_control_enabled.setChecked(True)
         sections = configure_workspace_layout(panel, "mcd2100")
         assert sections["Temperature"].toggle.isChecked()
-        assert not sections["New gate rows"].toggle.isChecked()
+        assert sections["New gate rows"].toggle.isChecked()
         assert not sections["Filename"].toggle.isChecked()
         assert table is panel._condition_table and table.rowCount() == count
         assert not sections["New gate rows"].content.isAncestorOf(table)
@@ -465,7 +465,7 @@ def test_mega_late_layout_callback_is_safe_after_native_page_deletion(app):
     callback()
 
 
-def test_mcd2100_collapsed_temperature_returns_full_width_to_optical_fields(app):
+def test_mcd2100_temperature_expansion_keeps_optical_section_full_width(app):
     from math import ceil
     from PySide6.QtWidgets import QBoxLayout
     from ui.mcd2100_panel import MCD2100Panel
@@ -506,15 +506,14 @@ def test_mcd2100_collapsed_temperature_returns_full_width_to_optical_fields(app)
                      for field, source in form.adapter._fields.items()
                      if source is section.toggle)
         assert row.direction() == QBoxLayout.Direction.TopToBottom
-        assert row.property("quickSectionColumns")
         assert panel._lightfield_group.isVisibleTo(panel)
         full_width = panel._lightfield_group.width()
         assert full_width > 500
         assert field.trigger()
         settle_geometry()
-        assert row.direction() == QBoxLayout.Direction.LeftToRight
+        assert row.direction() == QBoxLayout.Direction.TopToBottom
         assert section.content.isVisibleTo(panel)
-        assert panel._lightfield_group.width() < full_width
+        assert panel._lightfield_group.width() == full_width
         assert field.trigger()
         settle_geometry()
         assert row.direction() == QBoxLayout.Direction.TopToBottom

@@ -16,7 +16,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 import pyqtgraph as pg
 from ui.plot_factory import create_plot, create_image_view
-from PySide6.QtCore import QEvent, QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
@@ -24,7 +24,10 @@ from PySide6.QtWidgets import (
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTableWidget,
     QTableWidgetItem, QTabWidget, QVBoxLayout, QGridLayout, QSplitter, QWidget, QBoxLayout,
 )
-from ui.workflow_sections import bind_log_toggle, compact_form_rows, inline_divider
+from ui.workflow_sections import CompactRow, DisclosureSection, bind_log_toggle, disclosure_toggle, compact_form_rows, inline_divider
+from ui.mcd_workspace import (add_mcd_gate_settings, configure_mcd_workspace, mcd_settings_pane,
+                              mcd_control_actions, mcd_readouts, mcd_control_fields,
+                              add_mcd_field_settings, populate_mcd_gate_entry)
 from ui.table_layout import fit_table_columns
 
 from app.engine.mcd2100_worker import MCD2100Worker
@@ -446,12 +449,14 @@ class MCD2100Panel(QWidget):
         content_layout.setContentsMargins(4, 4, 4, 4)
         content_layout.setSpacing(6)
         scroll.setWidget(content)
-        self._splitter.addWidget(scroll)
+        self._splitter.addWidget(mcd_settings_pane(self, scroll))
 
         connection = QGroupBox("attoDRY2100 connection and telemetry")
+        connection.setObjectName("Mcd2100ConnectionSection")
+        connection.setProperty("quickSectionBoundary", True)
         connection_layout = QVBoxLayout(connection)
         connection_layout.setContentsMargins(8, 6, 8, 6)
-        connection_layout.setSpacing(4)
+        connection_layout.setSpacing(8)
         self.connection_status = QLabel("Disconnected")
         self.field_value = QLabel("N/A")
         self.temperature_value = QLabel("N/A")
@@ -463,54 +468,49 @@ class MCD2100Panel(QWidget):
         self.quench_value = QLabel("N/A")
         self.current_target = QLabel("N/A")
         self.telemetry_note = QLabel("")
-        telemetry = QGridLayout()
-        telemetry.setHorizontalSpacing(10)
-        telemetry.setVerticalSpacing(3)
-        telemetry.addWidget(QLabel("Connection"), 0, 0)
-        telemetry.addWidget(self.connection_status, 0, 1)
-        telemetry.addWidget(QLabel("Field"), 0, 2)
-        telemetry.addWidget(self.field_value, 0, 3)
-        telemetry.addWidget(QLabel("Magnet temp"), 1, 0)
-        telemetry.addWidget(self.temperature_value, 1, 1)
-        telemetry.addWidget(QLabel("Field control"), 1, 2)
-        telemetry.addWidget(self.control_value, 1, 3)
-        telemetry.addWidget(QLabel("Quench"), 2, 0)
-        telemetry.addWidget(self.quench_value, 2, 1)
-        telemetry.addWidget(QLabel("Target"), 2, 2)
-        telemetry.addWidget(self.current_target, 2, 3)
-        telemetry.addWidget(QLabel("Sample temp"), 3, 0)
-        telemetry.addWidget(self.sample_temperature_value, 3, 1)
-        telemetry.addWidget(QLabel("VTI temp"), 3, 2)
-        telemetry.addWidget(self.vti_temperature_value, 3, 3)
-        telemetry.addWidget(QLabel("Sample control"), 4, 0)
-        telemetry.addWidget(self.sample_temperature_control_value, 4, 1)
-        telemetry.addWidget(QLabel("Sample target"), 4, 2)
-        telemetry.addWidget(self.sample_temperature_setpoint_value, 4, 3)
-        telemetry.setColumnStretch(1, 1)
-        telemetry.setColumnStretch(3, 1)
-        connection_layout.addLayout(telemetry)
-        self.telemetry_note.setWordWrap(True)
-        connection_layout.addWidget(self.telemetry_note)
-        buttons = QGridLayout()
+
         self.connect_btn = QPushButton("Connect")
         self.disconnect_btn = QPushButton("Disconnect")
         self.refresh_btn = QPushButton("Refresh telemetry")
+        connection_layout.addWidget(mcd_control_actions("Mcd2100ConnectionActions",
+            (self.connect_btn, self.disconnect_btn, self.refresh_btn)))
+        live_label = QLabel("Live status")
+        set_style_role(live_label, strong=True)
+        connection_layout.addWidget(live_label)
+        connection_layout.addWidget(mcd_readouts("Mcd2100LiveStatus", (
+            ("Connection", self.connection_status), ("Field", self.field_value),
+            ("Magnet temperature", self.temperature_value), ("Field control", self.control_value),
+            ("Quench", self.quench_value), ("Target", self.current_target),
+        )))
+        temperature_readouts = mcd_readouts("Mcd2100TemperatureDiagnostics", (
+            ("Sample temperature", self.sample_temperature_value), ("VTI temperature", self.vti_temperature_value),
+            ("Sample control", self.sample_temperature_control_value),
+            ("Sample target", self.sample_temperature_setpoint_value),
+        ))
+        self._temperature_diagnostics = DisclosureSection("Temperature diagnostics", temperature_readouts)
+        self._temperature_diagnostics.setProperty("quickSectionBoundary", True)
+        connection_layout.addWidget(self._temperature_diagnostics)
+        self.telemetry_note.setWordWrap(True)
+        connection_layout.addWidget(self.telemetry_note)
+
         self.read_ramp_tables_btn = QPushButton("Refresh ramp tables")
-        self.read_ramp_tables_btn.setToolTip(
-            "Explicitly read raw current and factory-default ramp tables"
-        )
+        self.read_ramp_tables_btn.setToolTip("Explicitly read raw current and factory-default ramp tables")
         self.view_ramp_tables_btn = QPushButton("View ramp tables")
         self.view_ramp_tables_btn.setToolTip("View the last cached ramp-table report without communicating")
-        for index, button in enumerate((self.connect_btn, self.disconnect_btn,
-                self.refresh_btn, self.read_ramp_tables_btn, self.view_ramp_tables_btn)):
-            buttons.addWidget(button, index // 3, index % 3)
-        connection_layout.addLayout(buttons)
         self.ramp_tables_status = QLabel("Ramp tables not read")
         self.ramp_tables_status.setWordWrap(True)
-        connection_layout.addWidget(self.ramp_tables_status)
+        advanced_content = QWidget()
+        advanced_layout = QVBoxLayout(advanced_content)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.addWidget(mcd_control_actions("Mcd2100RampActions",
+            (self.read_ramp_tables_btn, self.view_ramp_tables_btn)))
+        advanced_layout.addWidget(self.ramp_tables_status)
+        self._connection_advanced = DisclosureSection("Advanced", advanced_content)
+        self._connection_advanced.setProperty("quickSectionBoundary", True)
+        connection_layout.addWidget(self._connection_advanced)
         content_layout.addWidget(connection)
 
-        workflow = QGroupBox("Continuous attoDRY2100 MCD")
+        workflow = QGroupBox("attoDRY2100 MCD")
         workflow_layout = QVBoxLayout(workflow)
         self._workflow_layout = workflow_layout
         workflow_layout.setContentsMargins(8, 8, 8, 8)
@@ -518,7 +518,7 @@ class MCD2100Panel(QWidget):
 
         sample_group = QGroupBox("Sample / Device")
         self._sample_group = sample_group
-        sample_form = QHBoxLayout(sample_group)
+        sample_form = QVBoxLayout(sample_group)
         sample_form.setContentsMargins(8, 6, 8, 6)
         sample_form.setSpacing(6)
         self.start_field = QLineEdit()
@@ -535,11 +535,9 @@ class MCD2100Panel(QWidget):
         self._compact(self.stop_field, 100, 140)
         self._compact(self._sample_id, 150, 300)
         self._compact(self._point, 80, 160)
-        sample_form.addWidget(QLabel("Sample ID"))
-        sample_form.addWidget(self._sample_id, 1)
-        sample_form.addWidget(inline_divider())
-        sample_form.addWidget(QLabel("Point / Location"))
-        sample_form.addWidget(self._point)
+        sample_form.addWidget(mcd_control_fields("McdSampleIdentity", (
+            ("Sample ID", self._sample_id), ("Point / Location", self._point),
+        )))
         workflow_layout.addWidget(sample_group)
 
         sweep_group = QGroupBox("Field Sweep")
@@ -553,10 +551,36 @@ class MCD2100Panel(QWidget):
         self.bidirectional.setVisible(False)
         self.round_trip_notice = QLabel("Round trip: forward + backward for every enabled gate")
         self.round_trip_notice.setWordWrap(True)
-        sweep_form.addRow("Start field (T)", self.start_field)
-        sweep_form.addRow("Stop field (T)", self.stop_field)
-        sweep_form.addRow("Sweep", self.round_trip_notice)
-        compact_form_rows(sweep_form, (self.start_field, self.stop_field))
+        self.point_pairing = QCheckBox("Point-by-point A/B pairing")
+        self.point_step = QDoubleSpinBox()
+        self.point_step.setRange(0.001, 12000.0)
+        self.point_step.setDecimals(3)
+        self.point_step.setValue(50.0)
+        self.point_step.setSuffix(" mT")
+        self.point_tolerance = QDoubleSpinBox()
+        self.point_tolerance.setRange(0.001, 1000.0)
+        self.point_tolerance.setDecimals(3)
+        self.point_tolerance.setValue(10.0)
+        self.point_tolerance.setSuffix(" mT")
+        self.point_stable = QDoubleSpinBox()
+        self.point_stable.setRange(0.0, 3600.0)
+        self.point_stable.setDecimals(2)
+        self.point_stable.setValue(1.0)
+        self.point_stable.setSuffix(" s")
+        self.point_stable.setToolTip("Engineering default; not a manufacturer stability criterion")
+        self.point_pairing.setParent(sweep_group)
+        self.point_pairing.hide()
+        self._acquisition_mode = QComboBox()
+        self._acquisition_mode.addItem("Continuous", "continuous")
+        self._acquisition_mode.addItem("Point-paired A/B", "point_pairing")
+        self._acquisition_mode.currentIndexChanged.connect(
+            lambda _index: self.point_pairing.setChecked(self._acquisition_mode.currentData() == "point_pairing"))
+        self.point_pairing.toggled.connect(
+            lambda checked: self._acquisition_mode.setCurrentIndex(1 if checked else 0))
+        add_mcd_field_settings(sweep_form, self.start_field, self.stop_field,
+                               self._acquisition_mode, self.point_step,
+                               self.point_tolerance, self.point_stable)
+        sweep_form.addRow(mcd_readouts("McdSweepMode", (("Sweep mode", self.round_trip_notice),)))
 
         rotation_group = QGroupBox("Rotation")
         self._rotation_group = rotation_group
@@ -577,9 +601,8 @@ class MCD2100Panel(QWidget):
         self.rotator.setMinimumWidth(120)
         self.rotator.setMaximumWidth(180)
         self.rotator.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        rotation_form.addRow("Angles", self.angles)
-        rotation_form.addRow("Rotator", self.rotator)
-        compact_form_rows(rotation_form, (self.angles, self.rotator))
+        rotation_form.addRow(mcd_control_fields("McdRotationDevice", (("Rotator", self.rotator),)))
+        rotation_form.addRow(mcd_control_fields("McdRotationAngles", (("Angles (°)", self.angles),)))
 
         field_rotation_row = QHBoxLayout()
         self._field_rotation_row = field_rotation_row
@@ -718,41 +741,16 @@ class MCD2100Panel(QWidget):
         self._compact(self.gate_ratio, 100, 140)
         self._compact(self.gate_vtg_factor, 80, 110)
         self._compact(self.gate_vbg_factor, 80, 110)
-        self.gate_vtg_factor.setFixedWidth(110)
-        self.gate_vbg_factor.setFixedWidth(110)
-        self.initial_voltage_settle.setFixedWidth(88)
-        self.voltage_settle.setFixedWidth(88)
         # The table below is authoritative.  These scalar widgets remain as
         # hidden migration attributes for legacy config/session adapters.
         for legacy_widget in (self.vtg, self.vbg, self.vbias):
             legacy_widget.setVisible(False)
-        ratio_row = QHBoxLayout()
-        ratio_row.setSpacing(6)
-        ratio_row.addWidget(QLabel("Weighting"))
-        ratio_row.addWidget(QLabel("TG"))
-        ratio_row.addWidget(self.gate_vtg_factor)
-        ratio_row.addWidget(inline_divider())
-        ratio_row.addWidget(QLabel("BG"))
-        ratio_row.addWidget(self.gate_vbg_factor)
-        ratio_row.addWidget(self.gate_ratio_value)
-        ratio_row.addStretch(1)
-        gate_form.addRow(ratio_row)
-        settle_row = QHBoxLayout()
-        settle_row.setSpacing(6)
-        settle_row.addWidget(QLabel("Settle"))
-        settle_row.addWidget(QLabel("First"))
-        settle_row.addWidget(self.initial_voltage_settle)
-        settle_row.addWidget(inline_divider())
-        settle_row.addWidget(QLabel("Later"))
-        settle_row.addWidget(self.voltage_settle)
-        settle_row.addStretch(1)
-        gate_form.addRow(settle_row)
+        add_mcd_gate_settings(
+            gate_form, self.gate_vtg_factor, self.gate_vbg_factor, self.gate_ratio_value,
+            self.initial_voltage_settle, self.voltage_settle,
+        )
 
         entry_group = QGroupBox("New gate rows")
-        entry_layout = QGridLayout(entry_group)
-        entry_layout.setContentsMargins(8, 6, 8, 6)
-        entry_layout.setHorizontalSpacing(6)
-        entry_layout.setVerticalSpacing(4)
         self._gate_entry_mode = QComboBox()
         self._gate_entry_mode.addItem("Direct Vtg / Vbg", MODE_DIRECT)
         self._gate_entry_mode.addItem("Doping / E-field", MODE_DOPING_EFIELD)
@@ -773,21 +771,12 @@ class MCD2100Panel(QWidget):
         self._gate_entry_status = QLabel()
         self._gate_entry_status.setWordWrap(True)
         self._gate_edit_row: Optional[int] = None
-        entry_layout.addWidget(QLabel("Input type"), 0, 0)
-        entry_layout.addWidget(self._gate_entry_a_label, 0, 1)
-        entry_layout.addWidget(self._gate_entry_b_label, 0, 2)
-        entry_layout.addWidget(self._gate_entry_mode, 1, 0)
-        entry_layout.addWidget(self._gate_entry_a, 1, 1)
-        entry_layout.addWidget(self._gate_entry_b, 1, 2)
-        entry_layout.addWidget(QLabel("Vbias"), 2, 0)
-        entry_layout.addWidget(self._gate_entry_expansion_label, 2, 1)
-        entry_layout.addWidget(self._gate_entry_vbias, 3, 0)
-        entry_layout.addWidget(self._gate_entry_expansion, 3, 1)
-        entry_layout.addWidget(self._gate_entry_add, 3, 2)
-        entry_layout.addWidget(self._gate_entry_status, 4, 0, 1, 3)
-        entry_layout.setColumnStretch(0, 1)
-        entry_layout.setColumnStretch(1, 1)
-        entry_layout.setColumnStretch(2, 1)
+        populate_mcd_gate_entry(entry_group, self._gate_entry_mode,
+                                self._gate_entry_a_label, self._gate_entry_a,
+                                self._gate_entry_b_label, self._gate_entry_b,
+                                self._gate_entry_vbias, self._gate_entry_expansion_label,
+                                self._gate_entry_expansion, self._gate_entry_add,
+                                self._gate_entry_status)
         gate_form.addRow(entry_group)
         self._gate_mode = QComboBox()
         self._gate_mode.setVisible(False)
@@ -795,6 +784,7 @@ class MCD2100Panel(QWidget):
         self._gate_mode.addItem("Doping / E-field", "coordinates")
         self._gate_mode.setToolTip("Choose which coordinate pair is editable in the gate table.")
         self._condition_table = _SmoothConditionTable(1, 10)
+        self._condition_table.setProperty("quickMcdGateTable", True)
         self._condition_table.setHorizontalHeaderLabels(
             ["Use", "#", "Input type", "Vtg", "Vbg", "Vbias", "Doping",
              "E-field", "Input A", "Input B"]
@@ -809,6 +799,11 @@ class MCD2100Panel(QWidget):
         self._condition_table.verticalHeader().setDefaultSectionSize(26)
         self._condition_table.verticalScrollBar().setSingleStep(18)
         self._condition_table.setToolTip("One row per gate condition. Mode selects the canonical input line; calculated voltage and D/F columns are read-only.")
+        self._gate_table_hint = QLabel("Gate conditions · select a row, then Edit selected.")
+        self._gate_table_hint.setWordWrap(True)
+        self._gate_table_hint.setProperty("quickSectionBoundary", True)
+        set_style_role(self._gate_table_hint, "text", tone="secondary")
+        gate_form.addRow(self._gate_table_hint)
         gate_form.addRow(self._condition_table)
         condition_buttons = QHBoxLayout()
         self._add_condition_btn = self._gate_entry_add
@@ -858,8 +853,8 @@ class MCD2100Panel(QWidget):
         temperature_lightfield_row = QHBoxLayout()
         self._temperature_lightfield_row = temperature_lightfield_row
         temperature_lightfield_row.setSpacing(6)
-        temperature_lightfield_row.addWidget(temperature_group, 1)
         temperature_lightfield_row.addWidget(lightfield_group, 1)
+        temperature_lightfield_row.addWidget(temperature_group, 1)
         workflow_layout.addLayout(temperature_lightfield_row)
         workflow_layout.addWidget(gate_group)
 
@@ -900,10 +895,10 @@ class MCD2100Panel(QWidget):
         set_style_role(self.start_btn, 'runAction')
         set_style_role(self.stop_btn, 'stopAction')
         controls.addWidget(self.start_btn)
-        controls.addWidget(self.prepare_magnet_btn)
         controls.addWidget(self.stop_btn)
+        controls.addWidget(self.prepare_magnet_btn)
         self._run_footer = run_group
-        layout.addWidget(run_group)
+        layout.insertWidget(0, run_group)
 
         status_group = QGroupBox("Status / Progress / Log")
         status_layout = QVBoxLayout(status_group)
@@ -957,7 +952,7 @@ class MCD2100Panel(QWidget):
         self.spectrum_activity.setWordWrap(True)
         display_header.addStretch(1)
         self._clear_log_btn = QPushButton("Clear log")
-        self._show_log_chk = QCheckBox("Show log")
+        self._show_log_chk = disclosure_toggle("Run log")
         display_header.addWidget(self._show_log_chk)
         display_header.addWidget(self._clear_log_btn)
         display_layout.addLayout(display_header)
@@ -989,6 +984,12 @@ class MCD2100Panel(QWidget):
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setChildrenCollapsible(False)
         self._splitter.setSizes([560, 440])
+        configure_mcd_workspace(self, {
+            "Sample": sample_group, "FieldSweep": sweep_group,
+            "Rotation": rotation_group, "LightField": lightfield_group,
+            "Temperature": temperature_group, "GateConditions": gate_group,
+            "Output": output_group,
+        }, (self._field_rotation_row, self._temperature_lightfield_row), 620)
         scroll.viewport().installEventFilter(self)
         self._apply_responsive_layout()
         self._activity_timer = QTimer(self)
@@ -1016,7 +1017,7 @@ class MCD2100Panel(QWidget):
         self._gate_mode.currentIndexChanged.connect(self._update_condition_editable)
         self._condition_table.itemChanged.connect(self._on_condition_item_changed)
         self._condition_table.cellClicked.connect(self._select_condition_row)
-        self._condition_table.itemSelectionChanged.connect(self._update_condition_preview)
+        self._condition_table.itemSelectionChanged.connect(self._update_condition_selection)
         for signal in (
             self._gate_entry_mode.currentIndexChanged,
             self._gate_entry_a.textChanged, self._gate_entry_b.textChanged,
@@ -1040,11 +1041,10 @@ class MCD2100Panel(QWidget):
         return widget
 
     def _apply_responsive_layout(self):
-        stacked = self._settings_scroll.viewport().width() < 700
         for row in (self._field_rotation_row, self._temperature_lightfield_row):
-            row.setDirection(QBoxLayout.Direction.TopToBottom if stacked else QBoxLayout.Direction.LeftToRight)
-            row.setStretch(0, 0 if stacked else 1)
-            row.setStretch(1, 0 if stacked else 1)
+            row.setDirection(QBoxLayout.Direction.TopToBottom)
+            row.setStretch(0, 0)
+            row.setStretch(1, 0)
 
     def eventFilter(self, watched, event):
         if watched is self._settings_scroll.viewport() and event.type() == QEvent.Type.Resize:
@@ -1343,7 +1343,7 @@ class MCD2100Panel(QWidget):
             )
         return float("nan"), "unavailable"
 
-    def _update_filename_preview(self, *_args) -> None:
+    def _update_filename_preview(self, *_args, _rows=None) -> None:
         if not hasattr(self, "filename_preview"):
             return
         try:
@@ -1351,7 +1351,7 @@ class MCD2100Panel(QWidget):
             stop_field = float(self.stop_field.text().strip())
             if not math.isfinite(start_field) or not math.isfinite(stop_field):
                 raise ValueError
-            enabled = [row for row in self._condition_rows() if row.get("enabled", True)]
+            enabled = [row for row in (_rows if _rows is not None else self._condition_rows()) if row.get("enabled", True)]
             if not enabled:
                 self.filename_preview.setText("Enable a gate condition to preview its filename")
                 return
@@ -1410,8 +1410,9 @@ class MCD2100Panel(QWidget):
         if not hasattr(self, "_condition_summary"):
             return
         try:
-            rows = self._condition_rows()
+            rows = [resolve_condition_line(row, self._gate_ratio()) for row in self._condition_rows_raw()]
         except (TypeError, ValueError) as exc:
+            self._condition_preview_cache = None
             self._condition_summary.setText(f"Condition preview unavailable: {exc}")
             return
         enabled = [(table_row, item) for table_row, item in enumerate(rows, start=1)
@@ -1440,14 +1441,21 @@ class MCD2100Panel(QWidget):
         self._condition_plan_preview.setPlainText(
             "\n".join(lines) if lines else "No enabled gate rows"
         )
+        execution_by_row = {table_row - 1: index for index, (table_row, _item) in enumerate(enabled, start=1)}
+        self._condition_preview_cache = (rows, execution_by_row)
+        self._update_condition_selection()
+        self._update_filename_preview(_rows=rows)
+
+    def _update_condition_selection(self, *_args) -> None:
+        cached = getattr(self, "_condition_preview_cache", None)
+        if cached is None:
+            self._update_move_buttons()
+            return
+        rows, execution_by_row = cached
         selected = self._condition_table.currentRow()
         if 0 <= selected < len(rows):
             item = rows[selected]
-            execution = next(
-                (index for index, (table_row, _item) in enumerate(enabled, start=1)
-                 if table_row == selected + 1),
-                None,
-            )
+            execution = execution_by_row.get(selected)
             execution_text = f"G{execution:02d}" if execution is not None else "disabled"
             self._selected_condition_summary.setText(
                 f"Selected table row {selected + 1} ({execution_text}) · "
@@ -1460,7 +1468,6 @@ class MCD2100Panel(QWidget):
         else:
             self._selected_condition_summary.setText("Select a row to inspect it")
         self._update_move_buttons()
-        self._update_filename_preview()
 
     def _update_move_buttons(self) -> None:
         if not hasattr(self, "_move_condition_up_btn"):
@@ -1577,37 +1584,43 @@ class MCD2100Panel(QWidget):
         try:
             self._condition_table.setRowCount(max(1, len(conditions)))
             for row, condition in enumerate(conditions):
-                check = QTableWidgetItem()
-                check.setFlags(
-                    Qt.ItemFlag.ItemIsEnabled
-                    | Qt.ItemFlag.ItemIsSelectable
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                )
-                check.setCheckState(Qt.CheckState.Checked if condition.get("enabled", True) else Qt.CheckState.Unchecked)
-                self._condition_table.setItem(row, 0, check)
-                mode = str(condition.get("mode", MODE_DIRECT))
-                if mode == "coordinates":
-                    mode = MODE_FIXED_DOPING
-                if "input_a" not in condition:
-                    mode = MODE_DIRECT
-                    condition = {**condition, "input_a": condition.get("vtg_v", 0.0),
-                                 "input_b": condition.get("vbg_v", 0.0)}
-                self._condition_table.setItem(row, 1, QTableWidgetItem(str(row + 1)))
-                self._condition_table.setCellWidget(row, 2, self._mode_combo(row, mode))
-                for column, key, fallback in ((8, "input_a", condition.get("vtg_v", 0.0)),
-                                               (9, "input_b", condition.get("vbg_v", 0.0)),
-                                               (5, "vbias_v", 0.0)):
-                    raw_value = condition.get(key, fallback)
-                    try:
-                        self._set_row_value(row, column, float(raw_value))
-                    except (TypeError, ValueError):
-                        self._set_row_text(row, column, raw_value)
-                for column in (3, 4, 6, 7):
-                    self._set_row_value(row, column, 0.0)
+                self._populate_condition_row(row, condition)
         finally:
             self._updating_table = False
         self._update_condition_table_height()
         self._update_condition_preview()
+
+    def _populate_condition_row(self, row: int, condition: dict) -> None:
+        check = QTableWidgetItem()
+        check.setFlags(
+            Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsUserCheckable
+        )
+        check.setCheckState(Qt.CheckState.Checked if condition.get("enabled", True) else Qt.CheckState.Unchecked)
+        self._condition_table.setItem(row, 0, check)
+        mode = str(condition.get("mode", MODE_DIRECT))
+        if mode == "coordinates":
+            mode = MODE_FIXED_DOPING
+        if "input_a" not in condition:
+            mode = MODE_DIRECT
+            condition = {**condition, "input_a": condition.get("vtg_v", 0.0),
+                         "input_b": condition.get("vbg_v", 0.0)}
+        number = QTableWidgetItem(str(row + 1))
+        number.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        self._condition_table.setItem(row, 1, number)
+        self._condition_table.setCellWidget(row, 2, self._mode_combo(row, mode))
+        for column, key, fallback in ((8, "input_a", condition.get("vtg_v", 0.0)),
+                                       (9, "input_b", condition.get("vbg_v", 0.0)),
+                                       (5, "vbias_v", 0.0)):
+            raw_value = condition.get(key, fallback)
+            try:
+                self._set_row_value(row, column, float(raw_value))
+            except (TypeError, ValueError):
+                self._set_row_text(row, column, raw_value)
+        for column in (3, 4, 6, 7):
+            self._set_row_value(row, column, 0.0)
+
 
     def _refresh_condition_row(self, row: int) -> None:
         mode_widget = self._condition_table.cellWidget(row, 2)
@@ -1754,18 +1767,34 @@ class MCD2100Panel(QWidget):
             if self._gate_edit_row is None:
                 self._append_condition_rows(rows, provenance)
             else:
-                existing = self._condition_rows()
+                existing = [resolve_condition_line(row, self._gate_ratio()) for row in self._condition_rows_raw()]
                 edit_row = self._gate_edit_row
                 if edit_row < 0 or edit_row >= len(existing):
                     raise ValueError("The selected gate row no longer exists")
-                combined = existing[:edit_row] + rows + existing[edit_row + 1:]
-                combined = resolve_gate_conditions(combined, self._gate_ratio())
+                replacement = [{**item, "enabled": existing[edit_row]["enabled"]} for item in rows]
+                combined = existing[:edit_row] + replacement + existing[edit_row + 1:]
+                combined = [resolve_condition_line(item, self._gate_ratio()) for item in combined]
                 validate_gate_conditions(combined, cfg.smu.volt_compliance_V)
-                self._seed_condition_table(combined)
-                self._condition_table.selectRow(edit_row + len(rows) - 1)
+                if len(rows) == 1:
+                    self._updating_table = True
+                    try:
+                        with QSignalBlocker(self._condition_table):
+                            self._populate_condition_row(edit_row, combined[edit_row])
+                            self._refresh_condition_row(edit_row)
+                            for column in (3, 4, 5, 6, 7, 8, 9):
+                                item = self._condition_table.item(edit_row, column)
+                                if item is not None:
+                                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                            self._condition_table.selectRow(edit_row)
+                    finally:
+                        self._updating_table = False
+                    self._update_condition_preview()
+                else:
+                    self._seed_condition_table(combined)
+                    self._condition_table.selectRow(edit_row + len(rows) - 1)
+                    self._update_condition_editable()
                 provenance["replaced_row"] = edit_row + 1
                 self._gate_batch_provenance.append(provenance)
-                self._update_condition_editable()
         except ValueError as exc:
             self._show_error(str(exc))
             return
@@ -1779,8 +1808,12 @@ class MCD2100Panel(QWidget):
         if row < 0:
             self._show_error("Select a gate row to edit")
             return
-        conditions = self._condition_rows()
-        condition = conditions[row]
+        raw = self._condition_rows_raw()[row]
+        try:
+            condition = resolve_condition_line(raw, self._gate_ratio())
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return
         mode = condition.get("mode", MODE_DIRECT)
         if mode not in (MODE_DIRECT, MODE_DOPING_EFIELD):
             # Legacy definitions are converted to their resolved voltages so
@@ -1797,20 +1830,32 @@ class MCD2100Panel(QWidget):
         self._update_gate_entry()
 
     def _add_condition_row(self) -> None:
-        rows = self._condition_rows()
+        rows = [resolve_condition_line(row, self._gate_ratio()) for row in self._condition_rows_raw()]
         source = dict(rows[-1]) if rows else {}
-        rows.append({"enabled": True, **source})
-        row = len(rows) - 1
-        self._seed_condition_table(rows)
-        self._condition_table.selectRow(row)
-        self._update_condition_editable()
+        source["enabled"] = True
+        row = self._condition_table.rowCount()
+        self._updating_table = True
+        try:
+            with QSignalBlocker(self._condition_table):
+                self._condition_table.insertRow(row)
+                self._populate_condition_row(row, source)
+                self._refresh_condition_row(row)
+                for column in (3, 4, 5, 6, 7, 8, 9):
+                    item = self._condition_table.item(row, column)
+                    if item is not None:
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self._condition_table.selectRow(row)
+        finally:
+            self._updating_table = False
+        self._update_condition_table_height()
+        self._update_condition_preview()
 
     def _append_condition_rows(self, rows: list[dict[str, Any]],
                                provenance: Optional[dict[str, Any]] = None) -> None:
         if not rows:
             raise ValueError("No gate rows were provided")
         # Resolve and validate the complete result before changing the table.
-        existing = self._condition_rows()
+        existing = [resolve_condition_line(row, self._gate_ratio()) for row in self._condition_rows_raw()]
         if len(existing) == 1:
             only = existing[0]
             if (
@@ -1822,47 +1867,82 @@ class MCD2100Panel(QWidget):
                 existing = []
         combined = resolve_gate_conditions([*existing, *rows], self._gate_ratio())
         validate_gate_conditions(combined, cfg.smu.volt_compliance_V)
-        self._seed_condition_table(combined)
+        table = self._condition_table
+        replace_empty = not existing
+        first_new = len(existing)
+        self._updating_table = True
+        try:
+            with QSignalBlocker(table):
+                if replace_empty:
+                    table.setRowCount(0)
+                for index in range(first_new, len(combined)):
+                    table.insertRow(index)
+                    self._populate_condition_row(index, combined[index])
+                    self._refresh_condition_row(index)
+                    for column in (3, 4, 5, 6, 7, 8, 9):
+                        item = table.item(index, column)
+                        if item is not None:
+                            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                table.selectRow(len(combined) - 1)
+        finally:
+            self._updating_table = False
         if provenance:
             self._gate_batch_provenance.append(dict(provenance))
-        self._condition_table.selectRow(len(combined) - 1)
-        self._update_condition_editable()
+        self._update_condition_table_height()
+        self._update_condition_preview()
 
     def _remove_condition_row(self) -> None:
-        if self._condition_table.rowCount() <= 1:
+        table = self._condition_table
+        if table.rowCount() <= 1:
             return
-        row = self._condition_table.currentRow()
-        row = row if row >= 0 else self._condition_table.rowCount() - 1
-        rows = self._condition_rows()
-        rows.pop(row)
-        self._seed_condition_table(rows)
-        self._condition_table.selectRow(min(row, self._condition_table.rowCount() - 1))
+        row = table.currentRow()
+        row = row if row >= 0 else table.rowCount() - 1
+        self._updating_table = True
+        try:
+            with QSignalBlocker(table):
+                table.removeRow(row)
+                for index in range(row, table.rowCount()):
+                    item = table.item(index, 1)
+                    if item is not None:
+                        item.setText(str(index + 1))
+                table.selectRow(min(row, table.rowCount() - 1))
+        finally:
+            self._updating_table = False
         self._gate_edit_row = None
-        self._update_condition_editable()
+        self._update_condition_table_height()
+        self._update_condition_preview()
 
     def _move_condition(self, delta: int) -> None:
-        row = self._condition_table.currentRow()
+        table = self._condition_table
+        row = table.currentRow()
         target = row + int(delta)
-        if row < 0 or target < 0 or target >= self._condition_table.rowCount():
+        if row < 0 or target < 0 or target >= table.rowCount():
             return
-        rows = self._condition_rows()
-        rows[row], rows[target] = rows[target], rows[row]
-        scrollbar = self._condition_table.verticalScrollBar()
+        scrollbar = table.verticalScrollBar()
         scroll_value = scrollbar.value()
-        self._condition_table.setUpdatesEnabled(False)
+        self._updating_table = True
+        table.setUpdatesEnabled(False)
         try:
-            self._seed_condition_table(rows)
-            self._update_condition_editable()
-            self._condition_table.selectRow(target)
-            scrollbar.setValue(scroll_value)
-            current = self._condition_table.item(target, 1)
-            if current is not None:
-                self._condition_table.scrollToItem(
-                    current, QAbstractItemView.ScrollHint.EnsureVisible
-                )
+            with QSignalBlocker(table):
+                modes = [table.cellWidget(index, 2).currentData() for index in (row, target)]
+                for column in (0, 3, 4, 5, 6, 7, 8, 9):
+                    first, second = table.takeItem(row, column), table.takeItem(target, column)
+                    if second is not None:
+                        table.setItem(row, column, second)
+                    if first is not None:
+                        table.setItem(target, column, first)
+                table.setCellWidget(row, 2, self._mode_combo(row, modes[1]))
+                table.setCellWidget(target, 2, self._mode_combo(target, modes[0]))
+                table.selectRow(target)
+                scrollbar.setValue(scroll_value)
+                current = table.item(target, 1)
+                if current is not None:
+                    table.scrollToItem(current, QAbstractItemView.ScrollHint.EnsureVisible)
         finally:
-            self._condition_table.setUpdatesEnabled(True)
-            self._condition_table.viewport().update()
+            self._updating_table = False
+            table.setUpdatesEnabled(True)
+            table.viewport().update()
+        self._gate_edit_row = None
         self._update_condition_preview()
 
     @staticmethod
@@ -1915,6 +1995,10 @@ class MCD2100Panel(QWidget):
 
     def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
         allowed = {
+            "point_pairing": lambda v: self.point_pairing.setChecked(bool(v)),
+            "point_step_mt": lambda v: self.point_step.setValue(float(v)),
+            "point_tolerance_mt": lambda v: self.point_tolerance.setValue(float(v)),
+            "point_stable_s": lambda v: self.point_stable.setValue(float(v)),
             "point": lambda v: self._point.setText(str(v)),
             "start_field_t": lambda v: self.start_field.setText(str(v)),
             "stop_field_t": lambda v: self.stop_field.setText(str(v)),
@@ -1978,6 +2062,10 @@ class MCD2100Panel(QWidget):
             "gate_conditions": conditions,
             "condition_drafts": raw_conditions,
             "gate_batches": list(self._gate_batch_provenance),
+            "point_pairing": self.point_pairing.isChecked(),
+            "point_step_mt": self.point_step.value(),
+            "point_tolerance_mt": self.point_tolerance.value(),
+            "point_stable_s": self.point_stable.value(),
             "mcd2100_settings_version": 4,
             "gate_mode": self._gate_mode.currentData(),
             "gate_ratio": ratio,
@@ -2028,6 +2116,16 @@ class MCD2100Panel(QWidget):
                 self._gate_entry_vbias.setValue(float(state["gate_entry_vbias"]))
         except (TypeError, ValueError):
             pass
+        if "point_pairing" in state:
+            self.point_pairing.setChecked(bool(state["point_pairing"]))
+        for widget, key in ((self.point_step, "point_step_mt"),
+                            (self.point_tolerance, "point_tolerance_mt"),
+                            (self.point_stable, "point_stable_s")):
+            if key in state:
+                try:
+                    widget.setValue(float(state[key]))
+                except (TypeError, ValueError):
+                    pass
         if "sample_id" in state:
             self._sample_id.setText(str(state["sample_id"]))
         if "point" in state:
@@ -3258,6 +3356,10 @@ class MCD2100Panel(QWidget):
             worker = self._worker_factory(
                 self.controller, optical, start_field, stop_field, angles, output,
                 stem=stem, bidirectional=True,
+                point_pairing=self.point_pairing.isChecked(),
+                point_step_t=self.point_step.value() / 1000.0,
+                point_tolerance_t=self.point_tolerance.value() / 1000.0,
+                point_stable_s=self.point_stable.value(),
                 rotator=rotator_name,
                 lf_center_nm=self.lf_center.value(),
                 lf_exposure_ms=self.lf_exposure.value(),

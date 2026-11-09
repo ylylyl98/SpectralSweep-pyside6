@@ -18,7 +18,7 @@ AppPane {
                 required property var modelData
                 width: contentColumn.width
                 spacing: 6
-                visible: modelData.groups.some(group => group.fields.some(field => field.visible))
+                visible: modelData.groups.some(group => group.fields.some(field => field.visible && (field.kind !== "heading" || field.text.trim().length > 0)))
                 Repeater {
                     model: contentFlow.modelData.groups
                     delegate: Item {
@@ -28,7 +28,7 @@ AppPane {
                         readonly property bool paired: fields.length === 2 && fields[0].kind === "label"
                         readonly property var editorField: fields[fields.length - 1]
                         readonly property bool longNote: editorField.kind === "label" && (editorField.text.length > 90 || editorField.text.indexOf("\n") >= 0)
-                        readonly property bool fullRow: !paired && (longNote || ["heading", "groupcheck", "disclosure", "log", "progress"].indexOf(editorField.kind) >= 0)
+                        readonly property bool fullRow: !paired && (longNote || ["heading", "groupcheck", "log", "progress"].indexOf(editorField.kind) >= 0 || (editorField.kind === "disclosure" && !editorField.compactDisclosure))
                         readonly property real labelWidth: paired ? Math.min(180, Math.max(45, Math.ceil(labelMetrics.advanceWidth(fields[0].text)) + 4)) : 0
                         // A width hint covers the entire numeric control. Reserve
                         // the editable value first, then add units and steppers.
@@ -38,14 +38,15 @@ AppPane {
                             groupMetrics.advanceWidth(editorField.minimum.toFixed(Math.min(20, editorField.decimals))),
                             groupMetrics.advanceWidth(editorField.maximum.toFixed(Math.min(20, editorField.decimals))))) + 20))
                         readonly property real numericEditorWidth: numericInputWidth + Math.ceil(groupMetrics.advanceWidth(editorField.prefix + editorField.suffix)) + 30
-                        readonly property real editorWidth: editorField.kind === "number" ? Math.max(editorField.preferredWidth || 156, numericEditorWidth) : editorField.preferredWidth > 0 ? editorField.preferredWidth : editorField.kind === "divider" ? 1 : editorField.kind === "label" ? Math.max(1, Math.ceil(labelMetrics.advanceWidth(editorField.text)) + 4) : editorField.kind === "text" ? 208 : editorField.kind === "choice" ? 188 : Math.max(64, Math.min(300, Math.ceil(groupMetrics.advanceWidth(editorField.text)) + (editorField.kind === "check" ? 36 : editorField.kind === "menu" ? 48 : 32)))
+                        readonly property real editorWidth: editorField.kind === "number" ? Math.max(editorField.preferredWidth || 156, numericEditorWidth) : editorField.preferredWidth > 0 ? editorField.preferredWidth : editorField.kind === "divider" ? 1 : editorField.kind === "label" ? Math.max(1, Math.ceil(labelMetrics.advanceWidth(editorField.text)) + 4) : editorField.kind === "text" ? 208 : editorField.kind === "choice" ? 188 : editorField.kind === "disclosure" ? Math.ceil(disclosureMetrics.advanceWidth(editorField.text)) + 36 : Math.max(64, Math.min(300, Math.ceil(groupMetrics.advanceWidth(editorField.text)) + (editorField.kind === "check" ? 36 : editorField.kind === "menu" ? 48 : 32)))
                         readonly property real minimumEditorWidth: editorField.kind === "number" ? numericEditorWidth : Math.min(editorWidth, 140)
                         readonly property bool stacked: paired && (editorField.labelAbove || width < labelWidth + 6 + minimumEditorWidth)
                         readonly property real allocatedLabelWidth: stacked ? width : labelWidth
-                        visible: paired ? editorField.visible : fields.some(field => field.visible)
+                        visible: paired ? editorField.visible : fields.some(field => field.visible && (field.kind !== "heading" || field.text.trim().length > 0))
                         width: visible ? (fullRow ? contentFlow.width : Math.min(contentFlow.width, paired && editorField.labelAbove ? Math.max(labelWidth, editorWidth) : labelWidth + (paired ? 6 : 0) + editorWidth)) : 0
                         height: visible ? implicitHeight : 0
                         implicitHeight: childrenRect.height
+                        FontMetrics { id: disclosureMetrics; font.family: Theme.fontFamily; font.pixelSize: Theme.bodySize; font.bold: true }
                         FontMetrics { id: groupMetrics; font.family: Theme.fontFamily; font.pixelSize: Theme.bodySize }
                         FontMetrics {
                             id: labelMetrics
@@ -359,21 +360,16 @@ AppPane {
     }
     Component {
         id: disclosureEditor
-        AppButton {
+        AppDisclosure {
             id: disclosure
             readonly property var field: parent.field
             objectName: "parameter_" + field.fieldId
-            text: (field.checked ? "▾  " : "▸  ") + field.text
-            appearance: "subtle"
-            leftPadding: 4
+            text: field.text
+            expanded: field.checked
+            chevronObjectName: "disclosureChevron_" + field.fieldId
             enabled: field.enabled
             Accessible.name: field.accessibleName || field.text
-            Accessible.role: Accessible.Button
-            Accessible.checkable: true
-            Accessible.checked: field.checked
-            Accessible.description: field.checked ? "Expanded" : "Collapsed"
             tooltipText: field.tooltip
-            contentItem: AppLabel { text: disclosure.text; font.bold: true; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap }
             onClicked: field.trigger()
         }
     }

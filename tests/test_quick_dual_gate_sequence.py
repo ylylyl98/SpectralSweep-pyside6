@@ -441,3 +441,37 @@ widget.close();widget.deleteLater();QTest.qWait(10)
     assert result.returncode == 0, result.stdout + result.stderr
     assert (tmp_path / "compact-light.png").is_file()
     assert (tmp_path / "wide-dark.png").is_file()
+
+
+def test_disclosures_click_and_update_visible_content(app):
+    from PySide6.QtCore import QPointF
+    from tests.test_quick_parameter_forms import find_item
+    contexts, rows, tasks = flat_plan()
+    widget = QuickDualGateSequencePreview(compact=False)
+    try:
+        widget.update_plan(contexts, rows, acquisition_schedule=tasks)
+        widget.resize(1100, 1100)
+        widget.show()
+        QTest.qWait(100)
+        root = widget.quick_widget.rootObject()
+        for toggle_name, state, content_name in (
+            ("DualGateOrderToggle", "orderExpanded", "DualGateLoopOrder"),
+            ("DualGateDetailsToggle", "detailsExpanded", "DualGateStepDetails"),
+            ("DualGateRulesToggle", "filtersExpanded", "DualGateWhenRules"),
+        ):
+            toggle = find_item(root, toggle_name)
+            content = find_item(root, content_name)
+            assert toggle is not None and content is not None
+            initial = bool(root.property(state))
+            for expected in (not initial, initial):
+                point = toggle.mapToScene(QPointF(toggle.width() / 2, toggle.height() / 2)).toPoint()
+                QTest.mouseClick(widget.quick_widget, Qt.MouseButton.LeftButton, pos=point)
+                QTest.qWait(30)
+                assert bool(root.property(state)) == expected
+                assert bool(toggle.property("expanded")) == expected
+                assert bool(content.property("visible")) == expected
+                chevron = find_item(toggle, "disclosureChevron")
+                assert chevron.property("rotation") == (90 if expected else 0)
+        assert not widget.qml_warnings
+    finally:
+        dispose(widget)

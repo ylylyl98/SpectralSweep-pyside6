@@ -4745,6 +4745,7 @@ class PresetsPanel(QWidget):
         self._filename_details_toggle = QToolButton()
         self._filename_details_toggle.setText("Filename details")
         self._filename_details_toggle.setCheckable(True)
+        self._filename_details_toggle.setProperty("quickDisclosure", True)
         self._filename_details_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self._filename_details_toggle.setArrowType(Qt.ArrowType.RightArrow)
         self._filename_details = QWidget()
@@ -4766,6 +4767,7 @@ class PresetsPanel(QWidget):
         sequence_title.setText("Measurement sequence")
         sequence_title.setObjectName("DualGateSequenceToggle")
         sequence_title.setCheckable(True)
+        sequence_title.setProperty("quickDisclosure", True)
         sequence_title.setChecked(True)
         sequence_title.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         sequence_title.setArrowType(Qt.ArrowType.DownArrow)
@@ -4873,8 +4875,14 @@ class PresetsPanel(QWidget):
             "Voltages are ramped back to zero before the run exits."
         )
         self._stop_btn.setEnabled(False)
-        self._spectrum_btn = QPushButton("Show Spectrum")
+        self._spectrum_btn = QToolButton()
+        self._spectrum_btn.setText("Show Spectrum")
         self._spectrum_btn.setCheckable(True)
+        self._spectrum_btn.setProperty("quickDisclosure", True)
+        self._spectrum_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._spectrum_btn.setArrowType(Qt.ArrowType.RightArrow)
+        self._spectrum_btn.toggled.connect(lambda opened: self._spectrum_btn.setArrowType(
+            Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow))
         self._spectrum_btn.setMinimumHeight(32)
         self._spectrum_btn.setToolTip(
             "Show the most recent completed LightField acquisition in a separate window."
@@ -4904,6 +4912,7 @@ class PresetsPanel(QWidget):
         self._log_toggle = QToolButton()
         self._log_toggle.setText("Run log")
         self._log_toggle.setCheckable(True)
+        self._log_toggle.setProperty("quickDisclosure", True)
         self._log_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self._log_toggle.setArrowType(Qt.ArrowType.RightArrow)
         self._log_toggle.toggled.connect(log_grp.setVisible)
@@ -6269,12 +6278,14 @@ class PresetsPanel(QWidget):
             if context_count > _LIVE_DRAFT_SPECTRA_LIMIT or count > _LIVE_DRAFT_SPECTRA_LIMIT:
                 unavailable = "Applied sequence · apply to preview large draft"
                 raise ValueError(f"Live draft preview is limited to {_LIVE_DRAFT_SPECTRA_LIMIT:,} potential spectra.")
-            seq, batch, total = _build_plan(
+            seq, batch, total, schedule = _build_plan(
                 loop_df,
                 batch_df,
                 mode=mode,
                 acquisition_grouping=grouping,
                 parameter_order=self._legacy_loop_order if not self._nested_schedule_enabled else None,
+                include_schedule=True,
+                _include_legacy_schedule=not self._nested_schedule_enabled,
             )
             if self._nested_schedule_enabled:
                 schedule = _build_nested_execution_schedule(
@@ -6284,10 +6295,6 @@ class PresetsPanel(QWidget):
                     execution_order=self._execution_order,
                 )
                 total = _count_logical_streams(schedule)
-            else:
-                schedule = _build_acquisition_schedule(
-                    seq, batch, acquisition_grouping=grouping
-                )
             draft_param_order = [
                 str(param)
                 for param in loop_df.loc[loop_df["Enable"], "Parameter"].tolist()
@@ -8228,10 +8235,14 @@ class PresetsPanel(QWidget):
             self._preview_event.set()
         else:
             self._preview_event.clear()
+        changed = self._spectrum_btn.isChecked() != bool(visible)
         self._spectrum_btn.blockSignals(True)
         self._spectrum_btn.setChecked(bool(visible))
+        self._spectrum_btn.setArrowType(Qt.ArrowType.DownArrow if visible else Qt.ArrowType.RightArrow)
         self._spectrum_btn.setText("Hide Spectrum" if visible else "Show Spectrum")
         self._spectrum_btn.blockSignals(False)
+        if changed:
+            self._spectrum_btn.toggled.emit(bool(visible))
 
     @Slot(object)
     def _on_acquisition_ready(self, payload: dict):

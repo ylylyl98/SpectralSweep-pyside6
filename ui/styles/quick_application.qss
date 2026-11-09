@@ -15,12 +15,17 @@ QWidget[quickWorkspaceSurface="true"] QScrollArea > QWidget#qt_scrollarea_viewpo
 QWidget[quickSidebar="true"] { background: palette(alternate-base); border: none; border-right: 1px solid palette(midlight); }
 QGroupBox { border: none; margin-top: 20px; padding: 6px 0px 0px 0px; background: transparent; }
 QGroupBox::title { subcontrol-origin: margin; left: 0px; top: 2px; color: palette(window-text); font-weight: 600; }
+/* MCD keeps each workflow section on its own band as panes are resized. */
+QGroupBox[mcdSection="true"] { border-top: 1px solid palette(midlight); border-radius: 0px; margin-top: 22px; padding-top: 8px; }
+QGroupBox[mcdSection="true"][title=""] { border: none; margin-top: 0px; padding-top: 0px; }
 /* The calculator already has its own disclosure heading. */
 QGroupBox#SweepLineCalculator { margin: 0px; padding: 0px; border: none; }
 /* Filename preview already has a disclosure heading; its body has no title. */
 QGroupBox#QuickDualGateFilenameContent { margin: 0px; padding: 0px; }
 QGroupBox[quickWorkspaceSurface="true"] { margin-top: 0px; padding-top: 22px; }
 QGroupBox[quickWorkspaceSurface="true"]::title { subcontrol-origin: margin; left: 12px; top: 8px; }
+/* Disclosure headers already own the caption of these retained groups. */
+QGroupBox[checkable="false"][quickDisclosureContent="true"] { margin-top: 0px; padding-top: 0px; }
 QLabel { background: transparent; }
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QPlainTextEdit {
     background: palette(base); color: palette(text); border: 1px solid palette(mid);

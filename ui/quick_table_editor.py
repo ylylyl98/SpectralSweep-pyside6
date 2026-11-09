@@ -45,6 +45,7 @@ class TableEditorModel(QAbstractTableModel):
         self._selection_anchor = -1
         self._selecting_rows = False
         self._columns = self._visible_columns()
+        self._mcd_gate_table = bool(table.property("quickMcdGateTable"))
         font = QFont("Segoe UI" if sys.platform == "win32" else "sans-serif")
         font.setPixelSize(12)
         self._font_metrics = QFontMetrics(font)
@@ -213,13 +214,16 @@ class TableEditorModel(QAbstractTableModel):
         enabled = self.table.isEnabled() and (control is None or control.isEnabled())
         cell = dict(kind="text", value=item.text() if item else "", enabled=enabled,
                     token=f"{self._generation}:{row}:{index.column()}",
-                    label=str(self.headerData(index.column(), Qt.Orientation.Horizontal)),
+                    label=(self._display_column_title(self._column_key(column)) if self._mcd_gate_table
+                           else str(self.headerData(index.column(), Qt.Orientation.Horizontal))),
                     editable=bool(item and item.flags() & Qt.ItemFlag.ItemIsEditable),
                     selected=self.table.selectionModel().isRowSelected(row, QModelIndex()),
                     tooltip=item.toolTip() if item else "", options=[], optionEnabled=[], currentIndex=-1,
                     choiceEditable=False, editText="", checked=False, drafted=False)
         if isinstance(control, QCheckBox):
             cell.update(kind="check", checked=control.isChecked(), editable=True)
+        elif isinstance(control, QComboBox) and self._display_only_combo(control):
+            cell.update(kind="text", value=control.currentText(), editable=False)
         elif isinstance(control, QComboBox):
             key = row, index.column()
             if key not in self._choices or key in self._choice_dirty:
@@ -267,7 +271,7 @@ class TableEditorModel(QAbstractTableModel):
     columnKeys = Property("QVariantList", lambda self: [self._column_key(column) for column in self._columns], notify=schemaChanged)
     singleLineRows = Property(bool, lambda self: self._single_line_rows, constant=True)
     minimumColumnWidths = Property("QVariantList", lambda self: [self._minimum_column_width(column) for column in self._columns], notify=schemaChanged)
-    displayColumnTitles = Property("QVariantList", lambda self: [self._display_column_title(self._column_key(column)) for column in self._columns] if self._single_line_rows else self._titles, notify=schemaChanged)
+    displayColumnTitles = Property("QVariantList", lambda self: [self._display_column_title(self._column_key(column)) for column in self._columns] if self._single_line_rows or self._mcd_gate_table else self._titles, notify=schemaChanged)
 
     def _column_key(self, column):
         header = self.table.horizontalHeaderItem(column)
@@ -281,6 +285,11 @@ class TableEditorModel(QAbstractTableModel):
         return name
 
     def _display_column_title(self, title):
+        if self._mcd_gate_table:
+            if title == "Use":
+                return "Enabled"
+            if title in {"Vtg", "Vbg", "Vbias", "Doping", "E-field"}:
+                return f"{title} (V)"
         if not self._single_line_rows:
             return title
         if title.startswith(("Vbg_", "Vtg_", "Vbias_")):
@@ -314,7 +323,7 @@ class TableEditorModel(QAbstractTableModel):
         # Size the schema, not every live cell: polling/telemetry must not scan
         # rows, enumerate choices, or continually change the wrapping geometry.
         # Scalar voltage/count fields need much less room than value sequences.
-        label_width = self._font_metrics.horizontalAdvance(name) + 12
+        label_width = self._font_metrics.horizontalAdvance(self._display_column_title(name)) + 12
         preferred = {
             "Run": 36, "Enable": 50, "MeasurePower": 92, "Group": 50,
             "Parameter": 180, "Values": 140, "This run": 116,
@@ -518,8 +527,13 @@ class TableEditorModel(QAbstractTableModel):
                       else QItemSelectionModel.SelectionFlag.ClearAndSelect)
         self._selecting_rows = True
         try:
-            self.table.selectionModel().select(selection, flags)
-            self.table.setCurrentCell(row, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+            if self._mcd_gate_table:
+                # MCD row actions read currentRow() in selectionChanged.
+                self.table.setCurrentCell(row, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
+                self.table.selectionModel().select(selection, flags)
+            else:
+                self.table.selectionModel().select(selection, flags)
+                self.table.setCurrentCell(row, 0, QItemSelectionModel.SelectionFlag.NoUpdate)
         finally:
             self._selecting_rows = False
 
@@ -601,13 +615,20 @@ class TableEditorModel(QAbstractTableModel):
         if not self._closed:
             self.refresh()
 
+    @staticmethod
+    def _display_only_combo(control):
+        # Source accepts neither keyboard nor mouse: show a readback.
+        return (isinstance(control, QComboBox)
+                and control.focusPolicy() == Qt.FocusPolicy.NoFocus
+                and control.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+
     @Slot(int, int, "QVariant", result=bool)
     def editCell(self, row, visible_column, value):
         if self._closed or not self.table.isEnabled() or not 0 <= row < self.rowCount() or not 0 <= visible_column < len(self._columns):
             return False
         column = self._columns[visible_column]
         control = self._control(row, column)
-        if control is not None and not control.isEnabled():
+        if control is not None and (not control.isEnabled() or self._display_only_combo(control)):
             return False
         if isinstance(control, (QSpinBox, QDoubleSpinBox, QLineEdit)) and control.isReadOnly():
             return False

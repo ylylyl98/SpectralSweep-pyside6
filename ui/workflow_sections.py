@@ -129,6 +129,24 @@ def compact_form_rows(form, editors, *, labels_above=False):
     return row
 
 
+def disclosure_toggle(title, parent=None, expanded=False):
+    """A compact arrow toggle for a separately owned optional surface."""
+    button = QToolButton(parent)
+    button.setText(title)
+    button.setAccessibleName(title)
+    button.setProperty("quickDisclosure", True)
+    button.setProperty("quickCompactDisclosure", True)
+    button.setProperty("fluentRole", "sectionHeader")
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    button.setCheckable(True)
+    button.toggled.connect(lambda checked: button.setArrowType(
+        Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow))
+    button.setChecked(bool(expanded))
+    button.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+    return button
+
+
 def bind_log_toggle(toggle, splitter, log):
     """Keep a splitter log optional, including sessions with a zero log size."""
     def update(visible):

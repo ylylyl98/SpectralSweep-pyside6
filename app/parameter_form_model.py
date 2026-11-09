@@ -28,7 +28,7 @@ class ParameterField(QObject):
                            step=1.0, decimals=0, prefix="", suffix="", specialText="",
                            editable=False, invalid=False, error="", inputMask="", optionEnabled=[],
                            echoMode=0, maximumLength=32767, cancels=False, corrects=False,
-                           preferredWidth=0.0, labelAbove=False,
+                           preferredWidth=0.0, labelAbove=False, compactDisclosure=False,
                            appearance="standard", textTone="", strong=False, logNotice="")
         self._actions = []
         self._adapter = None
@@ -70,6 +70,7 @@ class ParameterField(QObject):
     corrects = Property(bool, lambda s: s._state["corrects"], notify=changed)
     preferredWidth = Property(float, lambda s: s._state["preferredWidth"], notify=changed)
     labelAbove = Property(bool, lambda s: s._state["labelAbove"], notify=changed)
+    compactDisclosure = Property(bool, lambda s: s._state["compactDisclosure"], notify=changed)
     appearance = Property(str, lambda s: s._state["appearance"], notify=changed)
     textTone = Property(str, lambda s: s._state["textTone"], notify=changed)
     strong = Property(bool, lambda s: s._state["strong"], notify=changed)

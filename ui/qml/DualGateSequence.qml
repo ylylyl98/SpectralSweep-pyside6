@@ -424,9 +424,9 @@ AppPane {
         }
         RowLayout {
             Layout.fillWidth: true
-            ReviewButton { objectName: "DualGateOrderToggle"; visible: !root.compact; text: (root.orderExpanded ? "▾ " : "▸ ") + "Loop order"; appearance: "subtle"; onClicked: root.orderExpanded = !root.orderExpanded }
-            AppCheckBox { objectName: "DualGateDetailsToggle"; text: "Step details and changes"; visible: !root.compact; checked: root.detailsExpanded; onClicked: root.detailsExpanded = checked }
-            AppCheckBox { objectName: "DualGateRulesToggle"; text: "When rules"; checked: root.filtersExpanded; onClicked: root.filtersExpanded = checked }
+            AppDisclosure { objectName: "DualGateOrderToggle"; visible: !root.compact; text: "Loop order"; expanded: root.orderExpanded; onClicked: root.orderExpanded = !root.orderExpanded }
+            AppDisclosure { objectName: "DualGateDetailsToggle"; text: "Step details and changes"; visible: !root.compact; expanded: root.detailsExpanded; onClicked: root.detailsExpanded = !root.detailsExpanded }
+            AppDisclosure { objectName: "DualGateRulesToggle"; text: "When rules"; expanded: root.filtersExpanded; onClicked: root.filtersExpanded = !root.filtersExpanded }
         }
         ColumnLayout {
             objectName: "DualGateLoopOrder"

@@ -596,21 +596,25 @@ def test_disclosure_is_arrow_header_and_collapses_to_header_height():
         field = next(f for f, w in surface.adapter._fields.items() if w is section.toggle)
         assert field.kind == "disclosure"
         header = find_item(surface.rootObject(), "parameter_" + field.fieldId)
-        assert header.property("text").startswith("▾")
+        assert header.property("text") == "Acquisition options"
+        chevron = find_item(surface.rootObject(), "disclosureChevron_" + field.fieldId)
+        assert chevron.rotation() == 90
         expanded = surface.height()
         assert field.trigger()
         QTest.qWait(40)
         assert not section.toggle.isChecked()
-        assert header.property("text").startswith("▸")
+        assert chevron.rotation() == 0
         assert surface.height() < expanded
         assert surface.height() <= header.height() + 2
         assert surface.y() <= panel.layout().contentsMargins().top() + 1
-        assert field.trigger()
+        header.forceActiveFocus()
+        QTest.keyClick(surface, Qt.Key.Key_Space)
         for _ in range(20):
             QTest.qWait(10)
             if surface.height() == expanded:
                 break
         assert surface.height() == expanded
+        assert section.toggle.isChecked()
     finally:
         for form in coverage["forms"]:
             form.shutdown()

@@ -426,12 +426,12 @@ class MCD2100PanelTests(unittest.TestCase):
     def test_short_inputs_are_bounded_and_filename_preview_remains_expanding(self):
         panel, _, _ = self.make_panel()
         for widget, maximum in (
-            (panel.start_field, 140), (panel.stop_field, 140),
-            (panel.angles, 240), (panel.rotator, 180),
+            (panel.start_field, 240), (panel.stop_field, 240),
+            (panel.angles, 240), (panel.rotator, 240),
             (panel.lf_center, 140), (panel.lf_exposure, 140),
             (panel.lf_frames, 100), (panel.vtg, 140),
             (panel.vbg, 140), (panel.vbias, 140), (panel.gate_ratio, 140),
-            (panel._sample_id, 300), (panel._point, 160), (panel.stem, 450),
+            (panel._sample_id, 240), (panel._point, 240), (panel.stem, 450),
         ):
             self.assertLessEqual(widget.maximumWidth(), maximum)
             self.assertEqual(widget.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Fixed)
@@ -657,7 +657,7 @@ class MCD2100PanelTests(unittest.TestCase):
         panel.show()
         self.app.processEvents()
         self.assertTrue(panel.error_display.isHidden())
-        self.assertLessEqual(panel._sample_group.height(), 70)
+        self.assertLessEqual(panel._sample_group.height(), 100)
         self.assertGreater(panel._rotation_group.y(), panel._sweep_group.geometry().bottom())
         self.assertLessEqual(panel._settings_scroll.widget().minimumSizeHint().width(),
                              panel._settings_scroll.viewport().width())

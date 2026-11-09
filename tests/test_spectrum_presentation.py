@@ -25,6 +25,23 @@ def panel():
     app.processEvents()
 
 
+def test_spectrum_disclosures_keep_visibility_and_arrow_state_in_sync(panel):
+    from PySide6.QtCore import Qt
+    from ui.quick_parameter_forms import _kind
+
+    panel._andor_toggle.setVisible(True)
+    for toggle, content in ((panel._details_toggle, panel._acquisition_details),
+                            (panel._references_toggle, panel._side_panel),
+                            (panel._andor_toggle, panel._andor_controls)):
+        assert _kind(toggle) == "disclosure"
+        for expanded in (True, False, True):
+            toggle.setChecked(expanded)
+            assert content.isHidden() is not expanded
+            assert toggle.arrowType() == (Qt.ArrowType.DownArrow if expanded
+                                          else Qt.ArrowType.RightArrow)
+    assert _kind(panel._normalize_references_chk) == "check"
+
+
 def test_empty_plot_transitions_follow_visible_finite_data(panel):
     plot = panel._spec_plot
     assert plot._display_stack.currentWidget() is plot._empty_label
@@ -49,11 +66,14 @@ def test_reference_actions_follow_selection_and_saved_state(panel):
     panel._reference_list.setCurrentRow(0)
     assert panel._details_reference_btn.isEnabled()
     assert panel._retry_reference_btn.isEnabled()
-    assert not panel._retry_reference_btn.isHidden()
+    retry = next(a for a, button in panel._reference_menu_actions if button is panel._retry_reference_btn)
+    assert panel._retry_reference_btn.isHidden()
+    assert retry.isVisible() and retry.isEnabled()
     ref['saved'] = True
     panel._refresh_reference_item(ref)
     assert not panel._retry_reference_btn.isEnabled()
     assert panel._retry_reference_btn.isHidden()
+    assert not retry.isVisible()
     panel._reference_list.setCurrentRow(-1)
     assert not panel._details_reference_btn.isEnabled()
     assert not panel._reference_menu_actions[0][0].isEnabled()

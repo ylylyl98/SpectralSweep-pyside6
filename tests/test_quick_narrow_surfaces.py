@@ -84,7 +84,7 @@ def test_history_filters_actions_and_long_metadata_stay_inside_viewport(width, h
         drain_qt_deletions()
 
 
-def test_real_spectrum_reference_pane_at_70px_keeps_name_color_and_wrapped_status_reachable(monkeypatch, tmp_path):
+def test_real_spectrum_reference_pane_at_70px_keeps_compact_controls_and_rename_reachable(monkeypatch, tmp_path):
     app = application()
     previous = app.property("spectralQuick")
     app.setProperty("spectralQuick", True)
@@ -107,21 +107,26 @@ def test_real_spectrum_reference_pane_at_70px_keeps_name_color_and_wrapped_statu
         QTest.qWait(60)
         assert editor.width() <= 80
         root = editor.rootObject()
-        name = visual(root, "referenceName_" + reference["id"])
+        name = visual(root, "referenceLabel_" + reference["id"])
         status = visual(root, "referenceStatus_" + reference["id"])
+        checkbox = visual(root, "referenceVisibility_" + reference["id"])
+        color = visual(root, "referenceColor_" + reference["id"])
         assert name is not None and status is not None
-        for item in (name, status):
+        for item in (name, status, checkbox, color):
             left = item.mapToScene(QPointF(0, 0)).x()
             assert left >= 0 and left + item.width() <= root.width() + 1
         assert name.width() >= 40
-        assert status.height() > 50  # Full source/status text wraps into rows.
+        assert status.property("text") == "Unsaved"
+        assert status.height() < 30  # Repeated metadata stays in the tooltip.
+        assert "Long reference setup" in editor.model.rows[0].tooltip
         # TextField.boundingRect can include overflowing text decoration at
         # narrow widths. Click the actual control box, not that expanded box.
         point = name.mapToScene(QPointF(name.width() / 2, name.height() / 2)).toPoint()
         assert 0 <= point.x() < editor.width() and 0 <= point.y() < editor.height()
-        QTest.mouseClick(editor, Qt.MouseButton.LeftButton,
+        QTest.mouseDClick(editor, Qt.MouseButton.LeftButton,
                          pos=point)
-        assert name.property("activeFocus")
+        field = visual(root, "referenceName_" + reference["id"])
+        assert field.property("activeFocus")
         QTest.keyClick(editor, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
         QTest.keyClicks(editor, "narrow-reference")
         QTest.keyClick(editor, Qt.Key.Key_Return)

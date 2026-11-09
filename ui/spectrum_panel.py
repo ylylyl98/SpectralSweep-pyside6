@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, Slot, QSignalBlocker, QEvent
+from PySide6.QtCore import Qt, QTimer, Signal, Slot, QSignalBlocker, QEvent
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel,
     QTabWidget, QComboBox, QCheckBox, QSizePolicy, QDoubleSpinBox,
@@ -60,7 +60,7 @@ import pyqtgraph as pg
 from utils.config import cfg
 from ui.andor_controls_widget import AndorControlsWidget
 from ui.signal_connections import SignalConnections
-from ui.workflow_sections import CompactRow, inline_divider
+from ui.workflow_sections import CompactRow, disclosure_toggle, inline_divider
 from app.experiment_metadata import instrument_inventory
 from app.power_reading import power_correction_factor
 from app.spectrum_reference_state import (
@@ -164,6 +164,8 @@ class SpectrumPanel(QWidget):
     Usage:
         panel = SpectrumPanel(lf6_ctrl=lf6)
     """
+
+    referencePresentationChanged = Signal(str)
 
     def __init__(self, lf6_ctrl=None, parent: Optional[QWidget] = None, *, bind_controller=True):
         super().__init__(parent)
@@ -312,11 +314,7 @@ class SpectrumPanel(QWidget):
         details_layout.setContentsMargins(0, 0, 0, 0)
         details_layout.addWidget(self._frame_help)
         self._acquisition_details.hide()
-        self._details_toggle = QToolButton()
-        self._details_toggle.setText("Acquisition details")
-        self._details_toggle.setCheckable(True)
-        self._details_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self._details_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._details_toggle = disclosure_toggle("Acquisition details")
         self._error_panel = QWidget()
         error_layout = QVBoxLayout(self._error_panel)
         error_layout.setContentsMargins(0, 0, 0, 0)
@@ -465,17 +463,22 @@ class SpectrumPanel(QWidget):
         self._reference_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._reference_stack.addWidget(self._reference_empty)
         reference_layout.addWidget(self._reference_stack, 1)
-        reference_actions = QHBoxLayout()
         self._rename_reference_btn = QPushButton("Rename")
         self._color_reference_btn = QPushButton("Color")
         self._details_reference_btn = QPushButton("Details")
         self._remove_reference_btn = QPushButton("Remove")
         self._retry_reference_btn = QPushButton("Retry save")
-        self._reference_more = QPushButton("More…")
+        self._reference_more = QToolButton()
+        self._reference_more.setText("More")
+        self._reference_more.setObjectName("SpectrumReferenceMenu")
+        self._reference_more.setAccessibleName("Reference spectrum actions")
+        self._reference_more.setToolTip("Details, rename, color and reference visibility")
+        self._reference_more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._reference_menu = QMenu(self._reference_more)
         self._reference_more.setMenu(self._reference_menu)
         self._reference_menu_actions = []
-        for button in (self._rename_reference_btn, self._color_reference_btn,
+        for button in (self._details_reference_btn, self._retry_reference_btn,
+                       self._rename_reference_btn, self._color_reference_btn,
                        self._remove_reference_btn, self._show_all_btn, self._hide_all_btn):
             if button is self._show_all_btn:
                 self._reference_menu.addSeparator()
@@ -485,11 +488,7 @@ class SpectrumPanel(QWidget):
             action = self._reference_menu.addAction(button.text())
             action.triggered.connect(button.click)
             self._reference_menu_actions.append((action, button))
-        reference_actions.addWidget(self._details_reference_btn)
-        reference_actions.addWidget(self._reference_more)
-        reference_layout.addLayout(reference_actions)
-        reference_layout.addWidget(self._retry_reference_btn)
-        self._retry_reference_btn.hide()
+        reference_header.addWidget(self._reference_more)
 
         # Tab widget: 1D | 2D
         view_row = QHBoxLayout()
@@ -511,10 +510,7 @@ class SpectrumPanel(QWidget):
         view_row.addWidget(self._hide_gaps_chk)
         view_row.addWidget(self._normalize_references_chk)
         view_row.addWidget(self._comparison_hint, 1)
-        self._references_toggle = QToolButton()
-        self._references_toggle.setText("Side panel")
-        self._references_toggle.setCheckable(True)
-        self._references_toggle.setChecked(True)
+        self._references_toggle = disclosure_toggle("Side panel", expanded=True)
         self._references_toggle.setToolTip("Show or hide reference spectra and acquisition details; instrument controls stay above the plot.")
         view_row.addWidget(self._references_toggle)
         root.addLayout(view_row)
@@ -544,14 +540,7 @@ class SpectrumPanel(QWidget):
         self._content_splitter.setSizes([900, 280])
         root.addWidget(self._content_splitter, 1)
 
-        self._andor_toggle = QToolButton()
-        self._andor_toggle.setText("Andor controls")
-        self._andor_toggle.setCheckable(True)
-        self._andor_toggle.setChecked(False)
-        self._andor_toggle.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        )
-        self._andor_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self._andor_toggle = disclosure_toggle("Andor controls")
         self._andor_toggle.setVisible(False)
         root.insertWidget(2, self._andor_toggle)
         self._andor_controls = AndorControlsWidget(self._ctrl, bind_controller=False)
@@ -661,12 +650,13 @@ class SpectrumPanel(QWidget):
             button.setEnabled(ref is not None)
         self._show_all_btn.setEnabled(bool(scoped))
         self._hide_all_btn.setEnabled(bool(scoped))
-        for action, button in self._reference_menu_actions:
-            action.setEnabled(button.isEnabled())
         self._reference_more.setEnabled(bool(scoped))
-        self._retry_reference_btn.setVisible(any(not r["saved"] for r in scoped))
         self._retry_reference_btn.setEnabled(ref is not None and not ref["saved"])
         self._retry_reference_btn.setToolTip("Select an unsaved reference to retry saving it.")
+        for action, button in self._reference_menu_actions:
+            action.setEnabled(button.isEnabled())
+            if button is self._retry_reference_btn:
+                action.setVisible(any(not r["saved"] for r in scoped))
         self._reference_title.setText(f"Reference spectra ({len(scoped)})")
         reference_view = getattr(self, "_quick_reference_list", self._reference_list)
         self._reference_stack.setCurrentWidget(reference_view if scoped else self._reference_empty)
@@ -1095,13 +1085,18 @@ class SpectrumPanel(QWidget):
         self._comparison_hint.setText(
             "Select spectra below; only matching axis units are shown" if compare
             else "References follow the current setup")
+        visibility_changed = False
         for index, ref in enumerate(self._references):
             self._spec_plot.set_reference_visible(ref["id"], self._reference_display_visible(ref))
             item = self._reference_list.item(index)
-            item.setHidden(not self._reference_in_scope(ref))
+            hidden = not self._reference_in_scope(ref)
+            visibility_changed |= item.isHidden() != hidden
+            item.setHidden(hidden)
             if item.isHidden() and item is self._reference_list.currentItem():
                 self._reference_list.setCurrentRow(-1)
         self._refresh_reference_actions()
+        if visibility_changed:
+            self.referencePresentationChanged.emit("")
 
     def _remember_display_data(self):
         if self._last_data_kind == "spectrum_1d":
@@ -1413,6 +1408,7 @@ class SpectrumPanel(QWidget):
                     swatch.setStyleSheet(f"background-color: {ref['color']}; border: 1px solid #777;")
                 break
         self._refresh_reference_actions()
+        self.referencePresentationChanged.emit(str(ref["id"]))
 
     def rename_reference(self, reference_id: str, name: str) -> bool:
         ref = self._reference_by_id(reference_id)

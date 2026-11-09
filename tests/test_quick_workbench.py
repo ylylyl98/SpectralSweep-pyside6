@@ -334,7 +334,7 @@ def test_header_commands_stay_right_aligned_above_scrolling_workspace(workbench)
 
 
 @pytest.mark.parametrize('page_id', ['mega_sweep', 'power_sweep', 'mcd', 'mcd2100', 'bfp'])
-def test_commands_use_existing_monitoring_pane_without_footer_or_new_column(workbench, page_id):
+def test_commands_use_existing_monitoring_pane_without_footer_or_new_column(workbench, page_id, monkeypatch):
     from PySide6.QtCore import QPoint, QPointF
     from tests.test_quick_parameter_forms import find_item
 
@@ -366,17 +366,19 @@ def test_commands_use_existing_monitoring_pane_without_footer_or_new_column(work
     assert splitter.count() == 2
     assert pane is monitoring or pane.isAncestorOf(monitoring)
     assert monitoring.isVisibleTo(window)
+    mcd_top = page_id in {"mcd", "mcd2100"}
     assert command.parentWidget() is pane
-    assert pane.layout().indexOf(command) == pane.layout().count() - 1
-    assert command.rootObject().property('compact')
-    assert command.rootObject().property('embedded')
+    assert pane.layout().indexOf(command) == (0 if mcd_top else pane.layout().count() - 1)
     assert not shell.command_header.isVisibleTo(window)
     assert not shell.command_stack.isVisibleTo(window)
+    assert command.rootObject().property('compact')
+    assert command.rootObject().property('embedded')
     assert command.isVisibleTo(window)
-    assert command.width() <= pane.width()
-    assert command.x() + command.width() >= pane.width() - 12
-    assert command.y() + command.height() >= pane.height() - 12
-    assert command.mapTo(window, QPoint()).x() > settings.mapTo(window, QPoint()).x() + settings.width()
+    if not mcd_top:
+        assert command.width() <= pane.width()
+        assert command.x() + command.width() >= pane.width() - 12
+        assert command.y() + command.height() >= pane.height() - 12
+        assert command.mapTo(window, QPoint()).x() > settings.mapTo(window, QPoint()).x() + settings.width()
     assert command.height() < 170
     assert shell.body_scroll.horizontalScrollBar().maximum() == 0
     for key in command.adapter.buttons:
@@ -393,7 +395,54 @@ def test_commands_use_existing_monitoring_pane_without_footer_or_new_column(work
     late = QLabel('Optional monitoring detail', pane)
     pane.layout().addWidget(late)
     shell.refresh()
-    assert pane.layout().indexOf(command) == pane.layout().count() - 1
+    if mcd_top:
+        assert pane.layout().indexOf(command) == 0
+        # Narrow instrument focus hides the workspace, even with Stop idle.
+        shell._instrument_focus = True
+        shell.refresh()
+        assert command.parentWidget() is shell.command_stack
+        assert command.isVisibleTo(window)
+        shell._instrument_focus = False
+        shell.refresh()
+        assert command.parentWidget() is pane
+        # When the monitoring top leaves the outer viewport during a run,
+        # Stop moves to the fixed header and returns on scrolling back.
+        panel._stop_btn.setEnabled(True)
+        with monkeypatch.context() as scrolled:
+            scrolled.setattr(pane, "mapTo", lambda *_: QPoint(0, -100))
+            shell.refresh()
+            assert command.parentWidget() is shell.command_stack
+            assert command.isVisibleTo(window)
+        shell.refresh()
+        assert command.parentWidget() is pane
+        assert pane.layout().indexOf(command) == 0
+    else:
+        assert pane.layout().indexOf(command) == pane.layout().count() - 1
+
+
+@pytest.mark.parametrize("page_id", ["mcd", "mcd2100"])
+def test_mcd_commands_dock_above_real_monitoring_view(workbench, page_id):
+    from types import SimpleNamespace
+    from ui.mcd_panel import MCDPanel
+    from ui.mcd2100_panel import MCD2100Panel
+    from ui.quick_workspaces_preview import DisconnectedPreviewMagnet
+
+    shell, _window = workbench
+    panel = (MCDPanel(DisconnectedPreviewMagnet(), None, None, None)
+             if page_id == "mcd" else
+             MCD2100Panel(SimpleNamespace(state=SimpleNamespace(name="DISCONNECTED"), generation=0)))
+    try:
+        pane = panel._splitter.widget(1)
+        assert shell._dock_page_commands(panel, page_id)
+        command = shell._commands[page_id]
+        assert command.parentWidget() is pane
+        assert pane.layout().indexOf(command) == 0
+        assert pane.isAncestorOf(panel._plot)
+    finally:
+        shell._mount_command(shell._commands[page_id])
+        panel.shutdown(timeout_ms=0)
+        panel.close()
+        panel.deleteLater()
 
 
 def test_spectrum_actions_dock_below_right_tools_and_survive_reference_sidebar_hide(workbench, app, request):

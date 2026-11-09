@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 from shiboken6 import isValid
-from PySide6.QtCore import QEvent, QObject, QPointF, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPointF, QSignalBlocker, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QFont, QPolygonF
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -270,9 +270,11 @@ class _OpticalSequenceWidget(QWidget):
         spin.valueChanged.connect(self.changed)
         return spin
 
-    def _append_row(self, condition: OpticalCondition) -> None:
-        row = self._table.rowCount()
-        self._table.insertRow(row)
+    def _append_row(self, condition: OpticalCondition, row: int | None = None, *, insert: bool = True) -> None:
+        if row is None:
+            row = self._table.rowCount()
+        if insert:
+            self._table.insertRow(row)
         enabled_item = QTableWidgetItem()
         enabled_item.setFlags(
             Qt.ItemFlag.ItemIsEnabled
@@ -439,45 +441,46 @@ class _OpticalSequenceWidget(QWidget):
         row = self._table.currentRow()
         return row if row >= 0 else max(0, self._table.rowCount() - 1)
 
+    def _resize_table_height(self):
+        table_height = (self._table.horizontalHeader().sizeHint().height()
+                        + sum(self._table.rowHeight(row) for row in range(self._table.rowCount()))
+                        + 2 * self._table.frameWidth())
+        self._table.setMaximumHeight(min(_OPTICAL_TABLE_MAX_HEIGHT,
+                                     max(_OPTICAL_TABLE_MIN_HEIGHT, table_height)))
+
     def _add_condition(self) -> None:
         conditions = self.conditions()
         previous = conditions[-1]
-        conditions.append(OpticalCondition(
-            True,
-            f"C{len(conditions) + 1}",
-            previous.center_nm,
-            previous.exposure_ms,
-            previous.frames,
-            previous.backend,
-            previous.reduction,
-        ))
-        self.set_conditions(conditions)
-        self._table.selectRow(len(conditions) - 1)
+        condition = OpticalCondition(True, f"C{len(conditions) + 1}", previous.center_nm,
+                                     previous.exposure_ms, previous.frames,
+                                     previous.backend, previous.reduction)
+        with QSignalBlocker(self._table):
+            self._append_row(condition)
+            self._table.selectRow(self._table.rowCount() - 1)
+        self._resize_table_height()
+        self.changed.emit()
 
     def _duplicate_selected(self) -> None:
         conditions = self.conditions()
         row = self._selected_row()
         source = conditions[row]
-        conditions.insert(row + 1, OpticalCondition(
-            source.enabled,
-            f"{source.name}_copy",
-            source.center_nm,
-            source.exposure_ms,
-            source.frames,
-            source.backend,
-            source.reduction,
-        ))
-        self.set_conditions(conditions)
-        self._table.selectRow(row + 1)
+        duplicate = OpticalCondition(source.enabled, f"{source.name}_copy", source.center_nm,
+                                     source.exposure_ms, source.frames, source.backend, source.reduction)
+        with QSignalBlocker(self._table):
+            self._append_row(duplicate, row + 1)
+            self._table.selectRow(row + 1)
+        self._resize_table_height()
+        self.changed.emit()
 
     def _remove_selected(self) -> None:
         if self._table.rowCount() <= 1:
             return
-        conditions = self.conditions()
         row = self._selected_row()
-        conditions.pop(row)
-        self.set_conditions(conditions)
-        self._table.selectRow(min(row, len(conditions) - 1))
+        with QSignalBlocker(self._table):
+            self._table.removeRow(row)
+            self._table.selectRow(min(row, self._table.rowCount() - 1))
+        self._resize_table_height()
+        self.changed.emit()
 
     def _move_selected(self, delta: int) -> None:
         conditions = self.conditions()
@@ -485,9 +488,11 @@ class _OpticalSequenceWidget(QWidget):
         target = row + int(delta)
         if not 0 <= target < len(conditions):
             return
-        conditions[row], conditions[target] = conditions[target], conditions[row]
-        self.set_conditions(conditions)
-        self._table.selectRow(target)
+        with QSignalBlocker(self._table):
+            self._append_row(conditions[target], row, insert=False)
+            self._append_row(conditions[row], target, insert=False)
+            self._table.selectRow(target)
+        self.changed.emit()
 
 
 class _CollapsibleSection(QFrame):
@@ -517,6 +522,7 @@ class _CollapsibleSection(QFrame):
         self._header.setObjectName("MegaSweepDisclosureHeader")
         self._header.setText(title)
         self._header.setCheckable(True)
+        self._header.setProperty("quickDisclosure", True)
         self._header.setChecked(expanded)
         self._header.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon
@@ -1524,6 +1530,7 @@ class _TimingWidget(QGroupBox):
         self._toggle = QToolButton()
         self._toggle.setText("Advanced Timing")
         self._toggle.setCheckable(True)
+        self._toggle.setProperty("quickDisclosure", True)
         self._toggle.setChecked(False)
         self._toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._toggle.setArrowType(Qt.RightArrow)

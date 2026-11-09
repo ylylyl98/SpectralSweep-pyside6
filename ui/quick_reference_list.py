@@ -6,7 +6,7 @@ rename, visibility and color paths used by Spectrum.
 """
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer, QUrl, Qt
+from PySide6.QtCore import QObject, Property, Signal, Slot, QTimer, QUrl, Qt, QPoint, QEvent
 from PySide6.QtQuickWidgets import QQuickWidget
 from ui.quick_engine import QuickSurface
 from PySide6.QtWidgets import QStackedWidget, QSizePolicy
@@ -31,6 +31,9 @@ class ReferenceRow(QObject):
     visible = Property(bool, lambda s: s._state.get("visible", False), notify=changed)
     status = Property(str, lambda s: s._state.get("status", ""), notify=changed)
     setup = Property(str, lambda s: s._state.get("setup", ""), notify=changed)
+    unsaved = Property(bool, lambda s: s._state.get("unsaved", False), notify=changed)
+    saveFailed = Property(bool, lambda s: s._state.get("save_failed", False), notify=changed)
+    tooltip = Property(str, lambda s: s._state.get("tooltip", ""), notify=changed)
 
     def _resolve(self):
         if self.model._closed:
@@ -54,6 +57,12 @@ class ReferenceRow(QObject):
                          enabled=self.model.panel._reference_list.isEnabled(),
                          setup=source.text() if source is not None and isValid(source) else str(ref.get("setup_key", "")),
                          status=status.text() if status is not None and isValid(status) else "")
+            state.update(unsaved=not ref["saved"], save_failed=bool(ref.get("save_error")))
+            state["tooltip"] = "\n".join(filter(None, (
+                str(ref["name"]), state["setup"],
+                "Saved" if ref["saved"] else "Save failed" if ref.get("save_error") else "Unsaved",
+                str(ref.get("save_error") or ""), str(ref.get("path") or ""),
+            )))
         if any(self._state.get(key) != value for key, value in state.items()):
             self._state.update(state)
             self.changed.emit()
@@ -64,7 +73,7 @@ class ReferenceRow(QObject):
         if ref is None or item is None or item.isHidden() or not self.model.panel._reference_list.isEnabled():
             return False
         self.model.panel._reference_list.setCurrentItem(item)
-        self.model.refresh()
+        self.model.refresh_selection()
         return True
 
     def _control(self, key):
@@ -78,7 +87,7 @@ class ReferenceRow(QObject):
     def rename(self, text):
         if not text.strip():
             self.model._drafts.pop(self._id, None)
-            self.model.refresh()
+            self.refresh()
             return False
         control = self._control("_row_name")
         if control is None or control.isReadOnly():
@@ -86,7 +95,7 @@ class ReferenceRow(QObject):
         self.select()
         accepted = self.model.panel.rename_reference(self._id, text)
         self.model._drafts.pop(self._id, None)
-        self.model.refresh()
+        self.refresh()
         return accepted
 
     @Slot(str)
@@ -95,6 +104,18 @@ class ReferenceRow(QObject):
             self.model._drafts[self._id] = text
             self.refresh()
 
+    @Slot()
+    def cancelRename(self):
+        self.model._drafts.pop(self._id, None)
+        self.refresh()
+
+    @Slot(float, float, result=bool)
+    def showMenu(self, x, y):
+        if not self.select():
+            return False
+        self.model.menuRequested.emit(x, y)
+        return True
+
     @Slot(result=bool)
     def toggle(self):
         control = self._control("_row_checkbox")
@@ -102,7 +123,7 @@ class ReferenceRow(QObject):
             return False
         self.select()
         control.click()
-        self.model.refresh()
+        self.refresh()
         return True
 
     @Slot(result=bool)
@@ -112,44 +133,107 @@ class ReferenceRow(QObject):
             return False
         self.select()
         control.click()
-        self.model.refresh()
+        self.refresh()
         return True
 
 
 class ReferenceListModel(QObject):
     changed = Signal()
+    selectionChanged = Signal()
     renameRequested = Signal(str)
+    menuRequested = Signal(float, float)
+    focusRequested = Signal(str)
 
     def __init__(self, panel, parent=None):
         super().__init__(parent)
         self.panel, self._closed = panel, False
         self._rows, self._cache, self._drafts = [], {}, {}
+        self._selected_index = -1
+        self._resolved, self._indices = {}, {}
+        self._dirty_ids = set()
+        self._structure_dirty = False
         self._connections = []
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setSingleShot(True)
-        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.timeout.connect(self._flush_pending)
         source = panel._reference_list
-        for signal in (source.itemSelectionChanged, source.itemChanged,
+        for signal in (source.model().rowsAboutToBeRemoved, source.model().modelAboutToBeReset,
                        source.model().rowsInserted, source.model().rowsRemoved, source.model().modelReset):
-            callback = lambda *args: self._refresh_timer.start(0)
+            callback = lambda *args: self._queue_refresh()
             signal.connect(callback)
             self._connections.append((signal, callback))
+        for signal, callback in (
+                (source.itemSelectionChanged, self.refresh_selection),
+                (source.itemChanged, self._item_changed),
+                (panel.referencePresentationChanged, self._queue_refresh)):
+            signal.connect(callback)
+            self._connections.append((signal, callback))
+        source.installEventFilter(self)
         panel._rename_reference_btn.clicked.connect(self.request_rename)
         self._connections.append((panel._rename_reference_btn.clicked, self.request_rename))
         self.refresh()
 
     rows = Property("QVariantList", lambda s: s._rows, notify=changed)
+    selectedIndex = Property(int, lambda s: s._selected_index, notify=selectionChanged)
+
+    def eventFilter(self, watched, event):
+        if watched is self.panel._reference_list and event.type() == QEvent.Type.EnabledChange:
+            self._queue_refresh()
+        return False
+
+    def _item_changed(self, item):
+        self._queue_refresh(str(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _queue_refresh(self, reference_id=""):
+        if self._closed:
+            return
+        if reference_id:
+            self._dirty_ids.add(reference_id)
+        else:
+            self._structure_dirty = True
+        self._refresh_timer.start(0)
+
+    def _flush_pending(self):
+        if self._closed:
+            return
+        if self._structure_dirty:
+            self.refresh()
+            return
+        dirty, self._dirty_ids = self._dirty_ids, set()
+        for key in dirty:
+            if key in self._cache:
+                self._cache[key].refresh(self._resolved.get(key, (None, None)))
+        self.refresh_selection()
+
+    def refresh_selection(self):
+        if self._closed or self._structure_dirty:
+            return
+        # QListWidget owns a single selection; refresh only the old/new rows.
+        items = self.panel._reference_list.selectedItems()
+        key = str(items[0].data(Qt.ItemDataRole.UserRole)) if items and not items[0].isHidden() else None
+        index = self._indices.get(key, -1)
+        if index == self._selected_index:
+            return
+        for row_index in {self._selected_index, index}:
+            if 0 <= row_index < len(self._rows):
+                row = self._rows[row_index]
+                row.refresh(self._resolved.get(row.referenceId, (None, None)))
+        self._selected_index = index
+        self.selectionChanged.emit()
 
     def refresh(self):
         if self._closed:
             return
         self._refresh_timer.stop()
+        self._structure_dirty = False
+        self._dirty_ids.clear()
         live_ids = {str(ref["id"]) for ref in self.panel._references}
         self._drafts = {key: value for key, value in self._drafts.items() if key in live_ids}
         rows = []
         source = self.panel._reference_list
         items = {str(source.item(i).data(Qt.ItemDataRole.UserRole)): source.item(i)
                  for i in range(source.count())}
+        self._resolved = {str(ref["id"]): (ref, items.get(str(ref["id"]))) for ref in self.panel._references}
         for ref in self.panel._references:
             key = str(ref["id"])
             row = self._cache.get(key)
@@ -164,11 +248,32 @@ class ReferenceListModel(QObject):
         if rows != self._rows:
             self._rows = rows
             self.changed.emit()
+        self._indices = {row.referenceId: index for index, row in enumerate(rows)}
+        selected_index = next((index for index, row in enumerate(rows) if row.selected and row.visible), -1)
+        if selected_index != self._selected_index:
+            self._selected_index = selected_index
+            self.selectionChanged.emit()
 
     def request_rename(self, *_):
-        item = self.panel._reference_list.currentItem()
-        if item is not None and not self._closed:
-            self.renameRequested.emit(str(item.data(Qt.ItemDataRole.UserRole)))
+        if self._closed:
+            return
+        ref = self.panel._selected_reference()
+        if ref is not None:
+            self.refresh_selection()
+            self.renameRequested.emit(str(ref["id"]))
+
+    @Slot(int, result=bool)
+    def moveSelection(self, offset):
+        rows = [row for row in self._rows if row.visible and row.enabled]
+        if not rows:
+            return False
+        current = next((index for index, row in enumerate(rows) if row.selected), None)
+        target = (0 if offset > 0 else len(rows) - 1) if current is None else max(0, min(len(rows) - 1, current + offset))
+        row = rows[target]
+        if not row.select():
+            return False
+        self.focusRequested.emit(row.referenceId)
+        return True
 
     def commitEdits(self):
         if self._closed:
@@ -190,6 +295,7 @@ class ReferenceListModel(QObject):
 
     def shutdown(self):
         self._closed = True
+        self.panel._reference_list.removeEventFilter(self)
         self._refresh_timer.stop()
         self._drafts.clear()
         for signal, callback in self._connections:
@@ -204,6 +310,7 @@ class QuickReferenceList(QuickSurface):
     def __init__(self, panel, parent=None):
         super().__init__(parent)
         self.model = ReferenceListModel(panel, self)
+        self.model.menuRequested.connect(self._show_reference_menu)
         self.setObjectName("QuickSpectrumReferences")
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
         self.setMinimumHeight(80)
@@ -212,22 +319,17 @@ class QuickReferenceList(QuickSurface):
         self.setSource(QUrl.fromLocalFile(str(Path(__file__).with_name("qml") / "ReferenceList.qml")))
         if self.status() == QQuickWidget.Status.Error:
             raise RuntimeError("\n".join(error.toString() for error in self.errors()))
-        self._poll = QTimer(self)
-        self._poll.setInterval(150)
-        self._poll.timeout.connect(self.model.refresh)
+
+    def _show_reference_menu(self, x, y):
+        self.model.panel._refresh_reference_actions()
+        self.model.panel._reference_menu.popup(self.mapToGlobal(QPoint(round(x), round(y))))
 
     def showEvent(self, event):
         super().showEvent(event)
         if not self.model._closed:
             self.model.refresh()
-            self._poll.start()
-
-    def hideEvent(self, event):
-        self._poll.stop()
-        super().hideEvent(event)
 
     def shutdown(self):
-        self._poll.stop()
         self.model.shutdown()
         self.setSource(QUrl())
 

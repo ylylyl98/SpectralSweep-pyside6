@@ -1631,7 +1631,7 @@ class PowerSweepPanel(QWidget):
 
         # Optional condition batch.  Defaults preserve the original one-gate
         # sweep; enabling it expands the two coordinate arrays at run time.
-        self._conditions_grp = QGroupBox("Across conditions (optional)")
+        self._conditions_grp = QGroupBox("Enable condition batch")
         self._conditions_grp.setCheckable(True); self._conditions_grp.setChecked(False)
         condition_lay = QVBoxLayout(self._conditions_grp)
         condition_lay.setContentsMargins(3, 3, 3, 3)
@@ -1643,28 +1643,21 @@ class PowerSweepPanel(QWidget):
         condition_lay.addWidget(self._condition_editor)
         condition_lay.addWidget(self._condition_preview_btn)
         condition_lay.addWidget(self._condition_preview_lbl)
-        conditions_lay.addWidget(self._conditions_grp)
+        self._conditions_section = DisclosureSection("Across conditions", self._conditions_grp)
+        conditions_lay.addWidget(self._conditions_section)
         self._condition_editor.setEnabled(False)
         self._conditions_grp.toggled.connect(self._condition_editor.setEnabled)
         self._conditions_grp.toggled.connect(self._condition_preview_btn.setEnabled)
-        for widget in (self._condition_editor, self._condition_preview_btn, self._condition_preview_lbl):
-            widget.setVisible(False)
-            self._conditions_grp.toggled.connect(widget.setVisible)
 
         # The shared widget is the sole owner of calibration/reference acquisition.
-        self._cal_grp = QGroupBox("Shared ND calibration")
-        self._cal_grp.setCheckable(True)
-        self._cal_grp.setChecked(False)
-        cal_lay = QVBoxLayout(self._cal_grp)
-        cal_lay.setContentsMargins(6, 4, 6, 4)
         self._cal_widget = NDCalibrationWidget(self._stg, self._pm, self)
         self._cal_widget.setObjectName("NDCalibrationWidget")
         self._cal_widget.changed.connect(self._update_calibration_plot)
         self._cal_widget.changed.connect(self._update_position_preview)
-        cal_lay.addWidget(self._cal_widget)
+        self._cal_section = DisclosureSection("Shared ND calibration", self._cal_widget)
+        self._cal_grp = self._cal_section.toggle
         self._cal_grp.toggled.connect(self._set_calibration_expanded)
-        self._set_calibration_expanded(False)
-        setup_lay.addWidget(self._cal_grp)
+        setup_lay.addWidget(self._cal_section)
 
         # Optical settings
         opt_grp = QGroupBox("Optical Settings")
@@ -1776,13 +1769,7 @@ class PowerSweepPanel(QWidget):
         sweep_lay.addWidget(meta_grp)
 
         # Hardware status
-        hw_grp = QGroupBox("Hardware Status")
-        hw_grp.setCheckable(True)
-        hw_grp.setChecked(False)
         hw_body = QWidget()
-        hw_container = QVBoxLayout(hw_grp)
-        hw_container.setContentsMargins(0, 0, 0, 0)
-        hw_container.addWidget(hw_body)
         hw_form = QFormLayout(hw_body)
         hw_form.setContentsMargins(6, 4, 6, 4)
         hw_form.setSpacing(2)
@@ -1811,10 +1798,9 @@ class PowerSweepPanel(QWidget):
         self._smu_status = QLabel("○ Not connected")
         set_style_role(self._smu_status, 'text', tone='muted', strong=True)
         hw_form.addRow("SMU:", self._smu_status)
-        hw_body.setVisible(False)
-        hw_grp.toggled.connect(hw_body.setVisible)
-        self._hardware_grp = hw_grp
-        setup_lay.addWidget(hw_grp)
+        self._hardware_section = DisclosureSection("Hardware Status", hw_body)
+        self._hardware_grp = self._hardware_section.toggle
+        setup_lay.addWidget(self._hardware_section)
 
         # Let paired inputs fit the narrow sidebar instead of forcing a
         # horizontal scrollbar through their platform-default size hints.
@@ -2190,6 +2176,7 @@ class PowerSweepPanel(QWidget):
         for w in (self._power_start_spin, self._power_end_spin, self._power_count_spin):
             w.setEnabled(is_stage)
         self._power_spacing.setEnabled(is_stage)
+        self._cal_section.setVisible(is_stage or self._calibration_busy)
         self._cal_grp.setVisible(is_stage or self._calibration_busy)
         self._update_plan_visibility()
         self._refresh_calibration_visibility()
@@ -2514,6 +2501,7 @@ class PowerSweepPanel(QWidget):
         self._calibration_busy = bool(busy)
         if busy and not self._cal_grp.isChecked():
             self._cal_grp.setChecked(True)
+        self._cal_section.setVisible(self._last_motion_key == "stage" or busy)
         self._cal_grp.setVisible(self._last_motion_key == "stage" or busy)
         self._motion_grp.setEnabled(not busy)
         self._run_btn.setEnabled(not busy and self._thread is None)

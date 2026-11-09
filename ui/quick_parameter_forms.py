@@ -452,6 +452,7 @@ class WidgetsParameterAdapter(QObject):
             preferred = widget.property("quickPreferredWidth")
             state["preferredWidth"] = float(preferred) if isinstance(preferred, (int, float)) and math.isfinite(preferred) and preferred > 0 else 0.0
             state["labelAbove"] = bool(widget.property("quickLabelAbove"))
+            state["compactDisclosure"] = bool(widget.property("quickCompactDisclosure"))
             if isinstance(widget, (QDoubleSpinBox, QSpinBox)):
                 text = widget.cleanText()
                 state.update(text=self._drafts.get(field, text), minimum=widget.minimum(),
@@ -700,7 +701,8 @@ class WidgetsParameterAdapter(QObject):
         # owned by another batch. Never dispatch one while a visible draft is
         # invalid; cancellation and mode toggles remain independently usable.
         correction = field.kind == "button" and _correction_action(field, widget)
-        mutating = field.kind == "button" and not correction and not any(
+        presentation = bool(widget.property("quickPresentationAction"))
+        mutating = field.kind == "button" and not correction and not presentation and not any(
             word in command for word in ("stop", "abort", "cancel", "pause", "disconnect", "close"))
         if mutating and (any(other.invalid and other.visible and other.enabled for other in self._fields)
                          or self.validate_page is not None and not self.validate_page()):
@@ -749,7 +751,7 @@ class WidgetsParameterAdapter(QObject):
 
 class QuickParameterForm(QuickSurface):
     heightHintChanged = Signal()
-    def __init__(self, adapter, parent=None):
+    def __init__(self, adapter, parent=None, *, defer_load=False):
         super().__init__(parent, match_host_background=True)
         self.adapter = adapter
         adapter.setParent(self)
@@ -759,13 +761,6 @@ class QuickParameterForm(QuickSurface):
         self.setObjectName("QuickParameterForm")
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setInitialProperties({"bridge": adapter.model})
-        self.setSource(QUrl.fromLocalFile(str(Path(__file__).parent / "qml" / "ParameterForm.qml")))
-        if self.status() == QQuickWidget.Status.Error:
-            raise RuntimeError("\n".join(error.toString() for error in self.errors()))
-        self.rootObject().implicitHeightChanged.connect(self._schedule_height)
-        self.rootObject().widthChanged.connect(self._schedule_height)
-        self._resize_height()
         # Labels and blocked-signal changes have no Qt notification signal.
         self._refresh = QTimer(self)
         # Notification-driven updates cover normal interaction. Reconciliation
@@ -776,8 +771,25 @@ class QuickParameterForm(QuickSurface):
         self._readback.setInterval(150)
         self._readback.timeout.connect(adapter.refresh_readbacks)
         adapter.set_active(False)
+        if not defer_load:
+            self._ensure_loaded()
+
+    def _ensure_loaded(self):
+        if self.rootObject() is not None or self.adapter._closed:
+            return
+        # Collapsed sections need their source models, but no QML scene until
+        # shown. Retain the scene afterwards so tab switches reuse it.
+        self.setInitialProperties({"bridge": self.adapter.model})
+        self.setSource(QUrl.fromLocalFile(str(Path(__file__).parent / "qml" / "ParameterForm.qml")))
+        if self.status() == QQuickWidget.Status.Error:
+            raise RuntimeError("\n".join(error.toString() for error in self.errors()))
+        self.rootObject().implicitHeightChanged.connect(self._schedule_height)
+        self.rootObject().widthChanged.connect(self._schedule_height)
+        self._resize_height()
 
     def _resize_height(self):
+        if self.rootObject() is None:
+            return
         height = max(1, math.ceil(self.rootObject().implicitHeight()))
         if self.height() == height and self.minimumHeight() == height:
             return
@@ -801,6 +813,7 @@ class QuickParameterForm(QuickSurface):
     def showEvent(self, event):
         super().showEvent(event)
         if not self.adapter._closed:
+            self._ensure_loaded()
             self.adapter.set_active(True)
             self.adapter.refresh()
             self._refresh.start()
@@ -1116,7 +1129,7 @@ def install_parameter_forms(panel, page_id, *, refresh=False):
                 from ui.quick_editing import commit_quick_edits
                 return commit_quick_edits(panel)
             adapter.validate_page = commit_page
-            form = QuickParameterForm(adapter, owner)
+            form = QuickParameterForm(adapter, owner, defer_load=True)
             preview_timer = getattr(panel, "_quick_preview_height_timer", None)
             preview_splitter = getattr(panel, "_preview_splitter", None)
             if preview_timer is not None and preview_splitter is not None and preview_splitter.isAncestorOf(owner):

@@ -219,3 +219,38 @@ def test_power_readbacks_skip_filename_work_and_preserve_real_edit_updates(app):
         result.close()
         result.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def test_draft_preview_builds_flat_schedule_once_and_matches_plan(widget):
+    rows = [widget._batch_row_values(i) for i in range(10)]
+    panel._populate_batch_table(widget._batch_table, pd.DataFrame(rows))
+    widget._reset_batch_history()
+    widget._on_draft_edited()
+    with patch.object(panel, "_build_acquisition_schedule", wraps=panel._build_acquisition_schedule) as build:
+        cell(widget, 5, "condition_label").setText("changed once")
+        assert build.call_count == 1
+    plan = widget._tree._last_plan
+    expected = panel._build_acquisition_schedule(
+        plan["final_sequence"], plan["df_batch"], acquisition_grouping=plan["acquisition_grouping"])
+    # Optional bias fields use NaN; compare their serialized values.
+    import json
+    assert json.dumps(plan["acquisition_schedule"], sort_keys=True, default=str) == json.dumps(expected, sort_keys=True, default=str)
+    assert plan["preview_state"] == "Draft sequence"
+
+
+def test_draft_preview_nested_skips_unused_legacy_schedule(widget):
+    rows = [widget._batch_row_values(i) for i in range(10)]
+    panel._populate_batch_table(widget._batch_table, pd.DataFrame(rows))
+    widget._reset_batch_history()
+    widget._reset_execution_order()
+    with patch.object(panel, "_build_acquisition_schedule", wraps=panel._build_acquisition_schedule) as legacy, \
+         patch.object(panel, "_build_nested_execution_schedule", wraps=panel._build_nested_execution_schedule) as nested:
+        cell(widget, 5, "condition_label").setText("nested change")
+        assert legacy.call_count == 0
+        assert nested.call_count == 1
+    plan = widget._tree._last_plan
+    expected = panel._build_nested_execution_schedule(
+        *widget._draft_frames(), mode=widget._mode_combo.currentText(),
+        execution_order=widget._execution_order)
+    import json
+    assert json.dumps(plan["acquisition_schedule"], sort_keys=True, default=str) == json.dumps(expected, sort_keys=True, default=str)
