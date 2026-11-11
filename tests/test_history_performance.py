@@ -9,9 +9,10 @@ from unittest.mock import patch
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
+from PySide6.QtCore import QThreadPool
 from app.experiment_metadata import ExperimentHistory, ExperimentMetadataService
+from tests.quick_helpers import quick_application, drain_qt_deletions
 
 
 class HistoryPerformanceTests(unittest.TestCase):
@@ -50,7 +51,7 @@ class HistoryPerformanceTests(unittest.TestCase):
 
     def test_background_tasks_return_immediately_and_ignore_stale_results(self):
         from ui.history_loader import HistoryTaskRunner
-        app = QApplication.instance() or QApplication([])
+        app = quick_application()
         runner = HistoryTaskRunner()
         release = threading.Event()
         entered = threading.Event()
@@ -60,17 +61,21 @@ class HistoryPerformanceTests(unittest.TestCase):
             release.wait(2)
             return "old"
         start = time.perf_counter()
-        runner.submit("list", slow, lambda result, error: delivered.append(result))
-        self.assertLess(time.perf_counter() - start, .1)
-        self.assertTrue(entered.wait(1))
-        runner.submit("list", lambda cancel: "new", lambda result, error: delivered.append(result))
-        deadline = time.perf_counter() + 2
-        while not delivered and time.perf_counter() < deadline:
-            QTest.qWait(10)
-        release.set()
-        QTest.qWait(50)
+        try:
+            runner.submit("list", slow, lambda result, error: delivered.append(result))
+            self.assertLess(time.perf_counter() - start, .1)
+            self.assertTrue(entered.wait(1))
+            runner.submit("list", lambda cancel: "new", lambda result, error: delivered.append(result))
+            deadline = time.perf_counter() + 2
+            while not delivered and time.perf_counter() < deadline:
+                QTest.qWait(10)
+            self.assertEqual(delivered, ["new"])
+        finally:
+            runner.cancel_all()
+            release.set()
+            self.assertTrue(QThreadPool.globalInstance().waitForDone(5000))
+        QTest.qWait(10)
         self.assertEqual(delivered, ["new"])
-        runner.cancel_all()
 
     def test_event_pages_do_not_skip_the_second_half_of_twenty_entries(self):
         from ui.history_loader import load_preview
@@ -134,7 +139,10 @@ class HistoryPerformanceTests(unittest.TestCase):
         from ui.mcd_panel import MCDPanel
         from ui.mcd2100_panel import MCD2100Panel
         from ui.bfp_panel_integrated import BFPPanel, _BRCWidget, _FRCWidget
-        app = QApplication.instance() or QApplication([])
+        app = quick_application()
+        # Run after the widgets' deleteLater callbacks, while the application
+        # is still alive, so the next test cannot inherit deferred destruction.
+        self.addCleanup(drain_qt_deletions)
         def bare(cls):
             widget = cls.__new__(cls)
             QWidget.__init__(widget)
