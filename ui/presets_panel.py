@@ -5798,7 +5798,7 @@ class PresetsPanel(QWidget):
             return
         self._batch_history = [self._batch_snapshot()]
         self._batch_history_index = 0
-        self._update_batch_action_states()
+        self._update_batch_row_buttons()
 
     def _record_batch_history(self):
         if self._batch_history_restoring:

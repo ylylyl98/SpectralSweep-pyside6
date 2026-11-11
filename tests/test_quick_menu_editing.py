@@ -84,6 +84,62 @@ def click_menu_item(window, index):
     QTest.qWait(30)
 
 
+@pytest.mark.parametrize("invalid_source", ["scalar", "table"])
+def test_set_all_click_explains_rejected_edit_and_retries_after_correction(invalid_source):
+    quick_application()
+    panel = QWidget()
+    layout = QVBoxLayout(panel)
+    table = QTableWidget(1, 1)
+    value = QSpinBox()
+    value.setRange(1, 100)
+    table.setCellWidget(0, 0, value)
+    layout.addWidget(table)
+    repeat = QSpinBox()
+    repeat.setRange(1, 100)
+    repeat.setAccessibleName("Repeat")
+    layout.addWidget(repeat)
+    button = QPushButton("Set All")
+    layout.addWidget(button)
+    calls = []
+    button.clicked.connect(lambda: calls.append(repeat.value()))
+    view = install_table_editors(panel)[0]
+    coverage = install_parameter_forms(panel, "dual_gate")
+    surface = next(form for form in coverage["forms"] if button in form.adapter._fields.values())
+    fields = {source: field for form in coverage["forms"] for field, source in form.adapter._fields.items()}
+    panel.resize(800, 450)
+    panel.show()
+    QTest.qWait(30)
+    try:
+        token = view.model.cellAt(0, 0)["token"]
+        if invalid_source == "scalar":
+            assert not fields[repeat].edit("0")
+        else:
+            view.model.stageEdit(token, "1.5")
+        rendered = find_item(surface.rootObject(), "parameter_" + fields[button].fieldId)
+        def click():
+            QTest.mouseClick(surface, Qt.MouseButton.LeftButton,
+                             pos=rendered.mapToScene(rendered.boundingRect().center()).toPoint())
+            QTest.qWait(30)
+        click()
+        assert calls == []
+        feedback = find_item(surface.rootObject(), "parameterError_" + fields[button].fieldId)
+        assert feedback.isVisible() and feedback.property("text")
+        assert not fields[button].invalid  # Feedback cannot block the retry.
+        if invalid_source == "scalar":
+            assert "Repeat" in feedback.property("text")
+            assert fields[repeat].edit("3")
+        else:
+            assert feedback.property("text") == view.model.error
+            view.model.stageEdit(token, "3")
+        click()
+        assert len(calls) == 1
+        assert not feedback.isVisible()
+        assert not fields[button].error
+        assert (repeat if invalid_source == "scalar" else value).value() == 3
+    finally:
+        close_panel(panel, view)
+
+
 @pytest.mark.parametrize("theme,width", [("light", 360), ("dark", 800)])
 def test_menu_renders_outside_short_form_and_routes_submenu_mouse_click(theme, width):
     panel, source, _, view, field = menu_table_panel()

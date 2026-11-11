@@ -85,7 +85,8 @@ AppPane {
                                     property bool stackedLabel: pairedLabel && fieldGroup.stacked
                                 }
                                 AppLabel {
-                                    visible: fieldHost.field.invalid
+                                    objectName: "parameterError_" + fieldHost.field.fieldId
+                                    visible: fieldHost.field.error.length > 0
                                     width: parent.width
                                     text: fieldHost.field.error
                                     color: Theme.danger

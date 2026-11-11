@@ -672,3 +672,41 @@ def test_row_selection_never_rereads_or_rebuilds_visible_cell_editors(monkeypatc
     model.shutdown()
     source.deleteLater()
     drain_qt_deletions()
+
+
+def test_bulk_cell_notifications_do_not_scan_cached_viewport():
+    quick_application()
+    source = QTableWidget(1000, 4)
+    source.setColumnHidden(1, True)
+    source.horizontalHeader().moveSection(3, 0)
+    model = TableEditorModel(source)
+    for row in range(10):
+        model.watchRow(row)
+        for column in range(model.columnCount()):
+            model.cellAt(row, column)
+    model._dirty_cells.clear()
+
+    class LookupOnly(dict):
+        def __iter__(self):
+            raise AssertionError("A single-cell notification scanned the viewport")
+
+    original = model._cells
+    model._cells = LookupOnly(original)
+    try:
+        for row in range(source.rowCount()):
+            source.setItem(row, 3, QTableWidgetItem("3"))
+            source.setItem(row, 1, QTableWidgetItem("hidden"))
+        visible_column = model._columns.index(3)
+        assert model._dirty_cells == {(row, visible_column) for row in range(10)}
+    finally:
+        model._cells = original
+    # Range notifications still refresh only cached cells in source coordinates.
+    model._dirty_cells.clear()
+    model._data_changed(source.model().index(4, 2), source.model().index(20, 3))
+    assert model._dirty_cells == {(row, model._columns.index(column))
+                                 for row in range(4, 10) for column in (2, 3)}
+    model._flush_dirty()
+    assert model.cellAt(4, model._columns.index(3))["value"] == "3"
+    model.shutdown()
+    source.deleteLater()
+    drain_qt_deletions()

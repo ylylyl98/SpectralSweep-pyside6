@@ -413,10 +413,23 @@ class TableEditorModel(QAbstractTableModel):
     def _data_changed(self, first, last, *_args):
         if self._closed or self._resetting or not self._columns:
             return
-        for key in self._cells:
-            row, column = key
-            if first.row() <= row <= last.row() and first.column() <= self._columns[column] <= last.column():
+        top, bottom = first.row(), last.row()
+        left, right = first.column(), last.column()
+        if top == bottom and left == right:
+            # QTableWidget emits one source notification per changed cell,
+            # even while its own signals are blocked by a bulk command. Look
+            # up that cell directly instead of scanning the whole viewport
+            # thousands of times (including for rows outside the viewport).
+            if left not in self._columns:
+                return
+            key = top, self._columns.index(left)
+            if key in self._cells:
                 self._dirty_cells.add(key)
+        else:
+            for key in self._cells:
+                row, column = key
+                if top <= row <= bottom and left <= self._columns[column] <= right:
+                    self._dirty_cells.add(key)
         if self._dirty_cells and self._active:
             self._timer.start(0)
 

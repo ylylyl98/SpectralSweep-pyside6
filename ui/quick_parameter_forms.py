@@ -121,6 +121,18 @@ def _menu_edit_policy(panel, action):
     return "independent"
 
 
+def _quick_edit_error(panel, fields=()):
+    """Explain a rejected command at its trigger, including other forms."""
+    errors = [view.model.error for view in getattr(panel, "_quick_table_editors", [])
+              if not view.model._closed and view.source_table.isEnabled() and view.model.error]
+    fields = list(fields) + [field
+                            for form in getattr(panel, "_quick_parameter_forms", {}).get("forms", [])
+                            for field in form.adapter._fields]
+    errors.extend(f"{field.accessibleName or field.fieldId}: {field.error}" for field in fields
+                  if field.invalid and field.visible and field.enabled and field.error)
+    return next(iter(errors), "Correct the highlighted value before continuing.")
+
+
 class ParameterMenuAction(QObject):
     """Explicit QAction presentation; triggering follows its original route."""
     changed = Signal()
@@ -188,12 +200,7 @@ class ParameterMenuAction(QObject):
         if policy == "commit":
             from ui.quick_editing import commit_quick_edits
             if not commit_quick_edits(panel):
-                errors = [view.model.error for view in getattr(panel, "_quick_table_editors", [])
-                          if not view.model._closed and view.source_table.isEnabled() and view.model.error]
-                errors.extend(field.error
-                              for form in getattr(panel, "_quick_parameter_forms", {}).get("forms", [])
-                              for field in form.adapter._fields if field.invalid and field.error)
-                self._set_error(next(iter(errors), "Correct the highlighted value before continuing."))
+                self._set_error(_quick_edit_error(panel))
                 return False
         elif policy == "discard":
             from ui.quick_editing import discard_quick_edits
@@ -688,6 +695,9 @@ class WidgetsParameterAdapter(QObject):
         return True
 
     def trigger(self, field):
+        # Command feedback must not itself become an invalid input, otherwise
+        # the next attempt would be rejected even after the input is repaired.
+        field.publish(error="")
         widget = self._writable(field)
         if isinstance(widget, QGroupBox) and widget.isCheckable():
             widget.setChecked(not widget.isChecked())
@@ -706,6 +716,7 @@ class WidgetsParameterAdapter(QObject):
             word in command for word in ("stop", "abort", "cancel", "pause", "disconnect", "close"))
         if mutating and (any(other.invalid and other.visible and other.enabled for other in self._fields)
                          or self.validate_page is not None and not self.validate_page()):
+            field.publish(error=_quick_edit_error(self.visibility_root, self._fields))
             return False
         if field.cancels and self.cancel_page is not None:
             self.cancel_page()
