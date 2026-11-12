@@ -59,6 +59,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pyqtgraph as pg
 from ui.plot_factory import create_plot, create_image_view
 from utils.config import cfg
+from utils.bias_control import resolve_bias2, apply_bias_pair
+from ui.bias_controls import Bias2Control
 from ui.workflow_sections import DisclosureSection, divide_grid_fields, inline_divider
 from ui.table_layout import fit_table_columns
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
@@ -602,17 +604,20 @@ class RawAxis(Enum):
     VTG = "Vtg"
     VBG = "Vbg"
     VBIAS = "Vbias"
+    VBIAS2 = "Vbias2"
 
 
 class PhysAxis(Enum):
     DOPING = "Doping"
     EFIELD = "E-field"
     VBIAS = "Vbias"
+    VBIAS2 = "Vbias2"
 
 
-RAW_AXIS_ORDER = [RawAxis.VTG.value, RawAxis.VBG.value, RawAxis.VBIAS.value]
-PHYS_AXIS_ORDER = [PhysAxis.DOPING.value, PhysAxis.EFIELD.value, PhysAxis.VBIAS.value]
+RAW_AXIS_ORDER = [RawAxis.VTG.value, RawAxis.VBG.value, RawAxis.VBIAS.value, RawAxis.VBIAS2.value]
+PHYS_AXIS_ORDER = [PhysAxis.DOPING.value, PhysAxis.EFIELD.value, PhysAxis.VBIAS.value, PhysAxis.VBIAS2.value]
 AXIS_UNITS = {
+    "Vbias2": "V",
     "Vtg": "V",
     "Vbg": "V",
     "Vbias": "V",
@@ -620,6 +625,7 @@ AXIS_UNITS = {
     "E-field": "V",
 }
 AXIS_CODES = {
+    "Vbias2": "Vb2",
     "Vtg": "tg",
     "Vbg": "bg",
     "Vbias": "Vb",
@@ -917,6 +923,9 @@ def build_megasweep_filename(params: dict) -> str:
     optical_token = f"{float(params.get('center_nm', 0.0)):.0f}nm_{exp_s}sx{int(params.get('frames', 1))}"
     laser_power_token = _format_laser_power_token(params.get("laser_nm", ""), params.get("power_uw", ""))
     parts = [sample, sweep_token, fixed_token]
+    bias2 = params.get("bias2", {})
+    if bias2.get("bias2_mode") == "follow":
+        parts.append(f"Vb2offset{format_compact_number(bias2.get('bias2_offset_v', 0.0), keep_sign=True, decimals=4)}")
     if laser_power_token:
         parts.append(laser_power_token)
     condition_index = params.get("condition_index")
@@ -1045,6 +1054,8 @@ def _build_csv_metadata_text(
         "# === Hardware ===",
         f"# SMU_Connected: {smu_connected}",
         f"# Vbias_Available: {vbias_available}",
+        f"# Bias2_Mode: {params.get('bias2', {}).get('bias2_mode', 'off')}",
+        f"# Bias2_Offset_V: {params.get('bias2', {}).get('bias2_offset_v', 0.0)}",
         f"# LF6_Connected: {lf6_connected}",
         "#",
         "# === Sample ID ===",
@@ -1082,7 +1093,11 @@ def build_sweep_points(
     ratio: float,
     safety: dict,
     snake: bool,
+    bias2: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
+    bias2 = dict(bias2 or {})
+    if "Vbias2" in (axis_a, axis_b) and bias2.get("bias2_mode", "off") != "independent":
+        raise ValueError("Vbias2 can be a scan axis only in independent mode.")
     all_points: list[dict] = []
     valid_points: list[dict] = []
     for i, a_val in enumerate(np.asarray(axis_a_vals, dtype=float)):
@@ -1100,12 +1115,21 @@ def build_sweep_points(
                 F = float(axis_values.get("E-field", 0.0))
                 vbias = float(axis_values.get("Vbias", 0.0))
                 vtg, vbg = _physics_to_raw(D, F, ratio)
+            second_settings = dict(bias2)
+            if second_settings.get("bias2_mode") == "independent":
+                second_settings["vbias2_v"] = axis_values.get("Vbias2", second_settings.get("vbias2_v", 0.0))
+            vbias2 = resolve_bias2(second_settings, vbias)
+            second_in_bounds = vbias2 is None or (
+                safety.get("vbias2_min", -1.0) <= vbias2 <= safety.get("vbias2_max", 1.0))
             point = {
                 "axis_a": float(a_val),
                 "axis_b": float(b_val),
                 "axis_values": axis_values,
                 "raw": (float(vtg), float(vbg), float(vbias)),
-                "in_bounds": _is_in_bounds(vtg, vbg, vbias, safety),
+                "bias2": second_settings,
+                "Vbias2_set": vbias2,
+                "bias2_in_bounds": second_in_bounds,
+                "in_bounds": _is_in_bounds(vtg, vbg, vbias, safety) and second_in_bounds,
             }
             all_points.append(point)
             if point["in_bounds"]:
@@ -1397,18 +1421,17 @@ class _FixedParamsWidget(QGroupBox):
         self._spins: dict[str, QDoubleSpinBox] = {}
 
     def set_fixed_axes(self, axes: list[str], vbias_available: bool):
+        previous = self.get_values()
         while self._layout.rowCount():
             self._layout.removeRow(0)
         self._spins.clear()
         display_axes = list(axes)
-        if "Vbias" not in display_axes and not vbias_available:
-            display_axes.append("Vbias")
         self.setVisible(bool(display_axes))
         for axis in display_axes:
             spin = _NoWheelDoubleSpinBox()
             spin.setRange(-200.0, 200.0)
             spin.setDecimals(4)
-            spin.setValue(0.0)
+            spin.setValue(previous.get(axis, 0.0))
             _set_compact_editor(spin)
             if axis == "E-field":
                 spin.setToolTip(
@@ -1456,12 +1479,13 @@ class _SafetyWidget(QGroupBox):
         grid.addWidget(max_header, 0, 2)
         self._spins: dict[str, QDoubleSpinBox] = {}
         defaults = {
+            "vbias2_min": -1.0, "vbias2_max": 1.0,
             "vtg_min": -10.0, "vtg_max": 10.0,
             "vbg_min": -10.0, "vbg_max": 10.0,
             "vbias_min": -1.0, "vbias_max": 1.0,
         }
         for row, (prefix, row_label) in enumerate(
-            (("vtg", "Vtg"), ("vbg", "Vbg"), ("vbias", "Vbias")),
+            (("vtg", "Vtg"), ("vbg", "Vbg"), ("vbias", "Vbias"), ("vbias2", "Vbias2")),
             start=1,
         ):
             grid.addWidget(QLabel(row_label), row, 0)
@@ -1484,6 +1508,12 @@ class _SafetyWidget(QGroupBox):
 
     def get_limits(self) -> dict:
         return {name: float(spin.value()) for name, spin in self._spins.items()}
+
+    def set_bias2_visible(self, visible: bool):
+        for column in range(3):
+            item = self.layout().itemAtPosition(4, column)
+            if item and item.widget():
+                item.widget().setVisible(visible)
 
 
 class _TimingWidget(QGroupBox):
@@ -2169,6 +2199,23 @@ class _MegaSweepWorker(QObject):
 
     def _run_sweep(self, p: dict):
         iv = self._smu.device if self._smu and self._smu.is_connected else None
+        second = p.get("bias2", {})
+        if second.get("bias2_mode", "off") != "off":
+            available = getattr(iv, "role_is_available", None) or getattr(iv, "has_role", None)
+            required = ["Vbias2"] + (["Vbias"] if second.get("bias2_mode") == "follow" else [])
+            for role in required:
+                if not callable(available) or not available(role):
+                    raise RuntimeError(f"Required Keithley channel is unavailable: {role}")
+            for point in p.get("all_points", p["valid_points"]):
+                value = resolve_bias2(point.get("bias2", second), point["raw"][2])
+                if value is None or not math.isfinite(value) or not p["safety"].get("vbias2_min", -1.0) <= value <= p["safety"].get("vbias2_max", 1.0):
+                    raise ValueError("Vbias2 target exceeds the configured limits")
+                validate = getattr(self._smu, "validate_voltage_targets", None)
+                if callable(validate):
+                    targets = {"Vbias2": value}
+                    if p.get("vbias_available", True) or second.get("bias2_mode") == "follow":
+                        targets["Vbias"] = point["raw"][2]
+                    validate(targets)
         spec = self._lf6.adapter if self._lf6 and self._lf6.is_connected else None
         lf6 = self._lf6.setup if self._lf6 and self._lf6.is_connected else None
         out_path: Path = p["out_path"]
@@ -2355,6 +2402,9 @@ class _MegaSweepWorker(QObject):
             "Vtg_set", "Vbg_set", "Vbias_set", "Doping_set", "Efield_set",
             "Vbg_meas", "Vtg_meas", "Vbias_meas", "Ibg_A", "Itg_A", "Ibias_A",
         ]
+        bias2_active = p.get("bias2", {}).get("bias2_mode", "off") != "off"
+        if bias2_active:
+            cols.extend(["Vbias2_set", "Vbias2_meas", "Ibias2_A"])
         wl_str = np.array([f"{x:g}" for x in wls], dtype="U")
         header = np.concatenate((np.array(cols, dtype="U"), wl_str)).reshape(1, -1)
         meta_fp = fp.with_suffix(".meta.txt")
@@ -2397,7 +2447,12 @@ class _MegaSweepWorker(QObject):
                     stop_cb=self._stop.is_set,
                     stop_exc=_MegaSweepStopRequested,
                 )
-                if hasattr(iv, "set_bias"):
+                if bias2_active:
+                    apply_bias_pair(iv, vbias=vb0 if p.get("vbias_available", True) else None,
+                                    settings=points[0].get("bias2", p["bias2"]),
+                                    ramp_step=min(p["ramp_step"], cfg.ramp.vbias_step_V, cfg.ramp.vbias2_step_V), delay_s=p["step_delay_s"],
+                                    stop_cb=self._stop.is_set, stop_exc=_MegaSweepStopRequested)
+                elif hasattr(iv, "set_bias") and p.get("vbias_available", True):
                     iv.set_bias(
                         Vbias=vb0,
                         delay_s=p["step_delay_s"],
@@ -2424,7 +2479,12 @@ class _MegaSweepWorker(QObject):
                                 stop_cb=self._stop.is_set,
                                 stop_exc=_MegaSweepStopRequested,
                             )
-                        if hasattr(iv, "set_bias") and (prev is None or abs(prev[2] - vbias) > EPS):
+                        if bias2_active:
+                            apply_bias_pair(iv, vbias=vbias if p.get("vbias_available", True) else None,
+                                            settings=point.get("bias2", p["bias2"]),
+                                            ramp_step=min(p["ramp_step"], cfg.ramp.vbias_step_V, cfg.ramp.vbias2_step_V), delay_s=p["step_delay_s"],
+                                            stop_cb=self._stop.is_set, stop_exc=_MegaSweepStopRequested)
+                        elif hasattr(iv, "set_bias") and p.get("vbias_available", True) and (prev is None or abs(prev[2] - vbias) > EPS):
                             iv.set_bias(
                                 Vbias=vbias,
                                 delay_s=p["step_delay_s"],
@@ -2437,6 +2497,11 @@ class _MegaSweepWorker(QObject):
 
                     vbg_m, vtg_m, vbias_m, Ibg, Itg, Ib = _read_point_electrical(iv)
                     set_lightfield_context(self._lf6, output_file=fp, point_index=done, Vtg_set=float(vtg), Vbg_set=float(vbg), Vbias_set=float(vbias))
+                    second_readings = []
+                    if bias2_active:
+                        second_target = point["Vbias2_set"]
+                        second_readings = [second_target, iv.read_current_bias2(strict=True), iv.read_bias2_current(strict=True)]
+                        set_lightfield_context(self._lf6, Vbias2_set=second_target, bias2_mode=p["bias2"]["bias2_mode"], bias2_offset_v=p["bias2"].get("bias2_offset_v", 0.0))
                     y = _read_intensity(spec, int(wls.size), expected_wavelengths=wls) if spec is not None else np.full(wls.size, NAN, dtype=float)
                     axis_vals = point["axis_values"]
                     prefix = np.array([
@@ -2444,6 +2509,7 @@ class _MegaSweepWorker(QObject):
                         vtg, vbg, vbias,
                         axis_vals.get("Doping", NAN), axis_vals.get("E-field", NAN),
                         vbg_m, vtg_m, vbias_m, Ibg, Itg, Ib,
+                        *second_readings,
                     ], dtype=np.float64)
                     row = np.concatenate((prefix, y)).reshape(1, -1)
                     np.savetxt(fh, row, fmt="%.6e", delimiter=",")
@@ -2524,10 +2590,13 @@ class _MegaSweepWorker(QObject):
             return True
         try:
             self._emit_log("Ramping all connected channels to 0 V...")
-            iv.ramp_all_to_zero(
+            errors = iv.ramp_all_to_zero(
                 ramp_step=_SAFETY_RAMP_STEP_V,
                 delay_s=_SAFETY_RAMP_DELAY_S,
+                **({"include_bias2": True} if self._p.get("bias2", {}).get("bias2_mode", "off") != "off" else {}),
             )
+            if errors:
+                raise RuntimeError("; ".join(str(error) for error in errors))
             self._emit_log("All connected channels are at 0 V.")
             return True
         except Exception as exc:
@@ -2617,6 +2686,10 @@ class MegaSweepPanel(QWidget):
         self._axis_a = _AxisConfigWidget("Outer Axis", -5.0, 5.0)
         self._axis_b = _AxisConfigWidget("Inner Axis", -5.0, 5.0)
         self._fixed_widget = _FixedParamsWidget()
+        self._bias2_control = Bias2Control()
+        self._bias2_control.set_voltage_visible(False)
+        for spin in (self._bias2_control.voltage, self._bias2_control.offset):
+            _set_compact_editor(spin)
         self._safety_widget = _SafetyWidget()
         self._timing_widget = _TimingWidget()
 
@@ -2698,6 +2771,7 @@ class MegaSweepPanel(QWidget):
             self._axis_b,
             self._raw_link_label,
             self._fixed_widget,
+            self._bias2_control,
             self._safety_widget,
             self._timing_section,
             self._metadata_group,
@@ -2989,6 +3063,7 @@ class MegaSweepPanel(QWidget):
         self._apply_responsive_layout()
 
     def _wire(self):
+        self._bias2_control.changed.connect(self._sync_vbias_availability)
         self._coord_widget.changed.connect(self._on_coord_system_changed)
         self._axis_selector.changed.connect(self._on_axis_selection_changed)
         self._axis_a.changed.connect(self._schedule_preview)
@@ -3054,6 +3129,7 @@ class MegaSweepPanel(QWidget):
         primary = optical_conditions[0]
         return {
             "coordinate_system": self._coord_widget.coord_system().value,
+            "bias2": self._bias2_control.settings(),
             "ratio": float(self._coord_widget.ratio()),
             "outer_axis": self._axis_selector.outer(),
             "inner_axis": self._axis_selector.inner(),
@@ -3116,6 +3192,8 @@ class MegaSweepPanel(QWidget):
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
             return
+
+        self._bias2_control.set_settings(state.get("bias2", {}))
 
         coord = state.get("coordinate_system")
         if coord == CoordSystem.PHYSICAL.value:
@@ -3265,10 +3343,16 @@ class MegaSweepPanel(QWidget):
         axes = list(RAW_AXIS_ORDER if self._coord_widget.coord_system() == CoordSystem.RAW else PHYS_AXIS_ORDER)
         if not self._vbias_available() and "Vbias" in axes:
             axes.remove("Vbias")
+        if self._bias2_control.settings()["bias2_mode"] == "follow" and "Vbias" not in axes:
+            axes.append("Vbias")
+        if self._bias2_control.settings()["bias2_mode"] != "independent":
+            axes.remove("Vbias2")
         return axes
 
     @Slot()
     def _sync_vbias_availability(self):
+        self._bias2_control.refresh_visibility(bool(getattr(cfg.smu, "vbias2_resource", "")) or bool(getattr(self._smu, "has_vbias2", False)))
+        self._safety_widget.set_bias2_visible(self._bias2_control.settings()["bias2_mode"] != "off")
         self._safety_widget.set_vbias_available(self._vbias_available())
         self._axis_selector.set_available_axes(self._current_axis_pool())
         self._on_axis_selection_changed()
@@ -3287,15 +3371,15 @@ class MegaSweepPanel(QWidget):
         inner = self._axis_selector.inner()
         coord = self._coord_widget.coord_system()
         remaining = [axis for axis in axes if axis not in (outer, inner)]
-        if not self._vbias_available() and "Vbias" not in remaining:
+        if not self._vbias_available() and "Vbias" not in remaining and "Vbias" not in (outer, inner):
             remaining.append("Vbias")
         self._fixed_widget.set_fixed_axes(remaining, self._vbias_available())
         self._install_settings_wheel_redirects()
         if outer:
-            vds_label = "VDS (Vbias)" if (outer == "Vbias" and coord == CoordSystem.PHYSICAL) else None
+            vds_label = "VDS (Vbias)" if (outer == "Vbias" and coord == CoordSystem.PHYSICAL and self._bias2_control.settings()["bias2_mode"] != "follow") else None
             self._axis_a.set_axis_label(outer, AXIS_UNITS.get(outer, "V"), display_name=vds_label)
         if inner:
-            vds_label = "VDS (Vbias)" if (inner == "Vbias" and coord == CoordSystem.PHYSICAL) else None
+            vds_label = "VDS (Vbias)" if (inner == "Vbias" and coord == CoordSystem.PHYSICAL and self._bias2_control.settings()["bias2_mode"] != "follow") else None
             self._axis_b.set_axis_label(inner, AXIS_UNITS.get(inner, "V"), display_name=vds_label)
         self._update_raw_link_label()
         QTimer.singleShot(0, self._refresh_settings_scroll_range)
@@ -3369,6 +3453,7 @@ class MegaSweepPanel(QWidget):
         self._run_btn.setToolTip("Ratio cannot be zero - doping/efield transform is undefined." if invalid else "")
 
     def _resolve_preview_data(self) -> dict:
+        bias2 = self._bias2_control.settings()
         coord = self._coord_widget.coord_system()
         axis_a = self._axis_selector.outer()
         axis_b = self._axis_selector.inner()
@@ -3382,6 +3467,7 @@ class MegaSweepPanel(QWidget):
         axis_a_vals = self._axis_a.get_array()
         axis_b_vals = self._axis_b.get_array()
         geometry_key = (
+            tuple(sorted(bias2.items())),
             coord, axis_a, axis_b, ratio, tuple(sorted(fixed.items())),
             tuple(sorted(safety.items())), self._axis_selector.snake(),
             axis_a_vals.tobytes(), axis_b_vals.tobytes(),
@@ -3400,8 +3486,10 @@ class MegaSweepPanel(QWidget):
             ratio=ratio,
             safety=safety,
             snake=self._axis_selector.snake(),
+            bias2=bias2,
         )
         data = {
+            "bias2": bias2,
             "all_points": all_points,
             "valid_points": valid_points,
             "coord": coord,
@@ -3538,6 +3626,7 @@ class MegaSweepPanel(QWidget):
             False, "None", self._center_spin.value(), self._exp_spin.value(), self._frames_spin.value()
         )
         filename_preview = build_megasweep_filename({
+            "bias2": data.get("bias2", {}),
             "coord": data["coord"],
             "axis_a": data["axis_a"],
             "axis_b": data["axis_b"],
@@ -3581,6 +3670,15 @@ class MegaSweepPanel(QWidget):
             f"Run output cadence: flush every {_FLUSH_EVERY_POINTS} pts, plot every {_PLOT_UPDATE_EVERY_POINTS} pts, UI log every {_UI_LOG_EVERY_POINTS} pts",
         ]
         tone = 'secondary'
+        if data.get("bias2", {}).get("bias2_mode") != "off":
+            second = data["bias2"]
+            targets = [point["Vbias2_set"] for point in all_points if point.get("Vbias2_set") is not None]
+            if targets:
+                relation = f"Vbias + {second['bias2_offset_v']:+g} V" if second['bias2_mode'] == 'follow' else 'independent'
+                lines.append(f"Vbias2: {relation}; range {min(targets):g} to {max(targets):g} V")
+            if any(not point.get("bias2_in_bounds", True) for point in all_points):
+                lines.append("Vbias2 exceeds its limits. Adjust the plan before running.")
+                tone = 'danger'
         if not conditions:
             tone = 'danger'
             lines.append("Warning: Enable at least one optical condition.")
@@ -3632,6 +3730,28 @@ class MegaSweepPanel(QWidget):
         return data
 
     def _validate(self, params: dict) -> bool:
+        second = params.get("bias2", {})
+        if second.get("bias2_mode", "off") != "off":
+            needed = ["Vbias2"] + (["Vbias"] if second.get("bias2_mode") == "follow" else [])
+            check = getattr(self._smu, "role_is_available", None)
+            missing = [role for role in needed if not callable(check) or not check(role)]
+            if missing:
+                QMessageBox.critical(self, "Bias source unavailable", "Connect the required channels: " + ", ".join(missing))
+                return False
+            if params["safety"]["vbias2_min"] >= params["safety"]["vbias2_max"] or any(not point.get("bias2_in_bounds", True) for point in params["all_points"]):
+                QMessageBox.critical(self, "Vbias2 out of range", "Every Vbias2 target must be within its configured limits; adjust the range or offset.")
+                return False
+            validate = getattr(self._smu, "validate_voltage_targets", None)
+            if callable(validate):
+                try:
+                    for point in params["all_points"]:
+                        targets = {"Vbias2": point["Vbias2_set"]}
+                        if params.get("vbias_available", True) or second.get("bias2_mode") == "follow":
+                            targets["Vbias"] = point["raw"][2]
+                        validate(targets)
+                except (ValueError, RuntimeError) as exc:
+                    QMessageBox.critical(self, "Bias voltage range", str(exc))
+                    return False
         if not str(params.get("sample", "")).strip():
             QMessageBox.critical(self, "Sample ID required", "Enter a Sample ID before starting the sweep.")
             return False
@@ -3757,6 +3877,7 @@ class MegaSweepPanel(QWidget):
         self._run_failed = False
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
+        self._bias2_control.setEnabled(False)
         self._set_status("Running...", 'warning')
         self._run_inner_count = max(1, len(params.get("axis_b_vals", [])))
         self._worker = _MegaSweepWorker(params, self._smu, self._lf6, self._experiment_run)
@@ -3883,6 +4004,7 @@ class MegaSweepPanel(QWidget):
                 self._on_error(f"Metadata finalization error: {exc}")
         self._run_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
+        self._bias2_control.setEnabled(True)
         if self._run_failed:
             self._set_status("Error", 'danger')
         elif worker is not None and worker._stop.is_set():

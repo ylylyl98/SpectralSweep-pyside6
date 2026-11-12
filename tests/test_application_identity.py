@@ -86,7 +86,7 @@ def test_failed_windows_identity_is_reported_without_aborting_startup(monkeypatc
         SetCurrentProcessExplicitAppUserModelID=setter,
     )), raising=False)
     identity.set_windows_app_user_model_id()
-    setter.assert_called_once_with(identity.APP_ID)
+    setter.assert_called_once_with(identity.runtime_app_id())
     assert "HRESULT 0x80004005" in caplog.text
 
 
@@ -119,6 +119,7 @@ def test_taskbar_icon_is_persistent_and_repairs_corruption(application, tmp_path
 
 
 def test_relaunch_command_preserves_modes_and_quotes_paths(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "linux")
     executable = tmp_path / "Python with spaces" / "python.exe"
     executable.parent.mkdir()
     executable.with_name("pythonw.exe").touch()
@@ -135,6 +136,34 @@ def test_relaunch_command_preserves_modes_and_quotes_paths(monkeypatch, tmp_path
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     assert identity._relaunch_command(True) == subprocess.list2cmdline([
         str(executable), "--preview-spectrum",
+    ])
+
+
+def test_source_and_installed_taskbar_pins_are_distinct(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    first = identity.runtime_app_id()
+    assert first != identity.APP_ID
+    monkeypatch.setattr(identity, "_ROOT", tmp_path)
+    assert identity.runtime_app_id() != first
+    monkeypatch.setattr(sys, "frozen", True)
+    assert identity.runtime_app_id() == identity.APP_ID
+
+
+def test_windows_source_pin_updates_and_launches_same_folder(monkeypatch, tmp_path):
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    root = tmp_path / "source with spaces"
+    monkeypatch.setattr(identity, "_ROOT", root)
+    monkeypatch.setattr(sys, "argv", ["main.py", "--mock", "--watch-styles"])
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    assert identity._relaunch_command(False) == subprocess.list2cmdline([
+        str(powershell), "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", str(root / "tools/start_source.ps1"), "-Mock", "-WatchStyles",
+    ])
+    monkeypatch.setattr(sys, "frozen", True)
+    assert identity._relaunch_command(False) == subprocess.list2cmdline([
+        sys.executable, "--mock", "--watch-styles",
     ])
 
 
@@ -195,7 +224,7 @@ def check_identity():
     value = ctypes.c_void_p()
     assert getter(ctypes.byref(value)) == 0
     try:
-        assert ctypes.wstring_at(value) == (APP_ID if entry == 'main' else PREVIEW_APP_ID)
+        assert ctypes.wstring_at(value) == (identity.runtime_app_id() if entry == 'main' else PREVIEW_APP_ID)
     finally:
         free = ctypes.WinDLL('ole32').CoTaskMemFree
         free.argtypes = [ctypes.c_void_p]
@@ -215,8 +244,8 @@ def exercise(self):
         assert get_icon(hwnd, 0x007F, 0, 0), 'Windows small icon is missing'
         assert get_icon(hwnd, 0x007F, 1, 0), 'Windows big icon is missing'
         properties = read_properties(hwnd)
-        assert properties['app_id'] == (APP_ID if entry == 'main' else PREVIEW_APP_ID)
-        assert properties['name'] == ('SpectralSweep' if entry == 'main' else 'SpectralSweep Preview')
+        assert properties['app_id'] == (identity.runtime_app_id() if entry == 'main' else PREVIEW_APP_ID)
+        assert properties['name'] == ('SpectralSweep (Source)' if entry == 'main' else 'SpectralSweep Preview')
         assert properties['icon'].endswith(',0')
         icon_path = Path(properties['icon'][:-2])
         assert icon_path.is_file()

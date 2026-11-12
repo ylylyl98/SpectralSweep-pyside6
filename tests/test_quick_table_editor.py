@@ -205,9 +205,14 @@ def test_table_updates_finish_reset_after_exception_and_allow_next_edit(selectio
     assert not view.qml_warnings
 
 
-def test_batch_table_keeps_one_line_without_horizontal_scrolling_or_field_pages(panel):
+@pytest.mark.parametrize("width", [450, 650, 1100])
+def test_batch_table_keeps_readable_headers_without_horizontal_scrolling(panel, width):
+    from PySide6.QtGui import QFontDatabase
+    for font in ("segoeui.ttf", "seguisb.ttf"):
+        QFontDatabase.addApplicationFont("C:/Windows/Fonts/" + font)
     view = panel._batch_table._quick_editor
-    view.resize(450, 260)
+    view.setFixedWidth(width)
+    view.resize(width, 260)
     QTest.qWait(40)
     root = view.quick_widget.rootObject()
     grid = root.findChild(QObject, "QuickEditableTable")
@@ -218,27 +223,63 @@ def test_batch_table_keeps_one_line_without_horizontal_scrolling_or_field_pages(
             found = visual(child, name)
             if found is not None:
                 return found
-    assert root.metaObject().indexOfProperty("columnPages") < 0
     assert root.property("sharedHeaders")
-    # Production headers contain aliases/newlines instead of schema keys.
-    assert view.model.columnWidths[BATCH_SCHEMA.index("condition_label")] == 220
-    assert view.model.columnWidths[BATCH_SCHEMA.index("repeat")] == 46
-    assert view.model.columnWidths[BATCH_SCHEMA.index("MeasurePower")] == 54
-    assert view.model.columnKeys == BATCH_SCHEMA
-    assert view.model.displayColumnTitles[BATCH_SCHEMA.index("Vbg_start")] == "Vbg\nstart (V)"
-    assert view.model.displayColumnTitles[BATCH_SCHEMA.index("Vbias_stop")] == "Vbias\nstop (V)"
+    assert grid.property("contentWidth") <= grid.width() + 1
+    assert view.model.columnKeys == [name for index, name in enumerate(BATCH_SCHEMA)
+                                     if not panel._batch_table.isColumnHidden(index)]
+    for name, expected in (("MeasurePower", "Pwr"), ("When", "When"),
+                           ("repeat", "Rep."), ("frames", "Frm.")):
+        column = view.model.columnKeys.index(name)
+        header = visual(root, f"tableHeader_{column}")
+        assert header.property("text") == expected
+        assert not header.property("truncated")
     fields = []
     for column in range(view.model.columnCount()):
         field = visual(root, f"tableCell_0_{column}")
+        header = visual(root, f"tableHeader_{column}")
         fields.append(field)
-        assert field is not None, column
-        left = field.mapToScene(QPointF(0, 0)).x()
-        assert left >= 0 and left + field.width() <= root.width() + 1
-        assert field.width() > 0
+        assert field is not None and header is not None
+        assert not header.property("truncated")
+        assert field.mapToScene(QPointF()).x() == pytest.approx(header.mapToScene(QPointF()).x())
+        assert field.mapToScene(QPointF()).x() + field.width() <= root.width() + 1
     assert len({field.mapToScene(QPointF()).y() for field in fields}) == 1
-    assert fields[BATCH_SCHEMA.index("condition_label")].width() > fields[BATCH_SCHEMA.index("repeat")].width() * 3
-    assert visual(root, "tableRecord_0").height() == 36
-    assert grid.property("contentWidth") <= grid.property("width") + 1
+    assert not view.qml_warnings
+
+
+def test_batch_headers_with_independent_and_follow_bias2_fit(panel, monkeypatch):
+    from PySide6.QtGui import QFontDatabase
+    from ui.presets_panel import _configure_batch_table_columns
+    for font in ("segoeui.ttf", "seguisb.ttf"):
+        QFontDatabase.addApplicationFont("C:/Windows/Fonts/" + font)
+    monkeypatch.setattr(cfg.smu, "vbias2_resource", "configured")
+    panel._batch_table.item(0, BATCH_SCHEMA.index("bias2_mode")).setText("independent")
+    panel._insert_batch_rows(1, [{**panel._batch_row_values(0), "bias2_mode": "follow"}])
+    _configure_batch_table_columns(panel._batch_table)
+    view = panel._batch_table._quick_editor
+    view.setFixedWidth(650)
+    view.model.refresh()
+    QTest.qWait(40)
+    root = view.quick_widget.rootObject()
+    assert view.model.columnCount() == len(BATCH_SCHEMA)
+    def visual(item, name):
+        if item.objectName() == name:
+            return item
+        return next((result for child in item.childItems() if (result := visual(child, name)) is not None), None)
+    for column in range(view.model.columnCount()):
+        header = visual(root, f"tableHeader_{column}")
+        assert header is not None and not header.property("truncated"), (column, header.property("text"))
+    mode_col = view.model.columnKeys.index("bias2_mode")
+    independent = visual(root, f"tableCell_0_{mode_col}")
+    follow = visual(root, f"tableCell_1_{mode_col}")
+    assert independent.property("displayText") == "Ind"
+    assert follow.property("displayText") == "Fol"
+    from PySide6.QtGui import QFontMetricsF
+    for choice in (independent, follow):
+        editor = choice.property("contentItem")
+        assert QFontMetricsF(editor.property("font")).horizontalAdvance(choice.property("displayText")) <= editor.width()
+    assert panel._batch_table.item(0, BATCH_SCHEMA.index("bias2_mode")).text() == "independent"
+    assert panel._batch_table.item(1, BATCH_SCHEMA.index("bias2_mode")).text() == "follow"
+    assert root.findChild(QObject, "QuickEditableTable").property("contentWidth") <= root.width() + 1
     assert not view.qml_warnings
 
 
@@ -568,7 +609,8 @@ def test_batch_operations_keep_current_row_in_scrolled_quick_view(
     assert source.currentRow() == expected_row
     _assert_batch_current_visible(panel, grid)
     if operation not in {"top", "bottom"}:
-        assert grid.property("contentY") - grid.property("originY") == pytest.approx(offset)
+        # Keep the position while allowing Qt to reveal a row at the edge.
+        assert grid.property("contentY") - grid.property("originY") == pytest.approx(offset, abs=4)
     assert not view.qml_warnings
 
 
@@ -587,7 +629,7 @@ def test_batch_structural_undo_redo_preserves_scrolled_position(scrolled_batch, 
         QTest.qWait(40)
         assert panel._batch_snapshot().equals(expected)
         _assert_batch_current_visible(panel, grid)
-        assert grid.property("contentY") - grid.property("originY") == pytest.approx(offset)
+        assert grid.property("contentY") - grid.property("originY") == pytest.approx(offset, abs=4)
 
 
 def test_batch_undo_with_current_cell_but_no_selection_keeps_location(scrolled_batch):

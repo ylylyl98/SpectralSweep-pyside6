@@ -111,7 +111,18 @@ class _LightFieldRotationService:
         if frames is not None:
             raise RuntimeError("LightField acquisition preparation requires all settings")
 
-    def apply_gates(self, *, vtg_v, vbg_v, vbias_v, ratio, stop_cb=None):
+    def preflight_bias2(self, conditions):
+        from utils.mcd_common import smu_readiness_issues, validate_gate_conditions, validate_bias2_device_targets
+        active = [c for c in conditions if c.get("enabled", True) and c.get("bias2_mode", "off") != "off"]
+        if not active: return
+        roles = ("Vbg", "Vtg", "Vbias2")
+        if any(c.get("bias2_mode") == "follow" or float(c.get("vbias_v", 0.0)) != 0 for c in active): roles += ("Vbias",)
+        issues = smu_readiness_issues(self._smu, roles)
+        if issues: raise RuntimeError(issues[0])
+        validate_gate_conditions(active, cfg.smu.volt_compliance_V)
+        validate_bias2_device_targets(self._smu, active)
+
+    def apply_gates(self, *, vtg_v, vbg_v, vbias_v, ratio, stop_cb=None, bias2_settings=None):
         """Delegate gate setup when the existing SMU service exposes it."""
         service = getattr(self, "_smu", None)
         if service is None or not bool(getattr(service, "is_connected", False)):
@@ -119,17 +130,33 @@ class _LightFieldRotationService:
         device = getattr(service, "device", None)
         if device is None or not callable(getattr(device, "set_gates", None)):
             raise RuntimeError("SMU gate device is unavailable")
+        if bias2_settings: self.preflight_bias2([bias2_settings])
         device.set_gates(Vbg=float(vbg_v), Vtg=float(vtg_v),
                          ramp_step=cfg.ramp.step_V, delay_s=cfg.ramp.delay_s,
                          stop_cb=stop_cb)
-        if float(vbias_v) != 0.0:
-            set_bias = getattr(device, "set_bias", None)
-            if not callable(set_bias):
-                raise RuntimeError("SMU bias control is unavailable")
-            set_bias(Vbias=float(vbias_v), ramp_step=cfg.ramp.vbias_step_V,
-                     delay_s=cfg.ramp.delay_s, stop_cb=stop_cb)
+        from utils.bias_control import apply_bias_pair
+        has_role = getattr(device, "role_is_available", None) or getattr(device, "has_role", None)
+        master = float(vbias_v) if not callable(has_role) or has_role("Vbias") else None
+        if not bias2_settings or bias2_settings.get("bias2_mode", "off") == "off":
+            if master is not None and callable(getattr(device, "set_bias", None)):
+                device.set_bias(Vbias=master, ramp_step=cfg.ramp.vbias_step_V, delay_s=cfg.ramp.delay_s, stop_cb=stop_cb)
+        else:
+            apply_bias_pair(device, vbias=master, settings=bias2_settings or {},
+                            ramp_step=min(cfg.ramp.vbias_step_V, getattr(cfg.ramp, "vbias2_step_V", cfg.ramp.vbias_step_V)) if bias2_settings and bias2_settings.get("bias2_mode", "off") != "off" else cfg.ramp.vbias_step_V, delay_s=cfg.ramp.delay_s, stop_cb=stop_cb)
         readback = getattr(device, "read_current_gates", None)
-        return {"Vbg_V": readback()[0], "Vtg_V": readback()[1]} if callable(readback) else {}
+        result = {"Vbg_V": readback()[0], "Vtg_V": readback()[1]} if callable(readback) else {}
+        if bias2_settings and bias2_settings.get("bias2_mode", "off") != "off":
+            from utils.bias_control import resolve_bias2
+            result["Vbias2_target_V"] = resolve_bias2(bias2_settings, master)
+            read_bias2 = getattr(device, "read_current_bias2", None)
+            if not callable(read_bias2): raise RuntimeError("Vbias2 readback unavailable")
+            result["Vbias2_V"] = float(read_bias2(strict=True))
+            if not math.isfinite(result["Vbias2_V"]): raise RuntimeError("Vbias2 readback is non-finite")
+            read_current = getattr(device, "read_bias2_current", None)
+            if callable(read_current):
+                result["Ibias2_A"] = float(read_current(strict=True))
+                if not math.isfinite(result["Ibias2_A"]): raise RuntimeError("Vbias2 current readback is non-finite")
+        return result
 
     def move_to(self, angle):
         rotator = self._rotation.adapter(self._rotator_name) if self._rotation else None
@@ -777,21 +804,38 @@ class MCD2100Panel(QWidget):
                                 self._gate_entry_vbias, self._gate_entry_expansion_label,
                                 self._gate_entry_expansion, self._gate_entry_add,
                                 self._gate_entry_status)
+        from ui.bias_controls import Bias2Control
+        self._bias2_entry = Bias2Control()
+        self._bias2_entry.refresh_visibility(bool(getattr(cfg.smu, "vbias2_resource", "")))
+        entry_group.layout().addWidget(self._bias2_entry)
+        self._bias2_entry.changed.connect(self._update_gate_entry)
+        self._bias2_values = QLineEdit()
+        self._bias2_values.setPlaceholderText("Vbias2 list / range (optional)")
+        self._bias2_values.setToolTip("Independent Vbias2 values cross with gate conditions")
+        entry_group.layout().addWidget(self._bias2_values)
+        self._bias2_values.setVisible(False)
+        self._bias2_entry.changed.connect(lambda: self._bias2_values.setVisible(self._bias2_entry.settings()["bias2_mode"] == "independent"))
+        self._bias2_values.textChanged.connect(self._update_gate_entry)
+        for signal_name in ("connected", "disconnected"):
+            signal = getattr(self._smu, signal_name, None)
+            if hasattr(signal, "connect"):
+                signal.connect(lambda *_: self._refresh_bias2_visibility())
         gate_form.addRow(entry_group)
         self._gate_mode = QComboBox()
         self._gate_mode.setVisible(False)
         self._gate_mode.addItem("Vtg / Vbg", "voltage")
         self._gate_mode.addItem("Doping / E-field", "coordinates")
         self._gate_mode.setToolTip("Choose which coordinate pair is editable in the gate table.")
-        self._condition_table = _SmoothConditionTable(1, 10)
+        self._condition_table = _SmoothConditionTable(1, 11)
         self._condition_table.setProperty("quickMcdGateTable", True)
         self._condition_table.setHorizontalHeaderLabels(
             ["Use", "#", "Input type", "Vtg", "Vbg", "Vbias", "Doping",
-             "E-field", "Input A", "Input B"]
+             "E-field", "Input A", "Input B", "Vbias2"]
         )
         self._condition_table.verticalHeader().setVisible(False)
         self._condition_table.setColumnHidden(8, True)
         self._condition_table.setColumnHidden(9, True)
+        self._condition_table.setColumnHidden(10, not bool(getattr(cfg.smu, "vbias2_resource", "")))
         fit_table_columns(self._condition_table, (38, 24, 140, 54, 54, 54, 64, 64, 80, 80))
         self._condition_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._condition_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -1479,6 +1523,16 @@ class MCD2100Panel(QWidget):
         self._edit_condition_btn.setEnabled(row >= 0)
         self._remove_condition_btn.setEnabled(row >= 0 and count > 1)
 
+    def _refresh_bias2_visibility(self):
+        device = getattr(self._smu, "device", None)
+        checker = getattr(device, "role_is_available", None) or getattr(device, "has_role", None)
+        configured = bool(getattr(cfg.smu, "vbias2_resource", "")) or (callable(checker) and bool(checker("Vbias2")))
+        self._bias2_entry.refresh_visibility(configured)
+        column = 10
+        used = any((self._condition_table.item(row, 0).data(Qt.ItemDataRole.UserRole) or {}).get("bias2_mode", "off") != "off"
+                   for row in range(self._condition_table.rowCount()) if self._condition_table.item(row, 0))
+        self._condition_table.setColumnHidden(column, not (configured or used))
+
     def _condition_rows(self) -> list[dict[str, Any]]:
         rows = []
         for row in range(self._condition_table.rowCount()):
@@ -1490,6 +1544,7 @@ class MCD2100Panel(QWidget):
                 "mode": mode_widget.currentData() if mode_widget is not None else MODE_DIRECT,
                 "input_a": self._cell_value(row, 8), "input_b": self._cell_value(row, 9),
                 "vbias_v": self._cell_value(row, 5),
+                **((check.data(Qt.ItemDataRole.UserRole) or {}) if check else {}),
             })
         return resolve_gate_conditions(rows, self._gate_ratio())
 
@@ -1505,6 +1560,7 @@ class MCD2100Panel(QWidget):
                 "input_a": self._condition_table.item(row, 8).text() if self._condition_table.item(row, 8) else "",
                 "input_b": self._condition_table.item(row, 9).text() if self._condition_table.item(row, 9) else "",
                 "vbias_v": self._condition_table.item(row, 5).text() if self._condition_table.item(row, 5) else "",
+                **((check.data(Qt.ItemDataRole.UserRole) or {}) if check else {}),
             })
         return rows
 
@@ -1599,6 +1655,14 @@ class MCD2100Panel(QWidget):
         )
         check.setCheckState(Qt.CheckState.Checked if condition.get("enabled", True) else Qt.CheckState.Unchecked)
         self._condition_table.setItem(row, 0, check)
+        bias2 = {key: condition.get(key, default) for key, default in (("bias2_mode", "off"), ("vbias2_v", 0.0), ("bias2_offset_v", 0.0))}
+        check.setData(Qt.ItemDataRole.UserRole, bias2)
+        summary = bias2["bias2_mode"]
+        if summary != "off":
+            summary += " " + str(bias2["bias2_offset_v"] if summary == "follow" else bias2["vbias2_v"])
+            self._condition_table.setColumnHidden(10, False)
+        self._set_row_text(row, 10, summary)
+        self._condition_table.item(row, 10).setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         mode = str(condition.get("mode", MODE_DIRECT))
         if mode == "coordinates":
             mode = MODE_FIXED_DOPING
@@ -1722,6 +1786,9 @@ class MCD2100Panel(QWidget):
                 vbias_v=self._gate_entry_vbias.value(),
                 voltage_limit=cfg.smu.volt_compliance_V,
             )
+            from utils.mcd_common import expand_bias2_conditions
+            rows = expand_bias2_conditions(rows, self._bias2_entry.settings(), self._bias2_values.text(), self._gate_ratio())
+            validate_gate_conditions(rows, cfg.smu.volt_compliance_V)
         except ValueError as exc:
             self._gate_entry_rows = []
             self._gate_entry_status.setText(str(exc))
@@ -1826,6 +1893,8 @@ class MCD2100Panel(QWidget):
         self._gate_entry_a.setText(f"{float(input_a):.12g}")
         self._gate_entry_b.setText(f"{float(input_b):.12g}")
         self._gate_entry_vbias.setValue(float(condition.get("vbias_v", 0.0)))
+        self._bias2_entry.set_settings(condition)
+        self._bias2_values.clear()
         self._gate_edit_row = row
         self._update_gate_entry()
 
@@ -1860,6 +1929,7 @@ class MCD2100Panel(QWidget):
             only = existing[0]
             if (
                 only.get("mode") == MODE_DIRECT
+                and only.get("bias2_mode", "off") == "off"
                 and abs(float(only.get("input_a", 0.0))) <= 1e-12
                 and abs(float(only.get("input_b", 0.0))) <= 1e-12
                 and abs(float(only.get("vbias_v", 0.0))) <= 1e-12
@@ -2087,6 +2157,8 @@ class MCD2100Panel(QWidget):
             "gate_entry_a": self._gate_entry_a.text(),
             "gate_entry_b": self._gate_entry_b.text(),
             "gate_entry_vbias": self._gate_entry_vbias.value(),
+            "bias2_entry": self._bias2_entry.settings(),
+            "bias2_values": self._bias2_values.text(),
             "gate_entry_expansion": self._gate_entry_expansion.currentData(),
             "splitter_sizes": [int(value) for value in self._splitter.sizes()],
             "plot_log_sizes": [int(value) for value in self._plot_log_splitter.sizes()],
@@ -2114,6 +2186,8 @@ class MCD2100Panel(QWidget):
         try:
             if "gate_entry_vbias" in state:
                 self._gate_entry_vbias.setValue(float(state["gate_entry_vbias"]))
+            self._bias2_entry.set_settings(state.get("bias2_entry", {}))
+            self._bias2_values.setText(str(state.get("bias2_values", "")))
         except (TypeError, ValueError):
             pass
         if "point_pairing" in state:
@@ -3258,12 +3332,16 @@ class MCD2100Panel(QWidget):
             if not enabled_conditions:
                 raise ValueError("At least one enabled gate condition is required")
             validate_gate_conditions(enabled_conditions, cfg.smu.volt_compliance_V)
+            from utils.mcd_common import validate_bias2_device_targets
+            validate_bias2_device_targets(self._smu, enabled_conditions)
             if self._smu is None and self.parent() is None and self._apply_requested:
                 raise ValueError("SMU is not connected")
             if self._smu is not None or self.parent() is not None:
                 required_roles = ("Vbg", "Vtg")
-                if any(abs(float(item.get("vbias_v", 0.0))) > 1e-12 for item in enabled_conditions):
+                if any(abs(float(item.get("vbias_v", 0.0))) > 1e-12 or item.get("bias2_mode") == "follow" for item in enabled_conditions):
                     required_roles += ("Vbias",)
+                if any(item.get("bias2_mode", "off") != "off" for item in enabled_conditions):
+                    required_roles += ("Vbias2",)
                 readiness = smu_readiness_issues(self._smu, required_roles)
                 if readiness:
                     raise ValueError(readiness[0])

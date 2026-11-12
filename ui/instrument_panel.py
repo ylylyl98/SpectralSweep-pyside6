@@ -45,6 +45,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from utils.config import cfg
+from ui.bias_controls import Bias2Control
 from app.devices.stage_profiles import get_linear_stage_profile
 from app.devices.motion_verification import move_and_verify
 
@@ -55,6 +56,16 @@ def _record_spectrum_readback(owner: object, source: str, value: object) -> None
     if not isinstance(cache, dict):
         cache = {}
         setattr(owner, "_spectrum_readbacks", cache)
+    now = datetime.now(timezone.utc).isoformat()
+    if source == "smu" and isinstance(value, dict):
+        previous = cache.get(source, {})
+        readings = dict(previous.get("value", {}))
+        timestamps = dict(previous.get("field_timestamps_utc", {}))
+        readings.update(copy.deepcopy(value))
+        timestamps.update({key: now for key in value})
+        cache[source] = {"available": True, "value": readings,
+                         "timestamp_utc": now, "field_timestamps_utc": timestamps}
+        return
     cache[str(source)] = {
         "available": True,
         "value": copy.deepcopy(value),
@@ -1485,10 +1496,15 @@ class _SMUSection(QWidget):
         self._role_vbg   = QComboBox()
         self._role_vtg   = QComboBox()
         self._role_vbias = QComboBox()
+        self._role_vbias2 = QComboBox()
+        self._bias2_reveal = QCheckBox("Configure second bias")
+        self._bias2_reveal.setChecked(bool(getattr(cfg.smu, "vbias2_resource", "")))
+        lay.addWidget(self._bias2_reveal)
         self._role_combos = {
             "Vbg": self._role_vbg,
             "Vtg": self._role_vtg,
             "Vbias": self._role_vbias,
+            "Vbias2": self._role_vbias2,
         }
         self._curr_comp_by_role: dict[str, QDoubleSpinBox] = {}
         self._volt_comp_by_role: dict[str, QDoubleSpinBox] = {}
@@ -1500,6 +1516,7 @@ class _SMUSection(QWidget):
             "Vbg": "VISA address of the SMU channel used as back-gate (Vbg).",
             "Vtg": "VISA address of the SMU channel used as top-gate (Vtg).",
             "Vbias": "VISA address of the SMU channel used as source-drain bias (Vbias).",
+            "Vbias2": "VISA address of the optional second, independent Keithley bias source.",
         }
         for role, combo in self._role_combos.items():
             combo.addItem("<none>")
@@ -1516,6 +1533,10 @@ class _SMUSection(QWidget):
             addr_row.addWidget(addr_label)
             addr_row.addWidget(combo, stretch=1)
             lay.addLayout(addr_row)
+            if role == "Vbias2":
+                for widget in (addr_label, combo):
+                    widget.setVisible(self._bias2_reveal.isChecked())
+                    self._bias2_reveal.toggled.connect(widget.setVisible)
 
             curr = QDoubleSpinBox()
             curr.setRange(1.0, 1_050_000_000.0)
@@ -1605,6 +1626,10 @@ class _SMUSection(QWidget):
             volt_row.addWidget(apply_limits)
             limit_layout.addLayout(volt_row)
             limit_widgets.append(limit_widget)
+            if role == "Vbias2":
+                limit_widget.setVisible(self._bias2_reveal.isChecked())
+                self._bias2_reveal.toggled.connect(limit_widget.setVisible)
+                combo.currentTextChanged.connect(lambda text: self._bias2_reveal.setChecked(True) if text and text != "<none>" else None)
 
             apply_limits.clicked.connect(
                 lambda _checked=False, r=role: self._apply_role_limits(r)
@@ -1942,6 +1967,7 @@ class _SMUSection(QWidget):
             cfg.smu.vbg_resource,
             cfg.smu.vtg_resource,
             cfg.smu.vbias_resource,
+            getattr(cfg.smu, "vbias2_resource", ""),
         ):
             resource = str(resource or "").strip()
             if resource.startswith("GPIB") and resource not in resources:
@@ -1960,6 +1986,7 @@ class _SMUSection(QWidget):
             ("Vbg", self._role_vbg, cfg.smu.vbg_resource),
             ("Vtg", self._role_vtg, cfg.smu.vtg_resource),
             ("Vbias", self._role_vbias, cfg.smu.vbias_resource),
+            ("Vbias2", self._role_vbias2, getattr(cfg.smu, "vbias2_resource", "")),
         ):
             prev = combo.currentText()
             wanted = str(saved or "").strip() if prefer_saved else prev
@@ -1994,6 +2021,7 @@ class _SMUSection(QWidget):
             "Vbg":   addr(self._role_vbg),
             "Vtg":   addr(self._role_vtg),
             "Vbias": addr(self._role_vbias),
+            "Vbias2": addr(self._role_vbias2),
         }
         visa_addrs = [a for a in role_map.values() if a]
         if not visa_addrs:
@@ -2058,6 +2086,7 @@ class _SMUSection(QWidget):
         cfg.smu.vbg_resource = role_map.get("Vbg") or ""
         cfg.smu.vtg_resource = role_map.get("Vtg") or ""
         cfg.smu.vbias_resource = role_map.get("Vbias") or ""
+        cfg.smu.vbias2_resource = role_map.get("Vbias2") or ""
         cfg.smu.termination = self._pending_termination_text
         self._remember_visible_compliance()
         cfg.smu.compliance_by_addr = {
@@ -2096,7 +2125,7 @@ class _SMUSection(QWidget):
 class _ManualControlSection(QWidget):
     """Compact, collapsible front-panel controls for each Keithley role."""
 
-    _CHANNELS = ("Vbg", "Vtg", "Vbias")
+    _CHANNELS = ("Vbg", "Vtg", "Vbias", "Vbias2")
 
     def __init__(self, smu_ctrl, parent=None):
         super().__init__(parent)
@@ -2145,6 +2174,13 @@ class _ManualControlSection(QWidget):
         step_row.addWidget(self._step_spn, stretch=1)
         lay.addLayout(step_row)
 
+        self._bias2_link = Bias2Control()
+        self._bias2_link.mode.setCurrentIndex(self._bias2_link.mode.findData("follow"))
+        self._bias2_link.mode.setEnabled(False)
+        self._bias2_link.enable.setText("Link Vbias2 to Vbias")
+        self._bias2_link.set_voltage_visible(False)
+        lay.addWidget(self._bias2_link)
+
         self._voltage_lbl: dict[str, QLabel] = {}
         self._current_lbl: dict[str, QLabel] = {}
         self._down_btn: dict[str, QPushButton] = {}
@@ -2153,9 +2189,11 @@ class _ManualControlSection(QWidget):
         self._zero_btn_by_role: dict[str, QPushButton] = {}
         self._target_spn: dict[str, QDoubleSpinBox] = {}
         self._ramp_btn_by_role: dict[str, QPushButton] = {}
+        self._channel_widgets: dict[str, QWidget] = {}
 
         for role in self._CHANNELS:
             box = QFrame()
+            self._channel_widgets[role] = box
             box.setProperty("fluentRole", "channelRow")
             box.setAccessibleName(f"{role} manual controls")
             box_lay = QVBoxLayout(box)
@@ -2258,6 +2296,9 @@ class _ManualControlSection(QWidget):
 
         self._update_step_button_text()
         self._step_spn.valueChanged.connect(self._update_step_button_text)
+        self._bias2_link.changed.connect(self._set_controls_enabled)
+        self._bias2_link.changed.connect(self._update_link_target)
+        self._target_spn["Vbias"].valueChanged.connect(self._update_link_target)
 
         global_row = QHBoxLayout()
         self._read_all_btn = QPushButton("Read All")
@@ -2311,7 +2352,12 @@ class _ManualControlSection(QWidget):
         connected = bool(
             self._ctrl and getattr(self._ctrl, "is_connected", False)
         )
+        linked = self._bias2_link.settings()["bias2_mode"] == "follow"
+        self._bias2_link.refresh_visibility(bool(getattr(cfg.smu, "vbias2_resource", "")) or (connected and self._role_available("Vbias2")))
+        self._bias2_link.setEnabled(not self._busy and self._fast_active_role is None)
         for role in self._CHANNELS:
+            if role == "Vbias2":
+                self._channel_widgets[role].setVisible(linked or bool(getattr(cfg.smu, "vbias2_resource", "")) or (connected and self._role_available(role)))
             enabled = connected and self._role_available(role) and not self._busy
             self._down_btn[role].setEnabled(enabled)
             self._read_btn_by_role[role].setEnabled(enabled)
@@ -2319,6 +2365,9 @@ class _ManualControlSection(QWidget):
             self._zero_btn_by_role[role].setEnabled(enabled)
             self._target_spn[role].setEnabled(enabled)
             self._ramp_btn_by_role[role].setEnabled(enabled)
+            if role == "Vbias2" and linked:
+                for control in (self._down_btn[role], self._up_btn[role], self._zero_btn_by_role[role], self._target_spn[role], self._ramp_btn_by_role[role]):
+                    control.setEnabled(False)
         self._read_all_btn.setEnabled(connected and not self._busy)
         self._zero_all_btn.setEnabled(connected and not self._busy)
         self._step_spn.setEnabled(not self._busy)
@@ -2357,6 +2406,7 @@ class _ManualControlSection(QWidget):
             float(value),
             ramp_step_V=ramp_step,
             delay_s=cfg.ramp.delay_s,
+            **({"bias2_settings": self._bias2_link.settings()} if role == "Vbias" and self._bias2_link.settings()["bias2_mode"] == "follow" else {}),
         )
 
     def _set_target_value(self, role: str, value: float) -> None:
@@ -2366,6 +2416,15 @@ class _ManualControlSection(QWidget):
             target.setValue(float(value))
         finally:
             target.blockSignals(False)
+        if role == "Vbias":
+            self._update_link_target()
+
+    def _update_link_target(self, *_):
+        settings = self._bias2_link.settings()
+        if settings["bias2_mode"] == "follow":
+            target = self._target_spn["Vbias"].value() + settings["bias2_offset_v"]
+            self._set_target_value("Vbias2", target)
+            self._bias2_link.summary.setText(f"Vbias2 = Vbias + offset = {target:+.6g} V")
 
     @Slot(str)
     def _on_ramp_to(self, role: str) -> None:
@@ -2434,12 +2493,14 @@ class _ManualControlSection(QWidget):
                 continue
             self._fast_active_role = role
             self._fast_active_target = target
+            self._bias2_link.setEnabled(False)
             command(
                 "set_fast",
                 role,
                 target,
                 ramp_step_V=cfg.ramp.step_V,
                 delay_s=0.0,
+                **({"bias2_settings": self._bias2_link.settings()} if role == "Vbias" and self._bias2_link.settings()["bias2_mode"] == "follow" else {}),
             )
             return
 
@@ -2517,6 +2578,7 @@ class _ManualControlSection(QWidget):
             ("Vbg", "Vbg_meas", "Ibg"),
             ("Vtg", "Vtg_meas", "Itg"),
             ("Vbias", "Vbias_meas", "Ibias"),
+            ("Vbias2", "Vbias2_meas", "Ibias2"),
         ):
             if voltage_key not in readings and current_key not in readings:
                 continue
@@ -2564,6 +2626,7 @@ class _ManualControlSection(QWidget):
     @Slot()
     def _on_smu_disconnected(self) -> None:
         self._cancel_background_refresh()
+        self._spectrum_readbacks = {}
         self._busy = False
         self._confirmed_voltage.clear()
         self._requested_voltage.clear()
@@ -4276,6 +4339,7 @@ class InstrumentPanel(QScrollArea):
                 "vbg_resource": smu._role_vbg.currentText(),
                 "vtg_resource": smu._role_vtg.currentText(),
                 "vbias_resource": smu._role_vbias.currentText(),
+                "vbias2_resource": smu._role_vbias2.currentText(),
                 "termination": smu._termination.currentText(),
                 "compliance_by_addr": smu.compliance_by_addr(),
             }
@@ -4283,7 +4347,8 @@ class InstrumentPanel(QScrollArea):
         if isinstance(manual_smu, _ManualControlSection):
             state["manual_smu"] = {
                 "step_v": float(manual_smu._step_spn.value()),
-                "targets": {role: float(widget.value()) for role, widget in manual_smu._target_spn.items()},
+                "targets": {role: float(widget.value()) for role, widget in manual_smu._target_spn.items() if role != "Vbias2" or not manual_smu._channel_widgets[role].isHidden()},
+                "bias2_link": manual_smu._bias2_link.settings(),
             }
         for key in ("rot1", "rot2"):
             rotation = self._sections.get(key)
@@ -4405,6 +4470,7 @@ class InstrumentPanel(QScrollArea):
                 ("vbg_resource", smu._role_vbg),
                 ("vtg_resource", smu._role_vtg),
                 ("vbias_resource", smu._role_vbias),
+                ("vbias2_resource", smu._role_vbias2),
                 ("termination", smu._termination),
             ):
                 value = smu_state.get(key)
@@ -4432,6 +4498,8 @@ class InstrumentPanel(QScrollArea):
         if isinstance(manual_state, dict) and isinstance(
             manual_smu, _ManualControlSection
         ):
+            manual_smu._bias2_link.set_settings(manual_state.get("bias2_link", {}))
+            manual_smu._bias2_link.mode.setCurrentIndex(manual_smu._bias2_link.mode.findData("follow"))
             try:
                 manual_smu._step_spn.setValue(float(manual_state["step_v"]))
             except (KeyError, TypeError, ValueError):

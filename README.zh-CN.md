@@ -77,7 +77,7 @@ py -3.13 -m venv .venv-pyside6-313
 .\.venv-pyside6-313\Scripts\python.exe main.py --preview-workspaces
 ```
 
-源码日常启动使用仓库根目录的 `launch.bat`，它会选择项目虚拟环境，并在 Python 依赖变化时检查安装。
+源码日常启动使用仓库根目录的 `launch.bat`：自动创建 **SpectralSweep (Source)** 桌面图标、安全检查并更新远端 `main`，然后选择项目虚拟环境并启动；Python 依赖变化时会检查安装。以后可使用桌面图标，或将运行中的源码版图标固定到任务栏。存在本地修改或更新失败时会保留并启动本地版本，详见[源码安装](docs/installation.zh-CN.md#源码安装)。
 `--mock` 模拟光谱仪；`--preview-workspaces` 才是设备操作被禁用的隔离预览。
 详见[源码安装](docs/installation.zh-CN.md#source)。
 

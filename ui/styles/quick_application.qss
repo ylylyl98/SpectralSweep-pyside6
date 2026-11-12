@@ -35,11 +35,16 @@ QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTextEdit, QPlainTextEdit {
 QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover { border-color: palette(dark); }
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus { border: 1px solid palette(highlight); }
 QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled { background: palette(alternate-base); color: palette(disabled, text); }
-QPushButton, QToolButton { background: palette(base); color: palette(button-text); border: 1px solid palette(mid); border-radius: 4px; padding: 4px 10px; min-height: 18px; }
-QPushButton:hover, QToolButton:hover { background: palette(light); border-color: palette(dark); }
-QPushButton:pressed, QToolButton:pressed, QPushButton:checked, QToolButton:checked { background: palette(alternate-base); border-color: palette(highlight); }
+/* Actions have a tinted surface and firm outline; editable fields retain Base. */
+QPushButton, QToolButton { background: palette(button); color: palette(button-text); border: 1px solid palette(shadow); border-radius: 4px; padding: 4px 10px; min-height: 18px; font-weight: 600; }
+QPushButton:hover, QToolButton:hover { background: palette(light); border-color: palette(shadow); }
+QPushButton:pressed, QToolButton:pressed, QPushButton:checked, QToolButton:checked { background: palette(midlight); border-color: palette(highlight); }
 QPushButton:focus, QToolButton:focus { border: 2px solid palette(highlight); padding: 3px 9px; }
-QPushButton:disabled, QToolButton:disabled { color: palette(disabled, button-text); background: palette(alternate-base); }
+QPushButton:default, QPushButton[fluentAppearance="primary"], QPushButton[spectralRole="runAction"] { background: palette(highlight); color: palette(highlighted-text); border-color: palette(highlight); }
+QPushButton[fluentAppearance="danger"], QPushButton[spectralRole="stopAction"], QPushButton[spectralRole="dangerAction"] { color: palette(bright-text); border-color: palette(bright-text); }
+QPushButton:disabled, QToolButton:disabled,
+QPushButton[fluentAppearance="primary"]:disabled, QPushButton[spectralRole="runAction"]:disabled,
+QPushButton[fluentAppearance="danger"]:disabled, QPushButton[spectralRole="stopAction"]:disabled, QPushButton[spectralRole="dangerAction"]:disabled { color: palette(disabled, button-text); background: palette(alternate-base); border-color: palette(mid); }
 QCheckBox, QRadioButton { spacing: 7px; padding: 3px; background: transparent; }
 QCheckBox:disabled, QRadioButton:disabled { color: palette(disabled, text); }
 QTabWidget::pane { border: none; }

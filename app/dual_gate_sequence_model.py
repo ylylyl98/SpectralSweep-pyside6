@@ -20,8 +20,8 @@ _ALIASES = {"Center Wavelength (nm)": "CW", "Exposure Time (ms)": "Exposure",
             "Rotation2 Angle (deg)": "RotOut", "Stage Position": "Stage",
             "Measurement setup": "Setup"}
 _READABLE_LABELS = {**_ALIASES, "Center Wavelength (nm)": "Wavelength",
-                    "Accumulations (EPF)": "Accum.", "Rotation1 Angle (deg)": "Rotation in",
-                    "Rotation2 Angle (deg)": "Rotation out"}
+                    "Accumulations (EPF)": "Accum.", "Rotation1 Angle (deg)": "RotIn Angle",
+                    "Rotation2 Angle (deg)": "RotOut Angle"}
 
 
 def _enabled(value):
@@ -61,17 +61,22 @@ def _context(context, order=()):
 def _gate(task):
     point = task.get("gate_point")
     if point is not None:
-        return " · ".join(f"{axis} {_value(point[axis])} V" for axis in ("Vtg", "Vbg", "Vbias")
+        return " · ".join(f"{axis} {_value(point[axis])} V" for axis in ("Vtg", "Vbg", "Vbias", "Vbias2")
                           if _number(point.get(axis)) is not None)
     row = task.get("row", {})
     parts = []
-    for axis in ("Vtg", "Vbg", "Vbias"):
+    for axis in ("Vtg", "Vbg", "Vbias", "Vbias2"):
+        if axis == "Vbias2" and str(row.get("bias2_mode", "off")).lower() != "independent":
+            continue
         start, stop = _number(row.get(axis + "_start")), _number(row.get(axis + "_stop"))
         if start is None:
             continue
         stop = start if stop is None else stop
         span = f"{start:g}" if start == stop else f"{start:g} → {stop:g}"
         parts.append(f"{axis} {span} V")
+    if str(row.get("bias2_mode", "off")).lower() == "follow":
+        offset = _number(row.get("bias2_offset_v"))
+        parts.append(f"Vbias2 = Vbias {offset:+g} V" if offset is not None else "Vbias2 follow (offset missing)")
     return " · ".join(parts) or "No gate targets"
 
 
@@ -106,7 +111,9 @@ def _setting_value(key, value):
 def _gate_settings(task):
     point, row = task.get("gate_point"), task.get("row", {})
     values = []
-    for axis in ("Vtg", "Vbg", "Vbias"):
+    for axis in ("Vtg", "Vbg", "Vbias", "Vbias2"):
+        if axis == "Vbias2" and point is None and str(row.get("bias2_mode", "off")).lower() != "independent":
+            continue
         start = _number(point.get(axis)) if isinstance(point, Mapping) else _number(row.get(axis + "_start"))
         if start is None:
             continue
@@ -308,9 +315,24 @@ class DualGateSequenceModel(QAbstractListModel):
                         self._prefix.append(self._prefix[-1] + _positive(task.get("row", {}).get("repeat", 1)))
                     self._execution_positions = sorted(self._lookup)
             order = schedule[0].get("execution_order", []) if self._nested else []
-            self._nesting = ([str(level.get("label", level.get("id", level.get("kind", "")))) for level in order]
-                             if order else (["Gate conditions", "Loop settings", "Repeat", "Gate points"]
-                                            if grouping == "batch_first" else ["Loop settings", "Gate conditions", "Repeat", "Gate points"]))
+            if order:
+                self._nesting = []
+                for level in order:
+                    if level.get("kind") == "group":
+                        keys = list(self._group_values(schedule[0], level))
+                        names = [_READABLE_LABELS.get(key, key) for key in keys]
+                        self._nesting.append(" + ".join(names) + (" (linked values)" if len(names) > 1 else "") if names else str(level.get("label", "Loop group")))
+                    else:
+                        self._nesting.append(str(level.get("label", level.get("id", level.get("kind", "")))))
+            else:
+                first = schedule[0] if schedule else {}
+                groups = self._flat_loop_groups(first)
+                names = [_READABLE_LABELS.get(key, key) for key in first.get("ctx", {})]
+                loop_labels = ([" + ".join(_READABLE_LABELS.get(key, key) for key in group)
+                                + (" (linked values)" if len(group) > 1 else "") for group in groups]
+                               if groups else ["Loop settings" + (" (" + ", ".join(names) + ")" if names else "")])
+                self._nesting = (["Gate conditions", *loop_labels, "Repeat", "Gate points"]
+                                 if grouping == "batch_first" else [*loop_labels, "Gate conditions", "Repeat", "Gate points"])
             self._nesting.append("Acquire")
             self._page = self._selected = 0
             if self._nested:
@@ -403,13 +425,44 @@ class DualGateSequenceModel(QAbstractListModel):
         return [dict(label=_READABLE_LABELS.get(key, key), value=_setting_value(key, context[key]))
                 for key in keys if key in context]
 
+    def _flat_loop_groups(self, task):
+        """Recover legacy grouping only when definition covers the compiled context."""
+        mode = self._plan.get("loop_mode")
+        if mode not in ("Synchronize", "Zip", "Customized"):
+            return []
+        context = task.get("ctx", {})
+        keys = list(context)
+        if not keys:
+            return []
+        definition = _records(self._plan.get("loop_definition"))
+        enabled = [row for row in definition if _enabled(row.get("Enable", False))]
+        by_name = {str(row.get("Parameter", "")): row for row in enabled}
+        if len(by_name) != len(enabled) or any(key not in by_name for key in keys):
+            return []
+        if mode == "Synchronize":
+            # The compiled context retains the actual parameter_order sorting.
+            return [[key] for key in keys]
+        if mode == "Zip":
+            return [keys]
+        groups = {}
+        try:
+            for key in keys:
+                raw = by_name[key].get("Group", 1)
+                number = _number(raw)
+                group = 1 if number is None else int(number)
+                groups.setdefault(group, []).append(key)
+        except (TypeError, ValueError, OverflowError):
+            return []
+        return [groups[group] for group in sorted(groups)]
+
     def _order_levels(self, task):
         if task.get("nested"):
             return [level for level in task.get("execution_order", [])
                     if level.get("kind") in {"group", "conditions", "points"}]
-        context = dict(kind="loop", label="Loop settings")
+        groups = self._flat_loop_groups(task)
+        contexts = [dict(kind="flat_group", parameters=group) for group in groups] if groups else [dict(kind="loop", label="Loop settings")]
         condition = dict(kind="conditions", label="Condition")
-        outer = [condition, context] if self._plan.get("acquisition_grouping") == "batch_first" else [context, condition]
+        outer = [condition, *contexts] if self._plan.get("acquisition_grouping") == "batch_first" else [*contexts, condition]
         return [*outer, dict(kind="repeat"), dict(kind="points")]
 
     def _group_values(self, task, level):
@@ -432,16 +485,40 @@ class DualGateSequenceModel(QAbstractListModel):
                     label, value = fields[0]["label"], fields[0]["value"]
                     fields = []
                 elif fields:
-                    label, detail = "Linked settings", "Values move together"
+                    label, detail = "Linked settings", "Values paired in the same loop group"
                 else:
                     label, value = str(level.get("label") or "Loop group"), "Not specified"
                 occurrence = _number(task.get("group_instances", {}).get(level.get("id")))
                 if occurrence is not None and occurrence >= 0:
                     detail = " · ".join(filter(None, (detail, f"Occurrence {int(occurrence) + 1}")))
+                angles = [key for key in self._group_values(task, level) if key in ("Rotation1 Angle (deg)", "Rotation2 Angle (deg)")]
+                if angles:
+                    prior = self._schedule[source - 1].get("ctx", {}) if source > 0 else None
+                    states = []
+                    for key in angles:
+                        state = "first requested value" if prior is None or key not in prior else ("unchanged from previous step" if _same(prior[key], task.get("ctx", {}).get(key)) else "changed from previous step")
+                        states.append(f"{_READABLE_LABELS[key]}: {state}")
+                    detail = " · ".join(filter(None, (detail, *states)))
+            elif kind == "flat_group":
+                values = {key: task.get("ctx", {})[key] for key in level["parameters"]}
+                fields = self._setting_fields(values)
+                if len(fields) == 1:
+                    label, value = fields[0]["label"], fields[0]["value"]
+                    fields = []
+                else:
+                    label, detail = "Linked settings", "Values paired in the same loop group"
+                prior = self._schedule[source - 1].get("ctx", {}) if source > 0 else None
+                for key in values:
+                    if key in ("Rotation1 Angle (deg)", "Rotation2 Angle (deg)"):
+                        state = "first requested value" if prior is None or key not in prior else ("unchanged from previous step" if _same(prior[key], values[key]) else "changed from previous step")
+                        detail = " · ".join(filter(None, (detail, f"{_READABLE_LABELS[key]}: {state}")))
             elif kind == "loop":
                 label, fields = "Loop settings", self._setting_fields(task.get("ctx", {}))
                 if not fields:
                     value = "No loop variables"
+                angles = [key for key in task.get("ctx", {}) if key in ("Rotation1 Angle (deg)", "Rotation2 Angle (deg)")]
+                if angles:
+                    detail = "Requested loop values; legacy plan does not specify individual nesting"
             elif kind == "conditions":
                 label, value = "Condition", self._condition_label(task)
                 if task.get("nested"):
@@ -461,8 +538,12 @@ class DualGateSequenceModel(QAbstractListModel):
                 else:
                     value = f"{_positive(row.get('frames', 1)):,} points per sweep"
             path.append(dict(label=label, value=value, detail=detail, kind=kind, fields=fields))
+        absent_angles = [_READABLE_LABELS[key] for key in ("Rotation1 Angle (deg)", "Rotation2 Angle (deg)") if key not in task.get("ctx", {})]
+        acquire_detail = "Skipped by When" if source < 0 else "Power " + ("On" if _enabled(row.get("MeasurePower", False)) else "Off")
+        if absent_angles:
+            acquire_detail += " · Not in plan: " + ", ".join(absent_angles)
         path.append(dict(label="Acquire", value="No acquisition" if source < 0 else "1 spectrum",
-                         detail="Skipped by When" if source < 0 else "Power " + ("On" if _enabled(row.get("MeasurePower", False)) else "Off"),
+                         detail=acquire_detail,
                          kind="acquire", fields=[]))
         return path
 
@@ -470,6 +551,8 @@ class DualGateSequenceModel(QAbstractListModel):
         kind = level["kind"]
         if kind == "group":
             return (self._group_values(task, level), task.get("group_instances", {}).get(level.get("id")))
+        if kind == "flat_group":
+            return {key: task.get("ctx", {}).get(key) for key in level["parameters"]}
         if kind == "loop":
             return task.get("ctx", {})
         if kind == "conditions":
@@ -537,9 +620,9 @@ class DualGateSequenceModel(QAbstractListModel):
                 changes.append(f"{label}: {av} → {bv}")
         before_gate, after_gate = _gate_settings(previous), _gate_settings(task)
         # Compare raw targets too: rounded display strings must not suppress a change.
-        before_targets = previous.get("gate_point") or {key: value for key, value in previous.get("row", {}).items() if key.startswith(("Vtg_", "Vbg_", "Vbias_"))}
-        after_targets = task.get("gate_point") or {key: value for key, value in task.get("row", {}).items() if key.startswith(("Vtg_", "Vbg_", "Vbias_"))}
-        axes = ("Vtg", "Vbg", "Vbias")
+        before_targets = previous.get("gate_point") or {key: value for key, value in previous.get("row", {}).items() if key.startswith(("Vtg_", "Vbg_", "Vbias_", "Vbias2_"))}
+        after_targets = task.get("gate_point") or {key: value for key, value in task.get("row", {}).items() if key.startswith(("Vtg_", "Vbg_", "Vbias_", "Vbias2_"))}
+        axes = ("Vtg", "Vbg", "Vbias", "Vbias2")
         for axis in axes:
             before = {key: value for key, value in before_targets.items() if key == axis or key.startswith(axis + "_")}
             after = {key: value for key, value in after_targets.items() if key == axis or key.startswith(axis + "_")}

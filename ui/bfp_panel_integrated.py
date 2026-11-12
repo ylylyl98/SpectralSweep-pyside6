@@ -72,6 +72,17 @@ from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_con
 from copy import deepcopy
 from ui.sensor_readout_preflight import ensure_sensor_readout
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
+
+
+def _electrical_snapshot(widget):
+    """Use timestamped sidebar readings; never issue I/O during metadata capture."""
+    owner = widget
+    while owner is not None:
+        provider = getattr(owner, "_sidebar_snapshot_provider", None)
+        if callable(provider):
+            return provider()
+        owner = owner.parentWidget()
+    return {"available": False, "reason": "No instrument snapshot provider"}
 from app.power_reading import power_correction_factor
 from ui.workflow_sections import compact_form_rows, divide_grid_fields
 
@@ -875,7 +886,7 @@ class _BRCWidget(QWidget):
         self._rc_run = ExperimentMetadataService(sample_path.parent).begin(
             "bfp_binned_rc", device_id, output_dir=sample_path.parent,
             allow_post_completion=True,
-            settings={"processing_context": context,
+            settings={"processing_context": context, "instrument_snapshot": _electrical_snapshot(self),
                       "mode": context.get("processing", {}).get("mode"),
                       "scale": context.get("processing", {}).get("scale"),
                       "order": context.get("processing", {}).get("gradient_order")},
@@ -1240,7 +1251,7 @@ class _FRCWidget(QWidget):
         self._rc_run = ExperimentMetadataService(sample_path.parent).begin(
             "bfp_full_sensor_rc", device_id, output_dir=sample_path.parent,
             allow_post_completion=True,
-            settings={"processing_context": context,
+            settings={"processing_context": context, "instrument_snapshot": _electrical_snapshot(self),
                       "calculation": context.get("processing", {}).get("calculation"),
                       "display_key": context.get("processing", {}).get("display_key")},
         )
@@ -1826,6 +1837,7 @@ class BFPPanel(QWidget):
                 allow_post_completion=True,
                 instruments=instrument_inventory(lightfield=self._ctrl),
                 settings={"roi_mode": self._roi_combo.currentText(), "center_nm": self._center_spin.value(),
+                          "instrument_snapshot": _electrical_snapshot(self),
                           "sensor_readout_intents": deepcopy(getattr(self._ctrl, "sensor_readout_intents", {})),
                           "exposure_ms": self._exp_spin.value(), "frames": self._epf_spin.value(),
                           "repeat": self._repeat_spin.value(), "auto_save_csv": self._auto_save_csv_chk.isChecked(),

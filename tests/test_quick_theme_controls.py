@@ -30,6 +30,8 @@ AppPane {
     width: 460; height: 280
     property int activations: 0
     readonly property bool actionFocused: action.visualFocus
+    readonly property int actionBorderWidth: action.background.border.width
+    readonly property int disclosureBorderWidth: disclosure.background.border.width
     readonly property color canvasColor: Theme.canvas
     readonly property color surfaceColor: Theme.surface
     readonly property color textColor: Theme.text
@@ -38,6 +40,7 @@ AppPane {
     Column {
         spacing: 12
         AppButton { id: action; objectName: "action"; text: "Run"; onClicked: ++activations }
+        AppDisclosure { id: disclosure; objectName: "disclosure"; text: "Options"; onClicked: expanded = !expanded }
         AppComboBox { objectName: "editable"; editable: true; model: ["COM1", "COM2"] }
         AppSpinBox { objectName: "count"; from: 1; to: 9; value: 3 }
         AppCheckBox { objectName: "check"; text: "Enable" }
@@ -257,3 +260,55 @@ def test_navigation_collapses_to_filtered_workspace_selector():
         widget.close()
         widget.deleteLater()
         drain_qt_deletions()
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+@pytest.mark.parametrize("appearance", ["standard", "subtle"])
+def test_neutral_actions_have_visible_rest_outline_and_state_feedback(probe, mode, appearance):
+    widget, root, warnings = probe
+    root.setProperty("themeMode", mode)
+    button = root.findChild(QObject, "action")
+    button.setProperty("appearance", appearance)
+    QTest.mouseMove(widget, widget.rect().bottomRight())
+
+    def luminance(color):
+        channels = (color.redF(), color.greenF(), color.blueF())
+        return sum((v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4) * w
+                   for v, w in zip(channels, (.2126, .7152, .0722)))
+
+    def contrast(a, b):
+        low, high = sorted((luminance(a), luminance(b)))
+        return (high + .05) / (low + .05)
+
+    rest = button.property("fillColor")
+    assert rest != root.property("surfaceColor")
+    assert root.property("actionBorderWidth") == 1
+    assert contrast(button.property("outlineColor"), rest) >= 3
+    assert contrast(button.property("foregroundColor"), rest) >= 4.5
+    center = button.mapToScene(button.boundingRect().center()).toPoint()
+    QTest.mouseMove(widget, center)
+    assert button.property("fillColor") != rest
+    hover = button.property("fillColor")
+    QTest.mousePress(widget, Qt.MouseButton.LeftButton, pos=center)
+    assert button.property("fillColor") != hover
+    QTest.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=center)
+    QTest.keyClick(widget, Qt.Key.Key_Tab)
+    QTest.keyClick(widget, Qt.Key.Key_Backtab)
+    assert root.property("actionBorderWidth") == 2
+    button.setProperty("enabled", False)
+    assert button.property("fillColor") != rest
+    assert not warnings
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_disclosure_has_visible_band_and_preserves_keyboard_toggle(probe, mode):
+    widget, root, warnings = probe
+    root.setProperty("themeMode", mode)
+    disclosure = root.findChild(QObject, "disclosure")
+    assert disclosure.property("fillColor") != root.property("surfaceColor")
+    assert root.property("disclosureBorderWidth") >= 1
+    assert not disclosure.property("expanded")
+    disclosure.forceActiveFocus(Qt.FocusReason.TabFocusReason)
+    QTest.keyClick(widget, Qt.Key.Key_Space)
+    assert disclosure.property("expanded")
+    assert not warnings

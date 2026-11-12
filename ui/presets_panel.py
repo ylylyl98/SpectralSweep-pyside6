@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
     QProgressBar, QTextEdit, QSizePolicy, QFormLayout,
     QCheckBox, QAbstractItemView, QComboBox, QFrame, QToolButton,
     QCompleter, QStyledItemDelegate, QMessageBox, QDoubleSpinBox, QSpinBox,
-    QAbstractSpinBox, QMenu, QScrollArea, QRadioButton, QButtonGroup,
+    QAbstractSpinBox, QMenu, QScrollArea, QRadioButton, QButtonGroup, QInputDialog,
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -200,6 +200,7 @@ BATCH_SCHEMA = [
     "condition_label", "repeat", "frames",
     "Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop",
     "Vbias_start", "Vbias_stop",
+    "bias2_mode", "Vbias2_start", "Vbias2_stop", "bias2_offset_v",
 ]
 
 # Source-drain bias columns stay visible; blank values still mean skip.
@@ -207,7 +208,7 @@ _VBIAS_COLUMNS = ("Vbias_start", "Vbias_stop")
 
 _BATCH_BOOL_COLUMNS = {"Run", "MeasurePower"}
 _BATCH_INT_COLUMNS = {"repeat", "frames"}
-_BATCH_FLOAT_COLUMNS = {"Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop", "Vbias_start", "Vbias_stop"}
+_BATCH_FLOAT_COLUMNS = {"Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop", "Vbias_start", "Vbias_stop", "Vbias2_start", "Vbias2_stop", "bias2_offset_v"}
 
 
 # Loop mode labels and their tooltips.
@@ -259,6 +260,7 @@ _DEFAULT_BATCH = pd.DataFrame([{
     "Vbg_start": 0.0, "Vbg_stop": 0.0,
     "Vtg_start": 0.0, "Vtg_stop": 0.0,
     "Vbias_start": "", "Vbias_stop": "",
+    "bias2_mode": "off", "Vbias2_start": "", "Vbias2_stop": "", "bias2_offset_v": "",
 }])
 
 
@@ -426,6 +428,9 @@ def _normalize_batch(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     for c in ("Vbias_start", "Vbias_stop"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in ("Vbias2_start", "Vbias2_stop", "bias2_offset_v"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["bias2_mode"] = df["bias2_mode"].fillna("").astype(str).str.strip().str.lower().replace("", "off")
     df["When"] = df["When"].fillna("").astype(str)
     return df
 
@@ -895,6 +900,7 @@ def _build_nested_execution_schedule(
             "point_total": int(sweep["point_count"]),
             "Vbg": float(sweep["vbg_points"][point_i]),
             "Vtg": float(sweep["vtg_points"][point_i]),
+            "Vbias2": (float(sweep["vbias2_points"][point_i]) if sweep["vbias2_points"] is not None else None),
             "Vbias": (
                 float(sweep["vbias_points"][point_i])
                 if sweep["vbias_points"] is not None else None
@@ -967,7 +973,8 @@ def _nested_gate_transition(task: Dict[str, Any], previous_state):
     """Classify actual gate actions consistently for validation, timing and run."""
     point = task["gate_point"]
     values = (float(point["Vbg"]), float(point["Vtg"]),
-              float(point["Vbias"]) if point.get("Vbias") is not None else None)
+              float(point["Vbias"]) if point.get("Vbias") is not None else None,
+              float(point["Vbias2"]) if point.get("Vbias2") is not None else None)
     state = (_nested_gate_scope(task), values)
     if previous_state is None or previous_state[0] != state[0]:
         return state, "initial"
@@ -1056,6 +1063,28 @@ def _resolve_sweep_vectors(row: Dict[str, Any]) -> Dict[str, Any]:
         if vbias_s is not None and vbias_e is not None:
             vbias_points = np.linspace(vbias_s, vbias_e, point_count, dtype=float).tolist()
 
+    mode = str(row.get("bias2_mode", "off") or "off").strip().lower()
+    if mode not in ("off", "independent", "follow"):
+        raise ValueError("Vbias2 mode must be off, independent, or follow.")
+    vbias2_points = None
+    if mode == "independent":
+        start = _valid_bias_value(row.get("Vbias2_start"))
+        stop = _valid_bias_value(row.get("Vbias2_stop"))
+        if start is None and stop is None:
+            raise ValueError("Independent Vbias2 requires a start or stop voltage.")
+        start = start if start is not None else stop
+        stop = stop if stop is not None else start
+        vbias2_points = np.linspace(start, stop, point_count, dtype=float).tolist()
+    elif mode == "follow":
+        if vbias_points is None:
+            raise ValueError("Vbias2 follow requires Vbias at every point.")
+        offset = _valid_bias_value(row.get("bias2_offset_v"))
+        if offset is None:
+            raise ValueError("Vbias2 follow requires a numeric offset.")
+        vbias2_points = [v + offset for v in vbias_points]
+    if vbias2_points is not None and any(not np.isfinite(v) or abs(v) > 200 for v in vbias2_points):
+        raise ValueError("Vbias2 target must be within -200 to 200 V.")
+
     if not vbg_points or not vtg_points or len(vbg_points) != len(vtg_points):
         raise ValueError("Invalid gate sweep vectors.")
     if vbias_points is not None and len(vbias_points) != len(vbg_points):
@@ -1081,6 +1110,10 @@ def _resolve_sweep_vectors(row: Dict[str, Any]) -> Dict[str, Any]:
         "vbg_points": vbg_points,
         "vtg_points": vtg_points,
         "vbias_points": vbias_points,
+        "vbias2_points": vbias2_points,
+        "vbias2_start": vbias2_points[0] if vbias2_points else None,
+        "vbias2_stop": vbias2_points[-1] if vbias2_points else None,
+        "vbias2_step": _step_size(vbias2_points[0], vbias2_points[-1], point_count) if vbias2_points else None,
     }
 
 
@@ -1112,7 +1145,7 @@ def _validate_safe_jumps(
             sweep_row["frames"] = int(row_dict.get("_nested_original_frames"))
         sweep_key = tuple(sweep_row.get(key) for key in (
             "frames", "Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop",
-            "Vbias_start", "Vbias_stop",
+            "Vbias_start", "Vbias_stop", "bias2_mode", "Vbias2_start", "Vbias2_stop", "bias2_offset_v",
         ))
         if sweep_key not in sweeps:
             sweeps[sweep_key] = _resolve_sweep_vectors(sweep_row)
@@ -1123,11 +1156,12 @@ def _validate_safe_jumps(
                 float(point.get("Vbg", 0.0)),
                 float(point.get("Vtg", 0.0)),
                 (float(point["Vbias"]) if point.get("Vbias") is not None else None),
+                (float(point["Vbias2"]) if point.get("Vbias2") is not None else None),
             )
             previous_state = (previous_scope, previous_point) if previous_point is not None else None
             (current_scope, current_point), transition = _nested_gate_transition(task, previous_state)
             if transition == "direct":
-                for axis_i, axis in enumerate(("Vbg", "Vtg", "Vbias")):
+                for axis_i, axis in enumerate(("Vbg", "Vtg", "Vbias", "Vbias2")):
                     before, after = previous_point[axis_i], current_point[axis_i]
                     if before is None or after is None:
                         continue
@@ -1144,6 +1178,7 @@ def _validate_safe_jumps(
             ("Vtg", "vtg_start", "vtg_stop", "vtg_step"),
             ("Vbg", "vbg_start", "vbg_stop", "vbg_step"),
             ("Vbias", "vbias_start", "vbias_stop", "vbias_step"),
+            ("Vbias2", "vbias2_start", "vbias2_stop", "vbias2_step"),
         ):
             start = sweep[start_key]
             stop = sweep[stop_key]
@@ -1242,7 +1277,7 @@ def _valid_bias_value(value) -> Optional[float]:
     return x if x is not None else None
 
 
-_SMU_ROLE_ORDER = ("Vbg", "Vtg", "Vbias")
+_SMU_ROLE_ORDER = ("Vbg", "Vtg", "Vbias", "Vbias2")
 
 
 def _required_smu_roles(
@@ -1264,6 +1299,8 @@ def _required_smu_roles(
             or _valid_bias_value(row.get("Vbias_stop")) is not None
         ):
             required.add("Vbias")
+        if str(row.get("bias2_mode", "off")).strip().lower() not in ("", "off"):
+            required.add("Vbias2")
     return tuple(role for role in _SMU_ROLE_ORDER if role in required)
 
 
@@ -1594,6 +1631,15 @@ def _build_run_filename_base(
         setup_label = _SETUP_LABELS[_setup_backend(ctx[_SETUP_PARAM])]
         base += f"_{setup_label}"
         tokens.append(("setup", setup_label))
+    mode2 = str(row.get("bias2_mode", "off") or "off").strip().lower()
+    if mode2 in ("independent", "follow"):
+        sweep2 = _resolve_sweep_vectors(row)
+        points2 = sweep2["vbias2_points"]
+        token2 = f"Vbias2_{points2[0]:g}V"
+        if points2[-1] != points2[0]:
+            token2 += f"_to_{points2[-1]:g}V"
+        base += "_" + token2
+        tokens.append(("Vbias2", token2))
     return base, fname_ctx, tokens
 
 
@@ -1809,7 +1855,7 @@ class _SweepLineCalculator(QGroupBox):
         self.setObjectName("SweepLineCalculator")
         set_style_role(self, 'sweepCalculator')
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 7, 8, 8)
+        root.setContentsMargins(8, 3, 8, 3)
         root.setSpacing(6)
 
         self._toggle = QToolButton()
@@ -1999,6 +2045,12 @@ class _SweepLineCalculator(QGroupBox):
         vb_row.addWidget(self._vbias_badge)
         vb_row.addStretch()
         left_layout.addLayout(vb_row)
+        from ui.bias_controls import Bias2Control
+        self._bias2_control = Bias2Control(self)
+        for spin in (self._bias2_control.voltage, self._bias2_control.offset):
+            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self._bias2_control.refresh_visibility(bool(getattr(cfg.smu, "vbias2_resource", "")))
+        left_layout.addWidget(self._bias2_control)
         left_layout.addStretch(1)
 
         calc_hdr = QLabel("Calculated sweep")
@@ -2166,6 +2218,7 @@ class _SweepLineCalculator(QGroupBox):
             w.valueChanged.connect(self._on_result_edited)
         self._include_vbias_chk.toggled.connect(self._recalculate)
         self._vbias_spin.valueChanged.connect(self._recalculate)
+        self._bias2_control.changed.connect(self._recalculate)
         self._add_btn.clicked.connect(self._on_add_clicked)
         self.set_vbias_available(self._vbias_available())
 
@@ -2470,6 +2523,10 @@ class _SweepLineCalculator(QGroupBox):
             "Vtg_stop": float(vtg_stop),
             "Vbias_start": float(self._vbias_spin.value()) if self._include_vbias_chk.isChecked() else "",
             "Vbias_stop": float(self._vbias_spin.value()) if self._include_vbias_chk.isChecked() else "",
+            "bias2_mode": self._bias2_control.settings()["bias2_mode"],
+            "Vbias2_start": self._bias2_control.settings()["vbias2_v"],
+            "Vbias2_stop": self._bias2_control.settings()["vbias2_v"],
+            "bias2_offset_v": self._bias2_control.settings()["bias2_offset_v"],
         }
 
     def _show_multi_preview(self, entries: Sequence[Tuple[float, Optional[dict], str]]):
@@ -2890,6 +2947,8 @@ class _RunWorker(QObject):
         device = self._require_smu_ready()
         settings = dict(ramp_step=max(float(cfg.ramp.step_V) * .5, 1e-6),
                         delay_s=float(cfg.ramp.delay_s) * 2.)
+        if "Vbias2" in self._required_smu_roles:
+            settings["include_bias2"] = True
         try:
             if hasattr(device, 'ramp_all_to_zero_report'):
                 report = device.ramp_all_to_zero_report(**settings)
@@ -2972,6 +3031,30 @@ class _RunWorker(QObject):
             if self._stop.is_set():
                 raise _StopRequested()
             self._require_smu_ready()
+            if "Vbias2" in self._required_smu_roles:
+                validate_targets = getattr(self._smu, "validate_voltage_targets", None)
+                if callable(validate_targets):
+                    checked = set()
+                    try:
+                        for task in self._schedule:
+                            point = task.get("gate_point") if task.get("nested") else None
+                            if isinstance(point, dict):
+                                pairs = [(point.get("Vbias"), point.get("Vbias2"))]
+                            else:
+                                sweep = _resolve_sweep_vectors(task["row"])
+                                second = sweep["vbias2_points"]
+                                first = sweep["vbias_points"]
+                                pairs = zip(first if first is not None else [None] * len(second or []), second or [])
+                            for first, second in pairs:
+                                if second is None or (first, second) in checked:
+                                    continue
+                                checked.add((first, second))
+                                targets = {"Vbias2": float(second)}
+                                if first is not None:
+                                    targets["Vbias"] = float(first)
+                                validate_targets(targets)
+                    except Exception as exc:
+                        raise _RunFlowError("SMU safety", f"Bias voltage preflight failed: {exc}") from exc
             self._require_optical_ready()
             issues = _setup_readiness_issues(self._lf6, self._schedule)
             if issues:
@@ -3237,6 +3320,7 @@ class _RunWorker(QObject):
                     vbg_points = sweep["vbg_points"]
                     vtg_points = sweep["vtg_points"]
                     vbias_points = sweep["vbias_points"]
+                    vbias2_points = sweep["vbias2_points"]
 
                     if nested_point is not None:
                         # The planner already resolved the original frame
@@ -3249,6 +3333,7 @@ class _RunWorker(QObject):
                             [float(nested_point["Vbias"])]
                             if nested_point.get("Vbias") is not None else None
                         )
+                        vbias2_points = [float(nested_point["Vbias2"])] if nested_point.get("Vbias2") is not None else None
                         n_points = point_count = 1
                         vbg_s = vbg_e = vbg_points[0]
                         vtg_s = vtg_e = vtg_points[0]
@@ -3298,6 +3383,7 @@ class _RunWorker(QObject):
                                     break
 
                                 vbias_set = vbias_points[frame_i - 1] if vbias_points is not None else None
+                                vbias2_set = vbias2_points[frame_i - 1] if vbias2_points is not None else None
                                 if nested_point is None:
                                     is_start_point = (frame_i == 1)
                                 else:
@@ -3333,6 +3419,9 @@ class _RunWorker(QObject):
                                     "csv_path": str(csv_path) if csv_path is not None else None,
                                     "Vbg_set_V": float(vbg_set),
                                     "Vtg_set_V": float(vtg_set),
+                                    "Vbias2_set_V": float(vbias2_set) if vbias2_set is not None else None,
+                                    "bias2_mode": str(row_dict.get("bias2_mode", "off")),
+                                    "bias2_offset_v": _valid_bias_value(row_dict.get("bias2_offset_v")),
                                     "Vbias_set_V": (
                                         float(vbias_set) if vbias_set is not None else None
                                     ),
@@ -3346,6 +3435,7 @@ class _RunWorker(QObject):
                                     f"    Point {original_point_number}/{original_point_total}: "
                                     f"Vbg={float(vbg_set):g} V, Vtg={float(vtg_set):g} V"
                                     + (f", Vbias={float(vbias_set):g} V" if vbias_set is not None else "")
+                                    + (f", Vbias2={float(vbias2_set):g} V" if vbias2_set is not None else "")
                                     + (" | ramp to sweep start" if is_start_point else " | direct setpoint jump")
                                 )
 
@@ -3399,14 +3489,18 @@ class _RunWorker(QObject):
                                             stop_cb=self._stop.is_set,
                                             stop_exc=_StopRequested,
                                         )
-                                        if vbias_set is not None:
-                                            dev.set_bias(
-                                                Vbias=float(vbias_set),
+                                        if vbias2_set is not None:
+                                            from utils.bias_control import apply_bias_pair
+                                            apply_bias_pair(dev, vbias=vbias_set,
+                                                settings={"bias2_mode": "independent", "vbias2_v": vbias2_set},
+                                                ramp_step=min(float(cfg.ramp.vbias_step_V), float(getattr(cfg.ramp, "vbias2_step_V", cfg.ramp.vbias_step_V))),
+                                                delay_s=(cfg.ramp.delay_s if is_start_point else 0.0),
+                                                stop_cb=self._stop.is_set, stop_exc=_StopRequested)
+                                        elif vbias_set is not None:
+                                            dev.set_bias(Vbias=float(vbias_set),
                                                 ramp_step=(cfg.ramp.vbias_step_V if is_start_point else 0.0),
                                                 delay_s=(cfg.ramp.delay_s if is_start_point else 0.0),
-                                                stop_cb=self._stop.is_set,
-                                                stop_exc=_StopRequested,
-                                            )
+                                                stop_cb=self._stop.is_set, stop_exc=_StopRequested)
                                 except _StopRequested:
                                     raise
                                 except Exception as e:
@@ -3455,6 +3549,7 @@ class _RunWorker(QObject):
                                             scalar_fields_order=[
                                                 "Vbg_set", "Vbg_meas", "Vtg_set", "Vtg_meas",
                                                 "Vbias_set", "Vbias_meas", "Ibg", "Itg", "Ibias",
+                                                *(["Vbias2_set", "Vbias2_meas", "Ibias2"] if vbias2_points is not None else []),
                                                 *(["Power_uW", "Power_raw_uW", "Power_correction_factor"] if power_reading is not None else []),
                                             ],
                                         )
@@ -3506,6 +3601,7 @@ class _RunWorker(QObject):
                                 Ibg = Itg = Ib = None
                                 Vbg_meas = Vtg_meas = float("nan")
                                 Vbias_meas = float(vbias_set) if vbias_set is not None else None
+                                Vbias2_meas = Ibias2 = None
                                 dev = self._require_smu_ready()
                                 try:
                                     Ibg, Itg, Ib = dev.read_currents(strict=True)
@@ -3514,6 +3610,11 @@ class _RunWorker(QObject):
                                         vb_read = dev.read_current_bias(strict=True)
                                         if vb_read is not None:
                                             Vbias_meas = float(vb_read)
+                                    if vbias2_set is not None:
+                                        Vbias2_meas = dev.read_current_bias2(strict=True)
+                                        Ibias2 = dev.read_bias2_current(strict=True)
+                                        if _safe_float(Vbias2_meas) is None or _safe_float(Ibias2) is None:
+                                            raise RuntimeError("Vbias2 voltage or current readback unavailable")
                                 except Exception as exc:
                                     if (
                                         self._stop.is_set()
@@ -3531,6 +3632,7 @@ class _RunWorker(QObject):
                                         Ib,
                                         include_bias=vbias_set is not None,
                                     )
+                                    + (f", Ibias2={Ibias2:g} A" if Ibias2 is not None else "")
                                 )
 
                                 if wl.size == 0:
@@ -3563,6 +3665,10 @@ class _RunWorker(QObject):
                                 if vbias_set is not None:
                                     row_data["Vbias_set"] = float(vbias_set)
                                     row_data["Vbias_meas"] = Vbias_meas
+                                if vbias2_set is not None:
+                                    row_data["Vbias2_set"] = float(vbias2_set)
+                                    row_data["Vbias2_meas"] = Vbias2_meas
+                                    row_data["Ibias2"] = Ibias2
                                 if is_full_sensor:
                                     writer.write_matrix(
                                         row_data,
@@ -3706,10 +3812,12 @@ class _RunWorker(QObject):
                 cleanup_report["attempted"] = True
                 try:
                     device = self._smu.device
+                    bias2_cleanup = {"include_bias2": True} if "Vbias2" in self._required_smu_roles else {}
                     if hasattr(device, "ramp_all_to_zero_report"):
                         cleanup_roles = device.ramp_all_to_zero_report(
                             ramp_step=max(float(cfg.ramp.step_V) * 0.5, 1e-6),
                             delay_s=float(cfg.ramp.delay_s) * 2.0,
+                            **bias2_cleanup,
                         )
                         cleanup_report["roles"] = cleanup_roles
                         cleanup_errors = [
@@ -3721,6 +3829,7 @@ class _RunWorker(QObject):
                         cleanup_errors = device.ramp_all_to_zero(
                             ramp_step=max(float(cfg.ramp.step_V) * 0.5, 1e-6),
                             delay_s=float(cfg.ramp.delay_s) * 2.0,
+                            **bias2_cleanup,
                         )
                         cleanup_report["errors"] = list(cleanup_errors or [])
                     if cleanup_errors:
@@ -3884,7 +3993,7 @@ def _populate_batch_table(table: QTableWidget, df: pd.DataFrame) -> None:
         table.setHorizontalHeaderLabels(BATCH_SCHEMA)
         for r, row in df.iterrows():
             for c, col in enumerate(BATCH_SCHEMA):
-                table.setItem(r, c, _make_batch_table_item(col, row[col]))
+                table.setItem(r, c, _make_batch_table_item(col, row.get(col, "off" if col == "bias2_mode" else "")))
         _configure_batch_table_columns(table)
     finally:
         table.setUpdatesEnabled(updates_were_enabled)
@@ -3897,14 +4006,36 @@ def _configure_batch_table_columns(table: QTableWidget) -> None:
     """Keep every batch field visible with explicit, compact headers."""
     titles = ("Run", "When", "Measure\npower", "Condition", "Repeat", "Frames",
               "Vbg\nstart (V)", "Vbg\nstop (V)", "Vtg\nstart (V)", "Vtg\nstop (V)",
-              "Vbias\nstart (V)", "Vbias\nstop (V)")
+              "Vbias\nstart (V)", "Vbias\nstop (V)", "Bias2\nmode", "Vbias2\nstart (V)", "Vbias2\nstop (V)", "Bias2\noffset (V)")
     for column, title in enumerate(titles):
         item = table.horizontalHeaderItem(column)
         if item is not None:
             item.setText(title)
             if not item.toolTip():
                 item.setToolTip(BATCH_SCHEMA[column])
-    fit_table_columns(table, (34, 104, 58, 120, 48, 50, 72, 72, 72, 72, 72, 72))
+    fit_table_columns(table, (34, 104, 58, 120, 48, 50, 72, 72, 72, 72, 72, 72, 80, 72, 72, 72))
+    configured = bool(getattr(cfg.smu, "vbias2_resource", "")) or bool(table.property("bias2Configured"))
+    modes = []
+    blocked = table.blockSignals(True)
+    try:
+        for r in range(table.rowCount()):
+            item = table.item(r, BATCH_SCHEMA.index("bias2_mode"))
+            mode = item.text().strip().lower() if item else "off"
+            modes.append(mode)
+            for name, relevant in (("Vbias2_start", mode == "independent"),
+                                   ("Vbias2_stop", mode == "independent"),
+                                   ("bias2_offset_v", mode == "follow")):
+                cell = table.item(r, BATCH_SCHEMA.index(name))
+                if cell is not None:
+                    flags = cell.flags()
+                    cell.setFlags(flags | Qt.ItemFlag.ItemIsEditable if relevant else flags & ~Qt.ItemFlag.ItemIsEditable)
+    finally:
+        table.blockSignals(blocked)
+    used = any(mode not in ("", "off") for mode in modes)
+    table.setColumnHidden(BATCH_SCHEMA.index("bias2_mode"), not (configured or used))
+    for name in ("Vbias2_start", "Vbias2_stop"):
+        table.setColumnHidden(BATCH_SCHEMA.index(name), "independent" not in modes)
+    table.setColumnHidden(BATCH_SCHEMA.index("bias2_offset_v"), "follow" not in modes)
 
 
 def _read_batch_table(table: QTableWidget) -> pd.DataFrame:
@@ -4403,6 +4534,18 @@ class PresetsPanel(QWidget):
             item = self._batch_table.horizontalHeaderItem(i)
             if item and col in _batch_hdr_tips:
                 item.setToolTip(_batch_hdr_tips[col])
+        class _Bias2ModeDelegate(QStyledItemDelegate):
+            choices = ("off", "independent", "follow")
+            def createEditor(self, parent, option, index):
+                editor = QComboBox(parent)
+                editor.addItems(["off", "independent", "follow"])
+                return editor
+            def setEditorData(self, editor, index):
+                editor.setCurrentText(str(index.data() or "off"))
+            def setModelData(self, editor, model, index):
+                model.setData(index, editor.currentText())
+        self._bias2_mode_delegate = _Bias2ModeDelegate(self._batch_table)
+        self._batch_table.setItemDelegateForColumn(BATCH_SCHEMA.index("bias2_mode"), self._bias2_mode_delegate)
         # When-column delegate — autocomplete from loop table parameter names
         self._when_delegate = _WhenDelegate(self._loop_table, self._batch_table)
         _when_col = BATCH_SCHEMA.index("When")
@@ -4448,7 +4591,7 @@ class PresetsPanel(QWidget):
         self._batch_actions_btn.setText("Batch Actions")
         self._batch_actions_btn.setToolTip(
             "More batch tools: run-state controls, copy/paste, arrangement, "
-            "auto-frames, validation, and undo/redo."
+            "quick repeat, auto-frames, validation, and undo/redo."
         )
         self._batch_actions_btn.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextOnly
@@ -4468,35 +4611,18 @@ class PresetsPanel(QWidget):
         batch_btn_row.addWidget(self._batch_actions_btn)
         batch_btn_row.addStretch()
 
-        repeat_btn_row = QHBoxLayout()
-        repeat_btn_row.setSpacing(5)
-        repeat_label = QLabel("Quick repeat:")
-        repeat_label.setToolTip(
-            "Set the repeat count without editing each table cell individually."
-        )
-        self._batch_repeat_spin = _SafeSpinBox()
+        # The existing objects remain the single state/command source for both
+        # native and Quick workflows; their controls live in Batch Actions.
+        self._batch_repeat_spin = _SafeSpinBox(self)
         self._batch_repeat_spin.setRange(1, 100_000)
         self._batch_repeat_spin.setValue(1)
-        self._batch_repeat_spin.setFixedWidth(72)
-        self._batch_repeat_spin.setToolTip(
-            "Repeat count to assign to selected rows or every batch row."
-        )
-        self._batch_repeat_selected_btn = QPushButton("Set Selected")
-        self._batch_repeat_selected_btn.setToolTip(
-            "Assign this repeat count to all currently selected batch rows."
-        )
-        self._batch_repeat_all_btn = QPushButton("Set All")
-        self._batch_repeat_all_btn.setToolTip(
-            "Assign this repeat count to every batch row."
-        )
-        repeat_btn_row.addWidget(repeat_label)
-        repeat_btn_row.addWidget(self._batch_repeat_spin)
-        repeat_btn_row.addWidget(self._batch_repeat_selected_btn)
-        repeat_btn_row.addWidget(self._batch_repeat_all_btn)
-        repeat_btn_row.addStretch()
+        self._batch_repeat_spin.hide()
+        self._batch_repeat_selected_btn = QPushButton("Set Selected", self)
+        self._batch_repeat_selected_btn.hide()
+        self._batch_repeat_all_btn = QPushButton("Set All", self)
+        self._batch_repeat_all_btn.hide()
         batch_lay.addWidget(self._batch_table)
         batch_lay.addLayout(batch_btn_row)
-        batch_lay.addLayout(repeat_btn_row)
         lay_left.addWidget(batch_grp, stretch=1)
 
         self._sweep_calc = _SweepLineCalculator(
@@ -5006,6 +5132,12 @@ class PresetsPanel(QWidget):
         self._sweep_calc._recalculate()
         self._update_batch_row_buttons()
 
+    def _refresh_bias2_visibility(self, *_args):
+        configured = bool(getattr(cfg.smu, "vbias2_resource", "")) or bool(getattr(self._smu, "has_vbias2", False))
+        self._sweep_calc._bias2_control.refresh_visibility(configured)
+        self._batch_table.setProperty("bias2Configured", configured)
+        _configure_batch_table_columns(self._batch_table)
+
     def bind_controller_signals(self) -> None:
         """Own only this page's subscriptions; never reconnect instruments."""
         self.unbind_controller_signals()
@@ -5014,6 +5146,8 @@ class PresetsPanel(QWidget):
             connect(self._smu.connected,
                 lambda *_: self._sweep_calc.set_vbias_available(self._smu.has_vbias)
             )
+            connect(self._smu.connected, self._refresh_bias2_visibility)
+            connect(self._smu.disconnected, self._refresh_bias2_visibility)
             connect(self._smu.connected, self._on_smu_reconnected)
             connect(self._smu.disconnected, lambda: self._sweep_calc.set_vbias_available(False))
             connect(self._smu.connected, self._refresh_readiness)
@@ -5158,6 +5292,7 @@ class PresetsPanel(QWidget):
                 "vbias": float(calc._vbias_spin.value()),
                 "repeat": int(calc._repeat_spin.value()),
                 "include_vbias": bool(calc._include_vbias_chk.isChecked()),
+                "bias2": calc._bias2_control.settings(),
                 "condition_label": calc._condition_edit.text(),
             },
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
@@ -5384,6 +5519,8 @@ class PresetsPanel(QWidget):
                 self._sweep_calc._include_vbias_chk.setChecked(
                     bool(calculator["include_vbias"])
                 )
+            if isinstance(calculator.get("bias2"), dict):
+                self._sweep_calc._bias2_control.set_settings(calculator["bias2"])
             condition = calculator.get("condition_label")
             if isinstance(condition, str):
                 self._sweep_calc._condition_edit.setText(condition)
@@ -5753,6 +5890,20 @@ class PresetsPanel(QWidget):
             self._delete_disabled_batch_rows,
             target_menu=arrange_menu,
         )
+        repeat_menu = menu.addMenu("Quick Repeat")
+        repeat_menu.setToolTipsVisible(True)
+        self._batch_repeat_selected_action = add_action(
+            "Set Repeat for Selected Rows…",
+            lambda: self._prompt_batch_repeat(selected=True),
+            tooltip="Set one repeat count for the selected batch rows.",
+            target_menu=repeat_menu,
+        )
+        self._batch_repeat_all_action = add_action(
+            "Set Repeat for All Rows…",
+            lambda: self._prompt_batch_repeat(selected=False),
+            tooltip="Set one repeat count for every batch row.",
+            target_menu=repeat_menu,
+        )
         tools_menu = menu.addMenu("Sweep Tools")
         tools_menu.setToolTipsVisible(True)
         self._batch_auto_frames_action = add_action(
@@ -5835,6 +5986,7 @@ class PresetsPanel(QWidget):
         finally:
             self._batch_history_restoring = False
         self._update_batch_row_buttons()
+        _configure_batch_table_columns(self._batch_table)
         self._on_batch_draft_edited()
 
     @_coalesce_batch_updates
@@ -6047,7 +6199,7 @@ class PresetsPanel(QWidget):
                         message = f"Batch row {row_number}: {name} must be numeric."
                         issues.append(message)
                         mark(name, message)
-                for name in ("Vbias_start", "Vbias_stop"):
+                for name in ("Vbias_start", "Vbias_stop", "Vbias2_start", "Vbias2_stop", "bias2_offset_v"):
                     raw = str(row.get(name, "")).strip()
                     number = _safe_float(raw)
                     if raw and (number is None or not np.isfinite(number)):
@@ -7234,6 +7386,7 @@ class PresetsPanel(QWidget):
             table.blockSignals(signals_were_blocked)
         if updates_were_enabled:
             table.viewport().update()
+        _configure_batch_table_columns(table)
         table.scrollTo(table.model().index(selected_row, current_column))
         self._update_batch_row_buttons()
         self._commit_batch_change()
@@ -7251,6 +7404,8 @@ class PresetsPanel(QWidget):
         )
         self._batch_repeat_selected_btn.setEnabled(bool(rows))
         self._batch_repeat_all_btn.setEnabled(self._batch_table.rowCount() > 0)
+        self._batch_repeat_selected_action.setEnabled(bool(rows))
+        self._batch_repeat_all_action.setEnabled(self._batch_table.rowCount() > 0)
         self._update_batch_action_states(rows)
 
     def _update_batch_action_states(self, rows: Optional[List[int]] = None):
@@ -7322,6 +7477,7 @@ class PresetsPanel(QWidget):
             ("Vbg_start", "Vbg_stop"),
             ("Vtg_start", "Vtg_stop"),
             ("Vbias_start", "Vbias_stop"),
+            ("Vbias2_start", "Vbias2_stop"),
         ):
             values[start_name], values[stop_name] = (
                 values.get(stop_name, ""),
@@ -7423,6 +7579,19 @@ class PresetsPanel(QWidget):
             table.blockSignals(signals_were_blocked)
         self._commit_batch_change()
 
+    def _prompt_batch_repeat(self, *, selected: bool):
+        value, accepted = QInputDialog.getInt(
+            self, "Quick Repeat", "Repeat count:",
+            self._batch_repeat_spin.value(), self._batch_repeat_spin.minimum(),
+            self._batch_repeat_spin.maximum(), 1,
+        )
+        if accepted:
+            self._batch_repeat_spin.setValue(value)
+            if selected:
+                self._set_selected_rows_repeat()
+            else:
+                self._set_all_rows_repeat()
+
     @Slot()
     def _set_selected_rows_repeat(self):
         self._set_rows_repeat(
@@ -7516,6 +7685,7 @@ class PresetsPanel(QWidget):
                     ("Vbg_start", "Vbg_stop"),
                     ("Vtg_start", "Vtg_stop"),
                     ("Vbias_start", "Vbias_stop"),
+                    ("Vbias2_start", "Vbias2_stop"),
                 ):
                     start = _safe_float(values.get(start_name))
                     stop = _safe_float(values.get(stop_name))
@@ -7567,7 +7737,7 @@ class PresetsPanel(QWidget):
                     issues.append(
                         f"Row {row_number}: {name} must be numeric."
                     )
-            for name in ("Vbias_start", "Vbias_stop"):
+            for name in ("Vbias_start", "Vbias_stop", "Vbias2_start", "Vbias2_stop", "bias2_offset_v"):
                 value = str(row.get(name, "")).strip()
                 if value and _safe_float(value) is None:
                     issues.append(
@@ -7722,6 +7892,8 @@ class PresetsPanel(QWidget):
                     return
 
         self._commit_batch_change()
+        if col_name == "bias2_mode":
+            _configure_batch_table_columns(self._batch_table)
 
     @Slot(list)
     def _on_calculator_add_rows(self, rows: list):

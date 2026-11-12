@@ -65,6 +65,13 @@ class QuickDualGateSequencePreview(QWidget):
         if not self._closed:
             self._height_timer.start(0)
 
+    def set_embedded(self, embedded=True):
+        """Use the workspace's section heading and persistent run status."""
+        root = self.quick_widget.rootObject()
+        if root is not None:
+            root.setProperty("embedded", bool(embedded))
+            self._schedule_content_height()
+
     def _sync_content_height(self):
         root = self.quick_widget.rootObject()
         if self._closed or not self._compact or root is None:

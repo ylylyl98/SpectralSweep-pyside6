@@ -22,78 +22,25 @@ AppPane {
     readonly property var fieldWidths: {
         const widths = tableModel.columnWidths
         if (tableModel.singleLineRows) {
-            const minimums = tableModel.minimumColumnWidths
-            const titles = tableModel.columnKeys
-            const voltages = []
-            for (let i = 0; i < titles.length; ++i) {
-                if (/^V(bg|tg|bias)_/.test(titles[i])) voltages.push(i)
-            }
+            const minimums = tableModel.compactColumnTitles.map((title, i) => {
+                const measure = headerMeasures.itemAt(i)
+                const floor = tableModel.columnKeys[i] === "bias2_mode" ? 50 : 24
+                return Math.max(floor, measure ? measure.implicitWidth + 4 : 32)
+            })
             const available = Math.max(0, fieldWidth - Math.max(0, widths.length - 1) * 4)
-            let preferredTotal = 0, minimumTotal = 0
+            let minTotal = 0, preferredTotal = 0
             for (let i = 0; i < widths.length; ++i) {
-                preferredTotal += widths[i]
-                minimumTotal += minimums[i]
+                minTotal += minimums[i]
+                preferredTotal += Math.max(widths[i], minimums[i])
             }
-            const fitted = []
-            const compact = minimums.slice()
-            let shortage = Math.max(0, minimumTotal - available)
-            // Protect condition names at laptop widths. Compress the optional
-            // expression/counts first, then trim voltage padding room. Only
-            // extreme standalone previews scale the entire record together.
-            function trim(name, floor) {
-                const column = titles.indexOf(name)
-                if (column < 0) return
-                const reduction = Math.min(shortage, Math.max(0, compact[column] - floor))
-                compact[column] -= reduction
-                shortage -= reduction
-            }
-            trim("When", 30)
-            trim("repeat", 26)
-            trim("frames", 30)
-            let voltageRoom = 0
-            for (let i = 0; i < voltages.length; ++i) voltageRoom += Math.max(0, compact[voltages[i]] - 38)
-            const voltageReduction = Math.min(shortage, voltageRoom)
-            for (let i = 0; i < voltages.length; ++i) {
-                const column = voltages[i]
-                compact[column] -= voltageReduction * Math.max(0, compact[column] - 38) / Math.max(1, voltageRoom)
-            }
-            shortage -= voltageReduction
-            let compactTotal = 0
-            for (let i = 0; i < compact.length; ++i) compactTotal += compact[i]
-            const fraction = Math.max(0, Math.min(1, (available - minimumTotal) / Math.max(1, preferredTotal - minimumTotal)))
-            let used = 0
-            for (let i = 0; i < widths.length; ++i) {
-                fitted[i] = available < minimumTotal
-                    ? compact[i] * (shortage > 0 ? available / Math.max(1, compactTotal) : 1)
-                    : minimums[i] + (widths[i] - minimums[i]) * fraction
-                used += fitted[i]
-            }
-            // Give names and expressions useful desktop room, then share the
-            // remaining width among the voltage fields instead of growing two
-            // mostly empty text columns. Flags and counts stay compact.
-            const condition = titles.indexOf("condition_label")
-            const when = titles.indexOf("When")
-            const extra = Math.max(0, available - used)
-            let allocated = 0
-            if (condition >= 0) {
-                const addition = Math.min(extra * (when >= 0 ? .7 : 1), Math.max(0, 320 - fitted[condition]))
-                fitted[condition] += addition
-                allocated += addition
-            }
-            if (when >= 0) {
-                const addition = Math.min(extra * (condition >= 0 ? .3 : 1), Math.max(0, 240 - fitted[when]))
-                fitted[when] += addition
-                allocated += addition
-            }
-            if (voltages.length) {
-                const addition = Math.max(0, extra - allocated) / voltages.length
-                for (let i = 0; i < voltages.length; ++i) fitted[voltages[i]] += addition
-            } else if (condition < 0 && when < 0 && fitted.length) {
-                fitted[fitted.length - 1] += extra
-            }
-            // Round down before Flow positions its entries: a floating-point
-            // remainder must never turn the last cell into a second line.
-            return fitted.map(value => Math.floor(value * 100) / 100)
+            // Keep full abbreviations intact whenever physically possible.
+            // Only exceptionally narrow windows compress below those widths.
+            const fraction = Math.max(0, Math.min(1,
+                (available - minTotal) / Math.max(1, preferredTotal - minTotal)))
+            return widths.map((value, i) => Math.floor(100 * (available < minTotal
+                ? minimums[i] * available / Math.max(1, minTotal)
+                : minimums[i] + (Math.max(value, minimums[i]) - minimums[i]) * fraction)) / 100)
+
         }
         const result = []
         let first = 0, used = 0
@@ -156,6 +103,19 @@ AppPane {
             Qt.callLater(root.restoreViewport)
         }
     }
+    // Measure with the actual rendered theme font, including localized labels.
+    Repeater {
+        id: headerMeasures
+        model: root.tableModel.singleLineRows ? root.tableModel.compactColumnTitles : []
+        Text {
+            required property string modelData
+            visible: false
+            text: modelData
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.bodySize
+            font.weight: Font.DemiBold
+        }
+    }
     component CellPressHandler: PointHandler {
         required property int row
         acceptedButtons: Qt.LeftButton
@@ -185,8 +145,8 @@ AppPane {
                     required property string modelData
                     objectName: "tableHeader_" + index
                     width: root.fieldWidths[index] || 0
-                    text: root.compactSingleLine
-                        ? ({"MeasurePower": "Pwr", "repeat": "Rep.", "frames": "Fr."}[root.tableModel.columnKeys[index]] || root.tableModel.displayColumnTitles[index])
+                    text: root.tableModel.singleLineRows
+                        ? root.tableModel.compactColumnTitles[index]
                         : root.tableModel.displayColumnTitles[index]
                     Accessible.name: modelData
                     color: Theme.textSecondary
@@ -308,10 +268,17 @@ AppPane {
                                     CellPressHandler { row: entry.row }
                                     objectName: "tableCell_" + entry.row + "_" + entry.column
                                     enabled: entry.cell.enabled
+                                    readonly property bool compactBiasMode: root.tableModel.singleLineRows && root.tableModel.columnKeys[entry.column] === "bias2_mode"
+                                    leftPadding: compactBiasMode ? 3 : 10
+                                    rightPadding: compactBiasMode ? 20 : 28
+                                    popup.width: compactBiasMode ? Math.max(width, 150) : width
                                     model: entry.cell.options
                                     enabledOptions: entry.cell.optionEnabled
                                     editable: entry.cell.choiceEditable
                                     currentIndex: entry.cell.currentIndex
+                                    displayText: compactBiasMode
+                                        ? ({"off": "Off", "independent": "Ind", "follow": "Fol"}[choice.currentText] || choice.currentText)
+                                        : choice.currentText
                                     Binding { target: choice; property: "editText"; value: entry.cell.editText; when: !choice.activeFocus || !entry.cell.drafted; restoreMode: Binding.RestoreNone }
                                     Accessible.name: "Row " + (entry.row + 1) + ", " + entry.cell.label
                                     // In a table, column alignment and the

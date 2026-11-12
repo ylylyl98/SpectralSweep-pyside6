@@ -13,6 +13,13 @@ QtObject {
     readonly property color commandSurface: dark ? "#202a37" : "#ffffff"
     readonly property color surfaceHover: dark ? "#2b394a" : "#e9eff6"
     readonly property color surfacePressed: dark ? "#34465b" : "#dce6f1"
+    // Neutral action buttons remain distinct from editable white surfaces.
+    readonly property color buttonSurface: dark ? "#2c3a4b" : "#edf2f8"
+    readonly property color buttonHover: dark ? "#394a5e" : "#dfe8f2"
+    readonly property color buttonPressed: dark ? "#455a71" : "#cfdeeb"
+    readonly property color buttonBorder: dark ? "#93a8bf" : "#66788d"
+    readonly property color buttonDisabledSurface: dark ? "#26313e" : "#edf0f4"
+    readonly property color buttonDisabledBorder: dark ? "#617285" : "#a6b1bf"
     readonly property color border: dark ? "#61758d" : "#8a9aaf"
     readonly property color borderAccessible: border
     readonly property color inputBorder: dark ? "#46596f" : "#bdc9d8"

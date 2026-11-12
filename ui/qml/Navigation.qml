@@ -21,7 +21,7 @@ AppPane {
             Layout.rightMargin: 16
             Layout.topMargin: 9
             Layout.bottomMargin: 9
-            columns: root.width >= 1000 ? 7 : 3
+            columns: root.width >= 1350 ? 6 : 3
             columnSpacing: 12
             rowSpacing: 6
             RowLayout {
@@ -31,17 +31,20 @@ AppPane {
             }
             RowLayout {
                 spacing: 7
-                Layout.maximumWidth: 280
                 Layout.minimumWidth: 0
                 AppLabel { text: "Sample ID"; color: Theme.textSecondary }
-                AppTextField {
+                RowLayout {
+                    spacing: 0
+                    Layout.minimumWidth: 108
+                    Layout.maximumWidth: 240
+                    AppTextField {
                     id: sampleEditor
                     objectName: "WorkspaceSampleId"
                     text: ""
                     placeholderText: "Enter Sample ID"
                     Layout.fillWidth: true
-                    Layout.preferredWidth: 160
-                    Layout.minimumWidth: 100
+                    Layout.preferredWidth: 200
+                    Layout.minimumWidth: 80
                     readOnly: !root.bridge || typeof root.bridge.commitSampleId !== "function"
                               || !root.bridge.sampleEditable
                     Accessible.name: "Current sample ID"
@@ -72,8 +75,117 @@ AppPane {
                         function onSampleEditorChanged() { sampleEditor.sync() }
                     }
                 }
+                AppButton {
+                    id: sampleDropdown
+                    objectName: "WorkspaceSampleDropdown"
+                    text: ""
+                    implicitWidth: 28
+                    Layout.preferredWidth: 28
+                    Layout.minimumWidth: 28
+                    leftPadding: 0
+                    rightPadding: 0
+                    contentItem: Canvas {
+                        implicitWidth: 10; implicitHeight: 6
+                        onPaint: { const ctx = getContext("2d"); ctx.reset(); ctx.strokeStyle = Theme.textSecondary; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(width/2-4,height/2-2); ctx.lineTo(width/2,height/2+2); ctx.lineTo(width/2+4,height/2-2); ctx.stroke() }
+                        Connections { target: Theme; function onDarkChanged() { parent.requestPaint() } }
+                    }
+                    enabled: !!root.bridge && !!root.bridge.sampleEditable
+                    tooltipText: "Search and select a saved sample"
+                    Accessible.name: "Search saved samples"
+                    onClicked: {
+                        sampleSearch.text = ""
+                        samplePopup.open()
+                        sampleSearch.forceActiveFocus()
+                    }
+                    Popup {
+                        id: samplePopup
+                        objectName: "WorkspaceSamplePopup"
+                        popupType: Popup.Window
+                        focus: true
+                        onOpened: sampleSearch.forceActiveFocus()
+                        y: sampleDropdown.height + 2
+                        width: 260
+                        padding: 6
+                        implicitHeight: searchContent.implicitHeight + topPadding + bottomPadding
+                        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+                        background: Rectangle { color: Theme.surface; border.color: Theme.border; radius: Theme.radius }
+                        ColumnLayout {
+                            id: searchContent
+                            width: parent.width
+                            spacing: 4
+                            AppTextField {
+                                id: sampleSearch
+                                objectName: "WorkspaceSampleSearch"
+                                Layout.fillWidth: true
+                                placeholderText: "Search saved samples"
+                                Accessible.name: "Search saved samples"
+                            }
+                            ListView {
+                                id: sampleList
+                                objectName: "WorkspaceSampleResults"
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: Math.min(count * 32, 224)
+                                clip: true
+                                model: root.bridge && root.bridge.sampleIds
+                                    ? root.bridge.sampleIds.filter(function(value) {
+                                        return value.toLocaleLowerCase().indexOf(sampleSearch.text.toLocaleLowerCase()) >= 0
+                                      }) : []
+                                delegate: ItemDelegate {
+                                    required property int index
+                                    required property string modelData
+                                    objectName: "sampleResult_" + index
+                                    width: sampleList.width
+                                    text: modelData
+                                    Accessible.name: "Select sample " + modelData
+                                    onClicked: {
+                                        samplePopup.close()
+                                        root.bridge.commitSampleId(modelData)
+                                        sampleEditor.sync()
+                                    }
+                                }
+                                ScrollBar.vertical: ScrollBar {}
+                            }
+                            AppLabel {
+                                visible: sampleList.count === 0
+                                text: "No matching samples"
+                                color: Theme.textSecondary
+                            }
+                        }
+                    }
+                }
+                }
+                AppButton {
+                    objectName: "WorkspaceSaveSample"
+                    text: "Save sample"
+                    appearance: "accent"
+                    onClicked: if (root.bridge) root.bridge.saveSample()
+                }
+                AppButton {
+                    id: sampleActions
+                    objectName: "WorkspaceSampleActions"
+                    text: "Sample actions"
+                    enabled: !!root.bridge && (typeof root.bridge.sampleOperationsEnabled === "undefined" || root.bridge.sampleOperationsEnabled)
+                    onClicked: sampleActionsMenu.open()
+                    Menu {
+                        id: sampleActionsMenu
+                        popupType: Popup.Window
+                        y: sampleActions.height + 2
+                        MenuItem { objectName: "WorkspaceNewSample"; text: "New sample…"; onTriggered: root.bridge.newSample() }
+                        MenuItem { objectName: "WorkspaceDuplicateSample"; text: "Duplicate current…"; onTriggered: root.bridge.duplicateSample() }
+                    }
+                }
+                AppLabel {
+                    objectName: "WorkspaceSampleSaveStatus"
+                    visible: text.length > 0
+                    text: root.bridge && typeof root.bridge.sampleSaveStatus !== "undefined" ? root.bridge.sampleSaveStatus : ""
+                    color: Theme.textSecondary
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: 150
+                    Accessible.name: "Sample save status: " + text
+                }
             }
             AppLabel {
+                objectName: "WorkspaceActivityStatus"
                 text: root.bridge ? root.bridge.activityText : ""
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
@@ -81,9 +193,8 @@ AppPane {
                 Accessible.name: text
                 color: Theme.textSubtle
             }
-            AppButton { text: "Instruments"; appearance: "subtle"; onClicked: if (root.bridge) root.bridge.toggleSidebar() }
-            AppButton { text: "Run history"; appearance: "subtle"; onClicked: if (root.bridge) root.bridge.showHistory() }
-            AppButton { text: "Save sample"; appearance: "accent"; onClicked: if (root.bridge) root.bridge.saveSample() }
+            AppButton { objectName: "WorkspaceInstruments"; text: "Instruments"; appearance: "subtle"; onClicked: if (root.bridge) root.bridge.toggleSidebar() }
+            AppButton { objectName: "WorkspaceRunHistory"; text: "Run history"; appearance: "subtle"; onClicked: if (root.bridge) root.bridge.showHistory() }
             AppComboBox {
                 objectName: "WorkspaceTheme"
                 Layout.preferredWidth: 104

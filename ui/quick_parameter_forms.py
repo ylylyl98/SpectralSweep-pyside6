@@ -111,7 +111,8 @@ def _menu_edit_policy(panel, action):
     commit = ("_batch_copy_action", "_batch_paste_action", "_batch_duplicate_action", "_batch_rev_action",
               "_batch_enable_selected_action", "_batch_disable_selected_action", "_batch_only_selected_action",
               "_batch_enable_all_action", "_batch_disable_all_action", "_batch_move_top_action",
-              "_batch_move_bottom_action", "_batch_auto_frames_action", "_batch_validate_action")
+              "_batch_move_bottom_action", "_batch_auto_frames_action", "_batch_validate_action",
+              "_batch_repeat_selected_action", "_batch_repeat_all_action")
     for attribute in discard:
         if getattr(panel, attribute, None) is action:
             return "discard"

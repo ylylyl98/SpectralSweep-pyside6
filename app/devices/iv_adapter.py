@@ -62,15 +62,15 @@ class IVDevice:
         role_map: Optional[Dict[str, Optional[str]]] = None,  # e.g. {"Vbg": "...", "Vtg": "...", "Vbias": "..."}
     ):
         self.setup = setup
-        self.role_map = role_map or {"Vbg": None, "Vtg": None, "Vbias": None}
+        self.role_map = role_map or {"Vbg": None, "Vtg": None, "Vbias": None, "Vbias2": None}
         self._io_lock = threading.RLock()
         self._operation_context: Dict[str, Any] = {}
         self._operation_history = deque(maxlen=30)
         self._role_health: Dict[str, str] = {
-            role: "ready" for role in ("Vbg", "Vtg", "Vbias")
+            role: "ready" for role in ("Vbg", "Vtg", "Vbias", "Vbias2")
         }
         self._health_transitions: Dict[str, list] = {
-            role: [] for role in ("Vbg", "Vtg", "Vbias")
+            role: [] for role in ("Vbg", "Vtg", "Vbias", "Vbias2")
         }
         self._baseline_esr: Dict[str, Optional[int]] = {}
         self._last_communication_error: Optional[SMUCommunicationError] = None
@@ -263,7 +263,7 @@ class IVDevice:
         """
         seen = set()
         failures: Dict[str, str] = {}
-        for role in ("Vbg", "Vtg", "Vbias"):
+        for role in ("Vbg", "Vtg", "Vbias", "Vbias2"):
             if not self.has_role(role):
                 continue
             inst = self._instrument_for_role(role)
@@ -551,7 +551,7 @@ class IVDevice:
         """Best-effort live hardware read for one axis, falling back to nan."""
         nan = float("nan")
         try:
-            if name in ("Vbg", "Vtg", "Vbias"):
+            if name in ("Vbg", "Vtg", "Vbias", "Vbias2"):
                 value = self._read_measured_role(name)
                 return float(value) if value is not None else nan
         except Exception:
@@ -662,7 +662,7 @@ class IVDevice:
         self, role: str, target: float, delay_s: float = 0.0
     ) -> bool:
         """Set one role once, using a caller-maintained confirmed setpoint."""
-        if role not in ("Vbg", "Vtg", "Vbias"):
+        if role not in ("Vbg", "Vtg", "Vbias", "Vbias2"):
             raise ValueError(f"Unknown Keithley role: {role}")
         if not self.has_role(role):
             return False
@@ -858,6 +858,8 @@ class IVDevice:
                         role = "Vbg"
                     elif key.startswith("Vtg"):
                         role = "Vtg"
+                    elif key.startswith("Vbias2"):
+                        role = "Vbias2"
                     elif key.startswith("Vbias"):
                         role = "Vbias"
                     else:
@@ -971,11 +973,23 @@ class IVDevice:
             return None
         return self._read_measured_role("Vbias", strict=strict)
 
+    def read_current_bias2(self, *, strict: bool = False) -> Optional[float]:
+        """Return the measured second bias voltage when its role is present."""
+        if not self.has_role("Vbias2"):
+            return None
+        return self._read_measured_role("Vbias2", strict=strict)
+
+    def read_bias2_current(self, *, strict: bool = False) -> Optional[float]:
+        """Return the measured second bias current without changing legacy tuples."""
+        if not self.has_role("Vbias2"):
+            return None
+        return self._safe_read_y("Vbias2_leakage", strict=strict)
+
     def read_role_voltage(
         self, role: str, *, strict: bool = False
     ) -> Optional[float]:
         """Read the live output voltage for one mapped Keithley role."""
-        if role not in ("Vbg", "Vtg", "Vbias"):
+        if role not in ("Vbg", "Vtg", "Vbias", "Vbias2"):
             raise ValueError(f"Unknown Keithley role: {role}")
         return self._read_measured_role(role, strict=strict)
 
@@ -1000,14 +1014,16 @@ class IVDevice:
         return bg_val, tg_val
 
     def ramp_all_to_zero_report(
-        self, ramp_step: float = 0.1, delay_s: float = 0.05
+        self, ramp_step: float = 0.1, delay_s: float = 0.05, *,
+        include_bias2: bool = False,
     ) -> Dict[str, Dict[str, Any]]:
-        """Return a per-role cleanup result while isolating failed instruments."""
+        """Return isolated cleanup results for the roles used by the operation."""
+        roles = (("Vbias2",) if include_bias2 else ()) + ("Vbias", "Vbg", "Vtg")
         report: Dict[str, Dict[str, Any]] = {}
         role_map = getattr(self, "role_map", {})
         role_health = getattr(self, "_role_health", {})
         if getattr(self, "_io_frozen", False):
-            for role in ("Vbias", "Vbg", "Vtg"):
+            for role in roles:
                 if self.has_role(role):
                     report[role] = {
                         "status": "skipped_frozen_after_error",
@@ -1015,7 +1031,7 @@ class IVDevice:
                         "error": "No SMU commands sent; reconnect is required.",
                     }
             return report
-        for role in ("Vbias", "Vbg", "Vtg"):
+        for role in roles:
             if not self.has_role(role):
                 continue
             try:
@@ -1038,11 +1054,12 @@ class IVDevice:
                 }
         return report
 
-    def ramp_all_to_zero(self, ramp_step: float = 0.1, delay_s: float = 0.05):
+    def ramp_all_to_zero(self, ramp_step: float = 0.1, delay_s: float = 0.05, *, include_bias2: bool = False):
         """Best-effort isolated ramps; one dead role cannot block the others."""
         report = self.ramp_all_to_zero_report(
             ramp_step=ramp_step,
             delay_s=delay_s,
+            include_bias2=include_bias2,
         )
         errors = [
             f"{role}: {result.get('error', result.get('status', 'failed'))}"

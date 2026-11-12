@@ -16,6 +16,29 @@ SIDEBAR_SOURCES = ("_sample_summary", "_sample_settings_panel", "_sample_selecto
                    "_run_history_btn", "_sidebar_hide", "_history_toggle")
 
 
+def _park_sample_controls(window, sidebar):
+    """Retain transaction sources without a second sample-management surface."""
+    if not window.property("quickGlobalSample"):
+        return
+    parking = QWidget(sidebar)
+    parking.setObjectName("QuickGlobalSampleStateHost")
+    parking.hide()
+    selector = getattr(window, "_sample_selector", None)
+    sample_filter = getattr(window, "_sample_filter", None)
+    if selector is not None and sample_filter is not None and sample_filter.text():
+        draft = selector.currentText()
+        sample_filter.clear()
+        selector.setEditText(draft)
+    # Detaching a splitter child also releases its reserved height. Leave the
+    # source objects, ownership, enabled states and callbacks intact.
+    for name in ("_sample_summary", "_history_container", "_sample_settings_panel", "_history_toggle"):
+        source = getattr(window, name, None)
+        if isinstance(source, QWidget) and not parking.isAncestorOf(source):
+            source.setParent(parking)
+            source.hide()
+    window._quick_sample_state_host = parking
+
+
 class SidebarForms(QObject):
     def __init__(self, window):
         super().__init__(window)
@@ -29,6 +52,7 @@ class SidebarForms(QObject):
             return
         if not any(isinstance(getattr(window, name, None), QWidget) for name in SIDEBAR_SOURCES):
             return
+        _park_sample_controls(window, sidebar)
         # Keep stable source/automation names without copying instrument fields.
         for name in SIDEBAR_SOURCES:
             source = getattr(window, name, None)

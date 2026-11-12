@@ -1,7 +1,13 @@
 @echo off
-setlocal
-cd /d %~dp0
+setlocal DisableDelayedExpansion
+cd /d "%~dp0"
 
+if defined SPECTRAL_SOURCE_STARTING goto :runtime
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\start_source.ps1" %*
+exit /b %errorlevel%
+
+:runtime
+set "SPECTRAL_SOURCE_STARTING="
 set "PY="
 set "BOOTSTRAP="
 set "PYVER="

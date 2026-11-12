@@ -794,6 +794,40 @@ class _PowerSweepWorker(QObject):
                     raise ValueError(f"{axis} value {value:g} is outside [{lower:g}, {upper:g}]")
         if self._lf6 is None or not bool(getattr(self._lf6, "is_connected", False)) or getattr(self._lf6, "adapter", None) is None:
             raise RuntimeError("Motion sweep requires a connected LF6")
+        iv = None
+        if p.get("apply_gates"):
+            if self._smu is None or not bool(getattr(self._smu, "is_connected", False)) or getattr(self._smu, "device", None) is None:
+                raise RuntimeError("Motion sweep gate conditions require a connected SMU")
+            iv = self._smu.device
+            # Resolve channel roles and health before any gate or motion
+            # command.  A zero Vbias is optional only when the device
+            # explicitly reports that no Vbias role exists.
+            checker = getattr(iv, "role_is_available", None) or getattr(iv, "has_role", None)
+            health = getattr(iv, "health_states", {})
+            for role in ("Vbg", "Vtg", "Vbias", "Vbias2"):
+                needed = (any(c.get("bias2_mode", "off") != "off" for c in conditions) if role == "Vbias2" else
+                          role != "Vbias" or any(float(c.get("vbias_v", 0.0)) != 0.0 or c.get("bias2_mode") == "follow" for c in conditions))
+                if role == "Vbias2" and not needed: continue
+                available = False if role == "Vbias2" or (role == "Vbias" and any(c.get("bias2_mode") == "follow" for c in conditions)) else None
+                if callable(checker):
+                    try: available = bool(checker(role))
+                    except Exception: available = False
+                if role == "Vbias" and not needed and available is False:
+                    continue
+                if available is False:
+                    raise RuntimeError(f"Required SMU channel role {role} is unavailable")
+                if isinstance(health, Mapping) and health.get(role, "ready") != "ready":
+                    raise RuntimeError(f"SMU channel role {role} is not ready; reconnect required")
+            limit = abs(float(getattr(getattr(self._smu, "limits", None), "volt_compliance_V", getattr(cfg.smu, "volt_compliance_V", 20.0))))
+            from utils.mcd_common import validate_gate_conditions
+            validate_gate_conditions(conditions, limit)
+            from utils.mcd_common import validate_bias2_device_targets
+            validate_bias2_device_targets(self._smu, conditions)
+            for index, condition in enumerate(conditions, 1):
+                for key in ("vtg_v", "vbg_v", "vbias_v"):
+                    value = float(condition.get(key, 0.0))
+                    if not math.isfinite(value) or abs(value) > limit + 1e-9:
+                        raise ValueError(f"condition {index} {key} exceeds SMU voltage compliance")
         prepare = getattr(self._lf6, "configure_for_acquisition", None)
         if callable(prepare):
             try:
@@ -811,34 +845,6 @@ class _PowerSweepWorker(QObject):
                         configure_pm(float(p["pm_wl_nm"]))
                 except Exception as exc:
                     raise RuntimeError(f"PM wavelength configuration failed: {exc}") from exc
-        iv = None
-        if p.get("apply_gates"):
-            if self._smu is None or not bool(getattr(self._smu, "is_connected", False)) or getattr(self._smu, "device", None) is None:
-                raise RuntimeError("Motion sweep gate conditions require a connected SMU")
-            iv = self._smu.device
-            # Resolve channel roles and health before any gate or motion
-            # command.  A zero Vbias is optional only when the device
-            # explicitly reports that no Vbias role exists.
-            checker = getattr(iv, "role_is_available", None) or getattr(iv, "has_role", None)
-            health = getattr(iv, "health_states", {})
-            for role in ("Vbg", "Vtg", "Vbias"):
-                needed = role != "Vbias" or any(float(c.get("vbias_v", 0.0)) != 0.0 for c in conditions)
-                available = None
-                if callable(checker):
-                    try: available = bool(checker(role))
-                    except Exception: available = False
-                if role == "Vbias" and not needed and available is False:
-                    continue
-                if available is False:
-                    raise RuntimeError(f"Required SMU channel role {role} is unavailable")
-                if isinstance(health, Mapping) and health.get(role, "ready") != "ready":
-                    raise RuntimeError(f"SMU channel role {role} is not ready; reconnect required")
-            limit = abs(float(getattr(getattr(self._smu, "limits", None), "volt_compliance_V", getattr(cfg.smu, "volt_compliance_V", 20.0))))
-            for index, condition in enumerate(conditions, 1):
-                for key in ("vtg_v", "vbg_v", "vbias_v"):
-                    value = float(condition.get(key, 0.0))
-                    if not math.isfinite(value) or abs(value) > limit + 1e-9:
-                        raise ValueError(f"condition {index} {key} exceeds SMU voltage compliance")
         spec_lf6 = self._lf6.adapter
         try:
             wls = np.asarray(spec_lf6.calibration_wavelengths(force=False), dtype=float).ravel()
@@ -866,6 +872,8 @@ class _PowerSweepWorker(QObject):
         if iv is not None: headers += _SMU_COLUMNS
         headers += ["condition_id", "condition_index", "condition_label", "doping_v", "efield_v",
                     "condition_vtg", "condition_vbg", "condition_vbias", "sequence", "repeat"]
+        bias2_active = any(c.get("bias2_mode", "off") != "off" for c in conditions)
+        if bias2_active: headers += ["Vbias2_mode", "Vbias2_target", "Vbias2_meas", "Ibias2_A"]
         headers += [f"{float(w):.4f}" for w in wls]
         manifest_path = out_path / f"{p['base_name']}_manifest.json"
         manifest = {"version": plan["version"], "status": "running", "acquisition_status": "running",
@@ -908,17 +916,25 @@ class _PowerSweepWorker(QObject):
                     row_manifest = manifest["entries"][number - 1]; row_manifest["status"] = "running"
                     condition = entry["condition"]
                     gate = (float(condition.get("vbg_v", 0.0)), float(condition.get("vtg_v", 0.0)), float(condition.get("vbias_v", 0.0)))
-                    if iv is not None and (current_gate is None or any(not math.isclose(a, b, abs_tol=1e-9) for a,b in zip(current_gate, gate))):
+                    gate_identity = (gate, condition.get("bias2_mode", "off"), float(condition.get("vbias2_v", 0.0)), float(condition.get("bias2_offset_v", 0.0)))
+                    if iv is not None and current_gate != gate_identity:
                         iv.set_gates(Vtg=gate[1], Vbg=gate[0], ramp_step=p.get("ramp_step_V", 0.1),
                                      delay_s=p.get("step_delay_s", 0.02), stop_cb=self._stop.is_set, stop_exc=_StopRequested)
-                        if hasattr(iv, "set_bias"):
-                            iv.set_bias(Vbias=gate[2], ramp_step=p.get("vbias_step_V", p.get("ramp_step_V", 0.1)),
-                                        delay_s=p.get("step_delay_s", 0.02), stop_cb=self._stop.is_set, stop_exc=_StopRequested)
+                        from utils.bias_control import apply_bias_pair
+                        has_role = getattr(iv, "role_is_available", None) or getattr(iv, "has_role", None)
+                        master = gate[2] if not callable(has_role) or has_role("Vbias") else None
+                        if condition.get("bias2_mode", "off") == "off":
+                            if master is not None and callable(getattr(iv, "set_bias", None)):
+                                iv.set_bias(Vbias=master, ramp_step=p.get("vbias_step_V", p.get("ramp_step_V", 0.1)), delay_s=p.get("step_delay_s", 0.02), stop_cb=self._stop.is_set, stop_exc=_StopRequested)
+                        else:
+                            apply_bias_pair(iv, vbias=master, settings=condition,
+                                            ramp_step=min(p.get("vbias_step_V", p.get("ramp_step_V", 0.1)), getattr(cfg.ramp, "vbias2_step_V", p.get("ramp_step_V", 0.1))) if condition.get("bias2_mode", "off") != "off" else p.get("vbias_step_V", p.get("ramp_step_V", 0.1)),
+                                            delay_s=p.get("step_delay_s", 0.02), stop_cb=self._stop.is_set, stop_exc=_StopRequested)
                         _cancelable_sleep(p.get("settle_s", 0.0), self._stop)
-                        observed_gate = self._sequence_verify_gates(gate)
-                        current_gate = gate
+                        observed_gate = self._sequence_verify_gates(gate, condition)
+                        current_gate = gate_identity
                     else:
-                        observed_gate = self._sequence_verify_gates(gate) if iv is not None else {}
+                        observed_gate = self._sequence_verify_gates(gate, condition) if iv is not None else {}
                     requested = dict(entry["targets"])
                     actual = dict(current_targets)
                     for axis, target in requested.items():
@@ -988,8 +1004,17 @@ class _PowerSweepWorker(QObject):
                     if iv is not None:
                         vals += [gate[0], observed_gate.get("Vbg_observed", NAN), gate[1], observed_gate.get("Vtg_observed", NAN), gate[2], observed_gate.get("Vbias_observed", NAN), *_read_currents_strict(iv)]
                     vals += [cond_id, entry["condition_index"] + 1, condition.get("label", ""), condition.get("doping_v", NAN), condition.get("efield_v", NAN), gate[1], gate[0], gate[2], number, entry["repeat"]]
+                    if bias2_active:
+                        from utils.bias_control import resolve_bias2
+                        read_current = getattr(iv, "read_bias2_current", None) if iv is not None else None
+                        if condition.get("bias2_mode", "off") != "off":
+                            if not callable(read_current): raise RuntimeError("Vbias2 current readback unavailable")
+                            current2 = float(read_current(strict=True))
+                            if not math.isfinite(current2): raise RuntimeError("Vbias2 current readback is non-finite")
+                        else: current2 = NAN
+                        vals += [condition.get("bias2_mode", "off"), resolve_bias2(condition, gate[2]), observed_gate.get("Vbias2_observed", NAN), current2]
                     writer.writerow([_csv_cell(v) for v in vals] + [_csv_cell(v) for v in y]); fh.flush()
-                    row_manifest.update({"status": "complete", "condition_id": cond_id})
+                    row_manifest.update({"status": "complete", "condition_id": cond_id, "condition": dict(condition), "gate_readback": dict(observed_gate)})
                     self.progress.emit(number, len(plan["entries"]))
             complete = True; manifest["status"] = "complete"; manifest["acquisition_status"] = "complete"
         except _StopRequested:
@@ -1001,7 +1026,7 @@ class _PowerSweepWorker(QObject):
         finally:
             if p.get("return_to_zero", True) and iv is not None and (complete or stopped_cleanly):
                 try:
-                    result = iv.ramp_all_to_zero(ramp_step=p.get("ramp_step_V", 0.1), delay_s=p.get("step_delay_s", 0.02))
+                    result = iv.ramp_all_to_zero(ramp_step=p.get("ramp_step_V", 0.1), delay_s=p.get("step_delay_s", 0.02), **({"include_bias2": True} if bias2_active else {}))
                     if result: cleanup_errors.append(f"Gate return-to-zero: {result}")
                 except Exception as exc: cleanup_errors.append(f"Gate return-to-zero failed: {exc}")
             if p.get("return_motion_to_start", True):
@@ -1076,14 +1101,14 @@ class _PowerSweepWorker(QObject):
                 try:
                     order = str(p.get("sequence_order", p.get("order", "gate-first"))).lower()
                     if order.startswith("gate"):
-                        last_gate = self._sequence_apply_gate(p, gate, last_gate)
+                        last_gate = self._sequence_apply_gate(p, gate, last_gate, cond)
                         last_rotation = self._sequence_apply_rotations(p, requested, last_rotation)
                     else:
                         last_rotation = self._sequence_apply_rotations(p, requested, last_rotation)
-                        last_gate = self._sequence_apply_gate(p, gate, last_gate)
+                        last_gate = self._sequence_apply_gate(p, gate, last_gate, cond)
                     if self._stop.is_set():
                         raise _StopRequested()
-                    observed_gate = self._sequence_verify_gates(gate)
+                    observed_gate = self._sequence_verify_gates(gate, cond)
                     observed_rotation = self._sequence_rotation_readback(axes)
                     condition_id = entry["condition_id"]
                     applied = {"Vbg": gate[0], "Vtg": gate[1], "Vbias": gate[2], **observed_rotation}
@@ -1157,7 +1182,7 @@ class _PowerSweepWorker(QObject):
             if p.get("return_motion_to_start", True):
                 self._restore_motion_positions(restore)
             if failure is None and (completed_ok or self._stop.is_set()) and p.get("return_to_zero", True):
-                self._sequence_return_gates_zero(p)
+                self._sequence_return_gates_zero({**p, "bias2_active": any(c.get("bias2_mode", "off") != "off" for c in conditions)})
             if self._sequence_cleanup_errors:
                 manifest["cleanup_errors"] = list(self._sequence_cleanup_errors)
                 if manifest["status"] == "complete":
@@ -1235,6 +1260,19 @@ class _PowerSweepWorker(QObject):
             raise RuntimeError("Across conditions requires a connected SMU")
         if self._lf6 is None or not bool(getattr(self._lf6, "is_connected", False)) or getattr(self._lf6, "adapter", None) is None:
             raise RuntimeError("Across conditions requires a connected LF6")
+        from utils.mcd_common import validate_gate_conditions
+        validate_gate_conditions(conditions, getattr(cfg.smu, "volt_compliance_V", 20.0))
+        from utils.mcd_common import validate_bias2_device_targets
+        validate_bias2_device_targets(self._smu, conditions)
+        device = self._smu.device
+        checker = getattr(device, "role_is_available", None) or getattr(device, "has_role", None)
+        required = []
+        if any(c.get("bias2_mode", "off") != "off" for c in conditions): required.append("Vbias2")
+        if any(c.get("bias2_mode") == "follow" for c in conditions): required.append("Vbias")
+        elif callable(checker) and any(float(c.get("vbias_v", 0.0)) != 0 for c in conditions): required.append("Vbias")
+        for role in required:
+            if not callable(checker) or not checker(role): raise RuntimeError(f"Required SMU channel role {role} is unavailable")
+
         inner = str(p.get("motion_key", "stage"))
         if inner == "stage":
             adapter = getattr(self._stg, "adapter", None) if self._stg and bool(getattr(self._stg, "is_connected", False)) else None
@@ -1350,17 +1388,23 @@ class _PowerSweepWorker(QObject):
             last[f"{axis}_actual"] = observed
         return last
 
-    def _sequence_gate_readback(self) -> dict[str, float]:
+    def _sequence_gate_readback(self, condition=None) -> dict[str, float]:
         bg, tg = _read_gates(self._smu.device)
-        return {"Vbg_observed": bg, "Vtg_observed": tg, "Vbias_observed": _read_bias(self._smu.device)}
+        read_bias2 = getattr(self._smu.device, "read_current_bias2", None)
+        bias2 = NAN
+        if condition and condition.get("bias2_mode", "off") != "off":
+            if not callable(read_bias2): raise RuntimeError("Vbias2 readback unavailable")
+            bias2 = float(read_bias2(strict=True))
+            if not math.isfinite(bias2): raise RuntimeError("Vbias2 readback is non-finite")
+        return {"Vbg_observed": bg, "Vtg_observed": tg, "Vbias_observed": _read_bias(self._smu.device), "Vbias2_observed": bias2}
 
-    def _sequence_verify_gates(self, gate: tuple[float, float, float]) -> dict[str, float]:
+    def _sequence_verify_gates(self, gate: tuple[float, float, float], condition=None) -> dict[str, float]:
         """Retry transient readback errors without sending additional gate ramps."""
         has_role = getattr(self._smu.device, "has_role", None)
         for attempt in range(_GATE_READBACK_RETRIES + 1):
             if self._stop.is_set():
                 raise _StopRequested()
-            observed_gate = self._sequence_gate_readback()
+            observed_gate = self._sequence_gate_readback(condition)
             if self._stop.is_set():
                 raise _StopRequested()
             issues = []
@@ -1380,6 +1424,11 @@ class _PowerSweepWorker(QObject):
                         f"(requested {target:.12g} V, error {abs(observed - commanded):g} V, "
                         "tolerance 1e-05 V)"
                     )
+            if condition and condition.get("bias2_mode", "off") != "off":
+                from utils.bias_control import resolve_bias2
+                target2 = resolve_bias2(condition, gate[2])
+                if not math.isclose(observed_gate["Vbias2_observed"], target2, rel_tol=0.0, abs_tol=1e-5):
+                    issues.append(f"SMU Vbias2 readback does not match target {target2:g} V")
             if not issues:
                 return observed_gate
             detail = "; ".join(issues)
@@ -1397,8 +1446,10 @@ class _PowerSweepWorker(QObject):
                 out[f"{axis}_actual"] = NAN
         return out
 
-    def _sequence_apply_gate(self, p: dict, gate: tuple[float, float, float], last):
-        if last is not None and all(math.isclose(a, b, abs_tol=1e-9) for a, b in zip(last, gate)):
+    def _sequence_apply_gate(self, p: dict, gate: tuple[float, float, float], last, condition=None):
+        condition = condition or {}
+        identity = (gate, condition.get("bias2_mode", "off"), condition.get("vbias2_v", 0.0), condition.get("bias2_offset_v", 0.0))
+        if last == identity:
             return last
         if self._stop.is_set():
             raise _StopRequested()
@@ -1406,17 +1457,24 @@ class _PowerSweepWorker(QObject):
         iv.set_gates(Vtg=gate[1], Vbg=gate[0], ramp_step=p.get("ramp_step_V", 0.1),
                      delay_s=p.get("step_delay_s", p.get("ramp_step_V", 0.1) / 5),
                      stop_cb=self._stop.is_set, stop_exc=_StopRequested)
-        if hasattr(iv, "set_bias"):
-            iv.set_bias(Vbias=gate[2], ramp_step=p.get("vbias_step_V", p.get("ramp_step_V", 0.1)),
-                        delay_s=p.get("step_delay_s", p.get("ramp_step_V", 0.1) / 5),
-                        stop_cb=self._stop.is_set, stop_exc=_StopRequested)
+        from utils.bias_control import apply_bias_pair
+        has_role = getattr(iv, "role_is_available", None) or getattr(iv, "has_role", None)
+        master = gate[2] if not callable(has_role) or has_role("Vbias") else None
+        if condition.get("bias2_mode", "off") == "off":
+            if master is not None and callable(getattr(iv, "set_bias", None)):
+                iv.set_bias(Vbias=master, ramp_step=p.get("vbias_step_V", p.get("ramp_step_V", 0.1)), delay_s=p.get("step_delay_s", 0.02), stop_cb=self._stop.is_set, stop_exc=_StopRequested)
+        else:
+            apply_bias_pair(iv, vbias=master, settings=condition,
+                            ramp_step=min(p.get("vbias_step_V", p.get("ramp_step_V", 0.1)), getattr(cfg.ramp, "vbias2_step_V", p.get("ramp_step_V", 0.1))) if condition.get("bias2_mode", "off") != "off" else p.get("vbias_step_V", p.get("ramp_step_V", 0.1)),
+                            delay_s=p.get("step_delay_s", p.get("ramp_step_V", 0.1) / 5),
+                            stop_cb=self._stop.is_set, stop_exc=_StopRequested)
         _cancelable_sleep(p.get("settle_s", 0.0), self._stop)
-        return gate
+        return identity
 
     def _sequence_return_gates_zero(self, p: dict) -> None:
         try:
             result = self._smu.device.ramp_all_to_zero(ramp_step=p.get("ramp_step_V", 0.1),
-                                                       delay_s=p.get("step_delay_s", 0.02))
+                                                       delay_s=p.get("step_delay_s", 0.02), **({"include_bias2": True} if p.get("bias2_active") else {}))
             if result:
                 raise RuntimeError(str(result))
         except Exception as exc:
@@ -2652,9 +2710,13 @@ class PowerSweepPanel(QWidget):
         self._gate_grp.setEnabled(True)
         has_vb = getattr(self._smu, "has_vbias", False)
         self._vbias_spin.setEnabled(has_vb)
+        device = getattr(self._smu, "device", None)
+        checker = getattr(device, "role_is_available", None) or getattr(device, "has_role", None)
+        self._condition_editor.refresh_bias2_visibility(bool(checker("Vbias2")) if callable(checker) else False)
 
     @Slot()
     def _on_smu_disconnected(self):
+        self._condition_editor.refresh_bias2_visibility(False)
         self._smu_status.setText("○ Not connected")
         set_style_role(self._smu_status, 'text', tone='muted', strong=True)
         self._gate_grp.setEnabled(False)

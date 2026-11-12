@@ -95,7 +95,7 @@ class DualGateSpectrumViewer(QWidget):
         total = payload.get("point_total")
         point_text = f"Point {point}/{total} | " if point is not None and total is not None else ""
         voltage_bits = []
-        for label, key in (("Vbg", "Vbg_set"), ("Vtg", "Vtg_set"), ("Vbias", "Vbias_set")):
+        for label, key in (("Vbg", "Vbg_set"), ("Vtg", "Vtg_set"), ("Vbias", "Vbias_set"), ("Vbias2", "Vbias2_set")):
             value = payload.get(key)
             if value is not None:
                 voltage_bits.append(f"{label}={float(value):g} V")

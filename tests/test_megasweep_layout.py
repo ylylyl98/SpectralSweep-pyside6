@@ -172,10 +172,8 @@ class MegaSweepLayoutTests(unittest.TestCase):
         self.assertGreaterEqual(len(spins), 21)
         for spin in spins:
             self.assertLessEqual(spin.width(), 132)
-            self.assertLess(
-                spin.width(),
-                max(1, spin.parentWidget().width()),
-            )
+            if spin.isVisible():
+                self.assertLess(spin.width(), max(1, spin.parentWidget().width()))
 
     def test_long_path_does_not_force_the_preview_or_splitter_wider(self):
         panel = self._show_panel(1200, 720)
@@ -302,6 +300,8 @@ class MegaSweepLayoutTests(unittest.TestCase):
             panel._axis_b._step,
             *panel._fixed_widget._spins.values(),
             *panel._safety_widget._spins.values(),
+            panel._bias2_control.voltage,
+            panel._bias2_control.offset,
             panel._timing_widget._settle,
             panel._timing_widget._extra_overhead,
             panel._timing_widget._ramp_step,

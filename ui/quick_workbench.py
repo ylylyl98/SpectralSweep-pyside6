@@ -50,6 +50,7 @@ class QuickWorkbench(QObject):
             from ui.quick_style import apply_quick_style
             apply_quick_style(app, app.property("quickThemeMode") or "system")
         self.window = window
+        window.setProperty("quickGlobalSample", getattr(window, "_sample_selector", None) is not None)
         self.runtime = RuntimeState(self)
         self._pages = []
         self._commands = {}
@@ -363,6 +364,7 @@ class QuickWorkbench(QObject):
             references = install_reference_list(panel)
         tables = install_table_editors(panel)
         from ui.quick_workspace_layouts import configure_workspace_layout
+        panel.setProperty("quickGlobalSample", bool(self.window.property("quickGlobalSample")))
         configure_workspace_layout(panel, page_id)
         self._relocate_output_actions(panel, page_id)
         forms = install_parameter_forms(panel, page_id)
@@ -538,6 +540,21 @@ class QuickWorkbench(QObject):
         selector = getattr(self.window, "_sample_selector", None)
         return selector.currentText() if selector is not None else self.runtime.sampleId
 
+    @Property("QVariantList", notify=sampleEditorChanged)
+    def sampleIds(self):
+        selector = getattr(self.window, "_sample_selector", None)
+        return [selector.itemText(i) for i in range(selector.count())] if selector is not None else []
+
+    @Property(str, notify=sampleEditorChanged)
+    def sampleSaveStatus(self):
+        status = getattr(self.window, "_sample_save_status", None)
+        return status.text() if status is not None else ""
+
+    @Property(bool, notify=sampleEditorChanged)
+    def sampleOperationsEnabled(self):
+        check = getattr(self.window, "_acquisition_active", None)
+        return not self._closed and (not callable(check) or not check())
+
     @Property(bool, notify=sampleEditorChanged)
     def sampleEditable(self):
         selector = getattr(self.window, "_sample_selector", None)
@@ -563,7 +580,8 @@ class QuickWorkbench(QObject):
                 # The selector blocks its own signals while restoring a sample;
                 # its line edit still notifies both presentations of that reset.
                 edit.textChanged.connect(self._sync_sample_editor)
-        state = self.sampleDraft, self.sampleEditable
+        state = (self.sampleDraft, self.sampleEditable, tuple(self.sampleIds),
+                 self.sampleSaveStatus, self.sampleOperationsEnabled)
         if state != self._sample_editor_state:
             self._sample_editor_state = state
             self.sampleEditorChanged.emit()
@@ -651,15 +669,37 @@ class QuickWorkbench(QObject):
             else:
                 self.window._toggle_sidebar()
 
+    def _commit_sample_action_edits(self):
+        from ui.quick_editing import commit_quick_edits
+        owners = [entry[0] for entry in self._page_editors.values()]
+        if self._sidebar_forms is not None and hasattr(self._sidebar_forms, "sidebar"):
+            owners.append(self._sidebar_forms.sidebar)
+        if not all(commit_quick_edits(owner) for owner in owners):
+            self.window._status.showMessage("Correct the highlighted value before changing or saving a sample.", 8000)
+            return False
+        return True
+
     @Slot()
     def saveSample(self):
         if self._closed:
             return
-        if self._sidebar_forms is not None and hasattr(self._sidebar_forms, "sidebar"):
-            from ui.quick_editing import commit_quick_edits
-            if not commit_quick_edits(self._sidebar_forms.sidebar):
-                return
+        if self.sampleOperationsEnabled and not self._commit_sample_action_edits():
+            return
         self.window._save_current_sample()
+        self.refresh()
+
+    @Slot()
+    def newSample(self):
+        if self._closed or not self.sampleOperationsEnabled or not self._commit_sample_action_edits():
+            return
+        self.window._new_sample()
+        self.refresh()
+
+    @Slot()
+    def duplicateSample(self):
+        if self._closed or not self.sampleOperationsEnabled or not self._commit_sample_action_edits():
+            return
+        self.window._duplicate_current_sample()
         self.refresh()
 
     @Slot(str)
@@ -684,6 +724,9 @@ class QuickWorkbench(QObject):
     @Slot(str)
     def commitSampleId(self, value):
         if self._closed or not self.sampleEditable:
+            return
+        if self.sampleOperationsEnabled and not self._commit_sample_action_edits():
+            self.resetSampleIdDraft()
             return
         selector = self.window._sample_selector
         # Reuse the selector's sample-switch transaction, including validation,

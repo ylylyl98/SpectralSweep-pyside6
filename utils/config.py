@@ -134,6 +134,7 @@ class SMUConfig:
     vbg_resource: str = ""
     vtg_resource: str = ""
     vbias_resource: str = ""
+    vbias2_resource: str = ""
     termination: str = r"\n"
 
 
@@ -143,6 +144,7 @@ class RampConfig:
     step_V: float = 0.1               # V   — go_step default
     delay_s: float = 0.02             # s   — go_delay default
     settle_s: float = 0.05            # s   — settle_delay default
+    vbias2_step_V: float = 0.1
     vbias_step_V: float = 0.1         # V   — vbias_ramp_step default
     safe_jump_V: float = 0.5          # V   — max allowed direct jump during Dual Gate sweeps
 

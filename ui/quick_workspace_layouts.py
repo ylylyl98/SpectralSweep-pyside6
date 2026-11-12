@@ -493,6 +493,8 @@ def _dual_gate_layout(panel):
     _clear_group_title(panel._execution_order_group)
 
     sequence_panel = panel._tree.parentWidget()
+    if hasattr(panel._tree, "set_embedded"):
+        panel._tree.set_embedded(True)
     panel._sequence_toggle.setProperty("quickDisclosure", True)
     panel._filename_details_toggle.setProperty("quickDisclosure", True)
 
@@ -704,6 +706,55 @@ def _mega_sweep_layout(panel):
     return {"coordinate_hint": hint}
 
 
+def _hide_global_sample_field(panel, page_id):
+    """Keep shared sample sources alive for filenames and session restoration."""
+    if not panel.property("quickGlobalSample"):
+        return
+    attribute = {"dual_gate": "_sample_edit", "mega_sweep": "_sample_edit",
+                 "power_sweep": "_devid_edit", "bfp": "_dev_edit",
+                 "mcd": "_sample_id", "mcd2100": "_sample_id"}.get(page_id)
+    editor = getattr(panel, attribute, None) if attribute else None
+    if not isinstance(editor, QWidget):
+        return
+    editor.hide()
+    # Semantic grouping has finished; remove the label in its final location.
+    for label in panel.findChildren(QLabel):
+        if label.buddy() is editor:
+            label.hide()
+    for form in panel.findChildren(QFormLayout):
+        label = form.labelForField(editor)
+        if label is not None:
+            label.hide()
+            # MCD identity fields each own a one-field column. Hiding only the
+            # editor leaves that empty column occupying half the section.
+            if page_id in {"mcd", "mcd2100"} and form.rowCount() == 1:
+                owner = form.parentWidget()
+                owner.hide()
+                parent_grid = owner.parentWidget().layout()
+                if isinstance(parent_grid, QGridLayout):
+                    position = parent_grid.indexOf(owner)
+                    if position >= 0:
+                        _, column, _, _ = parent_grid.getItemPosition(position)
+                        parent_grid.setColumnStretch(column, 0)
+                        parent_grid.setColumnMinimumWidth(column, 0)
+    for grid in panel.findChildren(QGridLayout):
+        index = grid.indexOf(editor)
+        if index < 0:
+            continue
+        row, column, _, _ = grid.getItemPosition(index)
+        before = grid.itemAtPosition(row, column - 1) if column else None
+        label = before.widget() if before is not None else None
+        if isinstance(label, QLabel) and label.text().rstrip(":").strip().lower() == "sample id":
+            label.hide()
+    sections = getattr(panel, "_quick_gate_sections", {})
+    if page_id == "dual_gate" and sections.get("sample") is not None:
+        sections["sample"].setTitle("Location and temperature")
+    if page_id in {"mcd", "mcd2100"}:
+        for group in panel.findChildren(QGroupBox):
+            if group.title() == "Sample / Device":
+                group.setTitle("Location")
+
+
 def configure_workspace_layout(panel, page_id):
     """Assemble Quick-only workflow layout; call before scalar form migration."""
     app = QApplication.instance()
@@ -744,5 +795,6 @@ def configure_workspace_layout(panel, page_id):
     if page_id == "instruments":
         from ui.quick_instrument_layouts import configure_instrument_layout
         result = configure_instrument_layout(panel)
+    _hide_global_sample_field(panel, page_id)
     panel._quick_workspace_layout = result
     return result

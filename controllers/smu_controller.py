@@ -50,6 +50,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from iv_automation import IVSetup, KeithControl, PyvisaInstrument
 from utils.config import cfg
+from utils.bias_control import apply_bias_pair, normalize_bias2, resolve_bias2
 
 
 # ── Worker ────────────────────────────────────────────────────────────────────
@@ -71,13 +72,14 @@ class _SMUWorker(QObject):
         self._device = None   # app.devices.iv_adapter.IVDevice
         self._resource_manager = None
         self._connecting = False
+        self._applied_voltage_ranges = {}
 
     def _emit_live_readings(self, *, strict: bool = False) -> None:
         if self._device is None:
             return
         try:
             snapshots = {}
-            for role in ("Vbg", "Vtg", "Vbias"):
+            for role in ("Vbg", "Vtg", "Vbias", "Vbias2"):
                 if self._device.has_role(role):
                     snapshots[role] = self._device.read_role_snapshot(
                         role, strict=strict
@@ -87,13 +89,16 @@ class _SMUWorker(QObject):
             Vbg_m, Ibg = snapshots["Vbg"]
             Vtg_m, Itg = snapshots["Vtg"]
             Vbias_m, Ib = snapshots["Vbias"]
+            Vbias2_m, Ib2 = snapshots["Vbias2"]
             self.readings_ready.emit({
                 "Ibg": Ibg,
                 "Itg": Itg,
                 "Ibias": Ib,
+                "Ibias2": Ib2,
                 "Vbg_meas": Vbg_m,
                 "Vtg_meas": Vtg_m,
                 "Vbias_meas": Vbias_m,
+                "Vbias2_meas": Vbias2_m,
             })
         except Exception as exc:
             self.error.emit(f"SMU live read failed: {exc}")
@@ -109,11 +114,13 @@ class _SMUWorker(QObject):
             "Vbg": "Vbg_meas",
             "Vtg": "Vtg_meas",
             "Vbias": "Vbias_meas",
+            "Vbias2": "Vbias2_meas",
         }
         current_keys = {
             "Vbg": "Ibg",
             "Vtg": "Itg",
             "Vbias": "Ibias",
+            "Vbias2": "Ibias2",
         }
         self.readings_ready.emit({
             voltage_keys[role]: voltage,
@@ -139,6 +146,7 @@ class _SMUWorker(QObject):
                 except Exception:
                     pass
         self._device = None
+        self._applied_voltage_ranges.clear()
         if self._resource_manager is not None:
             try:
                 self._resource_manager.close()
@@ -188,6 +196,7 @@ class _SMUWorker(QObject):
             vbg_src = role_map.get("Vbg")
             vtg_src = role_map.get("Vtg")
             vbias_src = role_map.get("Vbias")
+            vbias2_src = role_map.get("Vbias2")
 
             print("SMU connection start", flush=True)
             print("configured roles:", flush=True)
@@ -195,6 +204,7 @@ class _SMUWorker(QObject):
                 ("Vbg", vbg_src),
                 ("Vtg", vtg_src),
                 ("Vbias", vbias_src),
+                ("Vbias2", vbias2_src),
             ):
                 print(f"    {role} -> {source or '<none>'}", flush=True)
             print(f"visa addresses to open: {visa_addrs}", flush=True)
@@ -231,6 +241,8 @@ class _SMUWorker(QObject):
                     role = "Vtg"
                 elif addr == vbias_src:
                     role = "Vbias"
+                elif addr == vbias2_src:
+                    role = "Vbias2"
 
                 print(
                     f"CONNECT ATTEMPT role={role or '?'} address={addr}",
@@ -314,6 +326,7 @@ class _SMUWorker(QObject):
                 ("Vbg", vbg_src),
                 ("Vtg", vtg_src),
                 ("Vbias", vbias_src),
+                ("Vbias2", vbias2_src),
             ):
                 if not source:
                     continue
@@ -367,6 +380,7 @@ class _SMUWorker(QObject):
 
             self.connected.emit(opened)
             for address, settings in initial_limit_results:
+                self._applied_voltage_ranges[str(address)] = float(settings["volt"])
                 self.limits_result.emit("apply", address, settings)
 
         except Exception as exc:
@@ -416,7 +430,7 @@ class _SMUWorker(QObject):
             flush=True,
         )
         try:
-            if role in ("Vbg", "Vtg", "Vbias"):
+            if role in ("Vbg", "Vtg", "Vbias", "Vbias2"):
                 inst = KeithControl(
                     address=addr,
                     name=f"{role}_SMU",
@@ -469,7 +483,7 @@ class _SMUWorker(QObject):
         output_on_connect: bool,
     ):
         """Configure one opened Keithley (or return {} for generic VISA)."""
-        if role not in ("Vbg", "Vtg", "Vbias"):
+        if role not in ("Vbg", "Vtg", "Vbias", "Vbias2"):
             return {}
         curr_c = float(compliance.get("curr", cfg.smu.curr_compliance_A))
         volt_c = float(compliance.get("volt", cfg.smu.volt_compliance_V))
@@ -611,6 +625,7 @@ class _SMUWorker(QObject):
         if self._device is None:
             self.limits_error.emit("apply", str(address), "SMU not connected.")
             return
+        self._applied_voltage_ranges.pop(str(address), None)
         try:
             instrument = self._keithley_for_address(address)
             if instrument is None:
@@ -620,11 +635,34 @@ class _SMUWorker(QObject):
                 None if current_range_A is None else float(current_range_A),
                 float(voltage_range_V),
             )
+            self._applied_voltage_ranges[str(address)] = float(settings["volt"])
             self.limits_result.emit("apply", str(address), settings)
         except Exception as exc:
             self.limits_error.emit("apply", str(address), str(exc))
 
-    @Slot(str, str, float, float, float)
+    @staticmethod
+    def _linked_ramp_step(requested):
+        steps = (float(requested), float(cfg.ramp.vbias_step_V), float(cfg.ramp.vbias2_step_V))
+        if any(not math.isfinite(step) or step <= 0 for step in steps):
+            raise ValueError("Linked bias ramp steps must be finite and positive.")
+        return min(steps)
+
+    def _validate_linked_manual_targets(self, target, settings):
+        """Check both final targets against verified ranges before any output."""
+        second = resolve_bias2(settings, target)
+        roles = getattr(self._device, "role_map", {})
+        for role, value in (("Vbias", float(target)), ("Vbias2", second)):
+            if value is None or not math.isfinite(float(value)):
+                raise ValueError(f"Invalid {role} target: {value}")
+            address = roles.get(role)
+            limit = self._applied_voltage_ranges.get(str(address)) if address else None
+            if limit is None or not math.isfinite(float(limit)) or float(limit) <= 0:
+                raise RuntimeError(f"No verified voltage range for {role}; apply limits first.")
+            effective = min(200.0, float(limit))
+            if abs(float(value)) > effective:
+                raise ValueError(f"{role} target {value:g} V exceeds the ±{effective:g} V limit.")
+
+    @Slot(str, str, float, float, float, object)
     def manual_control(
         self,
         action: str,
@@ -632,6 +670,7 @@ class _SMUWorker(QObject):
         value: float,
         ramp_step_V: float,
         delay_s: float,
+        bias2_settings=None,
     ) -> None:
         """Run one front-panel command on the serialized SMU worker thread."""
         if self._device is None:
@@ -648,7 +687,7 @@ class _SMUWorker(QObject):
             if action == "zero_all":
                 roles = []
                 availability = getattr(self._device, "role_is_available", None)
-                for candidate in ("Vbias", "Vbg", "Vtg"):
+                for candidate in ("Vbias2", "Vbias", "Vbg", "Vtg"):
                     if callable(availability) and availability(candidate):
                         roles.append(candidate)
                 if not roles:
@@ -677,7 +716,7 @@ class _SMUWorker(QObject):
                 self.manual_finished.emit(action, role, 0.0)
                 return
 
-            if role not in ("Vbg", "Vtg", "Vbias"):
+            if role not in ("Vbg", "Vtg", "Vbias", "Vbias2"):
                 raise ValueError(f"Unknown Keithley role: {role}")
             availability = getattr(self._device, "role_is_available", None)
             if callable(availability) and not availability(role):
@@ -686,6 +725,16 @@ class _SMUWorker(QObject):
             if action == "read_role":
                 self._emit_role_reading(role, strict=True)
                 self.manual_finished.emit(action, role, float("nan"))
+                return
+
+            follow = role == "Vbias" and normalize_bias2(bias2_settings)["mode"] == "follow"
+            if action == "set_fast" and follow:
+                target = float(value)
+                self._validate_linked_manual_targets(target, bias2_settings)
+                apply_bias_pair(self._device, vbias=target, settings=bias2_settings,
+                                ramp_step=self._linked_ramp_step(ramp_step_V),
+                                delay_s=max(float(delay_s), 0.0))
+                self.manual_finished.emit(action, role, target)
                 return
 
             if action == "set_fast":
@@ -717,15 +766,19 @@ class _SMUWorker(QObject):
             else:
                 raise ValueError(f"Unknown manual Keithley action: {action}")
 
-            moved = self._device.ramp_to(
-                role,
-                target,
-                max(abs(float(ramp_step_V)), 1e-4),
-                max(float(delay_s), 0.0),
-                start_value=measured,
-            )
-            if not moved:
-                raise RuntimeError(f"{role} Keithley is not available.")
+            if follow:
+                self._validate_linked_manual_targets(target, bias2_settings)
+                apply_bias_pair(self._device, vbias=target, settings=bias2_settings,
+                                ramp_step=self._linked_ramp_step(ramp_step_V),
+                                delay_s=max(float(delay_s), 0.0))
+                self._emit_role_reading("Vbias2", strict=True)
+            else:
+                moved = self._device.ramp_to(
+                    role, target, max(abs(float(ramp_step_V)), 1e-4),
+                    max(float(delay_s), 0.0), start_value=measured,
+                )
+                if not moved:
+                    raise RuntimeError(f"{role} Keithley is not available.")
             self._emit_role_reading(role, strict=True)
             self.manual_finished.emit(action, role, target)
         except Exception as exc:
@@ -787,7 +840,7 @@ class SMUController(QObject):
     _disconnect_requested = Signal()
     _read_requested = Signal()
     _zero_requested = Signal()
-    _manual_requested = Signal(str, str, float, float, float)
+    _manual_requested = Signal(str, str, float, float, float, object)
     _limits_read_requested = Signal(str)
     _limits_apply_requested = Signal(str, float, object, float)
 
@@ -800,6 +853,7 @@ class SMUController(QObject):
         self._role_map: Dict[str, Optional[str]] = {}
         self._voltage_readback = {}
         self._applied_limit_addresses: set[str] = set()
+        self._verified_voltage_ranges: dict[str, float] = {}
 
         self._worker.connected.connect(self.connected)
         self._worker.disconnected.connect(self._on_worker_disconnected)
@@ -853,6 +907,7 @@ class SMUController(QObject):
         self._role_map = dict(role_map)
         self._voltage_readback.clear()
         self._applied_limit_addresses.clear()
+        self._verified_voltage_ranges.clear()
         self._connect_requested.emit(
             visa_addrs,
             role_map,
@@ -868,6 +923,7 @@ class SMUController(QObject):
     def _on_worker_disconnected(self) -> None:
         self._voltage_readback.clear()
         self._applied_limit_addresses.clear()
+        self._verified_voltage_ranges.clear()
         self.limits_state_changed.emit()
         self.disconnected.emit()
 
@@ -879,7 +935,7 @@ class SMUController(QObject):
     @Slot(object)
     def _on_readings_ready(self, readings):
         if isinstance(readings, dict):
-            for role in ("Vbg", "Vtg", "Vbias"):
+            for role in ("Vbg", "Vtg", "Vbias", "Vbias2"):
                 key = f"{role}_meas"
                 if key in readings:
                     try:
@@ -892,7 +948,16 @@ class SMUController(QObject):
     @Slot(str, str, object)
     def _on_limits_result(self, action: str, address: str, settings) -> None:
         if action == "apply":
-            self._applied_limit_addresses.add(str(address))
+            try:
+                voltage_range = float(settings["volt"])
+            except (TypeError, KeyError, ValueError):
+                voltage_range = float("nan")
+            if math.isfinite(voltage_range) and voltage_range > 0:
+                self._verified_voltage_ranges[str(address)] = voltage_range
+                self._applied_limit_addresses.add(str(address))
+            else:
+                self._verified_voltage_ranges.pop(str(address), None)
+                self._applied_limit_addresses.discard(str(address))
             self.limits_state_changed.emit()
         self.limits_result.emit(str(action), str(address), settings)
 
@@ -907,6 +972,7 @@ class SMUController(QObject):
         voltage_range_V: float,
     ) -> None:
         self._applied_limit_addresses.discard(str(address))
+        self._verified_voltage_ranges.pop(str(address), None)
         self.limits_state_changed.emit()
         self._limits_apply_requested.emit(
             str(address),
@@ -917,7 +983,27 @@ class SMUController(QObject):
 
     def mark_smu_limits_dirty(self, address: str) -> None:
         self._applied_limit_addresses.discard(str(address))
+        self._verified_voltage_ranges.pop(str(address), None)
         self.limits_state_changed.emit()
+
+    def validate_voltage_targets(self, targets: dict) -> None:
+        """Validate targets against connected roles and last verified ranges, without I/O."""
+        for role, raw in targets.items():
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"Invalid {role} target: {raw}") from None
+            if not math.isfinite(value):
+                raise ValueError(f"Invalid {role} target: {raw}")
+            if not self.role_is_available(role):
+                raise RuntimeError(f"Required Keithley channel is unavailable: {role}")
+            address = self._role_map.get(role)
+            limit = self._verified_voltage_ranges.get(str(address)) if address else None
+            if limit is None or not math.isfinite(limit) or limit <= 0:
+                raise RuntimeError(f"No verified voltage range for {role}; apply limits first.")
+            limit = min(200.0, limit)
+            if abs(value) > limit:
+                raise ValueError(f"{role} target {value:g} V exceeds the ±{limit:g} V limit.")
 
     def limits_are_applied_for_roles(self, roles) -> bool:
         addresses = {
@@ -941,6 +1027,7 @@ class SMUController(QObject):
         *,
         ramp_step_V: Optional[float] = None,
         delay_s: Optional[float] = None,
+        bias2_settings=None,
     ) -> None:
         """Queue a read/step/ramp/zero command from the compact manual UI."""
         action = str(action)
@@ -960,6 +1047,9 @@ class SMUController(QObject):
                 ready = bool(
                     address and str(address) in self._applied_limit_addresses
                 )
+                if role == "Vbias" and normalize_bias2(bias2_settings)["mode"] == "follow":
+                    follower_address = self._role_map.get("Vbias2")
+                    ready = ready and bool(follower_address and str(follower_address) in self._applied_limit_addresses)
             if not ready:
                 self.manual_error.emit(
                     "Apply and verify the SMU compliance settings before changing outputs."
@@ -968,7 +1058,7 @@ class SMUController(QObject):
         step = cfg.ramp.step_V if ramp_step_V is None else ramp_step_V
         delay = cfg.ramp.delay_s if delay_s is None else delay_s
         self._manual_requested.emit(
-            action, role, float(value), float(step), float(delay)
+            action, role, float(value), float(step), float(delay), dict(bias2_settings or {})
         )
 
     # ── state ───────────────────────────────────────────────────────────────���─
@@ -1002,6 +1092,11 @@ class SMUController(QObject):
                 return False
         role_map = getattr(device, "role_map", None)
         return bool(isinstance(role_map, dict) and role_map.get("Vbias"))
+
+    @property
+    def has_vbias2(self) -> bool:
+        """Whether a connected SMU exposes a usable Vbias2 channel."""
+        return self.role_is_available("Vbias2")
 
     def role_is_available(self, role: str) -> bool:
         """Whether a connected instrument currently backs ``role``."""

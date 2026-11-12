@@ -235,9 +235,9 @@ class KeithleyControlTests(unittest.TestCase):
                 )
 
         self.assertLessEqual(section.sizeHint().height(), before + 6)
-        for label in section._limit_status_by_role.values():
+        for role, label in section._limit_status_by_role.items():
             self.assertFalse(label.wordWrap())
-            self.assertEqual(label.text(), "Applied")
+            self.assertEqual(label.text(), "Applied" if role in addresses else "Not connected")
 
     def test_compliance_follows_the_physical_address_when_selection_changes(self):
         section = _SMUSection(_FakeSMUController())
@@ -561,6 +561,7 @@ class KeithleyControlTests(unittest.TestCase):
         self.assertEqual(state["manual_smu"], {
             "step_v": 0.25,
             "targets": {"Vbg": 1.5, "Vtg": 0.0, "Vbias": 0.0},
+            "bias2_link": {"bias2_mode": "off", "vbias2_v": 0.0, "bias2_offset_v": 0.0},
         })
 
         restored_ctrl = _FakeSMUController()

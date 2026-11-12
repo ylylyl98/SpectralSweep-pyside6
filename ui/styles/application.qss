@@ -56,7 +56,7 @@ QToolButton[fluentRole="sectionHeader"] {
     font-weight: 600;
     min-height: 24px;
     padding: 3px 6px;
-    border: 1px solid transparent;
+    border: 1px solid #66788d;
     border-bottom-color: #d9e0e9;
     border-radius: 4px;
     background: #eaf0f7;
@@ -239,43 +239,47 @@ QPlainTextEdit, QTextEdit {
 QPushButton {
     min-height: 25px;
     color: #243246;
-    background: #ffffff;
-    border: 1px solid #c8d1dd;
+    background: #edf2f8;
+    border: 1px solid #66788d;
+    font-weight: 600;
     border-radius: 6px;
     padding: 4px 13px;
 }
 QPushButton:hover {
     color: #145da5;
-    background: #edf5fd;
-    border-color: #79a9d8;
+    background: #dfe8f2;
+    border-color: #52657b;
 }
 QPushButton:pressed {
-    background: #dcecfb;
-    border-color: #4f8bc6;
+    background: #cfdeeb;
+    border-color: #2877c9;
 }
 QPushButton:focus, QPushButton:default {
     border: 1px solid #2877c9;
 }
 QPushButton:disabled {
-    color: #96a0ae;
+    color: #718096;
     background: #edf0f4;
-    border-color: #dce1e8;
+    border-color: #bdc9d8;
 }
 QToolButton {
     min-width: 22px;
     min-height: 22px;
-    border: 1px solid transparent;
+    border: 1px solid #66788d;
     border-radius: 5px;
-    background: transparent;
+    background: #edf2f8;
+    font-weight: 600;
 }
 QToolButton:hover {
-    background: #e8f1fb;
-    border-color: #c5d9ed;
+    background: #dfe8f2;
+    border-color: #52657b;
 }
 QToolButton:pressed, QToolButton:checked {
-    background: #d9eafa;
-    border-color: #9fc1e2;
+    background: #cfdeeb;
+    border-color: #2877c9;
 }
+QToolButton:focus { border-color: #2877c9; outline: 1px solid #2877c9; }
+QToolButton:disabled { color: #718096; background: #edf0f4; border-color: #bdc9d8; }
 
 /* Navigation */
 QTabWidget::pane {
@@ -434,16 +438,16 @@ QFrame#MegaSweepDisclosure {
 }
 QToolButton#MegaSweepDisclosureHeader {
     min-height: 24px;
-    border: none;
+    border: 1px solid #66788d;
     border-radius: 6px;
     padding: 4px 7px;
     color: #29384c;
     font-weight: 600;
     text-align: left;
-    background: transparent;
+    background: #edf2f8;
 }
 QToolButton#MegaSweepDisclosureHeader:hover {
-    background: #f0f5fb;
+    background: #dfe8f2;
 }
 
 
@@ -623,7 +627,7 @@ QGroupBox#SweepLineCalculator QPushButton#SweepCalcPrimary:disabled {
     border-color: #d6dce5;
 }
 QGroupBox#SweepLineCalculator QToolButton {
-    border: none;
+    border: 1px solid #66788d;
     border-radius: 5px;
     background: #e5edf7;
 }

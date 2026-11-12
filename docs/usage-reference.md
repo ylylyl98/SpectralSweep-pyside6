@@ -13,6 +13,9 @@ Windows EXE 下载见本仓库 **Releases**。main 更新后自动运行完整�
 **双击本项目根目录的 [`launch.bat`](../launch.bat)，即可打开 SpectralSweep。**
 它与本 README、`main.py` 在同一层。根目录只保留这一个主程序 BAT 入口；
 请勿使用 `tmp/` 旧副本中的同名脚本。首次启动会检查并安装依赖，可能需要联网等待。
+普通启动还会自动创建 **SpectralSweep (Source)** 桌面快捷方式，并安全检查/快进更新远端 `main`。
+以后可双击桌面图标，或固定运行中的源码版到任务栏后单击启动；更新失败或有本地改动时保留并启动本地版本。
+完整条件见[源码安装](installation.zh-CN.md#源码安装)。
 
 中文速查见 [`00_启动说明.txt`](../00_启动说明.txt)。仪器手册已归入 `docs/manuals/`，
 截图在 `docs/screenshots/`，旧 Notebook 和参考脚本在

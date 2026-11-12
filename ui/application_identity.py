@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -23,10 +24,20 @@ _ROOT = Path(__file__).resolve().parents[1]
 _LOG = logging.getLogger(__name__)
 
 
-def set_windows_app_user_model_id(app_id: str = APP_ID) -> None:
+def runtime_app_id() -> str:
+    """Keep installed apps and individual source folders on separate taskbar pins."""
+    if getattr(sys, "frozen", False):
+        return APP_ID
+    folder = str(_ROOT.resolve()).casefold().encode("utf-8")
+    return f"SpectralSweep.SpectralSweep.Source.{hashlib.sha256(folder).hexdigest()[:16]}"
+
+
+def set_windows_app_user_model_id(app_id: str | None = None) -> None:
     """Call before QApplication so Windows can group our windows separately from Python."""
     if sys.platform != "win32":
         return
+    if app_id is None:
+        app_id = runtime_app_id()
     try:
         import ctypes
         setter = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID
@@ -111,6 +122,13 @@ def _relaunch_command(preview: bool) -> str:
     executable = Path(sys.executable)
     if getattr(sys, "frozen", False):
         command = [str(executable)]
+    elif sys.platform == "win32" and not preview:
+        powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        command = [str(powershell), "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-File", str(_ROOT / "tools" / "start_source.ps1")]
+        command.extend(option for flag, option in (("--mock", "-Mock"), ("--watch-styles", "-WatchStyles"))
+                       if flag in sys.argv[1:])
+        return subprocess.list2cmdline(command)
     else:
         pythonw = executable.with_name("pythonw.exe")
         command = [str(pythonw if pythonw.is_file() else executable), str(_ROOT / "main.py")]
@@ -188,6 +206,7 @@ def configure_window_taskbar(window: QWidget, *, preview: bool = False) -> None:
     window._taskbar_identity = _TaskbarIdentity(window, {
         "command": _relaunch_command(preview),
         "icon": f"{icon_path},0",
-        "name": f"{APP_NAME} Preview" if preview else APP_NAME,
-        "app_id": PREVIEW_APP_ID if preview else APP_ID,
+        "name": (f"{APP_NAME} Preview" if preview else
+                 APP_NAME if getattr(sys, "frozen", False) else f"{APP_NAME} (Source)"),
+        "app_id": PREVIEW_APP_ID if preview else runtime_app_id(),
     })

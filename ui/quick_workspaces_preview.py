@@ -134,6 +134,11 @@ def build_preview_window(root, app, *, hidden=False):
     window._bfp = BFPPanel()
     window._settings = SettingsPanel()
     window._calibration = window._spectrum.create_calibration_page()
+    shared_sample_edits = (window._presets._sample_edit, window._mega._sample_edit,
+                           window._power_sweep._devid_edit, window._bfp._dev_edit,
+                           window._mcd._sample_id, window._mcd2100._sample_id)
+    for edit in shared_sample_edits:
+        edit.setText("PREVIEW")
     window._inst_panel = InstrumentPanel(lf6_ctrl=window._lf6)
     window.workspace_pages = [
         ("dual_gate", "Dual Gate", window._presets),
@@ -225,6 +230,8 @@ def build_preview_window(root, app, *, hidden=False):
         value = window._sample_selector.currentText().strip()
         if value:
             window._sample_id_binder.value = value
+            for edit in shared_sample_edits:
+                edit.setText(value)
             config.cfg.session.sample_id = value
             window._sample_save_status.setText("Sample " + value + " · not saved")
         return bool(value)
@@ -267,6 +274,8 @@ def build_preview_window(root, app, *, hidden=False):
     window._history_toggle.clicked.connect(toggle_sample_settings)
     window._run_history_btn.clicked.connect(lambda: window.quick_workbench.showHistory())
     window._save_current_sample = save_sample
+    window._new_sample = lambda: new_sample(False)
+    window._duplicate_current_sample = lambda: new_sample(True)
     splitter = QSplitter(Qt.Orientation.Horizontal)
     window._sidebar_splitter = splitter
     splitter.addWidget(sidebar)

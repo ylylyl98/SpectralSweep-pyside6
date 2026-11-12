@@ -9,6 +9,7 @@ class SMUReadbackCacheTests(unittest.TestCase):
         QObject.__init__(controller)
         controller._voltage_readback = {}
         controller._applied_limit_addresses = set()
+        controller._verified_voltage_ranges = {}
         controller._on_readings_ready({"Vbg_meas": 1.2, "Vtg_meas": -2., "Vbias_meas": .1})
         controller._on_readings_ready({"Vbg_meas": 1.3})
         self.assertEqual(controller.latest_voltage_readback, {"Vbg": 1.3, "Vtg": -2., "Vbias": .1})

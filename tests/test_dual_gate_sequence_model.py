@@ -173,7 +173,7 @@ def test_focus_and_following_have_explicit_nested_units_and_cross_page_boundary(
     assert focus["positionText"] == "Repeat 2 / 2 · Point 1 / 3"
     assert focus["acquisitionText"] == "1 spectrum · Power Off"
     assert dict((entry["label"], entry["value"]) for entry in focus["settings"]) == {
-        "Rotation in": "90°", "Wavelength": "750 nm", "Exposure": "25 ms"}
+        "RotIn Angle": "90°", "Wavelength": "750 nm", "Exposure": "25 ms"}
     assert focus["gates"] == [{"label": "Vtg", "value": "0 V"}, {"label": "Vbg", "value": "0 V"}]
     assert model.followingStep["stepTitle"] == "Spectrum 9 / 12"
     assert "Vtg: 0 V → 1 V" in model.followingStep["changes"]
@@ -250,9 +250,9 @@ def test_point_identity_changes_are_visible_even_when_targets_match():
 def test_changed_context_does_not_repeat_occurrence_explanation():
     model = DualGateSequenceModel()
     model.update_plan([], [], acquisition_schedule=nested_plan(2))
-    assert model.followingStep["changes"] == ["Rotation in: 0° → 90°"]
+    assert model.followingStep["changes"] == ["RotIn Angle: 0° → 90°"]
     model.nextStep()
-    assert model.focusStep["changes"] == ["Rotation in: 0° → 90°"]
+    assert model.focusStep["changes"] == ["RotIn Angle: 0° → 90°"]
     assert model.selectedDetail["loop"] == "RotIn=90"
     assert "RotIn: 0 → 90" in model.selectedDetail["changes"]
 
@@ -330,14 +330,14 @@ def test_nested_order_path_follows_actual_interleaving_and_linked_groups():
     path = model.focusStep["orderPath"]
     assert [node["kind"] for node in path] == ["group", "conditions", "points", "group", "acquire"]
     assert all(set(node) == {"label", "value", "detail", "kind", "fields"} for node in path)
-    assert path[0] == {"label": "Linked settings", "value": "", "detail": "Values move together · Occurrence 1",
+    assert path[0] == {"label": "Linked settings", "value": "", "detail": "Values paired in the same loop group · Occurrence 1",
                        "kind": "group", "fields": [{"label": "Wavelength", "value": "750 nm"},
                                                      {"label": "Exposure", "value": "20 ms"}]}
     assert path[1]["value"] == "scan" and path[1]["detail"] == "Repeat 1 / 2"
     assert path[2]["value"] == "Point 1 / 3"
     assert path[2]["fields"][0] == {"label": "Vtg", "value": "0 V"}
-    assert path[3]["label"] == "Rotation in" and path[3]["value"] == "90°"
-    assert path[3]["detail"] == "Occurrence 2"
+    assert path[3]["label"] == "RotIn Angle" and path[3]["value"] == "90°"
+    assert path[3]["detail"] == "Occurrence 2 · RotIn Angle: changed from previous step"
     assert path[-1]["label"] == "Acquire" and path[-1]["value"] == "1 spectrum"
 
 
@@ -368,9 +368,9 @@ def test_transition_names_outer_change_and_proves_inner_return_from_explicit_ind
     # and explicitly returns the inner rotation occurrence to index zero.
     model = DualGateSequenceModel()
     model.update_plan([], [], acquisition_schedule=tasks)
-    assert model.followingStep["transitionText"] == "Next Rotation in: 90°"
+    assert model.followingStep["transitionText"] == "Next RotIn Angle: 90°"
     model.nextStep()
-    assert model.followingStep["transitionText"] == "Next Gate points: Point 2 / 3 · Rotation in returns to its first occurrence"
+    assert model.followingStep["transitionText"] == "Next Gate points: Point 2 / 3 · RotIn Angle returns to its first occurrence"
     # A lower inner occurrence index alone does not prove a return to the first.
     tasks = nested_plan(2)
     tasks[0]["group_instances"]["group:1"] = 3
@@ -387,7 +387,7 @@ def test_transition_preserves_same_value_occurrences_and_unknown_identity():
     tasks[1]["group_values"] = tasks[0]["group_values"]
     model = DualGateSequenceModel()
     model.update_plan([], [], acquisition_schedule=tasks)
-    assert model.followingStep["transitionText"] == "Next Rotation in: 0° (new occurrence, same values)"
+    assert model.followingStep["transitionText"] == "Next RotIn Angle: 0° (new occurrence, same values)"
     tasks[1]["group_instances"] = tasks[0]["group_instances"]
     model.update_plan([], [], acquisition_schedule=tasks)
     assert model.followingStep["transitionText"] == "Next: acquire at the same requested values"
@@ -403,7 +403,7 @@ def test_transition_only_reports_known_condition_repeat_and_point_returns():
     model = DualGateSequenceModel()
     model.update_plan([], [], acquisition_schedule=tasks)
     assert model.followingStep["transitionText"] == (
-        "Next Rotation in: 90° · Condition returns to Row 1 · Repeat returns to 1 · Gate point returns to 1")
+        "Next RotIn Angle: 90° · Condition returns to Row 1 · Repeat returns to 1 · Gate point returns to 1")
 
 
 @pytest.mark.parametrize("grouping", ["loop_first", "batch_first"])
@@ -527,3 +527,65 @@ def test_deepcopy_prepared_index_handles_schedule_back_reference():
     copied = copy.deepcopy(prepared)
     assert copied.schedule[0]["presentation_index"] is copied
     assert copied.schedule is not tasks and prepared.schedule is tasks
+
+
+def test_angle_nesting_names_linked_groups_and_reports_missing_without_inventing_order():
+    tasks = nested_plan(2)
+    for task in tasks:
+        task["group_values"]["group:1"]["Rotation2 Angle (deg)"] = 15
+        task["ctx"]["Rotation2 Angle (deg)"] = 15
+    model = DualGateSequenceModel()
+    model.update_plan([], [], acquisition_schedule=tasks)
+    assert model.nesting[:4] == ["Gate conditions", "Gate points", "RotIn Angle + RotOut Angle (linked values)", "Acquire"]
+    path = model.focusStep["orderPath"]
+    assert path[2]["kind"] == "group"
+    assert path[2]["fields"] == [{"label": "RotIn Angle", "value": "0°"}, {"label": "RotOut Angle", "value": "15°"}]
+    assert "paired in the same loop group" in path[2]["detail"]
+    assert "first requested value" in path[2]["detail"]
+    assert "Not in plan" not in path[-1]["detail"]
+    model.nextStep()
+    assert "RotIn Angle: changed from previous step" in model.focusStep["orderPath"][2]["detail"]
+    assert "RotOut Angle: unchanged from previous step" in model.focusStep["orderPath"][2]["detail"]
+
+
+def test_flat_plan_names_angle_without_inventing_individual_loop_order():
+    contexts, rows, tasks = flat_plan()
+    for task in tasks:
+        task["ctx"] = {**task["ctx"], "Rotation1 Angle (deg)": 30}
+    model = DualGateSequenceModel()
+    model.update_plan(contexts, rows, acquisition_schedule=tasks)
+    assert "RotIn Angle" in model.nesting[0]
+    loop = model.focusStep["orderPath"][0]
+    assert any(field == {"label": "RotIn Angle", "value": "30°"} for field in loop["fields"])
+    assert "does not specify individual nesting" in loop["detail"]
+    assert "Not in plan: RotOut Angle" in model.focusStep["orderPath"][-1]["detail"]
+
+
+def test_legacy_compiled_context_reveals_synchronize_order_and_zip_group():
+    contexts, rows, tasks = flat_plan()
+    for task in tasks:
+        task["ctx"] = {"Rotation1 Angle (deg)": 30, "Center Wavelength (nm)": 750}
+    definitions = [{"Enable": True, "Parameter": "Center Wavelength (nm)", "Group": 1},
+                   {"Enable": True, "Parameter": "Rotation1 Angle (deg)", "Group": 2}]
+    model = DualGateSequenceModel()
+    model.update_plan(contexts, rows, acquisition_schedule=tasks, loop_definition=definitions, loop_mode="Synchronize")
+    assert model.nesting[:3] == ["RotIn Angle", "Wavelength", "Gate conditions"]
+    path = model.focusStep["orderPath"]
+    assert [entry["label"] for entry in path[:2]] == ["RotIn Angle", "Wavelength"]
+    assert path[0]["value"] == "30°"
+    model.update_plan(contexts, rows, acquisition_schedule=list(tasks), loop_definition=definitions, loop_mode="Zip")
+    assert model.nesting[0] == "RotIn Angle + Wavelength (linked values)"
+    assert model.focusStep["orderPath"][0]["label"] == "Linked settings"
+
+
+def test_legacy_customized_groups_follow_group_numbers():
+    contexts, rows, tasks = flat_plan()
+    for task in tasks:
+        task["ctx"] = {"Rotation1 Angle (deg)": 30, "Center Wavelength (nm)": 750, "Rotation2 Angle (deg)": 45}
+    definitions = [{"Enable": True, "Parameter": "Rotation1 Angle (deg)", "Group": 2},
+                   {"Enable": True, "Parameter": "Center Wavelength (nm)", "Group": 1},
+                   {"Enable": True, "Parameter": "Rotation2 Angle (deg)", "Group": 2}]
+    model = DualGateSequenceModel()
+    model.update_plan(contexts, rows, acquisition_schedule=tasks, loop_definition=definitions, loop_mode="Customized")
+    assert model.nesting[:2] == ["Wavelength", "RotIn Angle + RotOut Angle (linked values)"]
+    assert model.focusStep["orderPath"][1]["fields"][1] == {"label": "RotOut Angle", "value": "45°"}

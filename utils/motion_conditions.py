@@ -1,6 +1,8 @@
 """Hardware independent planning for Motion Sweep condition batches."""
 from __future__ import annotations
 
+from utils.bias_control import resolve_bias2
+
 import itertools
 import math
 from typing import Any, Iterable, Mapping
@@ -313,7 +315,10 @@ def sequence_preview(sequence: Iterable[Mapping[str, Any]], conditions: list[Map
                     "rot2": float(rot2[rj]) if rot2 else None,
                     "D": condition.get("doping_v"), "F": condition.get("efield_v"),
                     "Vtg": condition.get("vtg_v"), "Vbg": condition.get("vbg_v"),
-                    "Vbias": condition.get("vbias_v", 0.0)})
+                    "Vbias": condition.get("vbias_v", 0.0),
+                    "bias2_mode": condition.get("bias2_mode", "off"),
+                    "Vbias2": resolve_bias2(condition, condition.get("vbias_v", 0.0)),
+                    "bias2_offset_v": condition.get("bias2_offset_v", 0.0)})
     return out
 
 

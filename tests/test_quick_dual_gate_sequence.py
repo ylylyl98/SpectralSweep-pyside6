@@ -51,6 +51,34 @@ def invoke(root, name, *args):
     assert QMetaObject.invokeMethod(root, name, Qt.ConnectionType.DirectConnection, *values)
 
 
+def test_embedded_preview_removes_duplicate_summary_and_keeps_review_navigation(app):
+    widget = QuickDualGateSequencePreview()
+    try:
+        widget.set_embedded(True)
+        widget.update_plan([], [], acquisition_schedule=nested_plan(1))
+        root = show(widget)
+        for name in ("DualGateSequenceHeading", "DualGatePreviewState", "DualGateSequenceCounts",
+                     "DualGateSequenceUnit", "DualGateFocusStep", "DualGateCompactNavigation"):
+            assert not root.findChild(QObject, name).property("visible"), name
+        summary = root.findChild(QObject, "DualGateEmbeddedSummary")
+        assert summary.property("visible")
+        assert widget.sequence_model.overview["planState"] in summary.property("text")
+        assert widget.sequence_model.focusStep["stepTitle"] in root.findChild(QObject, "DualGateFocusCaption").property("text")
+        widget.update_plan([], [], acquisition_schedule=nested_plan(3))
+        QTest.qWait(30)
+        assert root.findChild(QObject, "DualGateCompactNavigation").property("visible")
+        widget.sequence_model.nextStep()
+        assert widget.sequence_model.selectedDetail["title"] == "Step 2"
+        widget.show_full_sequence()
+        QTest.qWait(30)
+        full = widget._full_sequence_preview.quick_widget.rootObject()
+        assert full.findChild(QObject, "DualGateSequenceHeading").property("visible")
+        assert full.findChild(QObject, "DualGateSequenceCounts").property("visible")
+        assert not widget.qml_warnings
+    finally:
+        dispose(widget)
+
+
 def test_actual_qml_shows_exact_flat_order_and_when_candidates(app):
     contexts, rows, tasks = flat_plan()
     widget = QuickDualGateSequencePreview()

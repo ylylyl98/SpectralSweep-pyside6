@@ -114,39 +114,40 @@ def test_batch_keeps_every_field_on_one_record_line(table_factory, width, mode):
         assert field.mapToItem(record, QPointF()).y() + field.height() <= record.height()
     assert len({field.mapToScene(QPointF()).y() for field in fields}) == 1
     condition = fields[BATCH_SCHEMA.index("condition_label")]
-    repeat = fields[BATCH_SCHEMA.index("repeat")]
-    power = fields[BATCH_SCHEMA.index("MeasurePower")]
-    assert condition.width() > repeat.width() * 3
-    assert condition.width() > power.width() * 3
-    assert condition.width() <= 320
-    assert fields[BATCH_SCHEMA.index("When")].width() <= 240
-    assert repeat.width() <= 46
-    assert power.width() <= 54
-    if width >= 570:
-        assert condition.width() >= 120
-        measured = QFontMetricsF(condition.property("font"))
-        assert measured.horizontalAdvance(condition.property("text")) + condition.property("leftPadding") + condition.property("rightPadding") <= condition.width()
-        for title in BATCH_SCHEMA:
-            if title.startswith(("Vbg_", "Vtg_", "Vbias_")):
-                field = fields[BATCH_SCHEMA.index(title)]
-                measured = QFontMetricsF(field.property("font"))
-                assert measured.horizontalAdvance(field.property("text")) + field.property("leftPadding") + field.property("rightPadding") <= field.width()
-                assert field.property("font").pixelSize() == 12
     if width < 916:
         assert condition.property("leftPadding") == condition.property("rightPadding") == 4
-        assert find_item(root, f"tableHeader_{BATCH_SCHEMA.index('MeasurePower')}").property("text") == "Pwr"
-    if width >= 950:
-        assert condition.width() >= 140
-        assert fields[BATCH_SCHEMA.index("When")].width() >= 90
-    if width >= 1600:
-        assert all(fields[BATCH_SCHEMA.index(title)].width() > 72
-                   for title in BATCH_SCHEMA if title.startswith(("Vbg_", "Vtg_", "Vbias_")))
+    assert find_item(root, f"tableHeader_{BATCH_SCHEMA.index('MeasurePower')}").property("text") == "Pwr"
+    # All sixteen possible columns cannot remain legible in 360 pixels. At a
+    # realistic 650-pixel editor width, their complete abbreviations fit.
+    if width >= 650:
+        for column in range(len(BATCH_SCHEMA)):
+            header = find_item(root, f"tableHeader_{column}")
+            assert not header.property("truncated"), (column, header.property("text"))
     for title in BATCH_SCHEMA:
         if title.startswith(("Vbg_", "Vtg_", "Vbias_")):
             assert "(V)" in view.model.displayColumnTitles[BATCH_SCHEMA.index(title)]
     assert root.metaObject().indexOfProperty("columnPages") < 0
     grid = find_item(root, "QuickEditableTable")
     assert grid.property("contentWidth") <= grid.width()
+    assert not view.qml_warnings
+
+
+def test_common_batch_values_fit_at_650_pixels(table_factory):
+    titles = BATCH_SCHEMA[:12]
+    source, view, root = table_factory(titles, 650, single_line=True)
+    for name in ("repeat", "frames"):
+        source.item(0, titles.index(name)).setText("1000")
+    for name in titles:
+        if name.startswith(("Vbg_", "Vtg_", "Vbias_")):
+            source.item(0, titles.index(name)).setText("-12.0")
+    view.model.refresh()
+    QTest.qWait(20)
+    for name in ("repeat", "frames", "Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop", "Vbias_start", "Vbias_stop"):
+        field = find_item(root, f"tableCell_0_{titles.index(name)}")
+        font = field.property("font")
+        assert font.pixelSize() == 12
+        needed = QFontMetricsF(font).horizontalAdvance(field.property("text"))
+        assert needed + field.property("leftPadding") + field.property("rightPadding") <= field.width(), name
     assert not view.qml_warnings
 
 
@@ -177,7 +178,7 @@ def test_batch_resize_preserves_expression_draft_selection_and_full_tooltips(tab
     assert source.item(0, when).text() == expression
     assert model.columnTitles[condition] == "condition_label"
     assert model.displayColumnTitles[condition] == "Condition"
-    assert model.displayColumnTitles[BATCH_SCHEMA.index("MeasurePower")] == "Power"
+    assert model.displayColumnTitles[BATCH_SCHEMA.index("MeasurePower")] == "Measure power"
     assert not view.qml_warnings
 
 

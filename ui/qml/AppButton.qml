@@ -15,16 +15,16 @@ Basic.Button {
         : accented || checked ? Theme.accentText : Theme.text
     readonly property color fillColor: !enabled
         ? (dangerous ? Theme.dangerDisabledSurface : primary ? Theme.primaryDisabledSurface
-           : accented ? Theme.accentDisabledSurface : Theme.surfaceHover)
+           : accented ? Theme.accentDisabledSurface : Theme.buttonDisabledSurface)
         : primary ? (down ? Theme.accentPressed : hovered ? Theme.accentHover : Theme.accent)
         : dangerous ? (down ? Theme.dangerPressed : hovered ? Theme.dangerHover : Theme.dangerSurface)
         : accented ? (down ? Theme.accentSurfacePressed : hovered ? Theme.accentSurfaceHover : Theme.accentSurface)
-        : down ? Theme.surfacePressed : checked ? Theme.selection
-        : hovered ? Theme.surfaceHover : subtle ? "transparent" : Theme.surface
+        : down ? Theme.buttonPressed : checked ? Theme.selection
+        : hovered ? Theme.buttonHover : Theme.buttonSurface
     readonly property color outlineColor: !enabled
-        ? (dangerous ? Theme.dangerDisabledBorder : primary || accented ? Theme.accentDisabledBorder : Theme.inputBorder)
-        : visualFocus ? Theme.accent : dangerous ? Theme.dangerBorder
-        : primary ? Theme.accent : accented || checked ? Theme.accentBorder : Theme.inputBorder
+        ? (dangerous ? Theme.dangerDisabledBorder : primary || accented ? Theme.accentDisabledBorder : Theme.buttonDisabledBorder)
+        : visualFocus ? Theme.accent : dangerous ? Theme.danger
+        : primary ? Theme.accent : accented || checked ? Theme.accentText : Theme.buttonBorder
     implicitHeight: Math.max(Theme.controlHeight, contentItem.implicitHeight + topPadding + bottomPadding)
     implicitWidth: Math.max(64, contentItem.implicitWidth + leftPadding + rightPadding)
     padding: 5
@@ -34,7 +34,7 @@ Basic.Button {
     focusPolicy: Qt.StrongFocus
     font.family: Theme.fontFamily
     font.pixelSize: Theme.bodySize
-    font.weight: primary || checked ? Font.DemiBold : Font.Normal
+    font.weight: Font.DemiBold
     Accessible.name: text
     AppToolTip {
         text: control.tooltipText
@@ -51,7 +51,7 @@ Basic.Button {
     background: Rectangle {
         radius: Theme.radius
         color: control.fillColor
-        border.width: control.visualFocus ? 2 : (control.subtle && !control.checked ? 0 : 1)
+        border.width: control.visualFocus ? 2 : 1
         border.color: control.outlineColor
         Rectangle {
             visible: control.visualFocus && control.primary

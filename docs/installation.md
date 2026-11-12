@@ -135,11 +135,33 @@ The environment name matches `launch.bat`'s discovery rules. Explicit interprete
 paths avoid needing a PowerShell activation script. `requirements-quick.txt`
 includes the application dependencies and pins the validated PySide6 6.11.0 runtime.
 
-Daily source launch: double-click `launch.bat`, or run `.\launch.bat` in PowerShell.
-It creates/selects the managed environment and checks `requirements.txt` when
+Double-click **`launch.bat`** to create the **SpectralSweep (Source)** desktop
+shortcut, check for the latest remote `main`, and start the app. The shortcut uses
+the application icon and this folder's path. After the first launch, use that
+desktop shortcut for the same update-and-start flow.
+For single-click access, launch it once, then right-click the running app's taskbar
+icon and select **Pin to taskbar**. Use this source pin instead of an old installed
+version's pin. While the app is open, clicking its taskbar button returns to its
+window; updates run only on the next launch after closing it.
+
+Automatic updates require a Git clone on `main` tracking a remote `main`, with a
+clean working tree and no application or Git operation running in that folder.
+Only fast-forward updates are applied. Local edits, untracked files, local commits,
+another branch, missing Git, ZIP downloads, and fetch failures leave local code in
+place; the launcher reports **Not updated** and starts the existing local version.
+The launcher never stashes, resets, changes branches, commits, or pushes. Re-run
+`launch.bat` after moving the project, and recreate the taskbar pin too.
+The shortcut is local to each computer; pulling source does not create it.
+Shortcut creation requires neither administrator rights nor Python; running the
+app still needs Python and the relevant instrument drivers.
+
+`launch.bat` creates/selects the managed environment and checks `requirements.txt` when
 dependencies change. `.\launch.bat --install` only checks/installs Python dependencies;
 `.\launch.bat --update-deps` upgrades them. Reapply `requirements-quick.txt` if you
 want to return an upgraded environment to the pinned Qt version.
+Dependency-only (`--install`, `--update-deps`), help, smoke-test and isolated preview
+commands skip shortcut creation and Git updates. To run local code without an
+update check, use `.\.venv-pyside6-313\Scripts\python.exe main.py`.
 
 `python main.py --mock` simulates the spectrometer but retains the normal application
 runtime. Use `--preview-workspaces` for the fully isolated, disconnected preview.

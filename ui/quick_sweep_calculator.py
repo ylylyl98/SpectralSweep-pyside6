@@ -131,6 +131,7 @@ class CalculatorLayout(QObject):
         bias.addWidget(calc._vbias_badge)
         bias.addStretch(1)
         definition_layout.addLayout(bias)
+        definition_layout.addWidget(calc._bias2_control)
         definition_layout.addWidget(_label("D = TG + r·BG\nF = TG − r·BG", muted=True))
 
         limits, limits_layout = _section("Range limits", "QuickCalculatorLimits")

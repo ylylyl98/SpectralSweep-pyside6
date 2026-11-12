@@ -126,6 +126,16 @@ class MotionConditionsWidget(QWidget):
         self._bias_spin.setDecimals(6)
         self.bias = self._bias_spin
         advanced.addRow("Vbias:", self.bias)
+        from ui.bias_controls import Bias2Control
+        self.bias2 = Bias2Control()
+        self.bias2.refresh_visibility(bool(getattr(cfg.smu, "vbias2_resource", "")))
+        advanced.addRow(self.bias2)
+        self.bias2_values = QLineEdit()
+        self.bias2_values.setPlaceholderText("Optional list / range; blank uses Vbias2 above")
+        self.bias2_values.setToolTip("Independent Vbias2 values cross with gate conditions")
+        advanced.addRow("Vbias2 values:", self.bias2_values)
+        advanced.setRowVisible(self.bias2_values, False)
+        self.bias2.changed.connect(lambda: advanced.setRowVisible(self.bias2_values, self.bias2.settings()["bias2_mode"] == "independent"))
         self._advanced_section = DisclosureSection("Advanced", advanced_body)
         self._advanced_group = self._advanced_section.toggle
         self._advanced_body = advanced_body
@@ -199,8 +209,8 @@ class MotionConditionsWidget(QWidget):
             button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             buttons.addWidget(button, index // 3, index % 3)
         root.addLayout(buttons)
-        self._table = QTableWidget(0, 7)
-        self._table.setHorizontalHeaderLabels(["Use", "Condition", "D", "F", "Vtg", "Vbg", "Vbias"])
+        self._table = QTableWidget(0, 8)
+        self._table.setHorizontalHeaderLabels(["Use", "Condition", "D", "F", "Vtg", "Vbg", "Vbias", "Vbias2"])
         # Reserve room for five submitted conditions in the narrow control
         # column so the table remains usable without opening a child tab.
         self._table.setMinimumHeight(180)
@@ -210,6 +220,7 @@ class MotionConditionsWidget(QWidget):
         self._table.setAlternatingRowColors(True)
         fit_table_columns(self._table, (40, 80, 48, 48, 54, 54, 54))
         self.table = self._table
+        self.table.setColumnHidden(7, not bool(getattr(cfg.smu, "vbias2_resource", "")))
         root.addWidget(self.table)
         self._status_label = QLabel()
         self._status_label.setWordWrap(True)
@@ -223,6 +234,8 @@ class MotionConditionsWidget(QWidget):
         self.expansion.currentIndexChanged.connect(self._input_changed)
         self.ratio.valueChanged.connect(self._ratio_changed)
         self.bias.valueChanged.connect(self._input_changed)
+        self.bias2.changed.connect(self._input_changed)
+        self.bias2_values.textChanged.connect(self._input_changed)
         self.rot_axis.currentIndexChanged.connect(self._rotation_changed)
         self.rot1_plan.textChanged.connect(self._rotation_changed)
         self.rot2_plan.textChanged.connect(self._rotation_changed)
@@ -242,6 +255,13 @@ class MotionConditionsWidget(QWidget):
         self.table.itemChanged.connect(self._item_changed)
         self.table.itemSelectionChanged.connect(self._selection_changed)
         self._update_button.setEnabled(False); self._cancel_button.setEnabled(False)
+
+    def refresh_bias2_visibility(self, configured: bool) -> None:
+        configured = bool(configured or getattr(cfg.smu, "vbias2_resource", ""))
+        self.bias2.refresh_visibility(configured)
+        used = any(self._row_bundle(row).get("condition", {}).get("bias2_mode", "off") != "off"
+                   for row in range(self.table.rowCount()))
+        self.table.setColumnHidden(7, not (configured or used))
 
     def _voltage_limit(self) -> float:
         if self._configured_voltage_limit is not None:
@@ -279,9 +299,13 @@ class MotionConditionsWidget(QWidget):
         return parse_numeric_spec(self.a.text(), first), parse_numeric_spec(self.b.text(), second)
 
     def _pending(self) -> list[dict[str, Any]]:
-        return build_conditions(self.mode.currentData(), self.a.text(), self.b.text(),
+        rows = build_conditions(self.mode.currentData(), self.a.text(), self.b.text(),
                                 self.expansion.currentData(), self.ratio.value(), self.bias.value(),
                                 voltage_limit=self._voltage_limit())
+        from utils.mcd_common import expand_bias2_conditions
+        rows = expand_bias2_conditions(rows, self.bias2.settings(), self.bias2_values.text(), self.ratio.value())
+        validate_gate_conditions(rows, self._voltage_limit())
+        return rows
 
     def _input_changed(self, *_: Any) -> None:
         try:
@@ -317,13 +341,21 @@ class MotionConditionsWidget(QWidget):
         condition = copy.deepcopy(dict(row))
         return {"condition": condition, "provenance": copy.deepcopy(condition.get("provenance", {})), "edited": False}
 
+    @staticmethod
+    def _bias2_summary(row):
+        mode = row.get("bias2_mode", "off")
+        if mode == "follow": return "follow " + _format(row.get("bias2_offset_v", 0.0))
+        if mode == "independent": return _format(row.get("vbias2_v", 0.0))
+        return "off"
+
     def _append_row(self, row: Mapping[str, Any], *, label: str | None = None) -> None:
         index = self.table.rowCount()
         self.table.insertRow(index)
         values = ["", label if label is not None else f"Condition {index + 1}",
                   _format(row.get("doping_v", 0.0)), _format(row.get("efield_v", 0.0)),
                   _format(row.get("vtg_v", 0.0)), _format(row.get("vbg_v", 0.0)),
-                  _format(row.get("vbias_v", 0.0))]
+                  _format(row.get("vbias_v", 0.0)), self._bias2_summary(row)]
+        if row.get("bias2_mode", "off") != "off": self.table.setColumnHidden(7, False)
         bundle = self._condition_bundle(row)
         for column, value in enumerate(values):
             item = QTableWidgetItem(str(value))
@@ -331,6 +363,7 @@ class MotionConditionsWidget(QWidget):
                 item.setCheckState(Qt.CheckState.Checked if row.get("enabled", True) else Qt.CheckState.Unchecked)
             if column == 1:
                 item.setData(_ROW_ROLE, copy.deepcopy(bundle))
+            if column == 7: item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(index, column, item)
 
     def _row_bundle(self, row: int) -> dict[str, Any]:
@@ -361,12 +394,14 @@ class MotionConditionsWidget(QWidget):
                 "input_a": values[2], "input_b": values[3], "gate_ratio": self.ratio.value(),
                 "doping_v": values[0], "efield_v": values[1],
                 "vtg_v": values[2], "vbg_v": values[3],
-                "vbias_v": values[4], "provenance": self._row_bundle(row).get("provenance", {})}
+                "vbias_v": values[4], **{key: self._row_bundle(row).get("condition", {}).get(key, default)
+                    for key, default in (("bias2_mode", "off"), ("vbias2_v", 0.0), ("bias2_offset_v", 0.0))},
+                "provenance": self._row_bundle(row).get("provenance", {})}
 
     def _snapshot(self) -> list[dict[str, Any]]:
         snapshot = []
         for row in range(self.table.rowCount()):
-            values = [self.table.item(row, column).text() if self.table.item(row, column) else "" for column in range(7)]
+            values = [self.table.item(row, column).text() if self.table.item(row, column) else "" for column in range(self.table.columnCount())]
             item = self.table.item(row, 0)
             snapshot.append({"values": values, "checked": bool(item and item.checkState() == Qt.CheckState.Checked),
                              "bundle": self._row_bundle(row)})
@@ -385,9 +420,9 @@ class MotionConditionsWidget(QWidget):
                         values = list(entry) if isinstance(entry, (list, tuple)) else []
                         checked = bool(values and str(values[0]).strip().lower() not in _FALSE_TEXT)
                         bundle = {"condition": {}, "provenance": {}, "edited": False}
-                    values.extend([""] * (7 - len(values)))
+                    values.extend([""] * (self.table.columnCount() - len(values)))
                     row = self.table.rowCount(); self.table.insertRow(row)
-                    for column in range(7):
+                    for column in range(self.table.columnCount()):
                         # The checkbox is the source of truth; keeping the
                         # legacy text out of this column avoids a distracting
                         # literal ``1`` beside every checkbox.
@@ -396,6 +431,10 @@ class MotionConditionsWidget(QWidget):
                             item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
                         if column == 1:
                             item.setData(_ROW_ROLE, bundle)
+                            if bundle.get("condition", {}).get("bias2_mode", "off") != "off": self.table.setColumnHidden(7, False)
+                        if column == 7:
+                            item.setText(self._bias2_summary(bundle.get("condition", {})))
+                            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                         self.table.setItem(row, column, item)
         finally:
             self._busy = False
@@ -435,6 +474,8 @@ class MotionConditionsWidget(QWidget):
             self.a.setText(self.table.item(row, 4).text())
             self.b.setText(self.table.item(row, 5).text())
             self.bias.setValue(float(self.table.item(row, 6).text()))
+            self.bias2.set_settings(self._row_bundle(row).get("condition", {}))
+            self.bias2_values.clear()
             self._add_button.setEnabled(False); self._update_button.setEnabled(True); self._cancel_button.setEnabled(True)
             self._status_label.setText(f"Editing condition row {row + 1}; Update applies one scalar condition.")
         except Exception as exc:
@@ -458,6 +499,8 @@ class MotionConditionsWidget(QWidget):
                 item = self.table.item(row, 1)
                 if item is not None:
                     item.setData(_ROW_ROLE, self._condition_bundle({**condition, "enabled": self._is_enabled(row)}))
+                self.table.item(row, 7).setText(self._bias2_summary(condition))
+                if condition.get("bias2_mode", "off") != "off": self.table.setColumnHidden(7, False)
             self._busy = False; self._editing_row = None
             self._update_button.setEnabled(False); self._cancel_button.setEnabled(False); self._add_button.setEnabled(True)
             self._input_changed()
@@ -654,6 +697,7 @@ class MotionConditionsWidget(QWidget):
     def state(self) -> dict[str, Any]:
         return {"mode": self.mode.currentData(), "input_a": self.a.text(), "input_b": self.b.text(),
                 "expansion": self.expansion.currentData(), "ratio": self.ratio.value(), "vbias": self.bias.value(),
+                "bias2": self.bias2.settings(), "bias2_values": self.bias2_values.text(),
                 "rotation_axis": self.rot_axis.currentData(), "rotation_plan": self.rot_plan.text(),
                 "rotation_plans": {"rot1": self.rot1_plan.text(), "rot2": self.rot2_plan.text()},
                 "rotation_settle_s": self.rotation_settle.value(), "order": self.order.currentData(),
@@ -668,6 +712,8 @@ class MotionConditionsWidget(QWidget):
                 if index >= 0: combo.setCurrentIndex(index)
             self.a.setText(str(state.get("input_a", "0"))); self.b.setText(str(state.get("input_b", "0")))
             self.ratio.setValue(float(state.get("ratio", 1.0))); self.bias.setValue(float(state.get("vbias", 0.0)))
+            self.bias2.set_settings(state.get("bias2", {}))
+            self.bias2_values.setText(str(state.get("bias2_values", "")))
             plans = state.get("rotation_plans", {})
             self.rot1_plan.setText(str(plans.get("rot1", "Keep current")) if isinstance(plans, Mapping) else "Keep current")
             self.rot2_plan.setText(str(plans.get("rot2", "Keep current")) if isinstance(plans, Mapping) else "Keep current")

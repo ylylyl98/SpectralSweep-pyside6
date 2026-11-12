@@ -28,6 +28,7 @@ METADATA_WAIT_TIMEOUT_S = 120.0
 _CONTEXT_FIELDS = frozenset({
     "run_id", "experiment_id", "acquisition_id", "point_index", "output_file",
     "Vbg_set", "Vtg_set", "Vbias_set", "measurement_setup", "center_nm",
+    "Vbias2_set", "bias2_mode", "bias2_offset_v",
     "exposure_ms", "accumulations", "purpose", "capture_frames_requested",
 })
 

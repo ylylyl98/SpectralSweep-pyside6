@@ -160,6 +160,14 @@ def build_condition_batch(mode: str, input_a: str, input_b: str, expansion: str,
     return rows
 
 
+def expand_bias2_conditions(rows: list[dict[str, Any]], settings: Mapping[str, Any], spec: str, ratio: float) -> list[dict[str, Any]]:
+    """Cross independent Vbias2 values with existing gate rows; blank uses the scalar control."""
+    values = parse_numeric_spec(spec, "Vbias2") if settings.get("bias2_mode") == "independent" and str(spec).strip() else [settings.get("vbias2_v", 0.0)]
+    if len(rows) * len(values) > 10000:
+        raise ValueError("Vbias2 expansion exceeds 10000 rows")
+    return [resolve_condition_line({**row, **settings, "vbias2_v": value}, ratio) for row in rows for value in values]
+
+
 def _mode(condition: Mapping[str, Any]) -> str:
     mode = str(condition.get("mode", MODE_DIRECT)).strip().lower()
     mode = {"voltage": MODE_DIRECT, "coordinates": MODE_FIXED_DOPING,
@@ -204,8 +212,12 @@ def resolve_condition_line(condition: Mapping[str, Any], ratio: float) -> dict[s
         doping, vbg = _finite(a, "Input A/Doping"), _finite(b, "Input B/Vbg")
         vtg, equation = doping - r * vbg, "D=input_a; Vbg=input_b; Vtg=D-r*Vbg"
     doping, efield = mcd_coordinates(vtg, vbg, r)
+    from utils.bias_control import normalize_bias2, resolve_bias2
+    bias2 = normalize_bias2({key: item.get(key, default) for key, default in (("bias2_mode", "off"), ("vbias2_v", 0.0), ("bias2_offset_v", 0.0))})
+    bias2 = {"bias2_mode": bias2["mode"], "vbias2_v": bias2["voltage"], "bias2_offset_v": bias2["offset"]}
+    bias2_target = resolve_bias2(bias2, _finite(item.get("vbias_v", 0.0), "Vbias"))
     return {
-        **item, "mode": mode, "input_a": _finite(a, "Input A"), "input_b": _finite(b, "Input B"),
+        **item, **bias2, "vbias2_target_v": bias2_target, "mode": mode, "input_a": _finite(a, "Input A"), "input_b": _finite(b, "Input B"),
         "enabled": bool(item.get("enabled", True)), "vtg_v": vtg, "vbg_v": vbg,
         "vbias_v": _finite(item.get("vbias_v", 0.0), "Vbias"), "doping_v": doping, "efield_v": efield,
         "resolved": {"vtg_v": vtg, "vbg_v": vbg, "doping_v": doping, "efield_v": efield},
@@ -234,6 +246,36 @@ def validate_gate_conditions(conditions: Iterable[Mapping[str, Any]], voltage_li
             value = _finite(condition.get(key, 0.0), f"gate condition {index} {key}")
             if abs(value) > limit + 1e-9:
                 raise ValueError(f"gate condition {index} {key} is outside the ±{limit:g} V compliance limit")
+
+        if condition.get("bias2_mode", "off") != "off":
+            from utils.bias_control import resolve_bias2
+            target = _finite(resolve_bias2(condition, condition.get("vbias_v", 0.0)), f"gate condition {index} Vbias2")
+            if abs(target) > limit + 1e-9:
+                raise ValueError(f"gate condition {index} Vbias2 is outside the ±{limit:g} V compliance limit")
+
+
+def validate_bias2_device_targets(smu_ctrl: Any, conditions: Iterable[Mapping[str, Any]]) -> None:
+    """Validate every enabled second-bias target against its configured channel range."""
+    conditions = list(conditions)
+    if not any(c.get("enabled", True) and c.get("bias2_mode", "off") != "off" for c in conditions):
+        return
+    from utils.config import cfg
+    if min(float(cfg.ramp.vbias_step_V), float(getattr(cfg.ramp, "vbias2_step_V", cfg.ramp.vbias_step_V))) <= 0:
+        raise ValueError("Vbias and Vbias2 ramp steps must be positive")
+    validate = getattr(smu_ctrl, "validate_voltage_targets", None)
+    if not callable(validate):
+        return
+    from utils.bias_control import resolve_bias2
+    device = getattr(smu_ctrl, "device", None)
+    has_role = getattr(device, "role_is_available", None) or getattr(device, "has_role", None)
+    for condition in conditions:
+        if not condition.get("enabled", True) or condition.get("bias2_mode", "off") == "off":
+            continue
+        master = _finite(condition.get("vbias_v", 0.0), "Vbias")
+        targets = {"Vbias2": resolve_bias2(condition, master)}
+        if condition.get("bias2_mode") == "follow" or (callable(has_role) and has_role("Vbias")):
+            targets["Vbias"] = master
+        validate(targets)
 
 
 def smu_readiness_issues(smu_ctrl: Any, required_roles: Iterable[str]) -> list[str]:

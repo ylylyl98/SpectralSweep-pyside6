@@ -1,6 +1,8 @@
 """Discrete stabilized-field MCD workflow for the isolated attoDRY2100 stack."""
 from __future__ import annotations
 
+from utils.bias_control import resolve_bias2
+
 import csv
 import json
 import math
@@ -521,6 +523,8 @@ class MCD2100Worker:
         for index, condition in enumerate(conditions):
             if not isinstance(condition, Mapping):
                 raise ValueError(f"gate condition {index + 1} must be a mapping")
+            from utils.bias_control import normalize_bias2
+            normalize_bias2(condition)
             item = {
                 "enabled": bool(condition.get("enabled", True)),
                 "mode": condition.get("mode", "direct"),
@@ -529,6 +533,9 @@ class MCD2100Worker:
                 "vtg_v": float(condition.get("vtg_v", 0.0)),
                 "vbg_v": float(condition.get("vbg_v", 0.0)),
                 "vbias_v": float(condition.get("vbias_v", 0.0)),
+                "bias2_mode": condition.get("bias2_mode", "off"),
+                "vbias2_v": float(condition.get("vbias2_v", 0.0)),
+                "bias2_offset_v": float(condition.get("bias2_offset_v", 0.0)),
                 "doping_v": float(condition.get("doping_v", 0.0)),
                 "efield_v": float(condition.get("efield_v", 0.0)),
             }
@@ -991,10 +998,11 @@ class MCD2100Worker:
                 f"Vtg={self.vtg_v:+g} V, Vbg={self.vbg_v:+g} V, "
                 f"Vbias={self.vbias_v:+g} V"
             )
-            applied["smu"] = _jsonable(apply_gates(
-                vtg_v=self.vtg_v, vbg_v=self.vbg_v, vbias_v=self.vbias_v,
-                ratio=self.gate_ratio, stop_cb=self.stop_event.is_set,
-            ))
+            gate_kwargs = dict(vtg_v=self.vtg_v, vbg_v=self.vbg_v, vbias_v=self.vbias_v,
+                               ratio=self.gate_ratio, stop_cb=self.stop_event.is_set)
+            if condition and condition.get("bias2_mode", "off") != "off":
+                gate_kwargs["bias2_settings"] = condition
+            applied["smu"] = _jsonable(apply_gates(**gate_kwargs))
             observed = applied.get("smu") or {}
             self._emit_log(
                 f"Gate {condition_index}/{condition_count} ramp complete; "
@@ -1451,6 +1459,10 @@ class MCD2100Worker:
             previous_field = safety_field
 
     def run(self) -> dict[str, Any]:
+        if self.apply_voltages and any(c.get("bias2_mode", "off") != "off" for c in self.conditions):
+            preflight = getattr(self.optical, "preflight_bias2", None)
+            if not callable(preflight): raise RuntimeError("Vbias2 preflight is unavailable")
+            preflight(self.conditions)
         csv_path, metadata_path = self._paths()
         metadata: dict[str, Any] = {
             "status": "RUNNING", "error": None, "cleanup_error": None,
@@ -1674,6 +1686,9 @@ class MCD2100Worker:
                         "requested_gate": {
                             "Vtg_V": condition.get("vtg_v"), "Vbg_V": condition.get("vbg_v"),
                             "Vbias_V": condition.get("vbias_v"),
+                            "bias2_mode": condition.get("bias2_mode", "off"),
+                            "Vbias2_V": resolve_bias2(condition, condition.get("vbias_v", 0.0)),
+                            "bias2_offset_V": condition.get("bias2_offset_v", 0.0),
                         },
                         "observed_gate": applied.get("smu", {}) if isinstance(applied, dict) else {},
                         "derived_coordinates": {

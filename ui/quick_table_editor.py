@@ -250,6 +250,12 @@ class TableEditorModel(QAbstractTableModel):
                 cell.update(value="Open editor", kind="unsupported")
         elif item is not None and item.data(Qt.ItemDataRole.CheckStateRole) is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
             cell.update(kind="check", checked=item.checkState() == Qt.CheckState.Checked, editable=True)
+        elif item is not None and (choices := getattr(self.table.itemDelegateForColumn(column), "choices", None)):
+            options = list(choices)
+            value = item.text().strip() or options[0]
+            cell.update(kind="choice", options=options, optionEnabled=[True] * len(options),
+                        currentIndex=options.index(value) if value in options else -1,
+                        editText=value)
         if control is not None and control.toolTip():
             cell["tooltip"] = control.toolTip()
         draft = self._drafts.get(cell["token"])
@@ -271,6 +277,7 @@ class TableEditorModel(QAbstractTableModel):
     columnKeys = Property("QVariantList", lambda self: [self._column_key(column) for column in self._columns], notify=schemaChanged)
     singleLineRows = Property(bool, lambda self: self._single_line_rows, constant=True)
     minimumColumnWidths = Property("QVariantList", lambda self: [self._minimum_column_width(column) for column in self._columns], notify=schemaChanged)
+    compactColumnTitles = Property("QVariantList", lambda self: [self._compact_column_title(self._column_key(column)) for column in self._columns], notify=schemaChanged)
     displayColumnTitles = Property("QVariantList", lambda self: [self._display_column_title(self._column_key(column)) for column in self._columns] if self._single_line_rows or self._mcd_gate_table else self._titles, notify=schemaChanged)
 
     def _column_key(self, column):
@@ -279,8 +286,9 @@ class TableEditorModel(QAbstractTableModel):
         # The Widgets table uses human-readable multiline headers. Keep its
         # public labels intact while applying the same sizing to either schema.
         name = {"Measure power": "MeasurePower", "Condition": "condition_label",
-                "Repeat": "repeat", "Frames": "frames"}.get(name, name)
-        if name.startswith(("Vbg ", "Vtg ", "Vbias ")):
+                "Repeat": "repeat", "Frames": "frames", "Bias2 mode": "bias2_mode",
+                "Bias2 offset (V)": "bias2_offset_v"}.get(name, name)
+        if name.startswith(("Vbg ", "Vtg ", "Vbias ", "Vbias2 ")):
             name = name.removesuffix(" (V)").replace(" ", "_")
         return name
 
@@ -292,17 +300,36 @@ class TableEditorModel(QAbstractTableModel):
                 return f"{title} (V)"
         if not self._single_line_rows:
             return title
-        if title.startswith(("Vbg_", "Vtg_", "Vbias_")):
+        if title.startswith(("Vbg_", "Vtg_", "Vbias_", "Vbias2_")):
             gate, endpoint = title.split("_", 1)
             return f"{gate}\n{endpoint} (V)"
-        return {"MeasurePower": "Power", "condition_label": "Condition",
+        return {"MeasurePower": "Measure power", "condition_label": "Condition",
+                "bias2_mode": "Bias2 mode", "bias2_offset_v": "Bias2 offset (V)",
                 "repeat": "Repeat", "frames": "Frames"}.get(title, title.replace("_", " "))
+
+    def _compact_column_title(self, name):
+        titles = {"Run": "Run", "When": "When", "MeasurePower": "Pwr",
+                  "condition_label": "Cond.", "repeat": "Rep.", "frames": "Frm.",
+                  "bias2_mode": "B2\nmode", "bias2_offset_v": "B2\nΔV"}
+        if name in titles:
+            return titles[name]
+        for axis, short in (("Vbg_", "Vbg"), ("Vtg_", "Vtg"),
+                            ("Vbias_", "Bias"), ("Vbias2_", "B2")):
+            if name.startswith(axis):
+                return short + "\n" + name[len(axis):]
+        return self._display_column_title(name)
 
     def _minimum_column_width(self, column):
         name = self._column_key(column)
-        return {"Run": 26, "When": 46, "MeasurePower": 26,
-                "condition_label": 120, "repeat": 30, "frames": 36}.get(
-                    name, 42 if name.startswith(("Vbg_", "Vtg_", "Vbias_")) else self._column_width(column))
+        if not self._single_line_rows:
+            return self._column_width(column)
+        font = QFont("Segoe UI" if sys.platform == "win32" else "sans-serif")
+        font.setPixelSize(12)
+        font.setWeight(QFont.Weight.DemiBold)
+        metrics = QFontMetrics(font)
+        title = self._compact_column_title(name)
+        label_width = max((metrics.horizontalAdvance(line) for line in title.split("\n")), default=0) + 6
+        return max(label_width, 28 if name in ("Run", "MeasurePower") else 32)
 
     def _set_error(self, value):
         if value != self._error:
@@ -688,7 +715,13 @@ class TableEditorModel(QAbstractTableModel):
                 item = self.table.item(row, column)
                 if item is None:
                     return False
-                if item.data(Qt.ItemDataRole.CheckStateRole) is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                choices = getattr(self.table.itemDelegateForColumn(column), "choices", None)
+                if choices and item.flags() & Qt.ItemFlag.ItemIsEditable:
+                    selected = int(value)
+                    if not 0 <= selected < len(choices):
+                        raise ValueError("This choice is unavailable")
+                    item.setText(choices[selected])
+                elif item.data(Qt.ItemDataRole.CheckStateRole) is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
                     item.setCheckState(Qt.CheckState.Checked if bool(value) else Qt.CheckState.Unchecked)
                 elif item.flags() & Qt.ItemFlag.ItemIsEditable:
                     index = self._source.index(row, column)

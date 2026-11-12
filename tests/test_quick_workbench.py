@@ -1311,3 +1311,94 @@ def test_display_refresh_uses_published_validation_but_dispatch_reads_sources(wo
     assert not shell._before_command("spectrum", "apply")
     assert True in calls
     assert window._lf6._pending is None
+
+
+def test_sample_header_search_filters_and_selects_saved_profile(sample_navigation):
+    from PySide6.QtCore import QObject, Qt
+    shell, window, editor, _edits, calls, _persisted = sample_navigation
+    dropdown = navigation_item(shell, lambda item: item.objectName() == "WorkspaceSampleDropdown")
+    QTest.mouseClick(shell.navigation, Qt.MouseButton.LeftButton,
+                     pos=dropdown.mapToScene(dropdown.boundingRect().center()).toPoint())
+    QTest.qWait(30)
+    popup = shell.navigation.rootObject().findChild(QObject, "WorkspaceSamplePopup")
+    assert popup is not None and popup.property("opened")
+    search = popup.findChild(QObject, "WorkspaceSampleSearch")
+    results = popup.findChild(QObject, "WorkspaceSampleResults")
+    assert search is not None and results is not None
+    popup_window = next(window for window in quick_application().topLevelWindows()
+                        if window.metaObject().className() == "QQuickPopupWindow" and window.isVisible())
+    for key in (Qt.Key.Key_S, Qt.Key.Key_A, Qt.Key.Key_V, Qt.Key.Key_E, Qt.Key.Key_D):
+        QTest.keyClick(popup_window, key)
+    QTest.qWait(30)
+    assert search.property("text").lower() == "saved"
+    assert results.property("count") == 1
+    from tests.test_quick_parameter_forms import find_item
+    result = find_item(results, "sampleResult_0")
+    assert result is not None, (results.width(), results.height(), popup.property("height"), [child.objectName() for child in results.childItems()])
+    assert result.property("text") == "saved-sample"
+    QTest.mouseClick(popup_window, Qt.MouseButton.LeftButton,
+                     pos=result.mapToScene(result.boundingRect().center()).toPoint())
+    assert shell.sampleId == window._sample_id_binder.value == "saved-sample"
+    assert editor.property("text") == "saved-sample"
+    assert calls == [("select", "saved-sample")]
+
+
+def test_sample_header_status_and_actions_follow_source_and_guard(sample_navigation, monkeypatch):
+    from PySide6.QtWidgets import QLabel
+    shell, window, _editor, _edits, _calls, _persisted = sample_navigation
+    window._sample_save_status = QLabel("Unsaved changes", window)
+    actions = []
+    window._new_sample = lambda: actions.append("new")
+    window._duplicate_current_sample = lambda: actions.append("duplicate")
+    shell.refresh()
+    assert shell.sampleSaveStatus == "Unsaved changes"
+    status = navigation_item(shell, lambda item: item.objectName() == "WorkspaceSampleSaveStatus")
+    assert status.property("text") == "Unsaved changes"
+    window._sample_save_status.setText("Save failed")
+    shell.refresh()
+    assert shell.sampleSaveStatus == "Save failed"
+    assert status.property("text") == "Save failed"
+    shell.newSample()
+    shell.duplicateSample()
+    assert actions == ["new", "duplicate"]
+    monkeypatch.setattr(shell, "_commit_sample_action_edits", lambda: False)
+    shell.newSample()
+    shell.duplicateSample()
+    assert actions == ["new", "duplicate"]
+    window._acquisition_active = lambda: True
+    shell.refresh()
+    assert not shell.sampleOperationsEnabled
+    shell.newSample()
+    shell.duplicateSample()
+    assert actions == ["new", "duplicate"]
+
+
+@pytest.mark.parametrize("width", [900, 1000, 1200, 1400])
+def test_sample_and_activity_status_do_not_overlap_at_responsive_widths(sample_navigation, width):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QLabel
+    shell, window, _editor, _edits, _calls, _persisted = sample_navigation
+    window._sample_save_status = QLabel("Saved sample settings · recently", window)
+    window.resize(width, 900)
+    shell.refresh()
+    QTest.qWait(50)
+    sample = navigation_item(shell, lambda item: item.objectName() == "WorkspaceSampleSaveStatus")
+    activity = navigation_item(shell, lambda item: item.objectName() == "WorkspaceActivityStatus")
+    a, b = sample.mapToScene(QPointF()), activity.mapToScene(QPointF())
+    vertical_overlap = a.y() < b.y() + activity.height() and b.y() < a.y() + sample.height()
+    horizontal_overlap = a.x() < b.x() + activity.width() and b.x() < a.x() + sample.width()
+    assert not (vertical_overlap and horizontal_overlap)
+    assert a.x() >= 0 and a.x() + sample.width() <= shell.navigation.width() + 1
+    assert b.x() >= 0 and b.x() + activity.width() <= shell.navigation.width() + 1
+    names = ("WorkspaceSampleId", "WorkspaceSampleDropdown", "WorkspaceSaveSample",
+             "WorkspaceSampleActions", "WorkspaceSampleSaveStatus", "WorkspaceActivityStatus",
+             "WorkspaceInstruments", "WorkspaceRunHistory", "WorkspaceTheme")
+    items = [navigation_item(shell, lambda item, name=name: item.objectName() == name) for name in names]
+    for index, item in enumerate(items):
+        first = item.mapToScene(QPointF())
+        assert first.x() >= -1 and first.x() + item.width() <= shell.navigation.width() + 1, names[index]
+        for other, other_name in zip(items[index + 1:], names[index + 1:]):
+            second = other.mapToScene(QPointF())
+            overlap_x = first.x() < second.x() + other.width() - 0.5 and second.x() < first.x() + item.width() - 0.5
+            overlap_y = first.y() < second.y() + other.height() - 0.5 and second.y() < first.y() + item.height() - 0.5
+            assert not (overlap_x and overlap_y), (names[index], other_name)

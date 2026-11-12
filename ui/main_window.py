@@ -340,6 +340,7 @@ class MainWindow(QMainWindow):
 
         # BFP
         self._bfp = BFPPanel(lf6_ctrl=self._lf6)
+        self._bfp._sidebar_snapshot_provider = self._inst_panel.capture_spectrum_readbacks
         self._tabs.addTab(self._bfp, "BFP")
 
         # Spectrum

@@ -74,7 +74,7 @@ class MotionSequencePreviewDialog(QDialog):
         self._table.setAlternatingRowColors(True)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setMinimumHeight(260)
-        fit_table_columns(self._table, (40, 46, 54, 100, 64, 64, 64, 64, 64, 58, 58, 56, 56))
+        fit_table_columns(self._table, (40, 46, 54, 100, 64, 64, 64, 64, 64, 58, 58, 56, 56) + (80,) * (self.sequence_model.columnCount() - len(COLUMNS)))
         self.table = self._table
         root.addWidget(self._table, 1)
 

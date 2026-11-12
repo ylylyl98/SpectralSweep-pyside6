@@ -70,6 +70,14 @@ class MotionSequenceModel(QAbstractTableModel):
             row["_source_index"] = int(row.get("_source_index", row.get("source_index", index)))
             self._rows.append(row)
             self._selected_count += int(row["enabled"])
+        active = any(row.get("bias2_mode", "off") != "off" or row.get("Vbias2") is not None for row in self._rows)
+        self._columns = COLUMNS + ((("Vbias2", "Vbias2"), ("Bias2 mode", "bias2_mode"),
+                                    ("Offset (V)", "bias2_offset_v")) if active else ())
+        if active:
+            from utils.bias_control import resolve_bias2
+            for row in self._rows:
+                if row.get("bias2_mode", "off") != "off" and "Vbias2" not in row:
+                    row["Vbias2"] = resolve_bias2(row, row.get("Vbias", row.get("vbias_v")))
 
     count = Property(int, lambda self: len(self._rows), constant=True)
     selectedCount = Property(int, lambda self: self._selected_count, notify=selectionChanged)
@@ -79,7 +87,7 @@ class MotionSequenceModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self._rows)
 
     def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(COLUMNS)
+        return 0 if parent.isValid() else len(self._columns)
 
     def roleNames(self):
         return {int(Qt.ItemDataRole.DisplayRole): b"display",
@@ -92,7 +100,7 @@ class MotionSequenceModel(QAbstractTableModel):
             return None
         row = self._rows[index.row()]
         column = index.column()
-        if not 0 <= column < len(COLUMNS):
+        if not 0 <= column < len(self._columns):
             return None
         if role == self.CheckedRole:
             return row["enabled"]
@@ -102,7 +110,7 @@ class MotionSequenceModel(QAbstractTableModel):
             if column == 0:
                 return Qt.CheckState.Checked if row["enabled"] else Qt.CheckState.Unchecked
             return None
-        key = COLUMNS[column][1]
+        key = self._columns[column][1]
         value = row.get(key, row.get(_ALIASES.get(key)))
         if role == self.ValueRole:
             # Delegates receive scalar cell values, never mutable owned data.
@@ -112,9 +120,9 @@ class MotionSequenceModel(QAbstractTableModel):
         return None
 
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
-        if orientation == Qt.Orientation.Horizontal and 0 <= section < len(COLUMNS):
+        if orientation == Qt.Orientation.Horizontal and 0 <= section < len(self._columns):
             if role == Qt.ItemDataRole.DisplayRole:
-                return {1: "Seq.", 2: "Cond.\n#"}.get(section, COLUMNS[section][0])
+                return {1: "Seq.", 2: "Cond.\n#"}.get(section, self._columns[section][0])
             if role == Qt.ItemDataRole.ToolTipRole and section == 2:
                 return "Condition number"
         if orientation == Qt.Orientation.Vertical and role == Qt.ItemDataRole.DisplayRole:
@@ -148,7 +156,7 @@ class MotionSequenceModel(QAbstractTableModel):
             return True
         entry["enabled"] = entry["use"] = checked
         self._selected_count += 1 if checked else -1
-        self.dataChanged.emit(self.index(row, 0), self.index(row, len(COLUMNS) - 1),
+        self.dataChanged.emit(self.index(row, 0), self.index(row, len(self._columns) - 1),
                               [int(Qt.ItemDataRole.CheckStateRole), int(self.CheckedRole), int(self.ValueRole)])
         self.selectionChanged.emit()
         return True
@@ -164,7 +172,7 @@ class MotionSequenceModel(QAbstractTableModel):
         for row in self._rows:
             row["enabled"] = row["use"] = checked
         self._selected_count = target
-        self.dataChanged.emit(self.index(0, 0), self.index(len(self._rows) - 1, len(COLUMNS) - 1),
+        self.dataChanged.emit(self.index(0, 0), self.index(len(self._rows) - 1, len(self._columns) - 1),
                               [int(Qt.ItemDataRole.CheckStateRole), int(self.CheckedRole), int(self.ValueRole)])
         self.selectionChanged.emit()
 
@@ -204,7 +212,7 @@ class MotionSequenceModel(QAbstractTableModel):
             return []
         return [{"column": column, "label": title,
                  "text": self.data(self.index(row, column), Qt.ItemDataRole.DisplayRole)}
-                for column, (title, _key) in enumerate(COLUMNS)]
+                for column, (title, _key) in enumerate(self._columns)]
 
     def selected_rows(self) -> list[dict[str, Any]]:
         return [copy.deepcopy(row) for row in self._rows if row["enabled"]]

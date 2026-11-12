@@ -9,6 +9,8 @@ AppPane {
     required property QtObject sequenceModel
     required property QtObject bridge
     property bool compact: true
+    property bool embedded: false
+    readonly property bool embeddedCompact: compact && embedded
     property bool detailsExpanded: !compact
     property bool filtersExpanded: false
     property bool orderExpanded: false
@@ -66,11 +68,23 @@ AppPane {
         spacing: 6
         RowLayout {
             Layout.fillWidth: true
-            AppLabel { text: "Measurement sequence"; font.bold: true; font.pixelSize: Theme.sectionSize; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+            AppLabel { objectName: "DualGateSequenceHeading"; visible: !root.embeddedCompact; text: "Measurement sequence"; font.bold: true; font.pixelSize: Theme.sectionSize; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+            AppLabel {
+                objectName: "DualGateEmbeddedSummary"
+                visible: root.embeddedCompact
+                Layout.fillWidth: true
+                text: root.sequenceModel.overview.planState + " · " + root.sequenceModel.overview.stepsText
+                      + " · " + root.sequenceModel.overview.filesText
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                color: Theme.textSecondary
+                Accessible.description: root.sequenceModel.overview.unitHint
+            }
             ReviewButton { objectName: "FullDualGateSequence"; text: "Full view…"; appearance: "accent"; visible: root.compact; onClicked: root.openFullSequence() }
         }
         AppLabel {
             objectName: "DualGatePreviewState"
+            visible: !root.embeddedCompact
             Layout.fillWidth: true
             text: root.sequenceModel.overview.planState + " · " + root.sequenceModel.overview.phase
             textFormat: Text.PlainText
@@ -79,6 +93,7 @@ AppPane {
         }
         AppLabel {
             objectName: "DualGateSequenceCounts"
+            visible: !root.embeddedCompact
             Layout.fillWidth: true
             text: root.sequenceModel.overview.stepsText + " · " + root.sequenceModel.overview.filesText
             font.weight: Font.DemiBold
@@ -87,6 +102,7 @@ AppPane {
         }
         AppLabel {
             objectName: "DualGateSequenceUnit"
+            visible: !root.embeddedCompact
             Layout.fillWidth: true
             text: root.sequenceModel.overview.unitHint
             wrapMode: Text.WordWrap
@@ -127,7 +143,7 @@ AppPane {
                     Layout.fillWidth: true
                     AppLabel {
                         objectName: "DualGateFocusCaption"
-                        text: root.focusStep.caption || ""
+                        text: (root.focusStep.caption || "") + (root.embeddedCompact ? " · " + (root.focusStep.stepTitle || "") : "")
                         color: Theme.accentText
                         font.weight: Font.DemiBold
                         Layout.fillWidth: true
@@ -140,8 +156,8 @@ AppPane {
                                : root.focusStep.statusKind === "stopped" ? Theme.warning : Theme.textSecondary
                     }
                 }
-                AppLabel { objectName: "DualGateFocusStep"; text: root.focusStep.stepTitle || ""; Layout.fillWidth: true; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
-                AppLabel { text: "Outer loops → inner loops"; color: Theme.textSecondary; Layout.fillWidth: true }
+                AppLabel { objectName: "DualGateFocusStep"; visible: !root.embeddedCompact; text: root.focusStep.stepTitle || ""; Layout.fillWidth: true; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
+                AppLabel { visible: !root.embeddedCompact; text: "Outer loops → inner loops"; color: Theme.textSecondary; Layout.fillWidth: true }
                 ColumnLayout {
                     objectName: "DualGateExecutionPath"
                     Layout.fillWidth: true
@@ -219,6 +235,7 @@ AppPane {
                 }
                 AppLabel {
                     objectName: "DualGateFollowingTransition"
+                    visible: !(root.followingStep.changes || []).length
                     text: root.followingStep.transitionText || ""
                     Layout.fillWidth: true
                     textFormat: Text.PlainText
@@ -248,7 +265,8 @@ AppPane {
         }
         RowLayout {
             objectName: "DualGateCompactNavigation"
-            visible: root.compact
+            visible: root.compact && (!root.embeddedCompact || root.sequenceModel.canPreviousStep
+                                     || root.sequenceModel.canNextStep || !root.sequenceModel.followCurrent)
             Layout.fillWidth: true
             spacing: 5
             ReviewButton { objectName: "PreviousDualGateStep"; text: "Previous"; enabled: root.sequenceModel.canPreviousStep; onClicked: root.sequenceModel.previousStep() }
