@@ -59,6 +59,66 @@ def test_empty_plot_transitions_follow_visible_finite_data(panel):
     assert plot._display_stack.currentWidget() is plot._empty_label
 
 
+@pytest.mark.parametrize("follow", [False, True])
+def test_pair_plot_fitting_preserves_independent_auto_y(panel, follow):
+    from ui.spectrum_pair import SpectrumPairDisplay
+
+    display = SpectrumPairDisplay(panel)
+    plots = [entry[2] for entry in display._entries]
+    display.show_result(
+        "andor_ingaas",
+        {"lightfield": {"wavelengths": np.array([710., 711.]), "counts": np.array([20., 30.])},
+         "andor_ingaas": {"wavelengths": np.array([1110., 1111.]), "counts": np.array([70., 75.])}},
+        {}, None)
+    plots[0]._autoscale_chk.setChecked(follow)
+    plots[1]._autoscale_chk.setChecked(not follow)
+    for plot in plots:
+        plot._plot.setYRange(0., 1., padding=0.)
+    plots[0]._autoscale_chk.setChecked(follow)
+    plots[1]._autoscale_chk.setChecked(not follow)
+    plots[0]._fit_live_btn.click()
+    plots[1]._fit_visible_btn.click()
+    for plot, expected in zip(plots, (follow, not follow)):
+        assert plot._autoscale_chk.isChecked() is expected
+        ymin, ymax = plot._plot.viewRange()[1]
+        assert ymin < min(plot._cts) < max(plot._cts) < ymax
+        assert plot._follow_y is expected
+        plot.update_spectrum(plot._wl, plot._cts + 100.0)
+        after = plot._plot.viewRange()[1]
+        if expected:
+            assert after[0] > ymax
+        else:
+            assert after == [ymin, ymax]
+
+
+def test_load_spectra_imports_single_paired_csvs_and_checks_axis_units(panel, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    from app.paired_spectrum_files import PairedSpectrumFiles
+
+    panel.push_spectrum(np.array([700., 701.]), np.array([1., 2.]))
+    pair = PairedSpectrumFiles(tmp_path, "test_pair", "andor_ingaas")
+    records = {
+        "lightfield": {"wavelengths": [700.5, 701.5], "counts": [10., 20.], "axis_unit": "nm"},
+        "andor_ingaas": {"wavelengths": [1., 2.], "counts": [30., 40.], "axis_unit": "pixel"},
+    }
+    paths = pair.write_point(1, records)
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames",
+                        lambda *_args: ([str(path) for path in paths.values()], "CSV"))
+    panel._load_spectra_dialog()
+    assert "Hidden due to a different axis unit: 1" in panel._status_lbl.text()
+    nm, pixel = panel.references
+    for ref, record in zip((nm, pixel), records.values()):
+        assert ref["axis_unit"] == record["axis_unit"]
+        np.testing.assert_array_equal(ref["wavelength"], record["wavelengths"])
+        np.testing.assert_array_equal(ref["counts"], record["counts"])
+    assert panel._spec_plot._reference_curves[nm["id"]].isVisible()
+    assert not panel._spec_plot._reference_curves[pixel["id"]].isVisible()
+
+    pair.write_point(2, records)
+    with pytest.raises(ValueError, match="Multi-point paired sweep CSV"):
+        panel.load_spectra([paths["lightfield"]])
+
+
 def test_reference_actions_follow_selection_and_saved_state(panel):
     assert not panel._details_reference_btn.isEnabled()
     assert panel._retry_reference_btn.isHidden()
@@ -126,17 +186,72 @@ def test_instrument_controls_remain_above_plot_when_side_panel_is_hidden(panel):
     panel._references_toggle.setChecked(False)
     QApplication.processEvents()
     assert panel._side_panel.isHidden()
+    assert panel._header_readbacks.isAncestorOf(panel._status_lbl)
+    assert panel._status_lbl.isVisibleTo(panel)
     assert panel._apply_optics_btn.isVisible()
     assert panel._center.isVisible()
     assert panel._apply_optics_btn.mapTo(panel, QPoint(0, panel._apply_optics_btn.height())).y() < panel._content_splitter.y()
     assert panel._acquire_btn.isVisible()
     assert panel._stop_btn.isVisible()
     panel._references_toggle.setChecked(True)
+    assert panel._sidebar_readbacks.isAncestorOf(panel._status_lbl)
     assert panel._reference_panel.isVisible()
     assert panel._source_label.isVisible()
     assert panel._save_root_lbl.isVisible()
     assert panel._save_btn.isVisible()
     assert panel._acquire_btn.isVisible()
+
+
+def test_spectrum_dimension_selects_the_matching_acquisition_commands(panel):
+    for index in (1, 0):
+        panel._tabs.setCurrentIndex(index)
+        for button in (panel._acquire_2d_btn, panel._run_2d_btn):
+            assert button.isVisibleTo(panel) == (index == 1)
+        for button in (panel._acquire_btn, panel._run_1d_btn):
+            assert button.isVisibleTo(panel) == (index == 0)
+        assert panel._stop_btn.isVisibleTo(panel)
+        assert panel._abort_btn.isVisibleTo(panel)
+
+
+def test_station_modes_keep_spectra_and_apply_at_top_with_optional_single_optics(panel):
+    panel._pair_controls.set_station("attodry2100")
+    QApplication.processEvents()
+    spectra = panel._references_toggle
+    def header_position():
+        position = spectra.mapTo(panel, QPoint(spectra.width(), 0))
+        return panel.width() - position.x(), position.y()
+
+    position = header_position()
+    assert spectra.isVisible() and panel._apply_optics_btn.isVisible()
+    assert panel._center.isVisible() and panel._exposure.isVisible() and panel._accumulations.isVisible()
+    assert panel._center.mapTo(panel, QPoint()).y() == panel._exposure.mapTo(panel, QPoint()).y()
+    assert panel._spectrograph_group.isHidden()
+    panel._optics_toggle.setChecked(True)
+    assert all(control.isVisible() for control in
+               (panel._energy, panel._grating, panel._output_port, panel._optics_readback))
+    panel._pair_controls.mode.setCurrentIndex(1)
+    QApplication.processEvents()
+    margin, top = header_position()
+    assert margin == position[0]
+    assert top < panel._content_splitter.y()
+    def middle_y(widget):
+        return widget.mapTo(panel, widget.rect().center()).y()
+
+    assert abs(middle_y(panel._apply_pair_centers_btn) - middle_y(panel._acquire_btn)) <= 2
+    assert abs(middle_y(panel._pair_controls._pixis_editors[0]) - middle_y(panel._acquire_btn)) <= 2
+    assert panel._apply_pair_centers_btn.isVisible()
+    assert not panel._center.isVisible()
+    for editor in (panel._pair_controls._pixis_editors[0], panel._pair_controls._andor_editors[0]):
+        assert editor.isVisible()
+        assert editor.mapTo(panel, QPoint()).y() < panel._content_splitter.y()
+    assert panel._spectrograph_group.isHidden()
+    assert not panel._comparison_mode.isVisible()
+    panel._pair_controls.set_station("default")
+    QApplication.processEvents()
+    assert panel._pair_controls.isHidden()
+    assert spectra.isVisible() and panel._apply_optics_btn.isVisible()
+    assert panel._comparison_mode.isVisible()
+    assert panel._spectrograph_group.isVisible()
 
 
 def test_previous_side_tab_indices_migrate_without_hiding_instrument(panel):

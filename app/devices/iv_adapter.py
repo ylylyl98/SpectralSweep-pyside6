@@ -50,6 +50,22 @@ class SMUCommunicationError(RuntimeError):
         }
 
 
+class SetpointVerificationError(RuntimeError):
+    """A source is not at the requested voltage, or is current-limited.
+
+    Deliberately not an SMUCommunicationError: the link is healthy, so SMU
+    traffic is not frozen and the normal return-to-zero cleanup still runs.
+    """
+
+    def __init__(self, message: str, *, role: str, target: float,
+                 readback: Optional[float] = None, current: Optional[float] = None):
+        super().__init__(message)
+        self.role = role
+        self.target = target
+        self.readback = readback
+        self.current = current
+
+
 class IVDevice:
     """
     Thin adapter over iv_automation.IVSetup with role awareness.
@@ -741,6 +757,100 @@ class IVDevice:
 
     # ---------------- public API used by UI/steps ----------------
 
+    def verify_setpoints(self, targets: Dict[str, Optional[float]]) -> None:
+        """Read each targeted role once, then ``check_setpoint_readings``.
+
+        Costs one READ? per role, so use it once per condition after the
+        settle time. Per-point sweeps pass the readings they already log to
+        ``check_setpoint_readings`` instead.
+        """
+        from utils.config import cfg
+
+        if not bool(getattr(cfg.smu, "verify_setpoints", True)):
+            return
+        readings = {}
+        for role, target in targets.items():
+            if self._usable_target(target) is None or not self.has_role(role):
+                continue
+            voltage, current = self.read_role_snapshot(role, strict=True)
+            if voltage is None:
+                raise SetpointVerificationError(
+                    f"{role} is not at its setpoint: requested {float(target):.6g} V, "
+                    "no readback available",
+                    role=role, target=float(target),
+                )
+            readings[role] = (voltage, current)
+        self.check_setpoint_readings(targets, readings)
+
+    @staticmethod
+    def _usable_target(value: Any) -> Optional[float]:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    def check_setpoint_readings(
+        self,
+        targets: Dict[str, Optional[float]],
+        readings: Dict[str, Tuple[Optional[float], Optional[float]]],
+    ) -> None:
+        """Raise if a settled (voltage, current) reading contradicts its target.
+
+        No instrument I/O: callers pass readings taken after the settle time,
+        because the charging current right after a step can touch compliance.
+        The Keithleys measure current only, so on a 2400 the returned voltage
+        is the programmed source level: the voltage check catches a rejected
+        or lost write, and the current check catches compliance clamping (the
+        case where the sample does not see the requested voltage). A missing
+        or non-finite reading skips that check; strict readers report those.
+        """
+        from utils.config import cfg
+
+        smu_cfg = cfg.smu
+        if not bool(getattr(smu_cfg, "verify_setpoints", True)):
+            return
+        floor_v = abs(float(getattr(smu_cfg, "setpoint_tolerance_V", 0.005)))
+        range_fraction = abs(float(getattr(smu_cfg, "setpoint_tolerance_range_fraction", 2.5e-4)))
+        trip_fraction = float(getattr(smu_cfg, "compliance_trip_fraction", 0.95))
+        for role, target in targets.items():
+            target = self._usable_target(target)
+            if target is None or role not in readings or not self.has_role(role):
+                continue
+            voltage, current = readings[role]
+            voltage = self._usable_target(voltage)
+            current = self._usable_target(current)
+            inst = self._instrument_for_role(role)
+
+            def limit(name: str) -> Optional[float]:
+                try:
+                    value = float(getattr(inst, name))
+                except (TypeError, ValueError, AttributeError):
+                    return None
+                return value if math.isfinite(value) and value > 0 else None
+
+            volt_range = limit("_volt_range_V")
+            tolerance = max(floor_v, range_fraction * volt_range if volt_range else 0.0)
+            if voltage is not None and abs(voltage - target) > tolerance:
+                raise SetpointVerificationError(
+                    f"{role} is not at its setpoint: requested {target:.6g} V, "
+                    f"readback {voltage:.6g} V (tolerance {tolerance * 1e3:.3g} mV)",
+                    role=role, target=target, readback=voltage, current=current,
+                )
+            compliance = limit("_curr_compliance_A")
+            if (
+                trip_fraction > 0
+                and compliance is not None
+                and current is not None
+                and abs(current) >= trip_fraction * compliance
+            ):
+                raise SetpointVerificationError(
+                    f"{role} is current-limited at {target:.6g} V: |I| = {abs(current):.3g} A "
+                    f"against a {compliance:.3g} A compliance limit, so the sample is "
+                    "not at the requested voltage",
+                    role=role, target=target, readback=voltage, current=current,
+                )
+
     def set_gates(
         self,
         Vbg: Optional[float] = None,
@@ -931,7 +1041,9 @@ class IVDevice:
         current_key = f"{role}_leakage"
         try:
             inst = self.setup.y_channel_collection.get_instrument(meas_key)
-            if inst:
+            if inst is None and strict:
+                raise RuntimeError(f"No instrument is bound to {meas_key}")
+            if inst is not None:
                 self._execute_io(
                     role=role,
                     inst=inst,
@@ -951,7 +1063,7 @@ class IVDevice:
             return None, None
         except Exception as exc:
             if strict:
-                address = getattr(locals().get("inst"), "address", "unknown address")
+                address = getattr(locals().get("inst"), "address", None) or self.role_map.get(role) or "unknown address"
                 raise SMUCommunicationError(
                     f"{role} read failed on {address}: {exc}",
                     role=role,
@@ -1013,30 +1125,100 @@ class IVDevice:
 
         return bg_val, tg_val
 
+    def _ramp_gate_pair_to_zero_report(
+        self, ramp_step: float, delay_s: float,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return both gates to zero in proportional, serially written steps."""
+        gates = ("Vbg", "Vtg")
+        role_map = self.role_map
+        starts = {}
+        reached_zero = set()
+        try:
+            for role in gates:
+                start = self.read_role_voltage(role, strict=True)
+                if start is None or not math.isfinite(start):
+                    raise ValueError(f"Cannot read a finite initial voltage for {role}")
+                starts[role] = start
+            ratio = max(abs(voltage) for voltage in starts.values()) / ramp_step
+            steps = max(1, math.ceil(ratio - 1e-12))
+            for index in range(1, steps + 1):
+                remaining = (steps - index) / steps
+                for role in gates:
+                    target = 0.0 if index == steps else starts[role] * remaining
+                    if not self.set_role_voltage_fast(role, target, 0.0):
+                        raise RuntimeError(f"Could not set {role} to {target:g} V")
+                    if index == steps:
+                        reached_zero.add(role)
+                if delay_s:
+                    time.sleep(delay_s)
+        except Exception as exc:
+            report = {}
+            for gate in gates:
+                address = role_map.get(gate)
+                if gate in reached_zero:
+                    report[gate] = {"status": "reached_zero", "address": address}
+                elif gate == role:
+                    status = "skipped_reconnect_required" if self.io_frozen else "failed"
+                    report[gate] = {"status": status, "address": address, "error": str(exc)}
+                else:
+                    status = ("skipped_frozen_after_error" if self.io_frozen
+                              else "interrupted_paired_gate_after_error")
+                    report[gate] = {
+                        "status": status,
+                        "address": address,
+                        "error": f"Coordinated gate ramp stopped after {role}: {exc}",
+                    }
+            return report
+        return {gate: {"status": "reached_zero", "address": role_map.get(gate)} for gate in gates}
+
     def ramp_all_to_zero_report(
         self, ramp_step: float = 0.1, delay_s: float = 0.05, *,
-        include_bias2: bool = False,
+        include_bias2: bool = False, coordinated_gates: bool = False,
     ) -> Dict[str, Dict[str, Any]]:
-        """Return isolated cleanup results for the roles used by the operation."""
-        roles = (("Vbias2",) if include_bias2 else ()) + ("Vbias", "Vbg", "Vtg")
+        """Return per-role cleanup results, optionally ramping both gates together."""
+        bias_roles = ("Vbias2", "Vbias") if include_bias2 else ("Vbias",)
+        roles = bias_roles + ("Vbg", "Vtg")
         report: Dict[str, Dict[str, Any]] = {}
         role_map = getattr(self, "role_map", {})
         role_health = getattr(self, "_role_health", {})
+
+        def frozen_result(role):
+            return {
+                "status": "skipped_frozen_after_error",
+                "address": role_map.get(role),
+                "error": "No SMU commands sent; reconnect is required.",
+            }
+
         if getattr(self, "_io_frozen", False):
-            for role in roles:
-                if self.has_role(role):
-                    report[role] = {
-                        "status": "skipped_frozen_after_error",
-                        "address": role_map.get(role),
-                        "error": "No SMU commands sent; reconnect is required.",
-                    }
-            return report
-        for role in roles:
+            return {role: frozen_result(role) for role in roles if self.has_role(role)}
+
+        if coordinated_gates:
+            try:
+                ramp_step, delay_s = float(ramp_step), float(delay_s)
+                if not (math.isfinite(ramp_step) and ramp_step > 0):
+                    raise ValueError("Ramp step must be finite and positive")
+                if not (math.isfinite(delay_s) and delay_s >= 0):
+                    raise ValueError("Ramp delay must be finite and non-negative")
+            except (TypeError, ValueError, OverflowError) as exc:
+                return {
+                    role: {"status": "failed", "address": role_map.get(role), "error": str(exc)}
+                    for role in roles if self.has_role(role)
+                }
+        paired = coordinated_gates and self.has_role("Vbg") and self.has_role("Vtg")
+        independent_roles = bias_roles if paired else roles
+        for role in independent_roles:
             if not self.has_role(role):
                 continue
+            if coordinated_gates and getattr(self, "_io_frozen", False):
+                report[role] = frozen_result(role)
+                continue
             try:
-                self.ramp_to(role, 0.0, ramp_step, delay_s)
-                self.ramp_to(role, 0.0, 0.0, 0.0)
+                moved = self.ramp_to(role, 0.0, ramp_step, delay_s)
+                if coordinated_gates and moved is False:
+                    raise RuntimeError(f"Could not ramp {role} to zero")
+                moved = self.ramp_to(role, 0.0, 0.0, 0.0)
+                if coordinated_gates and moved is False:
+                    raise RuntimeError(f"Could not set {role} to zero")
                 report[role] = {
                     "status": "reached_zero",
                     "address": role_map.get(role),
@@ -1052,14 +1234,23 @@ class IVDevice:
                     "address": role_map.get(role),
                     "error": str(exc),
                 }
+        if paired:
+            if getattr(self, "_io_frozen", False):
+                report.update({gate: frozen_result(gate) for gate in ("Vbg", "Vtg")})
+            else:
+                report.update(self._ramp_gate_pair_to_zero_report(ramp_step, delay_s))
         return report
 
-    def ramp_all_to_zero(self, ramp_step: float = 0.1, delay_s: float = 0.05, *, include_bias2: bool = False):
-        """Best-effort isolated ramps; one dead role cannot block the others."""
+    def ramp_all_to_zero(
+        self, ramp_step: float = 0.1, delay_s: float = 0.05, *,
+        include_bias2: bool = False, coordinated_gates: bool = False,
+    ):
+        """Return an error summary for cleanup of the mapped roles."""
         report = self.ramp_all_to_zero_report(
             ramp_step=ramp_step,
             delay_s=delay_s,
             include_bias2=include_bias2,
+            **({"coordinated_gates": True} if coordinated_gates else {}),
         )
         errors = [
             f"{role}: {result.get('error', result.get('status', 'failed'))}"

@@ -16,7 +16,8 @@ AppPane {
     property bool orderExpanded: false
     property int liveDelegateCount: 0
     readonly property bool wide: width >= 960
-    readonly property real stepHeight: wide ? Math.max(52, metrics.height * 3) : Math.max(86, metrics.height * 5.1)
+    readonly property real stepHeight: wide ? Math.max(26, metrics.height * 1.7) : Math.max(44, metrics.height * 2.8)
+    readonly property color unchangedText: Theme.textSecondary
     readonly property var focusStep: sequenceModel.focusStep
     readonly property var followingStep: sequenceModel.followingStep
     readonly property bool hasRunPosition: sequenceModel.overview.phase !== "Idle"
@@ -27,34 +28,6 @@ AppPane {
 
 
     component ReviewButton: AppButton {}
-
-    component ValueGrid: GridLayout {
-        id: valueGrid
-        property var values: []
-        columns: 2
-        columnSpacing: 12
-        rowSpacing: 5
-        Repeater {
-            model: valueGrid.values.length
-            delegate: RowLayout {
-                required property int index
-                readonly property var modelData: valueGrid.values[index] || ({label: "", value: ""})
-                Layout.fillWidth: true
-                Layout.minimumWidth: 0
-                Layout.columnSpan: modelData.label === "Setup" ? 2 : 1
-                spacing: 5
-                AppLabel { text: modelData.label; Layout.maximumWidth: 112; wrapMode: Text.Wrap; color: Theme.textSecondary; textFormat: Text.PlainText }
-                AppLabel {
-                    Layout.fillWidth: true
-                    Layout.minimumWidth: 0
-                    text: modelData.value
-                    font.weight: Font.DemiBold
-                    wrapMode: Text.Wrap
-                    textFormat: Text.PlainText
-                }
-            }
-        }
-    }
 
     function nextPage() { sequenceModel.nextPage() }
     function previousPage() { sequenceModel.previousPage() }
@@ -110,6 +83,47 @@ AppPane {
             color: Theme.textSecondary
         }
         AppPane {
+            id: outlineCard
+            objectName: "DualGatePlanOutline"
+            visible: (root.sequenceModel.planOutline || []).length > 0
+            Layout.fillWidth: true
+            padding: 6
+            Accessible.name: "Measurement plan, outer loop to inner loop"
+            background: Rectangle { color: Theme.surface; radius: 5; border.width: 1; border.color: Theme.divider }
+            ColumnLayout {
+                width: outlineCard.availableWidth
+                spacing: 4
+                Repeater {
+                    model: (root.sequenceModel.planOutline || []).length
+                    delegate: GridLayout {
+                        required property int index
+                        readonly property var modelData: (root.sequenceModel.planOutline || [])[index] || ({})
+                        Layout.fillWidth: true
+                        Layout.leftMargin: Math.min(index, 5) * 12
+                        // A narrow side pane stacks the values under their level.
+                        columns: root.wide ? 2 : 1
+                        columnSpacing: 6
+                        rowSpacing: 0
+                        AppLabel {
+                            text: (index + 1) + ". " + (modelData.label || "")
+                            color: Theme.textSecondary
+                            textFormat: Text.PlainText
+                            Layout.alignment: Qt.AlignTop
+                        }
+                        AppLabel {
+                            text: modelData.text || ""
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            Layout.leftMargin: root.wide ? 0 : 14
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                            font.weight: Font.DemiBold
+                        }
+                    }
+                }
+            }
+        }
+        AppPane {
             id: focusCard
             objectName: "DualGateFocusCard"
             visible: root.compact && !!root.focusStep.stepTitle
@@ -157,61 +171,14 @@ AppPane {
                     }
                 }
                 AppLabel { objectName: "DualGateFocusStep"; visible: !root.embeddedCompact; text: root.focusStep.stepTitle || ""; Layout.fillWidth: true; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
-                AppLabel { visible: !root.embeddedCompact; text: "Outer loops → inner loops"; color: Theme.textSecondary; Layout.fillWidth: true }
-                ColumnLayout {
+                AppLabel {
                     objectName: "DualGateExecutionPath"
+                    text: root.focusStep.summaryLine || ""
+                    visible: text.length > 0
                     Layout.fillWidth: true
-                    spacing: 5
-                    Repeater {
-                        model: (root.focusStep.orderPath || []).length
-                        delegate: RowLayout {
-                            required property int index
-                            readonly property var modelData: (root.focusStep.orderPath || [])[index] || ({})
-                            Layout.fillWidth: true
-                            Layout.leftMargin: Math.min(index * 4, 20)
-                            spacing: 6
-                            AppLabel {
-                                text: (index + 1) + "."
-                                color: Theme.accentText
-                                Layout.alignment: Qt.AlignTop
-                                Layout.preferredWidth: 18
-                                font.weight: Font.DemiBold
-                            }
-                            ColumnLayout {
-                                Layout.fillWidth: true
-                                Layout.minimumWidth: 0
-                                spacing: 2
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 6
-                                    AppLabel {
-                                        text: modelData.label
-                                        font.weight: Font.DemiBold
-                                        Layout.maximumWidth: modelData.value ? 115 : Number.POSITIVE_INFINITY
-                                        Layout.fillWidth: !modelData.value
-                                        textFormat: Text.PlainText
-                                        wrapMode: Text.Wrap
-                                    }
-                                    AppLabel {
-                                        text: modelData.value || ""
-                                        visible: text.length > 0
-                                        Layout.fillWidth: true
-                                        textFormat: Text.PlainText
-                                        wrapMode: Text.Wrap
-                                    }
-                                }
-                                ValueGrid { Layout.fillWidth: true; values: modelData.fields || []; visible: values.length > 0 }
-                                AppLabel {
-                                    text: modelData.detail || ""
-                                    visible: text.length > 0
-                                    Layout.fillWidth: true
-                                    textFormat: Text.PlainText
-                                    wrapMode: Text.Wrap
-                                    color: Theme.textSecondary
-                                }
-                            }
-                        }
-                    }
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
+                    textFormat: Text.PlainText
                 }
             }
         }
@@ -227,11 +194,11 @@ AppPane {
                 spacing: 4
                 AppLabel {
                     objectName: "DualGateFollowingStep"
-                    text: "Following step · " + (root.followingStep.stepTitle || "")
+                    text: "Next · " + (root.followingStep.stepTitle || "")
                     Layout.fillWidth: true
                     font.weight: Font.DemiBold
                     color: Theme.accentText
-                    wrapMode: Text.WordWrap
+                    elide: Text.ElideRight
                 }
                 AppLabel {
                     objectName: "DualGateFollowingTransition"
@@ -239,21 +206,17 @@ AppPane {
                     text: root.followingStep.transitionText || ""
                     Layout.fillWidth: true
                     textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
                 }
                 AppLabel {
                     objectName: "DualGateFollowingChanges"
+                    visible: (root.followingStep.changes || []).length > 0
                     Layout.fillWidth: true
-                    text: (root.followingStep.changes || []).join("\n") || "Requested values unchanged"
-                    wrapMode: Text.Wrap
+                    text: (root.followingStep.changes || []).join(" · ")
+                    elide: Text.ElideRight
+                    maximumLineCount: 1
                     textFormat: Text.PlainText
-                }
-                AppLabel {
-                    text: root.followingStep.unchangedText || ""
-                    visible: text.length > 0
-                    Layout.fillWidth: true
-                    wrapMode: Text.WordWrap
-                    color: Theme.textSecondary
                 }
             }
         }
@@ -329,7 +292,7 @@ AppPane {
             AppLabel { text: "Step"; Layout.preferredWidth: metrics.averageCharacterWidth * 6; font.bold: true }
             AppLabel { text: "Status"; Layout.preferredWidth: metrics.averageCharacterWidth * 10; font.bold: true }
             AppLabel { text: "Condition / repeat"; Layout.fillWidth: true; Layout.preferredWidth: 160; font.bold: true }
-            AppLabel { text: "Loop settings"; Layout.fillWidth: true; Layout.preferredWidth: 180; font.bold: true }
+            AppLabel { text: "Loop setting"; Layout.fillWidth: true; Layout.preferredWidth: 180; font.bold: true }
             AppLabel { text: "Gate target / sweep"; Layout.fillWidth: true; Layout.preferredWidth: 200; font.bold: true }
             AppLabel { text: "Acquisition"; Layout.fillWidth: true; Layout.preferredWidth: 160; font.bold: true }
         }
@@ -371,6 +334,11 @@ AppPane {
                 required property string acquisition
                 required property bool selected
                 required property int sourceIndex
+                required property string loopVarying
+                required property bool sameCondition
+                required property bool sameLoop
+                required property bool sameGate
+                readonly property string loopText: loopVarying.length ? loopVarying : loop
                 objectName: "DualGateStep_" + index
                 width: ListView.view.width
                 height: root.stepHeight
@@ -400,17 +368,16 @@ AppPane {
                         AppLabel { text: entry.step; color: root.palette.text; Layout.preferredWidth: metrics.averageCharacterWidth * 6; font.bold: true }
                         AppLabel { text: entry.status; color: entry.statusColor; Layout.preferredWidth: metrics.averageCharacterWidth * 10; elide: Text.ElideRight }
                         Repeater {
-                            model: [entry.condition, entry.loop, entry.gate, entry.acquisition]
+                            model: [entry.condition, entry.loopText, entry.gate, entry.acquisition]
                             delegate: AppLabel {
                                 required property string modelData
                                 required property int index
                                 text: modelData
-                                color: root.palette.text
+                                color: [entry.sameCondition, entry.sameLoop, entry.sameGate, false][index] ? root.unchangedText : root.palette.text
                                 textFormat: Text.PlainText
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: [160, 180, 200, 160][index]
-                                wrapMode: Text.WordWrap
-                                maximumLineCount: 2
+                                maximumLineCount: 1
                                 elide: Text.ElideRight
                             }
                         }
@@ -423,11 +390,15 @@ AppPane {
                             Layout.fillWidth: true
                             AppLabel { text: entry.step; color: root.palette.text; font.bold: true }
                             AppLabel { text: entry.status; color: entry.statusColor }
-                            AppLabel { text: entry.condition; color: root.palette.text; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
+                            AppLabel { text: entry.condition; color: entry.sameCondition ? root.unchangedText : root.palette.text; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
                         }
-                        AppLabel { text: "Loop: " + entry.loop; color: root.palette.text; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
-                        AppLabel { text: entry.gate; color: root.palette.text; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
-                        AppLabel { text: entry.acquisition; color: root.palette.text; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText }
+                        AppLabel {
+                            text: [entry.loopText, entry.gate, entry.acquisition].filter(part => part.length > 0).join(" · ")
+                            color: entry.sameLoop && entry.sameGate ? root.unchangedText : root.palette.text
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                            textFormat: Text.PlainText
+                        }
                     }
                 }
             }

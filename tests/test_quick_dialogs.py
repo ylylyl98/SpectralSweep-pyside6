@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDeadlineTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QLineEdit, QWidget
 
@@ -81,6 +81,11 @@ def test_unfinished_calibration_draft_cancel_never_writes_source_and_reopens(own
     initial = dialog.tolerance.value()
     dialog.tolerance.setKeyboardTracking(False)
     view = next(view for view in entry["forms"]["forms"] if dialog.tolerance in view.adapter._fields.values())
+    # The form loads when Qt shows the newly migrated layout.
+    deadline = QDeadlineTimer(2000)
+    while view.rootObject() is None and not deadline.hasExpired():
+        QTest.qWait(10)
+    assert view.rootObject() is not None
     item = find_item(view.rootObject(), "parameter_" + field.fieldId)
     QTest.mouseClick(view, Qt.MouseButton.LeftButton,
                      pos=item.mapToScene(item.boundingRect().center()).toPoint())

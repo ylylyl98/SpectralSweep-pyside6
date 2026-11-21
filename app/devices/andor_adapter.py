@@ -58,13 +58,13 @@ class _OwnerThread:
     def ident(self) -> Optional[int]:
         return self._thread.ident
 
-    def call(self, fn: Callable[[], Any], timeout_s: float) -> Any:
+    def call(self, fn: Callable[[], Any], timeout_s: float | None) -> Any:
         if threading.get_ident() == self._thread.ident:
             return fn()
         reply: queue.Queue = queue.Queue(maxsize=1)
         self._jobs.put((fn, reply))
         try:
-            ok, value = reply.get(timeout=max(0.1, float(timeout_s)))
+            ok, value = reply.get(timeout=None if timeout_s is None else max(0.1, float(timeout_s)))
         except queue.Empty as exc:
             raise TimeoutError(
                 f"Andor SDK operation exceeded {float(timeout_s):g} s"
@@ -153,6 +153,12 @@ class AndorSDK2Setup:
             self.options.operation_timeout_s if timeout_s is None else timeout_s,
         )
 
+    def run_paired_operation(self, operation: Callable[[], Any]) -> Any:
+        """Keep the pair lease through completion of any dispatched SDK calls."""
+        if self._closed:
+            raise RuntimeError("Andor spectrometer is disconnected")
+        return self._owner.call(operation, timeout_s=None)
+
     def _load_andor_module(self):
         if self._andor_module is not None:
             return self._andor_module
@@ -209,8 +215,14 @@ class AndorSDK2Setup:
         role_label = "Si" if role == "si" else "InGaAs"
         wanted_serial = self.options.camera_serial.strip()
         for index in range(count):
+            # Identification only. pylablib switches the cooler off for
+            # temperature="off" and on for None; a numeric setpoint leaves the
+            # cooler as it is. Keep the configured fan mode rather than "off"
+            # so a detector that is still cold is not left without airflow.
             camera = module.AndorSDK2Camera(
-                idx=index, temperature="off", fan_mode="off"
+                idx=index,
+                temperature=float(self.options.temperature_c),
+                fan_mode=self.options.fan_mode,
             )
             try:
                 info = camera.get_device_info()
@@ -729,6 +741,36 @@ class AndorSDK2Setup:
             result = spec.set_wavelength(center_nm * 1e-9)
         return float(result if result is not None else spec.get_wavelength()) * 1e9
 
+    def apply_center_wavelength(self, center_nm, *, stop_event=None) -> float:
+        """Apply the Shamrock wavelength without writing any camera or exit settings."""
+        center_nm = float(center_nm)
+        if not np.isfinite(center_nm) or center_nm < 0:
+            raise ValueError("Andor center must be finite and non-negative")
+
+        def apply():
+            spec = self._require_spectrograph()
+            if self._output_port != "unchanged":
+                if not spec.is_flipper_present("output") or str(spec.get_flipper_port("output")) != self._output_port:
+                    raise RuntimeError(f"Shamrock {self._output_port} output is not selected; verify it in Instruments.")
+            if center_nm > 0:
+                minimum, maximum = (float(value) * 1e9 for value in spec.get_wavelength_limits(int(spec.get_grating())))
+                if not np.isfinite([minimum, maximum]).all() or not minimum <= center_nm <= maximum:
+                    raise ValueError(f"Andor center {center_nm:g} nm is outside its grating range {minimum:g}–{maximum:g} nm.")
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("Andor center change stopped.")
+            try:
+                self._set_wavelength_on_owner(center_nm)
+                actual = float(spec.get_wavelength()) * 1e9
+                if not np.isfinite(actual) or abs(actual - center_nm) > 0.1:
+                    raise RuntimeError(
+                        f"Wavelength readback {actual:.3f} nm does not match requested {center_nm:.3f} nm.")
+                self._center_nm = actual
+                return actual
+            finally:
+                self._stored_calibration_cache.clear()
+
+        return self._call(apply)
+
     def configure_for_acquisition(self, *, center_nm, exposure_ms, frames):
         center_nm = float(center_nm)
         exposure_ms = float(exposure_ms)
@@ -832,7 +874,7 @@ class AndorSDK2Setup:
                 except Exception:
                     pass
 
-    def _capture_frames_on_owner(self) -> np.ndarray:
+    def _capture_frames_on_owner(self, stop_event=None) -> np.ndarray:
         camera = self._require_camera()
         self._cleanup_acquisition_on_owner()
         camera.set_exposure(self._exposure_ms / 1000.0)
@@ -844,7 +886,7 @@ class AndorSDK2Setup:
         frames = []
         try:
             for _ in range(count):
-                if self._abort.is_set():
+                if self._abort.is_set() or (stop_event is not None and stop_event.is_set()):
                     raise RuntimeError("Andor acquisition was cancelled")
                 frame = np.asarray(camera.snap(timeout=timeout), dtype=np.float32)
                 # pylablib commonly returns one requested frame with a leading
@@ -863,7 +905,7 @@ class AndorSDK2Setup:
             raise RuntimeError(f"Andor frame shape changed during acquisition: {shapes}")
         return np.mean(np.stack(frames, axis=0), axis=0, dtype=np.float64)
 
-    def acquire_2d(self) -> np.ndarray:
+    def acquire_2d(self, *, stop_event=None) -> np.ndarray:
         self._abort.clear()
         self._busy.set()
         timeout = (
@@ -881,7 +923,10 @@ class AndorSDK2Setup:
             except Exception:
                 log.warning("Andor metadata snapshot could not be recorded", exc_info=True)
         try:
-            frame = np.asarray(self._call(self._capture_frames_on_owner, timeout_s=timeout), dtype=float)
+            capture = self._capture_frames_on_owner
+            if stop_event is not None:
+                capture = lambda: self._capture_frames_on_owner(stop_event)
+            frame = np.asarray(self._call(capture, timeout_s=timeout), dtype=float)
         except Exception as exc:
             if recorder is not None:
                 try:
@@ -899,8 +944,8 @@ class AndorSDK2Setup:
                 log.warning("Andor capture result metadata could not be recorded", exc_info=True)
         return frame
 
-    def acquire(self) -> np.ndarray:
-        frame = self.acquire_2d()
+    def acquire(self, *, stop_event=None) -> np.ndarray:
+        frame = self.acquire_2d(stop_event=stop_event)
         wavelengths = self.get_wavelength_calibration()
         if frame.ndim == 1:
             return frame
@@ -1001,18 +1046,6 @@ class AndorSDK2Setup:
                     self._identity.setdefault("connection_warnings", []).append(warning)
         self._call(reconnect)
 
-    def get_disconnect_safety_snapshot(self) -> dict[str, Any]:
-        def read() -> dict[str, Any]:
-            camera = self._require_camera()
-            return {
-                "temperature_c": float(camera.get_temperature()),
-                "temperature_status": str(camera.get_temperature_status()),
-                "cooler_on": bool(camera.is_cooler_on()),
-                "camera_role": self.options.camera_role,
-            }
-
-        return self._call(read, timeout_s=10.0)
-
     def set_cooler(self, on: bool) -> None:
         self._call(lambda: self._require_camera().set_cooler(on=bool(on)))
 
@@ -1021,17 +1054,25 @@ class AndorSDK2Setup:
             return
 
         def close_hardware():
-            self._cleanup_acquisition_on_owner()
-            if self._spectrograph is not None:
+            # Every step runs even if an earlier one fails: a spectrograph
+            # error must not leave the camera handle open behind a "closed"
+            # adapter. The first failure is reported after all were attempted.
+            first_error = None
+            try:
+                self._cleanup_acquisition_on_owner()
+            except Exception as exc:
+                first_error = exc
+            for attribute in ("_spectrograph", "_camera"):
+                device = getattr(self, attribute)
+                setattr(self, attribute, None)
+                if device is None:
+                    continue
                 try:
-                    self._spectrograph.close()
-                finally:
-                    self._spectrograph = None
-            if self._camera is not None:
-                try:
-                    self._camera.close()
-                finally:
-                    self._camera = None
+                    device.close()
+                except Exception as exc:
+                    first_error = first_error or exc
+            if first_error is not None:
+                raise first_error
 
         try:
             self._owner.call(close_hardware, self.options.operation_timeout_s)
@@ -1055,10 +1096,14 @@ class SpectrometerAndor:
             self._wavelengths = self.setup.get_wavelength_calibration()
         return np.asarray(self._wavelengths, dtype=float).copy()
 
-    def acquire(self):
-        counts = np.asarray(self.setup.acquire(), dtype=float).ravel()
+    def acquire(self, *, stop_event=None):
+        frame = self.setup.acquire() if stop_event is None else self.setup.acquire(stop_event=stop_event)
+        counts = np.asarray(frame, dtype=float).ravel()
         wavelengths = self.calibration_wavelengths(force=False)
         return align_wavelengths_to_intensities(wavelengths, counts)
+
+    def acquire_for_pair(self, stop_event):
+        return self.acquire(stop_event=stop_event)
 
     def acquire_2d(self) -> np.ndarray:
         return self.setup.acquire_2d()

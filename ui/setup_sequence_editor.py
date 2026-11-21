@@ -29,7 +29,7 @@ class _SetupRow(QWidget):
 
 class SetupSequenceDialog(QDialog):
     """Edits a draft; the caller commits selected_backends only after Accepted."""
-    def __init__(self, values, choices, parent=None):
+    def __init__(self, values, choices, parent=None, *, concurrent_choices=False):
         super().__init__(parent)
         self.setWindowTitle("Measurement setups")
         self.setObjectName("DualGateSetupSequenceDialog")
@@ -38,11 +38,17 @@ class SetupSequenceDialog(QDialog):
         layout = QVBoxLayout(self)
         hint = QLabel(
             "Select setups in measurement order. Values in the same Group pair by position; "
-            "other Groups run all combinations. PIXIS and Andor Silicon use silicon detectors; "
-            "WinSpec and Andor InGaAs use InGaAs detectors. "
-            "Repeated setups are allowed. When MFF101 automatic routing is enabled, "
-            "each setup's light path is verified before measurement. "
-            "Set its position in Settings > MFF101 light paths."
+            "other Groups run all combinations. "
+            + (
+                "Choose a PIXIS + Andor entry for simultaneous spectra at each gate point. "
+                "Use the standard optical loop parameters for PIXIS and the Andor loop parameters "
+                "for the paired Andor."
+                if concurrent_choices else
+                "PIXIS and Andor Silicon use silicon detectors; WinSpec and Andor InGaAs use InGaAs detectors. "
+                "Repeated setups are allowed. When MFF101 automatic routing is enabled, "
+                "each setup's light path is verified before measurement. "
+                "Set its position in Settings > MFF101 light paths."
+            )
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -68,20 +74,22 @@ class SetupSequenceDialog(QDialog):
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
         layout.addWidget(self.buttons)
         for value in values or [None]:
-            self._add_row(value)
+            self._add_row(value, refresh=False)
+        self._refresh()
         self.rows[0].combo.setFocus()
         self.resize(580, 340)
 
-    def _add_row(self, value):
+    def _add_row(self, value, *, refresh=True):
         row = _SetupRow(self._choices, value)
         self.rows.append(row)
         self._rows_layout.addWidget(row)
-        row.combo.currentIndexChanged.connect(self._refresh)
+        row.combo.currentIndexChanged.connect(self._refresh_validation)
         row.up_button.clicked.connect(lambda: self._move(row, -1))
         row.down_button.clicked.connect(lambda: self._move(row, 1))
         row.remove_button.clicked.connect(lambda: self._remove(row))
-        self._refresh()
-        row.combo.setFocus()
+        if refresh:
+            self._refresh()
+            row.combo.setFocus()
 
     def _move(self, row, offset):
         index = self.rows.index(row)
@@ -109,8 +117,7 @@ class SetupSequenceDialog(QDialog):
     def selected_backends(self):
         return [row.combo.currentData() for row in self.rows]
 
-    def _refresh(self, *_args):
-        missing = []
+    def _refresh(self):
         tab_order = []
         for index, row in enumerate(self.rows):
             position = index + 1
@@ -123,18 +130,21 @@ class SetupSequenceDialog(QDialog):
             for button, action in ((row.up_button, 'Move up'), (row.down_button, 'Move down'), (row.remove_button, 'Remove')):
                 button.setAccessibleName(f"{action} setup {position}")
                 button.setToolTip(f"{action} setup at position {position}")
-            if row.combo.currentData() not in self._choices:
-                missing.append(str(position))
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not missing)
         tab_order.extend((self.add_button, self.buttons.button(QDialogButtonBox.StandardButton.Ok),
                           self.buttons.button(QDialogButtonBox.StandardButton.Cancel)))
         for previous, following in zip(tab_order, tab_order[1:]):
             QWidget.setTabOrder(previous, following)
+        self._refresh_validation()
+
+    def _refresh_validation(self, *_args):
+        missing = [str(position) for position, row in enumerate(self.rows, 1)
+                   if row.combo.currentData() not in self._choices]
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(not missing)
         self.message.setText("Choose a setup for position(s): " + ', '.join(missing) if missing else
                              f"{len(self.rows)} position(s). Use the same number of values in the other rows of this Group.")
 
     def accept(self):
         if any(value not in self._choices for value in self.selected_backends()):
-            self._refresh()
+            self._refresh_validation()
             return
         super().accept()

@@ -81,16 +81,18 @@ def _configure_optical_section(section):
         setup_label = next(item.widget() for item in items
                            if isinstance(item.widget(), QLabel) and item.widget().text() == "Measurement setup:")
         setup_label.setBuddy(section._backend)
-        connection = group_items(section, "", _take_for(items, setup_label, section._backend,
+        connection = group_items(section, "", _take_for(items, section._station_label, section._station, setup_label, section._backend,
             section._setup_summary, section._connect_btn, section._status,
             section._connection_summary), "QuickDetectorConnection")
         detector = group_items(section, "", _take_for(items, section._temperature,
             section._temperature_detail, section._temperature_monitor,
-            section._acquisition_condition, section._warm_disconnect_btn), "QuickDetectorReadback")
+            section._acquisition_condition), "QuickDetectorReadback")
         # Connection first, current detector state next, optional setup last.
         layout.addWidget(connection)
         layout.addWidget(detector)
         append_items(layout, items)
+        prefer_width(section._station, 270)
+        section._station.setProperty("quickLabelAbove", True)
         prefer_width(section._backend, 270)
         section._backend.setProperty("quickLabelAbove", True)
         for combo in (section._optical_profile, section._lf_route, section._winspec_route,

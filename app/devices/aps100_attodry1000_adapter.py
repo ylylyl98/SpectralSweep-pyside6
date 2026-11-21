@@ -267,38 +267,71 @@ class APS100AttoDry1000Adapter:
         resource = self._require_connected()
         return self._normalized_line(resource.read())
 
+    @staticmethod
+    def _discard_pending_input(resource, *, force: bool = False) -> None:
+        """Drop reply bytes left over from an earlier, failed exchange.
+
+        Replies carry no command tag, so a late answer to a timed-out query
+        would otherwise be returned as the answer to the next one (IMAG? and
+        IOUT? share a format). Best effort: fakes and backends without these
+        attributes are left untouched.
+        """
+        try:
+            if not force and int(getattr(resource, "bytes_in_buffer", 0) or 0) <= 0:
+                return
+            flush = getattr(resource, "flush", None)
+            if callable(flush):
+                from pyvisa import constants
+
+                flush(constants.BufferOperation.discard_receive_buffer)
+                flush(constants.BufferOperation.discard_read_buffer_no_io)
+        except Exception:
+            pass
+
     def _query(self, command: str) -> str:
         with self._lock:
             resource = self._resource
             if resource is None:
                 raise APS100Error("APS100 resource is not open")
-            resource.write(command)
-            command_norm = self._normalized_line(command).lower()
-            last = ""
-            for _ in range(8):
-                line = self._normalized_line(resource.read())
-                if not line:
-                    continue
-                last = line
-                if line.lower() == command_norm:
-                    continue
-                if "command blocked" in line.lower():
-                    raise APS100CommandBlockedError(
-                        f"APS100 blocked {command!r}; close the front-panel menu "
-                        "and enable remote operation"
-                    )
-                observer = self.command_observer
-                if callable(observer):
-                    observer(
-                        {
-                            "utc_epoch_s": time.time(),
-                            "kind": "query",
-                            "command": command,
-                            "response": line,
-                        }
-                    )
-                return line
-            raise APS100Error(f"APS100 returned no response to {command!r}; last line={last!r}")
+            self._discard_pending_input(resource)
+            try:
+                return self._query_locked(resource, command)
+            except APS100CommandBlockedError:
+                raise
+            except Exception:
+                # The exchange is out of step; do not let its late reply be
+                # read as the answer to the next command.
+                self._discard_pending_input(resource, force=True)
+                raise
+
+    def _query_locked(self, resource, command: str) -> str:
+        resource.write(command)
+        command_norm = self._normalized_line(command).lower()
+        last = ""
+        for _ in range(8):
+            line = self._normalized_line(resource.read())
+            if not line:
+                continue
+            last = line
+            if line.lower() == command_norm:
+                continue
+            if "command blocked" in line.lower():
+                raise APS100CommandBlockedError(
+                    f"APS100 blocked {command!r}; close the front-panel menu "
+                    "and enable remote operation"
+                )
+            observer = self.command_observer
+            if callable(observer):
+                observer(
+                    {
+                        "utc_epoch_s": time.time(),
+                        "kind": "query",
+                        "command": command,
+                        "response": line,
+                    }
+                )
+            return line
+        raise APS100Error(f"APS100 returned no response to {command!r}; last line={last!r}")
 
     def _write(self, command: str, *, check_errors: bool = True) -> None:
         with self._lock:
@@ -610,7 +643,16 @@ class APS100AttoDry1000Adapter:
         return direction.lower()
 
     def pause(self, *, confirm: bool = True, timeout_s: float = 3.0, slow: bool = False) -> None:
-        self._write("SWEEP PAUSE SLOW" if slow else "SWEEP PAUSE")
+        command = "SWEEP PAUSE SLOW" if slow else "SWEEP PAUSE"
+        try:
+            self._write(command)
+        except APS100CommandBlockedError:
+            raise
+        except Exception:
+            # The *ESR? bookkeeping around a write can fail on a flaky link
+            # before the command is sent. A stop must still go out; pausing
+            # twice is harmless and the state is confirmed below.
+            self._write(command, check_errors=False)
         if not confirm:
             return
         deadline = time.monotonic() + max(0.1, float(timeout_s))

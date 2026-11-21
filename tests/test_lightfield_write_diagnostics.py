@@ -11,6 +11,27 @@ SpectrometerSettings = lf6.SpectrometerSettings
 from tests.test_lightfield_acquisition_validation import CENTER, EXIT, setup
 
 
+@pytest.mark.parametrize("center, route, error", [
+    (720., "side", None),
+    (1600., "side", "invalid for the selected grating"),
+    (720., "front", "front output is not selected"),
+])
+def test_center_only_uses_current_exit_and_range_without_diagnostic_files(setup, tmp_path, center, route, error):
+    setup._center_diagnostics_path = tmp_path / "center.jsonl"
+    setup.detector_output_route = route
+    setup.experiment.IsValid = lambda key, value: key == CENTER and 0 <= value <= 1500
+    setup._acquisition_recipe = {"center_nm": 700., "exposure_ms": 5000.}
+    if error:
+        with pytest.raises((RuntimeError, ValueError), match=error):
+            setup.apply_center_wavelength(center)
+        assert setup.experiment.writes == []
+    else:
+        assert setup.apply_center_wavelength(center) == center
+        assert setup.experiment.writes == [(CENTER, center)]
+        assert setup._acquisition_recipe == {"center_nm": center, "exposure_ms": 5000.}
+    assert not setup._center_diagnostics_path.exists()
+
+
 @pytest.mark.parametrize('ignored', [False, True])
 def test_center_diagnostics_keep_before_write_and_final_evidence(setup, tmp_path, ignored):
     setup._center_diagnostics_path = tmp_path / 'lightfield-center.jsonl'

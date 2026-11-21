@@ -11,6 +11,7 @@ _DATA_FIELDS = (
     "_acquisition_settings_snapshot", "_pending_acquisition_snapshot",
     "_last_acquisition_snapshot", "_active_setup_key", "_setup_views",
     "_spectrum_data", "_frame_data", "_metadata_context", "_observed_readbacks",
+    "_pair_result_point",
     "_reference_sample_id", "_unavailable_references",
     "_optics_snapshot", "_pre_local_ranges", "_pre_local_recipe",
     "_latest_winspec_frame", "_winspec_frame_context", "_winspec_frame_datatype",
@@ -46,6 +47,17 @@ def capture_spectrum_state(panel):
         "splitter": panel._content_splitter.saveState(),
         "andor": panel._andor_controls.capture_reload_state(),
         "andor_expanded": panel._andor_toggle.isChecked(),
+        "pair_settings": panel._pair_controls.request_state(),
+        "pair_result": panel._pair_result,
+        "pair_reference_index": panel._pair_reference_target.currentIndex(),
+        "pair_layout": panel._pair_display.layout_choice.currentIndex() if panel._pair_display is not None else 0,
+        "pair_fold_gaps": panel._pair_display.fold_gaps.isChecked() if panel._pair_display is not None else True,
+        "overlay_view": (panel._pair_display.overlay_plot.capture_view() if panel._pair_display is not None
+                         and panel._pair_display.showing_overlay else None),
+        "pair_views": {
+            backend: plot.capture_view() for backend, plot in
+            panel._pair_display.plots(panel._pair_controls.andor_backend)
+        } if panel._pair_display is not None and panel._pair_controls.andor_backend else {},
         "calibration_enabled": panel._use_winspec_nm.isChecked(),
         "reverse_pixels": panel._reverse_winspec_pixels.isChecked(),
         "ranges": [(w.minimum(), w.maximum(), w.decimals() if hasattr(w, "decimals") else None)
@@ -100,9 +112,19 @@ def restore_spectrum_state(panel, state):
     panel._save_btn.setEnabled(panel._last_data is not None)
     panel._retry_reference_btn.setEnabled(any(not r["saved"] for r in panel._references))
     panel._andor_toggle.setChecked(state["andor_expanded"])
-    is_andor = panel._connected and (getattr(panel._ctrl, "identity", {}) or {}).get("backend") == "andor_sdk2"
-    panel._andor_toggle.setVisible(is_andor)
-    panel._andor_controls.setVisible(is_andor and state["andor_expanded"])
+    panel._pair_result = state["pair_result"]
+    with QSignalBlocker(panel._pair_reference_target):
+        panel._pair_reference_target.setCurrentIndex(state["pair_reference_index"])
+    panel._pair_controls.restore_state(state["pair_settings"])
+    if panel._pair_display is not None:
+        panel._pair_display.fold_gaps.setChecked(state.get("pair_fold_gaps", True))
+        panel._pair_display.layout_choice.setCurrentIndex(state.get("pair_layout", 0))
+        if panel._pair_display.showing_overlay and state.get("overlay_view"):
+            panel._pair_display.overlay_plot.restore_view(state["overlay_view"])
+        for backend, plot in panel._pair_display.plots(panel._pair_controls.andor_backend):
+            if backend in state["pair_views"]:
+                plot.restore_view(state["pair_views"][backend])
+    panel._refresh_andor_disclosure()
     panel._refresh_action_controls()
     for name, (text, tooltip) in state["labels"].items():
         getattr(panel, name).setText(text)

@@ -89,19 +89,46 @@ class _RunDetailsHeight(QObject):
         if not self.section.toggle.isChecked():
             return
         layout = self.pane.layout()
-        fixed = sum(item.sizeHint().height() for item in
-                    (layout.itemAt(i) for i in range(layout.count()))
-                    if item.widget() not in (self.preview, self.section) and not item.isEmpty())
-        header = self.section.toggle.sizeHint().height() + self.section.layout().spacing()
-        # At most a third of the pane belongs to optional details. Also reserve
-        # a preview header when wrapped commands/status need additional room.
-        budget = max(0, min(self.pane.height() // 3, self.pane.height() - fixed - header - 36))
+        items = [layout.itemAt(i) for i in range(layout.count())]
+        visible = [item for item in items if not item.isEmpty()]
+        margins = layout.contentsMargins()
+        fixed = margins.top() + margins.bottom() + layout.spacing() * (len(visible) - 1)
+        for item in visible:
+            widget = item.widget()
+            if widget is self.preview:
+                # The tab bar and all its pages contribute to the inspector's
+                # actual layout minimum, even when the sequence is scrollable.
+                fixed += item.minimumSize().height()
+            elif widget is not self.section:
+                fixed += max(item.minimumSize().height(), item.sizeHint().height())
+        section_layout = self.section.layout()
+        header_items = [section_layout.itemAt(i) for i in range(section_layout.count())]
+        header_items = [item for item in header_items if item.widget() is not self.scroll and not item.isEmpty()]
+        margins = section_layout.contentsMargins()
+        header = margins.top() + margins.bottom() + section_layout.spacing() * len(header_items)
+        header += sum(max(item.minimumSize().height(), item.sizeHint().height()) for item in header_items)
+        budget = max(0, min(self.pane.height() // 3, self.pane.height() - fixed - header))
         body = self.content.layout()
         width = max(1, self.scroll.viewport().width())
         wanted = body.totalHeightForWidth(width) if body.hasHeightForWidth() else body.sizeHint().height()
         height = min(max(0, wanted), budget)
         if self.scroll.minimumHeight() != height or self.scroll.maximumHeight() != height:
             self.scroll.setFixedHeight(height)
+
+
+class _PreviewLayoutRefit(QObject):
+    def __init__(self, splitter, execution_content, timer):
+        super().__init__(splitter)
+        self.timer = timer
+        self.execution_content = execution_content
+        splitter.installEventFilter(self)
+        execution_content.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        resize = event.type() == QEvent.Type.Resize and event.size().width() != event.oldSize().width()
+        if resize or (watched is self.execution_content and event.type() == QEvent.Type.LayoutRequest):
+            self.timer.start(0)
+        return False
 
 
 class _WideOpticalFooter(QObject):
@@ -130,6 +157,7 @@ class _WideOpticalFooter(QObject):
         section._header.setAccessibleName("Optical Sequence")
         section.expanded_changed.connect(self._expansion_changed)
         panel._optical_widget.changed.connect(self.update_summary)
+        panel._pair_controls.backend_changed.connect(self.update_summary)
         restore = panel.restore_session_state
         def restore_state(_panel, state):
             sections = state.get("sections") if isinstance(state, dict) else None
@@ -152,10 +180,12 @@ class _WideOpticalFooter(QObject):
 
     def update_summary(self):
         section = self.panel._optical_group
-        conditions = self.panel._optical_widget.conditions()
+        conditions = self.panel._measurement_conditions()
         active = [condition for condition in conditions if condition.enabled]
         summary = f"{len(active)}/{len(conditions)} active"
-        if conditions:
+        if self.panel._pair_controls.andor_backend:
+            summary = conditions[0].name
+        elif conditions:
             primary = (active or conditions)[0]
             # Names remain editable in the original table; keep this glanceable
             # summary bounded even when an imported recipe has a long name.
@@ -455,21 +485,24 @@ def _bfp_layout(panel):
 
 
 def _dual_gate_layout(panel):
-    layout = panel._results_content.layout()
+    output_layout = panel._output_scroll.widget().layout()
     safety_content = QWidget()
     safety_layout = QVBoxLayout(safety_content)
     safety_layout.setContentsMargins(0, 0, 0, 0)
     safety_layout.setSpacing(6)
     for bar in (panel._safety_bar, panel._voltage_timing_bar):
-        layout.removeWidget(bar)
+        output_layout.removeWidget(bar)
         bar.setMaximumHeight(16777215)
         safety_layout.addWidget(bar)
-    safety = DisclosureSection("Safety and settling", safety_content, expanded=False)
+    safety = DisclosureSection("Safety and settling", safety_content, expanded=True)
     safety.setObjectName("QuickDualGateSafetyDisclosure")
     summary = QLabel()
     summary.setObjectName("QuickDualGateSafetySummary")
     summary.setWordWrap(True)
     safety.layout().insertWidget(1, summary)
+    summary.hide()
+    safety.toggle.toggled.connect(summary.setHidden)
+    output_layout.addWidget(safety)
 
     def update_summary(*args):
         text = (f"Max jump {panel._safe_jump_spin.value():g} V · "
@@ -503,20 +536,26 @@ def _dual_gate_layout(panel):
         # one card, long plans retain a bounded scrolling viewport. Do not let
         # this splitter reserve the old 380px minimum or absorb spare space.
         expanded = execution.toggle.isChecked()
-        execution.setMaximumHeight(16777215 if expanded else 36)
-        execution.setMinimumHeight(0)
-        execution.updateGeometry()
-        sequence_layout = sequence_panel.layout()
-        sequence_layout.invalidate()
-        width = max(1, sequence_panel.width())
-        sequence_height = (sequence_layout.totalHeightForWidth(width)
-                           if sequence_layout.hasHeightForWidth()
-                           else sequence_layout.sizeHint().height())
-        sequence_panel.setFixedHeight(sequence_height)
-        execution_height = (execution.heightForWidth(width) if execution.hasHeightForWidth()
-                            else execution.sizeHint().height()) if expanded else 36
-        preview_splitter.setFixedHeight(execution_height + sequence_height + preview_splitter.handleWidth())
-        preview_splitter.setSizes([execution_height, sequence_height])
+        width = max(1, preview_splitter.contentsRect().width())
+
+        def content_height(section):
+            layout = section.layout()
+            layout.invalidate()
+            return (layout.totalHeightForWidth(width) if layout.hasHeightForWidth()
+                    else layout.sizeHint().height())
+
+        execution_height = content_height(execution) if expanded else 36
+        sequence_height = content_height(sequence_panel)
+        if execution.minimumHeight() != execution_height:
+            execution.setFixedHeight(execution_height)
+        if sequence_panel.minimumHeight() != sequence_height:
+            sequence_panel.setFixedHeight(sequence_height)
+        height = execution_height + sequence_height + preview_splitter.handleWidth()
+        if preview_splitter.minimumHeight() != height:
+            preview_splitter.setFixedHeight(height)
+        sizes = [execution_height, sequence_height]
+        if preview_splitter.sizes() != sizes:
+            preview_splitter.setSizes(sizes)
 
     execution.toggle.toggled.connect(fit_execution)
     panel._sequence_toggle.toggled.connect(fit_execution)
@@ -525,6 +564,8 @@ def _dual_gate_layout(panel):
     panel._quick_preview_height_timer = QTimer(panel)
     panel._quick_preview_height_timer.setSingleShot(True)
     panel._quick_preview_height_timer.timeout.connect(fit_execution)
+    panel._quick_preview_layout_refit = _PreviewLayoutRefit(
+        preview_splitter, execution.content, panel._quick_preview_height_timer)
     if hasattr(panel._tree, "preferredHeightChanged"):
         panel._tree.preferredHeightChanged.connect(fit_execution)
     panel._tree.setMinimumHeight(0)
@@ -532,18 +573,11 @@ def _dual_gate_layout(panel):
     fit_execution(False)
     preview_splitter.setStretchFactor(0, 0)
     preview_splitter.setStretchFactor(1, 1)
-    layout.removeWidget(preview_splitter)
-    layout.insertWidget(0, preview_splitter)
-    layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-    layout.insertWidget(1, safety)
-    filename_group = panel._filename_preview_lbl.parentWidget()
-    layout.removeWidget(filename_group)
-    filename = DisclosureSection("Filename preview", filename_group, expanded=False)
-    filename.setObjectName("QuickDualGateFilenameDisclosure")
-    _clear_group_title(filename_group)
-    filename_group.setObjectName("QuickDualGateFilenameContent")
-    filename_group.layout().setContentsMargins(0, 0, 0, 0)
-    layout.insertWidget(0, filename)
+    panel._results_content.layout().setAlignment(Qt.AlignmentFlag.AlignTop)
+    filename = panel._filename_preview_lbl.parentWidget()
+    # The log has a full page. Keep its scrollable document and selection
+    # instead of presenting the small tail preview used by inline log fields.
+    panel._log_text.setProperty("quickSectionBoundary", True)
 
     # QuickWorkbench mounts compact Apply/Run/Stop below the right scroll area.
     # Keep optional run tools beside those actions, with their own bounded
@@ -552,13 +586,13 @@ def _dual_gate_layout(panel):
     footer = results_layout.itemAt(1).widget()
     results_layout.removeWidget(footer)
     footer.layout().removeWidget(panel._readiness_lbl)
-    layout.insertWidget(0, panel._readiness_lbl)
     run_status = QWidget(panel._results_pane)
     run_status.setObjectName("QuickDualGateRunStatus")
     run_status.setProperty("quickSectionBoundary", True)
     status_layout = QVBoxLayout(run_status)
     status_layout.setContentsMargins(8, 4, 8, 4)
     status_layout.setSpacing(2)
+    status_layout.addWidget(panel._readiness_lbl)
     for name in ("_progress", "_status_lbl", "_run_time_lbl"):
         source = getattr(panel, name, None)
         if source is not None:
@@ -580,10 +614,9 @@ def _dual_gate_layout(panel):
     results_layout.addWidget(run_details)
     results_layout.addWidget(run_status)
     panel._quick_run_details_height = _RunDetailsHeight(
-        panel._results_pane, panel._results_scroll, run_details, details_scroll, footer)
+        panel._results_pane, panel._results_tabs, run_details, details_scroll, footer)
     panel._quick_safety_disclosure = safety
     panel._quick_execution_disclosure = execution
-    panel._quick_filename_disclosure = filename
     panel._quick_run_details_disclosure = run_details
     panel._quick_run_details_scroll = details_scroll
     panel._quick_run_status = run_status
@@ -601,6 +634,7 @@ def _dual_gate_layout(panel):
     configure_sweep_calculator(panel)
     _workspace_surface(panel._workflow_scroll.widget())
     _workspace_surface(panel._results_content)
+    _compact_sections(panel._output_scroll.widget())
     # One right-hand card encloses both the scrollable preview and its fixed
     # actions. Keep the existing content inset, without a second inner border.
     _workspace_surface(panel._results_pane)
@@ -776,7 +810,7 @@ def configure_workspace_layout(panel, page_id):
     elif page_id == "spectrum" and hasattr(panel, "_content_splitter"):
         _workspace_surface(panel._tabs)
         _workspace_surface(panel._side_panel)
-        _readable_pane(panel, panel._content_splitter, 340, index=1, state_key=None)
+        _readable_pane(panel, panel._content_splitter, 280, index=1, state_key=None)
         result = {}
     elif page_id == "settings":
         from ui.quick_settings_layout import configure_quick_settings

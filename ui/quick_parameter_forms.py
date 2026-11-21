@@ -408,9 +408,16 @@ class WidgetsParameterAdapter(QObject):
         return True
 
     def refresh(self):
-        """Explicit fresh snapshot for command/session boundaries and fallback."""
+        """Reconcile the complete presentation when it is shown or polled."""
         self._refresh_fields(self._fields, choices=True)
         self._dirty_fields.clear()
+
+    def discard_edits(self):
+        affected = [field for field in self._fields if field in self._drafts or field.invalid or field.error]
+        self._drafts.clear()
+        for field in affected:
+            field.publish(invalid=False, error="")
+        self._refresh_fields(affected, choices=False)
 
     def refresh_dirty(self):
         if self._closed or not self._dirty_fields:
@@ -569,7 +576,7 @@ class WidgetsParameterAdapter(QObject):
         if not isinstance(widget, (QPushButton, QToolButton)) or widget.menu() is None:
             return False
         widget.menu().aboutToShow.emit()
-        self.refresh()
+        self._refresh_fields((field,), choices=False)
         return True
 
     def open_choice(self, field):
@@ -715,7 +722,7 @@ class WidgetsParameterAdapter(QObject):
         presentation = bool(widget.property("quickPresentationAction"))
         mutating = field.kind == "button" and not correction and not presentation and not any(
             word in command for word in ("stop", "abort", "cancel", "pause", "disconnect", "close"))
-        if mutating and (any(other.invalid and other.visible and other.enabled for other in self._fields)
+        if mutating and (any(other.invalid and self._writable(other) is not None for other in self._fields)
                          or self.validate_page is not None and not self.validate_page()):
             field.publish(error=_quick_edit_error(self.visibility_root, self._fields))
             return False
@@ -1272,7 +1279,12 @@ def parameters_valid(panel, *, refresh=True):
         coverage["forms"][:] = [form for form in coverage["forms"] if isValid(form)]
         if refresh:
             for form in coverage["forms"]:
-                form.adapter.refresh()
+                # Only pending edits can block or change what this action reads.
+                # Check their current source visibility/enabled state even if
+                # an interlock changed before Qt delivered the queued refresh.
+                adapter = form.adapter
+                pending = [field for field in adapter._fields if field.invalid or field in adapter._drafts]
+                adapter._refresh_fields(pending, choices=False)
     return not coverage or all(not field.invalid or not field.enabled or not field.visible for form in coverage["forms"]
                                for field in form.adapter._fields)
 

@@ -273,18 +273,6 @@ class SettingsPanel(QWidget):
         ingaas_operating.addWidget(self._andor_ingaas_output_port)
         form.addRow("InGaAs operating profile:", ingaas_operating)
 
-        self._andor_safe_disconnect_temperature = QDoubleSpinBox()
-        self._andor_safe_disconnect_temperature.setRange(-20.0, 30.0)
-        self._andor_safe_disconnect_temperature.setDecimals(1)
-        self._andor_safe_disconnect_temperature.setSuffix(" °C")
-        self._andor_safe_disconnect_temperature.setToolTip(
-            "Warm-up disconnect waits until the detector reaches at least this temperature."
-        )
-        form.addRow(
-            "Safe disconnect temperature:",
-            self._andor_safe_disconnect_temperature,
-        )
-
         self._andor_shutter = QComboBox()
         self._andor_shutter.addItems(["auto", "open", "closed"])
         form.addRow("Camera shutter mode:", self._andor_shutter)
@@ -463,11 +451,6 @@ class SettingsPanel(QWidget):
                     cfg.lf6, f"andor_{role}_output_port", value
                 )
             )
-        self._andor_safe_disconnect_temperature.valueChanged.connect(
-            lambda value: setattr(
-                cfg.lf6, "andor_safe_disconnect_temperature_c", float(value)
-            )
-        )
         self._andor_shutter.currentTextChanged.connect(
             lambda value: setattr(cfg.lf6, "andor_shutter_mode", value)
         )
@@ -539,9 +522,6 @@ class SettingsPanel(QWidget):
             getattr(self, f"_andor_{role}_output_port").setCurrentText(
                 str(getattr(cfg.lf6, f"andor_{role}_output_port"))
             )
-        self._andor_safe_disconnect_temperature.setValue(
-            float(cfg.lf6.andor_safe_disconnect_temperature_c)
-        )
         self._andor_shutter.setCurrentText(str(cfg.lf6.andor_shutter_mode))
         self._andor_shamrock_shutter.setCurrentText(
             str(cfg.lf6.andor_shamrock_shutter_mode)
@@ -593,7 +573,6 @@ class SettingsPanel(QWidget):
                 "ingaas_cooler": bool(self._andor_ingaas_cooler.isChecked()),
                 "ingaas_fan": self._andor_ingaas_fan.currentText(),
                 "ingaas_output_port": self._andor_ingaas_output_port.currentText(),
-                "safe_disconnect_temperature": float(self._andor_safe_disconnect_temperature.value()),
                 "shutter": self._andor_shutter.currentText(),
                 "shamrock_shutter": self._andor_shamrock_shutter.currentText(),
                 "grating": int(self._andor_grating.value()),
@@ -657,7 +636,6 @@ class SettingsPanel(QWidget):
             for key, widget in (
                 ("si_temperature", self._andor_si_temperature),
                 ("ingaas_temperature", self._andor_ingaas_temperature),
-                ("safe_disconnect_temperature", self._andor_safe_disconnect_temperature),
                 ("slit_width", self._andor_slit),
             ):
                 try:

@@ -3,7 +3,7 @@ import os
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import pytest
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialogButtonBox, QPushButton
 
@@ -33,26 +33,19 @@ def open_picker(widget, edit, *, accept=True, row=0):
     """Drive the modal editor without substituting its editing/commit logic."""
     button = widget._loop_table.cellWidget(row, 2)
     assert isinstance(button, QPushButton), 'Setup Values must offer a selection control'
-    errors = []
-    def interact():
-        dialog = QApplication.activeModalWidget()
-        try:
-            assert dialog is not None
-            edit(dialog)
-            if accept:
-                dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).click()
-                assert dialog.result() == dialog.DialogCode.Accepted
-            else:
-                dialog.reject()
-        except BaseException as exc:
-            errors.append(exc)
-        finally:
-            if dialog is not None and dialog.isVisible():
-                dialog.reject()
-    QTimer.singleShot(0, interact)
     button.click()
-    if errors:
-        raise errors[0]
+    dialog = QApplication.activeModalWidget()
+    assert isinstance(dialog, panel.SetupSequenceDialog)
+    try:
+        edit(dialog)
+        if accept:
+            dialog.buttons.button(QDialogButtonBox.StandardButton.Ok).click()
+            assert dialog.result() == dialog.DialogCode.Accepted
+        else:
+            dialog.reject()
+    finally:
+        if dialog.isVisible():
+            dialog.reject()
 
 
 def test_setup_cell_offers_picker_while_numeric_cells_remain_text(widget):

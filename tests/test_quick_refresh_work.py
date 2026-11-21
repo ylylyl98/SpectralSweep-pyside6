@@ -120,6 +120,44 @@ def test_one_control_change_does_not_rebuild_unrelated_options(table_view):
     assert model.cellAt(0, 0)["optionEnabled"] == [True, False, True]
 
 
+def test_delegate_edit_and_cleanup_do_not_refresh_unrelated_controls(table_view):
+    source, view, choice, _ = table_view
+    model = view.model
+    choice.option_reads = 0
+    cells = QSignalSpy(model.cellChanged)
+    assert model.editCell(0, 2, "updated")
+    drain_qt_deletions()
+    assert source.item(0, 2).text() == "updated"
+    editor = find_item(view.quick_widget.rootObject(), "tableCell_0_2")
+    assert editor.property("text") == "updated"
+    assert [cells.at(i) for i in range(cells.count())] == [[0, 2]]
+    assert choice.option_reads == 0
+
+
+def test_discard_reads_only_the_cells_with_drafts(table_view, monkeypatch):
+    _, view, choice, _ = table_view
+    model = view.model
+    token = model.cellAt(0, 2)["token"]
+    model.stageEdit(token, "draft value")
+    model._flush_dirty()
+    assert model.cellAt(0, 2)["value"] == "draft value"
+
+    read_cells = []
+    data = model.data
+
+    def record_read(index, role):
+        read_cells.append((index.row(), index.column()))
+        return data(index, role)
+
+    monkeypatch.setattr(model, "data", record_read)
+    choice.option_reads = 0
+    model.discardEdits()
+    model.discardEdits()
+    assert model.cellAt(0, 2)["value"] == "old"
+    assert read_cells == [(0, 2)]
+    assert choice.option_reads == 0
+
+
 def test_fallback_keeps_blocked_values_flags_and_readonly_state(table_view):
     _, view, choice, number = table_view
     model = view.model
@@ -127,11 +165,14 @@ def test_fallback_keeps_blocked_values_flags_and_readonly_state(table_view):
     number.setValue(42.5)
     number.blockSignals(blocked)
     blocked = choice.model().blockSignals(True)
+    choice.setItemText(0, "Renamed")
     choice.model().item(2).setEnabled(False)
+    choice.addItem("Added")
     choice.model().blockSignals(blocked)
     view._poll.timeout.emit()
     assert model.cellAt(0, 1)["value"] == "42.5"
-    assert model.cellAt(0, 0)["optionEnabled"] == [True, True, False]
+    assert model.cellAt(0, 0)["options"] == ["Renamed", "Second", "Third", "Added"]
+    assert model.cellAt(0, 0)["optionEnabled"] == [True, True, False, True]
     number.setReadOnly(True)
     model._flush_dirty()
     assert not model.cellAt(0, 1)["editable"]
@@ -166,6 +207,9 @@ def test_pooled_record_reloads_all_fields_after_offscreen_change(table_view):
     editor = find_item(root, "tableCell_0_2")
     assert editor is not None
     assert editor.property("text") == "changed while pooled"
+    source.item(0, 2).setText("changed after reuse")
+    view.model._flush_dirty()
+    assert editor.property("text") == "changed after reuse"
     assert not view.qml_warnings
 
 

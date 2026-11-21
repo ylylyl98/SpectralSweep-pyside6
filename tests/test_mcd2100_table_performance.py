@@ -6,6 +6,27 @@ from tests.quick_helpers import quick_application, drain_qt_deletions
 from ui.mcd2100_panel import MCD2100Panel
 
 
+def test_temperature_readback_updates_filename_without_rebuilding_gate_table(monkeypatch):
+    quick_application()
+    panel = MCD2100Panel(SimpleNamespace(state=SimpleNamespace(name='DISCONNECTED'), generation=0))
+    try:
+        panel.temperature_control_enabled.setChecked(False)
+        panel._seed_condition_table([
+            {'enabled': False, 'vtg_v': 5.0}, {'enabled': True, 'vtg_v': 0.25},
+        ])
+        def unexpected_read():
+            raise AssertionError('temperature readback rescanned gate rows')
+        monkeypatch.setattr(panel, '_condition_rows_raw', unexpected_read)
+        panel._on_temperature_snapshot(SimpleNamespace(sample_temperature_k=4.25))
+        assert 'filename 4.25 K' in panel._condition_summary.text()
+        assert 'Vtg+0.25' in panel.filename_preview.text()
+    finally:
+        panel.shutdown(timeout_ms=0)
+        panel.close()
+        panel.deleteLater()
+        drain_qt_deletions()
+
+
 def test_row_operations_do_not_rebuild_existing_rows(monkeypatch):
     quick_application()
     panel = MCD2100Panel(SimpleNamespace(state=SimpleNamespace(name='DISCONNECTED'), generation=0))

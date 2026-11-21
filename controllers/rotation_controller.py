@@ -279,6 +279,11 @@ class RotationController(QObject):
     _scan_requested = Signal(str, str, str, object)
     _disconnect_requested = Signal(str)
     _shutdown_requested = Signal()
+    _move_requested = Signal(str, float)
+    _position_requested = Signal(str)
+    _profile_inspect_requested = Signal(str)
+    _profile_apply_requested = Signal(str, float, float)
+    _settings_save_requested = Signal(str)
     ROTATION_SLOTS = ("rot1", "rot2")
     # Compatibility spelling retained for older panels.
     LOGICAL_SLOTS = ROTATION_SLOTS
@@ -311,6 +316,14 @@ class RotationController(QObject):
             self._worker.disconnect_slot, Qt.ConnectionType.QueuedConnection
         )
         self._shutdown_requested.connect(self._worker.shutdown, Qt.ConnectionType.QueuedConnection)
+        # Device I/O belongs on the worker thread: a slow or silent ESP300 must
+        # not freeze the GUI, and the worker alone opens and closes adapters.
+        queued = Qt.ConnectionType.QueuedConnection
+        self._move_requested.connect(self._worker.move_to, queued)
+        self._position_requested.connect(self._worker.get_position, queued)
+        self._profile_inspect_requested.connect(self._worker.inspect_motion_profile, queued)
+        self._profile_apply_requested.connect(self._worker.apply_motion_profile, queued)
+        self._settings_save_requested.connect(self._worker.save_esp300_settings, queued)
         self._thread.finished.connect(self._worker.deleteLater)
 
         self._thread.start()
@@ -353,23 +366,28 @@ class RotationController(QObject):
             self._disconnect_requested.emit(slot)
 
     def move_to(self, slot: str, angle_deg: float) -> None:
-        self._worker.move_to.__func__(self._worker, slot, float(angle_deg))
+        if not self._shutting_down:
+            self._move_requested.emit(slot, float(angle_deg))
 
     def get_position(self, slot: str) -> None:
-        self._worker.get_position.__func__(self._worker, slot)
+        if not self._shutting_down:
+            self._position_requested.emit(slot)
 
     def inspect_motion_profile(self, slot: str) -> None:
-        self._worker.inspect_motion_profile.__func__(self._worker, slot)
+        if not self._shutting_down:
+            self._profile_inspect_requested.emit(slot)
 
     def apply_motion_profile(
         self, slot: str, velocity_fraction: float, acceleration_fraction: float
     ) -> None:
-        self._worker.apply_motion_profile.__func__(
-            self._worker, slot, velocity_fraction, acceleration_fraction
-        )
+        if not self._shutting_down:
+            self._profile_apply_requested.emit(
+                slot, float(velocity_fraction), float(acceleration_fraction)
+            )
 
     def save_esp300_settings(self, slot: str) -> None:
-        self._worker.save_esp300_settings.__func__(self._worker, slot)
+        if not self._shutting_down:
+            self._settings_save_requested.emit(slot)
 
     def scan_axes(
         self, slot: str, visa_resource: str, *,

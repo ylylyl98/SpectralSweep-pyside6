@@ -1,6 +1,7 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 os.environ.setdefault('QT_QUICK_BACKEND','software')
+from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest, QSignalSpy
 from tests.quick_helpers import quick_application, drain_qt_deletions
 from ui.motion_conditions_widget import MotionConditionsWidget
@@ -69,8 +70,43 @@ def test_motion_select_row_does_not_rewrite_other_rows_provenance():
              'bundle':{'provenance':{'row':i}, 'edited':False}} for i in range(30)]
     w._restore(rows)
     before = w._snapshot()
+    changes = QSignalSpy(w.changed)
     try:
+        w.a.setText("1")
+        baseline = changes.count()
         w.table.selectRow(4)
         assert w._snapshot() == before
+        assert changes.count() == baseline
+    finally:
+        w.close(); w.deleteLater(); drain_qt_deletions()
+
+
+def test_optical_row_commands_only_read_the_affected_rows(monkeypatch):
+    quick_application()
+    w = _OpticalSequenceWidget()
+    w.set_conditions([OpticalCondition(True, f"C{i}", 720, 30, 1) for i in range(40)])
+    w._table.item(3, 1).setText("  draft  ")
+    w._table.selectRow(3)
+    seen = []
+    read = w._read_condition
+
+    def record(row, **kwargs):
+        seen.append(row)
+        return read(row, **kwargs)
+
+    monkeypatch.setattr(w, "_read_condition", record)
+    changed = QSignalSpy(w.changed)
+    structure = QSignalSpy(w.rowStructureChanged)
+    try:
+        w._table.item(3, 0).setCheckState(Qt.CheckState.Unchecked)
+        assert changed.count() == 1
+        assert structure.count() == 0
+        w._move_selected(1)
+        assert w._table.item(4, 1).text() == "  draft  "
+        w._duplicate_selected()
+        w._add_condition()
+        assert seen == [3, 4, 4, 40]
+        assert changed.count() == 4
+        assert structure.count() == 3
     finally:
         w.close(); w.deleteLater(); drain_qt_deletions()

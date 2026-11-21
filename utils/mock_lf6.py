@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import time
 import numpy as np
+from numpy.random import default_rng
 from typing import List
 import copy
 from types import SimpleNamespace
@@ -127,7 +128,7 @@ class MockLF6Setup:
         self._exit_port = "Front"
         self._frames_to_save = 1
         self._loaded_experiment: str | None = None
-        self._rng = np.random.default_rng(seed=42)
+        self._rng = default_rng(seed=42)
 
     # ── internal helpers ──────────────────────────────────────────────────────
 
@@ -246,6 +247,12 @@ class MockLF6Setup:
     def set_center_wavelength_when_ready(self, value, **_kwargs) -> None:
         """Mock the shared guarded setter used by production LightField paths."""
         self.change_spectra_center(value)
+
+    def apply_center_wavelength(self, value, *, stop_event=None):
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("Mock center change stopped.")
+        self.set_center_wavelength_when_ready(value)
+        return float(self._center_nm)
 
     def change_center_wavelength(self, wavelength) -> None:
         """Alias used by older calling code."""

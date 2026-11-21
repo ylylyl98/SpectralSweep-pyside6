@@ -81,3 +81,14 @@ def test_unwritable_log_does_not_prevent_application_launch(monkeypatch, tmp_pat
     assert launch_app.run_application([]) == 0
     assert len(calls) == 1 and "stderr" not in calls[0][1]
     assert unavailable.read_text() == "keep"
+
+
+def test_launcher_installs_the_pinned_runtime_and_tracks_included_files(tmp_path):
+    assert launch_app.REQUIREMENTS.name == "requirements-quick.txt"
+    base = tmp_path / "requirements.txt"
+    base.write_text("numpy\n", encoding="utf-8")
+    pinned = tmp_path / "requirements-quick.txt"
+    pinned.write_text("-r requirements.txt\nPySide6==6.11.0\n", encoding="utf-8")
+    before = launch_app.dependency_fingerprint(pinned)
+    base.write_text("numpy\npandas\n", encoding="utf-8")
+    assert launch_app.dependency_fingerprint(pinned) != before

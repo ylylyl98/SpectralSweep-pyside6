@@ -65,7 +65,6 @@ def test_detector_setup_label_stays_above_its_selector_and_disclosure_works(monk
         for form in coverage["forms"]:
             form.shutdown()
         section._status_refresh_timer.stop()
-        section._warmup_timer.stop()
         section.close()
         section.deleteLater()
         controller.deleteLater()

@@ -662,6 +662,25 @@ class _SMUWorker(QObject):
             if abs(float(value)) > effective:
                 raise ValueError(f"{role} target {value:g} V exceeds the ±{effective:g} V limit.")
 
+    def _validate_manual_target(self, role, target) -> None:
+        """Refuse a manual target beyond the role's verified voltage range.
+
+        The Keithley rejects an out-of-range level with an error the write
+        path never reads, so the UI would report a move that did not happen.
+        A role with no verified range yet is left to the existing checks.
+        """
+        address = getattr(self._device, "role_map", {}).get(role)
+        limit = self._applied_voltage_ranges.get(str(address)) if address else None
+        try:
+            limit = float(limit)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(limit) or limit <= 0:
+            return
+        effective = min(200.0, limit)
+        if abs(float(target)) > effective:
+            raise ValueError(f"{role} target {float(target):g} V exceeds the ±{effective:g} V limit.")
+
     @Slot(str, str, float, float, float, object)
     def manual_control(
         self,
@@ -741,6 +760,7 @@ class _SMUWorker(QObject):
                 target = float(value)
                 if not math.isfinite(target):
                     raise ValueError(f"Invalid {role} target: {target}")
+                self._validate_manual_target(role, target)
                 moved = self._device.set_role_voltage_fast(
                     role, target, max(float(delay_s), 0.0)
                 )
@@ -773,6 +793,8 @@ class _SMUWorker(QObject):
                                 delay_s=max(float(delay_s), 0.0))
                 self._emit_role_reading("Vbias2", strict=True)
             else:
+                if action != "zero":
+                    self._validate_manual_target(role, target)
                 moved = self._device.ramp_to(
                     role, target, max(abs(float(ramp_step_V)), 1e-4),
                     max(float(delay_s), 0.0), start_value=measured,

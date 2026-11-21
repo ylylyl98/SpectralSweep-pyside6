@@ -25,7 +25,7 @@ from ui.workflow_sections import CompactRow, bind_log_toggle, disclosure_toggle,
 from ui.mcd_workspace import (add_mcd_gate_settings, configure_mcd_workspace, mcd_settings_pane,
                               mcd_control_actions, mcd_control_fields, mcd_readouts, add_mcd_field_settings,
                               populate_mcd_gate_entry)
-from ui.table_layout import fit_table_columns
+from ui.table_layout import batch_table_updates, fit_table_columns
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QBoxLayout,
@@ -59,6 +59,8 @@ from app.devices.aps100_field_policy import APS100FieldLimits
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from copy import deepcopy
 from ui.sensor_readout_preflight import ensure_sensor_readout
+from app.engine.mcd_paired_spectra import MCDPairedSpectra
+from ui.station_pair_controls import StationPairControls
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.engine.mcd_point_pairing import field_points, FieldStability, validate_pair_fields
 from app.engine.mcd_metadata import condition_metadata_summary, finalize_mcd_metadata
@@ -80,6 +82,10 @@ from utils.mcd_common import (
     vtg_vbg_from_doping_efield,
     resolve_condition_line as _resolve_mcd_condition_line,
 )
+
+
+# After Stop, how long a paired (dual-detector) capture may take to drain.
+_PAIR_STOP_TIMEOUT_S = 30.0
 
 
 class _MCDStopRequested(RuntimeError):
@@ -272,6 +278,8 @@ class _ContinuousMCDWorker(QObject):
         self._stop = threading.Event()
         self._csv_path: Optional[Path] = None
         self._output_csv_paths: list[str] = []
+        self._station_pair = None
+        self._point_id = None
         self._metadata_path: Optional[Path] = None
         self._metadata: dict = {}
         self._spectra_written = 0
@@ -299,6 +307,9 @@ class _ContinuousMCDWorker(QObject):
             raise _MCDStopRequested("MCD stop requested")
 
     def _ensure_lightfield_ready(self) -> None:
+        if self._p.get("paired_backend"):
+            self._lf6_ctrl.validate_station_pair(self._p["paired_backend"], self._p["paired_recipes"])
+            return
         if not getattr(self._lf6_ctrl, "is_connected", False):
             raise RuntimeError("LightField is not connected")
         ensure_ready = getattr(self._lf6_ctrl, "ensure_ready", None)
@@ -749,13 +760,17 @@ class _ContinuousMCDWorker(QObject):
             self._sleep_stop_aware(p["start_settle_s"])
 
         spec = self._lf6_ctrl.adapter
-        wavelengths = np.asarray(
-            spec.calibration_wavelengths(force=True), dtype=float
-        ).ravel()
-        if wavelengths.size < 2:
-            raise RuntimeError("Could not obtain LightField wavelength calibration")
-
-        wl_headers = [f"{value:.6f}" for value in wavelengths]
+        if p.get("paired_backend"):
+            self._station_pair = MCDPairedSpectra(self._lf6_ctrl, p["paired_backend"], p["paired_recipes"],
+                                                  self._csv_path.parent, self._csv_path.stem,
+                                                  metadata_run=self._metadata_run)
+            wavelengths = np.array([])
+            wl_headers = ["point_id"]
+        else:
+            wavelengths = np.asarray(spec.calibration_wavelengths(force=True), dtype=float).ravel()
+            if wavelengths.size < 2:
+                raise RuntimeError("Could not obtain LightField wavelength calibration")
+            wl_headers = [f"{value:.4f}" for value in wavelengths]  # four decimals on every page
         cycle = 0
         self._spectra_written = 0
         timing = {"acquire_s": 0.0, "read_s": 0.0, "acquisitions": 0, "reads": 0}
@@ -871,7 +886,7 @@ class _ContinuousMCDWorker(QObject):
                                 timing["reads"] += 1
                                 timestamp_start = _utc_now()
                                 acquire_started = time.monotonic()
-                                wl, counts = _spectrum_1d(*self._acquire_spectrum(spec))
+                                wl, counts = self._capture_at_field(spec, p, field_before, measured_angle, label)
                                 timing["acquire_s"] += time.monotonic() - acquire_started
                                 timing["acquisitions"] += 1
                                 timestamp_end = _utc_now()
@@ -883,6 +898,8 @@ class _ContinuousMCDWorker(QObject):
                                 )
                                 timing["read_s"] += time.monotonic() - read_started
                                 timing["reads"] += 1
+                                if self._station_pair:
+                                    wavelengths = wl
                                 if wl.size != wavelengths.size or not np.allclose(
                                     wl, wavelengths, rtol=0.0, atol=1e-6
                                 ):
@@ -908,7 +925,7 @@ class _ContinuousMCDWorker(QObject):
                                         None,
                                         None,
                                     ]
-                                    + counts.tolist()
+                                    + ([self._point_id] if self._station_pair else counts.tolist())
                                 )
                                 handle.flush()
                                 os.fsync(handle.fileno())
@@ -1032,7 +1049,8 @@ class _ContinuousMCDWorker(QObject):
                     stability.reset()
                     before = wait_stable()
                     timestamp_start = _utc_now()
-                    wl, counts = _spectrum_1d(*self._acquire_spectrum(spec))
+                    wl, counts = self._capture_at_field(spec, p, before, measured_angle, label,
+                                                       pair_id=pair_id, field_target_T=target)
                     timestamp_end = _utc_now()
                     after_error = None
                     after = float("nan")
@@ -1045,6 +1063,8 @@ class _ContinuousMCDWorker(QObject):
                             raise RuntimeError("APS100 did not confirm paused holding state")
                     except Exception as exc:
                         after_error = exc
+                    if self._station_pair:
+                        wavelengths = wl
                     if wl.size != wavelengths.size or not np.allclose(wl, wavelengths, rtol=0.0, atol=1e-6):
                         counts = np.interp(wavelengths, wl, counts)
                         wl = wavelengths
@@ -1054,7 +1074,7 @@ class _ContinuousMCDWorker(QObject):
                                      "increasing" if direction == "up" else "decreasing",
                                      measured_angle, before, after, mean, p["vtg_v"], p["vbg_v"],
                                      p["vbias_v"], doping, efield, None, None, None,
-                                     target, pair_id, label] + counts.tolist())
+                                     target, pair_id, label] + ([self._point_id] if self._station_pair else counts.tolist()))
                     handle.flush()
                     os.fsync(handle.fileno())
                     self._spectra_written += 1
@@ -1074,6 +1094,9 @@ class _ContinuousMCDWorker(QObject):
         return pair_id
 
     def _configure_lightfield(self, p: dict) -> None:
+        if p.get("paired_backend"):
+            self._lf6_ctrl.validate_station_pair(p["paired_backend"], p["paired_recipes"])
+            return
         setup = self._lf6_ctrl.setup
         if setup is None:
             return
@@ -1182,6 +1205,9 @@ class _ContinuousMCDWorker(QObject):
             f"{'first' if first_ramp else 'later'} gate ramp: {settle_s:g} s"
         )
         self._sleep_stop_aware(settle_s)
+        from utils.bias_control import verify_setpoints
+        verify_setpoints(device, {"Vbg": p["vbg_v"], "Vtg": p["vtg_v"], "Vbias": master,
+                                  "Vbias2": info["bias2_target_v"]})
         info["gate_settle_s"] = settle_s
         info["gate_settle_phase"] = "first" if first_ramp else "later"
         readback: dict = dict(info["readback"])
@@ -1211,8 +1237,17 @@ class _ContinuousMCDWorker(QObject):
             self._check_stop()
             time.sleep(min(0.05, deadline - time.monotonic()))
 
-    def _acquire_spectrum(self, spec):
+    def _capture_at_field(self, spec, params, field, angle, label, **scalars):
+        if self._station_pair:
+            scalars.update(field_before_T=field, angle_deg=angle, polarization=label,
+                           Vtg=params["vtg_v"], Vbg=params["vbg_v"], Vbias=params["vbias_v"])
+            return _spectrum_1d(*self._acquire_spectrum(spec, pair_scalars=scalars))
+        return _spectrum_1d(*self._acquire_spectrum(spec))
+
+    def _acquire_spectrum(self, spec, *, pair_scalars=None):
         """Acquire one spectrum while publishing live APS100 field reads.
+
+        After Stop, a paired capture gets _PAIR_STOP_TIMEOUT_S to drain.
 
         LightField acquisitions can take tens of seconds.  The worker runs the
         acquisition on a helper thread and periodically emits the current field
@@ -1225,6 +1260,13 @@ class _ContinuousMCDWorker(QObject):
             try:
                 acquisition_id = str(uuid.uuid4())
                 result["acquisition_id"] = acquisition_id
+                if self._station_pair:
+                    try:
+                        result["value"] = self._station_pair.capture(acquisition_id, self._stop, pair_scalars)
+                    except InterruptedError as exc:
+                        raise _MCDStopRequested(str(exc)) from exc
+                    self._point_id = acquisition_id
+                    return
                 set_lightfield_context(
                     self._lf6_ctrl, output_file=self._csv_path,
                     spectrum_index=self._spectra_written + 1,
@@ -1241,8 +1283,21 @@ class _ContinuousMCDWorker(QObject):
         ).start()
         telemetry_s = max(0.0, float(self._p.get("field_telemetry_s", 2.0)))
         last_emit = float("-inf")
+        pair_stop_deadline = None
         while not completed.wait(0.5):
             if self._stop.is_set():
+                if self._station_pair:
+                    # The paired controller drains both owners on cancellation,
+                    # but a hung detector call must not hold the run (and the
+                    # application close) open forever.
+                    if pair_stop_deadline is None:
+                        pair_stop_deadline = time.monotonic() + _PAIR_STOP_TIMEOUT_S
+                    if time.monotonic() < pair_stop_deadline:
+                        continue
+                    raise _MCDStopRequested(
+                        "MCD stop requested; the paired capture did not return within "
+                        f"{_PAIR_STOP_TIMEOUT_S:g} s. Reconnect the detectors before the next run."
+                    )
                 abort = getattr(spec, "abort_acquisition", None)
                 if callable(abort):
                     try:
@@ -1772,6 +1827,11 @@ class MCDPanel(QWidget):
         lightfield_form.addRow("Exposure", self._exposure)
         lightfield_form.addRow("Frames / accums", self._frames)
         compact_form_rows(lightfield_form, (self._center, self._exposure, self._frames), labels_above=True)
+        self._pair_controls = StationPairControls(side_by_side=False)
+        lightfield_form.addRow(self._pair_controls)
+        self._pair_controls.bind_controller(self._lf6)
+        self._pair_controls.backend_changed.connect(self._on_detector_mode_changed)
+        self.run_state_changed.connect(lambda running: self._pair_controls.set_editing_enabled(not running))
 
         voltages = QGroupBox("Gate / SMU")
         voltages.setToolTip(
@@ -2774,9 +2834,9 @@ class MCDPanel(QWidget):
             existing = []
         combined = existing + table_rows
         validate_gate_conditions(combined, self._voltage_limit)
-        self._seed_condition_table(combined)
+        self._write_condition_rows(len(existing), table_rows)
         self._condition_table.selectRow(len(combined) - 1)
-        self._update_condition_editable()
+        self._update_condition_editable(first_row=len(existing))
         self._update_coordinates_and_filename()
 
     def _row_value(self, row: int, column: int) -> float:
@@ -2803,57 +2863,64 @@ class MCDPanel(QWidget):
         item.setText(str(value))
 
     def _seed_condition_table(self, conditions: list) -> None:
+        self._write_condition_rows(0, conditions)
+
+    def _write_condition_rows(self, first_row: int, conditions: list) -> None:
         self._updating_table = True
         try:
-            self._condition_table.setRowCount(max(1, len(conditions)))
-            for row, condition in enumerate(conditions):
+            with batch_table_updates(self._condition_table):
+                self._condition_table.setRowCount(max(1, first_row + len(conditions)))
+                self._fill_condition_rows(first_row, conditions)
+        finally:
+            self._updating_table = False
+        self._update_condition_table_height()
+
+    def _fill_condition_rows(self, first_row: int, conditions: list) -> None:
+        for row, condition in enumerate(conditions, start=first_row):
+            check = QTableWidgetItem()
+            check.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            check.setCheckState(
+                Qt.CheckState.Checked
+                if bool(condition.get("enabled", True))
+                else Qt.CheckState.Unchecked
+            )
+            self._condition_table.setItem(row, 0, check)
+            bias2 = {key: condition.get(key, default) for key, default in (("bias2_mode", "off"), ("vbias2_v", 0.0), ("bias2_offset_v", 0.0))}
+            check.setData(Qt.ItemDataRole.UserRole, bias2)
+            summary = bias2["bias2_mode"]
+            if summary != "off":
+                summary += " " + str(bias2["bias2_offset_v"] if summary == "follow" else bias2["vbias2_v"])
+                self._condition_table.setColumnHidden(6, False)
+            summary_item = QTableWidgetItem(summary)
+            summary_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            self._condition_table.setItem(row, 6, summary_item)
+            for column, key in (
+                (1, "vtg_v"),
+                (2, "vbg_v"),
+                (3, "vbias_v"),
+                (4, "doping_v"),
+                (5, "efield_v"),
+            ):
+                raw_value = condition.get(key, 0.0)
+                try:
+                    self._set_row_value(row, column, float(raw_value))
+                except (TypeError, ValueError):
+                    self._set_row_value_text(row, column, str(raw_value))
+        for row in range(first_row, self._condition_table.rowCount()):
+            if self._condition_table.item(row, 0) is None:
                 check = QTableWidgetItem()
                 check.setFlags(
                     Qt.ItemFlag.ItemIsEnabled
                     | Qt.ItemFlag.ItemIsUserCheckable
                 )
-                check.setCheckState(
-                    Qt.CheckState.Checked
-                    if bool(condition.get("enabled", True))
-                    else Qt.CheckState.Unchecked
-                )
+                check.setCheckState(Qt.CheckState.Checked)
                 self._condition_table.setItem(row, 0, check)
-                bias2 = {key: condition.get(key, default) for key, default in (("bias2_mode", "off"), ("vbias2_v", 0.0), ("bias2_offset_v", 0.0))}
-                check.setData(Qt.ItemDataRole.UserRole, bias2)
-                summary = bias2["bias2_mode"]
-                if summary != "off":
-                    summary += " " + str(bias2["bias2_offset_v"] if summary == "follow" else bias2["vbias2_v"])
-                    self._condition_table.setColumnHidden(6, False)
-                summary_item = QTableWidgetItem(summary)
-                summary_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                self._condition_table.setItem(row, 6, summary_item)
-                for column, key in (
-                    (1, "vtg_v"),
-                    (2, "vbg_v"),
-                    (3, "vbias_v"),
-                    (4, "doping_v"),
-                    (5, "efield_v"),
-                ):
-                    raw_value = condition.get(key, 0.0)
-                    try:
-                        self._set_row_value(row, column, float(raw_value))
-                    except (TypeError, ValueError):
-                        self._set_row_value_text(row, column, str(raw_value))
-            for row in range(self._condition_table.rowCount()):
-                if self._condition_table.item(row, 0) is None:
-                    check = QTableWidgetItem()
-                    check.setFlags(
-                        Qt.ItemFlag.ItemIsEnabled
-                        | Qt.ItemFlag.ItemIsUserCheckable
-                    )
-                    check.setCheckState(Qt.CheckState.Checked)
-                    self._condition_table.setItem(row, 0, check)
-                for column in range(1, 6):
-                    if self._condition_table.item(row, column) is None:
-                        self._set_row_value(row, column, 0.0)
-        finally:
-            self._updating_table = False
-        self._update_condition_table_height()
+            for column in range(1, 6):
+                if self._condition_table.item(row, column) is None:
+                    self._set_row_value(row, column, 0.0)
 
     def _update_condition_table_height(self) -> None:
         """Size the condition table to its rows so it never leaves blank space."""
@@ -2866,11 +2933,11 @@ class MCDPanel(QWidget):
         )
         self._condition_table.setFixedHeight(height)
 
-    def _update_condition_editable(self) -> None:
+    def _update_condition_editable(self, *, first_row: int = 0) -> None:
         editable = abs(self._gate_ratio.value()) > 1e-9
         self._updating_table = True
         try:
-            for row in range(self._condition_table.rowCount()):
+            for row in range(first_row, self._condition_table.rowCount()):
                 doping, efield = _mcd_coordinates(
                     self._row_value(row, 1),
                     self._row_value(row, 2),
@@ -2926,31 +2993,10 @@ class MCDPanel(QWidget):
         self._update_coordinates_and_filename()
 
     def _add_condition_row(self) -> None:
-        self._updating_table = True
-        try:
-            row = self._condition_table.rowCount()
-            self._condition_table.insertRow(row)
-            source = self._condition_rows()[-1] if row > 0 else {}
-            check = QTableWidgetItem()
-            check.setFlags(
-                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
-            )
-            check.setCheckState(Qt.CheckState.Checked)
-            self._condition_table.setItem(row, 0, check)
-            self._set_row_value(row, 1, float(source.get("vtg_v", 0.0)))
-            self._set_row_value(row, 2, float(source.get("vbg_v", 0.0)))
-            self._set_row_value(row, 3, float(source.get("vbias_v", 0.0)))
-            doping, efield = _mcd_coordinates(
-                float(source.get("vtg_v", 0.0)),
-                float(source.get("vbg_v", 0.0)),
-                self._gate_ratio.value(),
-            )
-            self._set_row_value(row, 4, doping)
-            self._set_row_value(row, 5, efield)
-            self._condition_table.selectRow(row)
-        finally:
-            self._updating_table = False
-        self._update_condition_table_height()
+        row = self._condition_table.rowCount()
+        self._write_condition_rows(row, [{}])
+        self._update_condition_editable(first_row=row)
+        self._condition_table.selectRow(row)
         self._update_coordinates_and_filename()
 
     def _remove_condition_row(self) -> None:
@@ -3150,6 +3196,10 @@ class MCDPanel(QWidget):
             self._filename_preview.setText(f"Invalid filename settings: {exc}")
             self._path_preview.setText("—")
 
+    def _on_detector_mode_changed(self, backend):
+        for widget in (self._center, self._exposure, self._frames):
+            widget.setEnabled(not backend)
+
     def _collect_params(self, *, require_sample: bool = True) -> dict:
         start = self._start_t.value()
         stop = self._stop_t.value()
@@ -3178,6 +3228,8 @@ class MCDPanel(QWidget):
         validate_gate_conditions(enabled, limit)
         first = enabled[0]
         params = {
+            "paired_backend": self._pair_controls.andor_backend,
+            "paired_recipes": self._pair_controls.recipes(),
             "start_t": start,
             "stop_t": stop,
             "field_tolerance_t": cfg.magnet.field_tolerance_t,
@@ -3334,7 +3386,15 @@ class MCDPanel(QWidget):
         if QMessageBox.question(self, "Arm MCD", summary) != QMessageBox.StandardButton.Yes:
             self._magnet.release_exclusive("mcd")
             return
-        if not ensure_sensor_readout(self, self._lf6, mode="1d"):
+        if params.get("paired_backend"):
+            try:
+                self._lf6.validate_station_pair(params["paired_backend"], params["paired_recipes"])
+            except (ValueError, RuntimeError) as exc:
+                self._magnet.release_exclusive("mcd")
+                QMessageBox.warning(self, "Dual detector setup", str(exc))
+                return
+        sensor_options = {"backends": ["lightfield"]} if params.get("paired_backend") else {}
+        if not ensure_sensor_readout(self, self._lf6, mode="1d", **sensor_options):
             self._magnet.release_exclusive("mcd")
             return
         params["sensor_readout_intents"] = deepcopy(getattr(self._lf6, "sensor_readout_intents", {}))
@@ -3580,9 +3640,12 @@ class MCDPanel(QWidget):
             "voltage_settle_s": lambda v: self._voltage_settle.setValue(float(v)),
         }
         if keys_only:
-            return {"supported_keys": list(allowed)}
+            return {"supported_keys": ["paired_recipes", *allowed]}
+        self._pair_controls.restore_measurement_mode(settings.get("paired_recipes"))
         skipped = []
         for key, value in dict(settings or {}).items():
+            if key == "paired_recipes":
+                continue
             setter = allowed.get(key)
             if setter is None:
                 skipped.append(key)

@@ -8,7 +8,7 @@ from app.experiment_metadata import ExperimentMetadataService, _atomic_json, _js
 
 REFERENCE_FIELDS = (
     "name", "color", "visible", "source", "path", "metadata_path", "axis_unit",
-    "setup_key", "sample_id", "save_root", "saved", "save_error",
+    "setup_key", "reference_backend", "sample_id", "save_root", "saved", "save_error",
 )
 
 

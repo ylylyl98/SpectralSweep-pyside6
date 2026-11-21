@@ -467,17 +467,12 @@ class _LF6Section(QWidget):
         super().__init__(parent)
         self._ctrl = lf6_ctrl
         self._real_andor = False
-        self._last_temperature_c: Optional[float] = None
-        self._warming_disconnect = False
         self._last_andor_snapshot: dict = {}
         self._temperature_read_error = ""
         self._background_temperatures = {}
         self._pending_configuration = None
         self._winspec_readback = None
         self._winspec_readback_time = None
-        self._warmup_timer = QTimer(self)
-        self._warmup_timer.setInterval(5000)
-        self._warmup_timer.timeout.connect(self._poll_warmup_temperature)
         self._build()
         self._wire()
         self._status_refresh_timer = QTimer(self)
@@ -493,14 +488,28 @@ class _LF6Section(QWidget):
         lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(4)
 
+        self._station = QComboBox()
+        self._station.addItem("Default / other station", "default")
+        self._station.addItem("attoDRY2100 (split optical path)", "attodry2100")
+        self._station.setCurrentIndex(max(0, self._station.findData(cfg.lf6.station_id)))
+        self._station.setToolTip("The physical station on this PC. On the 2100 you can choose a single detector or acquire with PIXIS and Andor together.")
+        self._station_label = QLabel("Physical station:")
+        self._station_label.setBuddy(self._station)
+        lay.addWidget(self._station_label)
+        lay.addWidget(self._station)
+        self._station.currentIndexChanged.connect(self._change_station)
+        station_changed = getattr(self._ctrl, "station_changed", None)
+        if station_changed is not None:
+            station_changed.connect(self._show_station)
+
         backend_row = QHBoxLayout()
         lay.addWidget(QLabel("Measurement setup:"))
         self._backend = QComboBox()
         self._backend.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self._backend.setMinimumContentsLength(22)
         self._backend.addItem("LightField + PIXIS / CCD", "lightfield")
-        self._backend.addItem("Andor Shamrock + Si CCD", "andor_si")
         self._backend.addItem("Andor Shamrock + InGaAs CCD", "andor_ingaas")
+        self._backend.addItem("Andor Shamrock + Si CCD", "andor_si")
         self._backend.addItem("WinSpec InGaAs + LightField spectrograph", "winspec_ingaas")
         selected = self._backend.findData(getattr(cfg.lf6, "backend", "lightfield"))
         self._backend.setCurrentIndex(max(0, selected))
@@ -622,12 +631,8 @@ class _LF6Section(QWidget):
 
         self._andor_group = self._build_andor_controls()
         self._andor_group.setVisible(False)
-        # Detailed spectrograph and detector controls live beside the plots in
-        # the Spectrum tab.  Keep this section focused on connection and safe
-        # shutdown; the hidden group remains as a compatibility bridge for its
-        # existing status slots while the controls are migrated.
-        self._warm_disconnect_btn.setVisible(False)
-        lay.addWidget(self._warm_disconnect_btn)
+        # Detailed controls live in Spectrum. The hidden widgets receive
+        # existing status updates for this connection panel.
 
         self._exp_combo = QComboBox()
         self._exp_combo.setPlaceholderText("Saved experiments")
@@ -719,17 +724,11 @@ class _LF6Section(QWidget):
         self._andor_diagnostics = QPushButton("View diagnostics")
         form.addRow("", self._andor_diagnostics)
 
-        self._warm_disconnect_btn = QPushButton("Warm up + disconnect")
-        self._warm_disconnect_btn.setToolTip(
-            "Turn the cooler off, monitor detector temperature, and disconnect "
-            "only after the configured safe temperature is reached."
-        )
-        form.addRow("", self._warm_disconnect_btn)
         return group
 
     def _wire(self):
         self._connect_btn.clicked.connect(self._on_connect)
-        self._disconnect_btn.clicked.connect(self._on_disconnect_requested)
+        self._disconnect_btn.clicked.connect(lambda: self._ctrl.disconnect_instrument())
         self._ctrl.connected.connect(self._on_connected)
         self._ctrl.disconnected.connect(self._on_disconnected)
         self._ctrl.error.connect(self._on_error)
@@ -758,7 +757,6 @@ class _LF6Section(QWidget):
         self._andor_refresh.clicked.connect(self._refresh_andor_status)
         self._andor_apply.clicked.connect(self._apply_andor_controls)
         self._andor_diagnostics.clicked.connect(self._show_andor_diagnostics)
-        self._warm_disconnect_btn.clicked.connect(self._start_warmup_disconnect)
         self._backend.currentIndexChanged.connect(self._update_connection_actions)
         self._backend.activated.connect(self._on_setup_selected)
         self._mock_chk.toggled.connect(self._update_connection_actions)
@@ -802,8 +800,19 @@ class _LF6Section(QWidget):
         route = (getattr(self._ctrl, 'identity', {}) or {}).get('output_route')
         self._status.setText(f'In use: {label}' + (f' · Exit: {route}' if route else ''))
 
+    def _show_station(self, station_id):
+        blocked = self._station.blockSignals(True)
+        self._station.setCurrentIndex(max(0, self._station.findData(station_id)))
+        self._station.blockSignals(blocked)
+
+    def _change_station(self, _index):
+        change = getattr(self._ctrl, "set_station", None)
+        if not callable(change) or not change(self._station.currentData()):
+            self._show_station(cfg.lf6.station_id)
+
     def _update_connection_actions(self, *_args):
-        locked = self._warming_disconnect or self._pending_configuration is not None or bool(getattr(self._ctrl, "switching_locked", False))
+        locked = self._pending_configuration is not None or bool(getattr(self._ctrl, "switching_locked", False))
+        self._station.setEnabled(not locked and callable(getattr(self._ctrl, "set_station", None)))
         connected = bool(getattr(self._ctrl, "is_connected", False))
         active = getattr(self._ctrl, "backend", "")
         if connected and bool(getattr(self._ctrl, 'spectrum_actions_blocked', False)):
@@ -814,7 +823,6 @@ class _LF6Section(QWidget):
                 self._backend.blockSignals(blocked)
                 # A previous detector's temperature must not follow the setup
                 # label to the next detector. Idle polling fills these again.
-                self._last_temperature_c = None
                 self._winspec_readback = None
                 self._winspec_readback_time = None
                 self._temperature.setText('Detector: N/A')
@@ -837,7 +845,7 @@ class _LF6Section(QWidget):
         self._mock_chk.setEnabled(not locked and selected not in online)
         self._disconnect_btn.setEnabled(not locked and connected)
         self._disconnect_btn.setText("Disconnect")
-        self._disconnect_btn.setToolTip("Disconnect the current device. For Andor, this closes both camera and spectrograph after the temperature check. Use Spectrum → Andor controls to disconnect only Shamrock.")
+        self._disconnect_btn.setToolTip("Disconnect the current device. For Andor, this closes both camera and spectrograph. Use Spectrum → Andor controls to disconnect only Shamrock.")
         labels = {self._backend.itemData(i): self._backend.itemText(i) for i in range(self._backend.count())}
         simulation = (str((getattr(self._ctrl, 'identity', {}) or {}).get('backend', '')).startswith('mock_')
                       if selected == active and connected else self._mock_chk.isChecked() and selected not in online)
@@ -977,7 +985,6 @@ class _LF6Section(QWidget):
             self._backend.blockSignals(True)
             self._backend.setCurrentIndex(index)
             self._backend.blockSignals(False)
-        self._last_temperature_c = None
         self._winspec_readback = None
         self._winspec_readback_time = None
         self._last_andor_snapshot = {}
@@ -1018,7 +1025,6 @@ class _LF6Section(QWidget):
         real_andor = str(identity.get("backend", "")) == "andor_sdk2"
         self._real_andor = real_andor
         self._andor_group.setVisible(False)
-        self._warm_disconnect_btn.setVisible(real_andor)
         self._temperature_refresh.setEnabled(real_andor)
         self._cooler.setEnabled(real_andor)
         role_key = role.lower() if role.lower() in {"si", "ingaas"} else "ingaas"
@@ -1072,13 +1078,9 @@ class _LF6Section(QWidget):
         self._temperature_detail.clear()
         self._temperature_monitor.clear()
         self._temperature_read_error = ""
-        self._last_temperature_c = None
         self._last_andor_snapshot = {}
         self._real_andor = False
-        self._warming_disconnect = False
-        self._warmup_timer.stop()
         self._andor_group.setVisible(False)
-        self._warm_disconnect_btn.setVisible(False)
         self._temperature_refresh.setEnabled(False)
         self._cooler.setEnabled(False)
 
@@ -1117,7 +1119,7 @@ class _LF6Section(QWidget):
             else:
                 self._update_winspec_temperature()
             return
-        if not self._real_andor or self._warming_disconnect:
+        if not self._real_andor:
             return
         if "error" in data:
             self._temperature_read_error = str(data["error"])
@@ -1137,7 +1139,7 @@ class _LF6Section(QWidget):
         if self._backend.currentData() == 'winspec_ingaas':
             self._update_winspec_temperature()
             return
-        if self._real_andor and not self._warming_disconnect:
+        if self._real_andor:
             suffix = " · Last temperature read failed" if self._temperature_read_error else ""
             self._temperature_monitor.setText(state + suffix)
 
@@ -1153,21 +1155,8 @@ class _LF6Section(QWidget):
     def _on_temperature_ready(self, value):
         try:
             temperature = float(value)
-            self._last_temperature_c = temperature
             self._temperature.setText(f"Detector: {temperature:.1f} °C")
             _record_spectrum_readback(self, "detector_temperature", {"temperature_c": temperature})
-            if self._warming_disconnect:
-                threshold = float(cfg.lf6.andor_safe_disconnect_temperature_c)
-                self._andor_temperature_status.setText(
-                    f"Warming: {temperature:.1f} °C / safe at {threshold:.1f} °C"
-                )
-                if temperature >= threshold:
-                    self._warming_disconnect = False
-                    self._warmup_timer.stop()
-                    pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
-                    if callable(pause):
-                        pause("warmup", False)
-                    self._ctrl.disconnect_instrument()
         except (TypeError, ValueError):
             self._temperature.setText(f"Detector: {value}")
 
@@ -1349,48 +1338,6 @@ class _LF6Section(QWidget):
     def _on_andor_controls_applied(self, snapshot: object) -> None:
         self._on_andor_status(snapshot)
         self._status.setText("Connected · Andor controls applied and verified")
-
-    @Slot()
-    def _start_warmup_disconnect(self) -> None:
-        if not self._real_andor:
-            self._ctrl.disconnect_instrument()
-            return
-        self._warming_disconnect = True
-        pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
-        if callable(pause):
-            pause("warmup", True)
-        self._update_connection_actions()
-        self._cooler.setChecked(False)
-        self._andor_temperature_status.setText("Warming detector before disconnect…")
-        self._warmup_timer.start()
-        self._poll_warmup_temperature()
-
-    @Slot()
-    def _poll_warmup_temperature(self) -> None:
-        read_temperature = getattr(self._ctrl, "read_temperature", None)
-        if self._warming_disconnect and callable(read_temperature):
-            read_temperature()
-
-    @Slot()
-    def _on_disconnect_requested(self) -> None:
-        threshold = float(cfg.lf6.andor_safe_disconnect_temperature_c)
-        cold = (
-            self._real_andor
-            and (
-                self._cooler.isChecked()
-                or self._last_temperature_c is None
-                or self._last_temperature_c < threshold
-            )
-        )
-        if cold:
-            QMessageBox.warning(
-                self,
-                "Detector is cold",
-                "The Andor detector is cold or its temperature has not been verified. "
-                "Use 'Warm up + disconnect' and wait for the safe temperature.",
-            )
-            return
-        self._ctrl.disconnect_instrument()
 
     @Slot()
     def _show_andor_diagnostics(self) -> None:

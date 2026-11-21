@@ -40,7 +40,7 @@ class FilenameContext:
     measure_power: bool = False
     measured_power_uw: Optional[float] = None
     power_coefficient: float = 1.0
-    decimal_style: str = "p"
+    decimal_style: str = "dot"
     # Dual Gate opts into role labels while older callers retain Rot1/Rot2.
     rotation_labels: bool = False
 
@@ -100,7 +100,7 @@ def format_decimal_token(
     value: float,
     decimals: int = 3,
     *,
-    decimal_style: str = "p",
+    decimal_style: str = "dot",
 ) -> str:
     txt = f"{float(value):.{decimals}f}".rstrip("0").rstrip(".")
     if txt in {"", "-0"}:
@@ -115,7 +115,7 @@ def format_compact_number(
     keep_sign: bool = False,
     decimals: int = 3,
     *,
-    decimal_style: str = "p",
+    decimal_style: str = "dot",
 ) -> str:
     x = _coerce_float(value)
     if x is None:
@@ -134,7 +134,7 @@ def format_exposure_token(
     exposure_ms: Any,
     accumulations: Any,
     *,
-    decimal_style: str = "p",
+    decimal_style: str = "dot",
 ) -> str:
     exp_ms = _coerce_float(exposure_ms)
     if exp_ms is None:
@@ -148,7 +148,7 @@ def format_exposure_token(
     return f"{exp_txt}sx{acc_txt}"
 
 
-def format_center_token(center_nm: Any, *, decimal_style: str = "p") -> str:
+def format_center_token(center_nm: Any, *, decimal_style: str = "dot") -> str:
     center = _coerce_float(center_nm)
     if center is None:
         return ""
@@ -167,7 +167,7 @@ def format_rotation_token(
     index: int,
     degrees: Any,
     *,
-    decimal_style: str = "p",
+    decimal_style: str = "dot",
     role_label: Optional[str] = None,
 ) -> str:
     deg = _coerce_float(degrees)
@@ -177,7 +177,7 @@ def format_rotation_token(
     return f"{prefix}{format_compact_number(deg, decimals=2, decimal_style=decimal_style)}deg"
 
 
-def format_stage_position_token(position: Any, *, decimal_style: str = "p") -> str:
+def format_stage_position_token(position: Any, *, decimal_style: str = "dot") -> str:
     pos = _coerce_float(position)
     if pos is None:
         return ""

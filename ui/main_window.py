@@ -582,7 +582,8 @@ class MainWindow(QMainWindow):
         for key, spec in PAGE_RELOAD_REGISTRY.items():
             helpers = QUICK_PAGE_MODULES.get(key, ()) if quick else ()
             groups[key] = tuple(name.replace(".", "/") + ".py" for name in (*helpers, *spec.modules))
-        shared = {"ui/spectrum_plot.py", "ui/andor_controls_widget.py"}
+        shared = {"ui/spectrum_plot.py", "ui/andor_controls_widget.py",
+                  "ui/station_pair_controls.py", "ui/spectrum_pair.py"}
         if quick:
             shared.update(QUICK_SHARED_RESTART_SOURCES)
         self._source_changes = SourceChangeTracker(
@@ -1703,6 +1704,11 @@ class MainWindow(QMainWindow):
         self.close()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if any(getattr(getattr(self, name, None), "paired_acquisition_pending", False)
+               for name in ("_spectrum", "_bfp")):
+            self._status.showMessage("Wait for the paired acquisition to finish and save.", 5000)
+            event.ignore()
+            return
         status = getattr(getattr(self, "_lf6", None), "capture_status", {})
         if ((isinstance(status, dict) and status.get("active")) or
                 getattr(getattr(self, "_lf6", None), "acquisition_in_progress", False) is True or
@@ -1787,45 +1793,6 @@ class MainWindow(QMainWindow):
             )
             event.ignore()
             return
-        try:
-            cooling = self._lf6.andor_disconnect_safety_snapshot()
-        except Exception as exc:
-            answer = QMessageBox.question(
-                self,
-                "Andor detector temperature is unknown",
-                "The Andor detector temperature could not be verified before exit:\n\n"
-                f"{exc}\n\nExit and close the camera connection anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
-        else:
-            if cooling:
-                temperature = float(cooling.get("temperature_c", -273.15))
-                threshold = float(cfg.lf6.andor_safe_disconnect_temperature_c)
-                cooler_on = bool(cooling.get("cooler_on", False))
-                if cooler_on or temperature < threshold:
-                    answer = QMessageBox.question(
-                        self,
-                        "Andor detector is cold",
-                        f"The detector is {temperature:.1f} °C and the safe disconnect "
-                        f"temperature is {threshold:.1f} °C.\n\n"
-                        "Cancel exit and use 'Warm up + disconnect' in the "
-                        "Instruments tab. Exit anyway only for an emergency.",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No,
-                    )
-                    if answer != QMessageBox.StandardButton.Yes:
-                        event.ignore()
-                        return
-        app = QApplication.instance()
-        if app is not None and hasattr(self, "_session_change_watcher"):
-            app.removeEventFilter(self._session_change_watcher)
-        self._session_observe_timer.stop()
-        self._session_poll_timer.stop()
-        self._session_save_timer.stop()
         self._persist_session()
         self._save_geometry()
         if not self._magnet2100.shutdown():
@@ -1859,6 +1826,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "MFF101 could not close", f"{detail}\nPlease close again to retry.")
             event.ignore()
             return
+        # Past the last step that can keep the window open. Stopping session
+        # tracking any earlier would leave autosave dead after a refused close.
+        app = QApplication.instance()
+        if app is not None and hasattr(self, "_session_change_watcher"):
+            app.removeEventFilter(self._session_change_watcher)
+        self._session_observe_timer.stop()
+        self._session_poll_timer.stop()
+        self._session_save_timer.stop()
         for ctrl in (
             self._magnet,
             self._lf6,

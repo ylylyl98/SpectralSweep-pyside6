@@ -32,6 +32,23 @@ class DraftUXTests(unittest.TestCase):
     def cell(self, name):
         return self.widget._batch_table.item(0, panel.BATCH_SCHEMA.index(name))
 
+    def test_loop_selection_and_same_length_edit_preserve_order_controls(self):
+        widget = self.widget
+        table = widget._loop_table
+        order = widget._execution_order_table
+        row = next(i for i in range(table.rowCount())
+                   if table.cellWidget(i, 1).currentData() == "Center Wavelength (nm)")
+        controls = [order.cellWidget(i, 2) for i in range(order.rowCount())]
+        widget._preview_timer.stop()
+        table.selectRow(row)
+        self.assertFalse(widget._preview_timer.isActive())
+        for wavelength in (710, 720):
+            table.item(row, 2).setText(str(wavelength))
+            self.assertTrue(widget._preview_timer.isActive())
+            self.assertEqual(controls, [order.cellWidget(i, 2) for i in range(order.rowCount())])
+            task = widget._tree._last_plan["acquisition_schedule"][0]
+            self.assertEqual(task["ctx"]["Center Wavelength (nm)"], wavelength)
+
     def test_customized_loop_values_stay_readable_in_compact_pane(self):
         widget = self.widget
         widget._mode_combo.setCurrentText("Customized")

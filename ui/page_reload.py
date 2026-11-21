@@ -20,7 +20,8 @@ from ui.settings_reload_state import (
 )
 
 
-_MODULES = ("ui.andor_controls_widget", "ui.spectrum_plot", "ui.spectrum_panel")
+_MODULES = ("ui.andor_controls_widget", "ui.spectrum_plot", "ui.station_pair_controls",
+            "ui.spectrum_pair", "ui.spectrum_panel")
 _DUAL_GATE_MODULES = (
     "ui.quick_dual_gate_sequence", "ui.preview_widget", "ui.loop_run_selection",
     "ui.setup_sequence_editor", "ui.presets_panel",

@@ -97,10 +97,11 @@ def command_fields(app):
 def test_qml_spectrum_uses_existing_apply_acquire_and_cancel(spectrum):
     panel, widget, controller, warnings = spectrum
     assert widget.status() == QQuickWidget.Status.Ready
-    assert panel._acquisition_group.isHidden()
+    assert not panel._acquisition_group.isHidden()
     bridge = widget.adapter.presenter
-    assert panel._spectrograph_group.isAncestorOf(panel._exposure)
-    assert panel._spectrograph_group.isAncestorOf(panel._accumulations)
+    assert panel._single_recipe_row.isAncestorOf(panel._center)
+    assert panel._acquisition_group.isAncestorOf(panel._exposure)
+    assert panel._acquisition_group.isAncestorOf(panel._accumulations)
     assert bridge.fields == []
     assert find_item(widget.rootObject(), "field_exposure") is None
     panel._exposure.setValue(15.5)
@@ -316,6 +317,41 @@ def test_footer_actions_align_right_wrap_in_order_and_keep_keyboard_focus(app):
         widget.deleteLater()
         for button in buttons.values():
             button.deleteLater()
+        drain_qt_deletions()
+
+
+def test_cold_footer_reserves_action_width_while_qml_parent_is_hidden(app):
+    panel = QWidget()
+    layout = QVBoxLayout(panel)
+    buttons = {key: QPushButton(text, panel) for key, text in
+               (("apply", "Apply plan"), ("run", "Run"), ("stop", "Stop"))}
+    widget = install_workflow_controls(panel, "Dual Gate", buttons)
+    layout.setAlignment(widget, Qt.AlignmentFlag.AlignRight)
+    widget.set_docked()
+    root = widget.rootObject()
+    root.setVisible(False)
+    panel.resize(600, 180)
+    try:
+        QTest.qWait(40)
+        items = [find_item(root, "command_" + key) for key in buttons]
+        assert all(not item.isVisible() for item in items)
+        minimum = (sum(item.implicitWidth() for item in items) + 16
+                   + root.property("leftPadding") + root.property("rightPadding"))
+        assert widget.sizeHint().width() >= minimum
+
+        root.setVisible(True)
+        panel.show()
+        QTest.qWait(40)
+        rects = [item.mapRectToScene(item.boundingRect()) for item in items]
+        assert all(item.isVisible() for item in items)
+        assert len({rect.top() for rect in rects}) == 1
+        assert all(right.left() - left.right() >= 7 for left, right in zip(rects, rects[1:]))
+        assert abs(rects[-1].right() - (widget.width() - root.property("rightPadding"))) < 1
+        assert all(rect.bottom() <= widget.height() for rect in rects)
+    finally:
+        widget.shutdown()
+        panel.close()
+        panel.deleteLater()
         drain_qt_deletions()
 
 

@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QPushButton, QWidget
 
 from app.wavelength_calibration import calibrated_axis
@@ -75,12 +75,14 @@ def click_source(entry, source):
 
 def test_native_calibration_plot_keeps_one_based_pixels_and_detected_peak_locations(calibration):
     dialog, entry, _ = calibration
+    resets = QSignalSpy(dialog.table._quick_editor.model.modelReset)
     payload = frame()
     original = copy.deepcopy(payload)
     dialog.set_frame(payload)
     QTest.qWait(30)
     assert isinstance(dialog.plot, QuickScientificPlot)
     assert dialog.table.rowCount() == 4
+    assert resets.count() == 1
     detected = [float(dialog.table.item(row, 1).text()) for row in range(4)]
     np.testing.assert_allclose(detected, [20.25, 200.2, 300.1, 490.3], atol=.035)
     assert all(dialog.table.cellWidget(row, 0).currentText() == "Ignore" for row in range(4))

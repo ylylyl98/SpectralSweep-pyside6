@@ -4,7 +4,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from datetime import timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
@@ -176,15 +176,30 @@ class TemperatureMonitorTests(unittest.TestCase):
         self.assertFalse(requested)
         read.assert_not_called()
 
-    def test_manual_warmup_read_remains_available_but_not_during_sweep(self):
-        read = Mock(return_value=-10.)
-        self.controller._worker._setup.get_temperature = read
-        self.controller.set_temperature_monitor_paused('warmup', True)
-        self.controller._worker.read_temperature()
-        read.assert_called_once()
-        self.controller.set_temperature_monitor_paused('sweep', True)
-        self.controller._worker.read_temperature()
-        self.assertEqual(read.call_count, 1)
+    def test_disconnect_button_closes_cold_camera_and_allows_reconnect(self):
+        section = _LF6Section(self.controller)
+        setup = self.controller._worker._setup
+        setup.close = Mock()
+        setup.set_cooler = Mock()
+        try:
+            section._real_andor = True
+            section._on_temperature_snapshot(self.read())
+            section._on_cooler_changed(True)
+            section._update_connection_actions()
+            with patch("ui.instrument_panel.QMessageBox.warning") as warning:
+                section._disconnect_btn.click()
+                self.assertTrue(self.controller.switching_locked)
+                self.wait_for(lambda: self.controller.state is LightFieldLifecycleState.DISCONNECTED
+                              and not self.controller.switching_locked)
+                warning.assert_not_called()
+            setup.close.assert_called_once()
+            setup.set_cooler.assert_not_called()
+            self.assertTrue(section._connect_btn.isEnabled())
+            self.controller.connect_instrument(use_mock=True, backend="andor_si")
+            self.wait_for(lambda: self.controller.is_connected)
+            self.assertEqual(self.controller.backend, "andor_si")
+        finally:
+            section.deleteLater()
 
     def test_unchanged_monitor_state_emitted_only_once(self):
         states = []

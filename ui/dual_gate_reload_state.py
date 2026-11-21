@@ -2,9 +2,9 @@
 from copy import deepcopy
 from math import isnan
 
-from PySide6.QtCore import Qt, QSignalBlocker, QItemSelectionModel
+from PySide6.QtCore import Qt, QSignalBlocker, QItemSelectionModel, QTimer
 from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QAbstractButton, QComboBox, QDoubleSpinBox,
+    QApplication, QAbstractItemView, QAbstractButton, QAbstractScrollArea, QComboBox, QDoubleSpinBox,
     QSpinBox, QLineEdit,
 )
 
@@ -66,6 +66,59 @@ def _restore_controls(owner, values):
                 getattr(widget, setters[kind])(value)
 
 
+def _inspector_scroll_areas(panel):
+    tabs = getattr(panel, "_results_tabs", None)
+    if tabs is not None:
+        for index in range(tabs.count()):
+            area = tabs.widget(index)
+            if isinstance(area, QAbstractScrollArea):
+                yield area.objectName(), area
+            elif area.objectName() == "DualGateRunLog":
+                yield area.objectName(), panel._log_text
+
+
+def _inspector_scroll_positions(panel):
+    pending = getattr(panel, "_inspector_reload_scrolls", {})
+    return {name: pending.get(name, area.verticalScrollBar().value())
+            for name, area in _inspector_scroll_areas(panel)}
+
+
+def _restore_inspector_scrolls(panel, positions):
+    tabs = panel._results_tabs
+    pending = {}
+    for name, area in _inspector_scroll_areas(panel):
+        if name in positions:
+            value = positions[name]
+            area.verticalScrollBar().setValue(value)
+            if value:
+                pending[name] = value
+    panel._inspector_reload_scrolls = pending
+    if not pending:
+        return
+
+    def restore_active(index):
+        page = tabs.widget(index)
+        if page is None:
+            return
+        name = page.objectName()
+
+        def restore_when_laid_out():
+            if panel._inspector_reload_scrolls is not pending:
+                tabs.currentChanged.disconnect(restore_active)
+            elif tabs.currentWidget() is page and name in pending:
+                area = dict(_inspector_scroll_areas(panel))[name]
+                area.verticalScrollBar().setValue(pending.pop(name))
+                if not pending:
+                    tabs.currentChanged.disconnect(restore_active)
+
+        if name in pending:
+            QTimer.singleShot(0, page, restore_when_laid_out)
+
+    # An unvisited tab has no scroll range until its viewport is shown.
+    tabs.currentChanged.connect(restore_active)
+    restore_active(tabs.currentIndex())
+
+
 def capture_dual_gate_state(panel):
     from ui.quick_editing import require_committed_quick_edits
     require_committed_quick_edits(panel)
@@ -112,6 +165,7 @@ def capture_dual_gate_state(panel):
         "run_time_text": panel._run_time_lbl.text(),
         "scrolls": {name: getattr(panel, name).verticalScrollBar().value()
                     for name in ("_workflow_scroll", "_results_scroll")},
+        "inspector_scrolls": _inspector_scroll_positions(panel),
     })
 
 
@@ -158,7 +212,12 @@ def restore_dual_gate_state(panel, state):
     # from the editable draft and from a newly rebuilt default plan.
     for name, value in state["data"].items():
         setattr(panel, name, value)
-    _restore_controls(panel, state["controls"])
+    controls = dict(state["controls"])
+    legacy_log_open = controls.pop("_log_toggle", ("checked", False))[1]
+    _restore_controls(panel, controls)
+    if legacy_log_open and "inspector_page" not in state["session"]:
+        panel._set_inspector_page("DualGateRunLog")
+    panel._set_sequence_expanded(panel._sequence_toggle.isChecked())
     _restore_controls(panel._sweep_calc, state["calculator_controls"])
     for name, value in state["calculator_data"].items():
         setattr(panel._sweep_calc, name, value)
@@ -189,7 +248,6 @@ def restore_dual_gate_state(panel, state):
             table.horizontalScrollBar().setValue(saved["scroll"][0])
             table.verticalScrollBar().setValue(saved["scroll"][1])
     panel._log_text.setHtml(state["log"])
-    panel._log_text.verticalScrollBar().setValue(state["log_scroll"])
     panel._status_lbl.setText(state["status"][0])
     for name, value in state["status"][1].items():
         panel._status_lbl.setProperty(name, value)
@@ -199,12 +257,16 @@ def restore_dual_gate_state(panel, state):
     panel._progress.setValue(state["progress"][2])
     panel._run_time_lbl.setText(state.get("run_time_text", "Elapsed 00:00 · Remaining —"))
     panel._filename_details.setVisible(panel._filename_details_toggle.isChecked())
-    for toggle in (panel._filename_details_toggle, panel._log_toggle):
-        toggle.setArrowType(Qt.ArrowType.DownArrow if toggle.isChecked() else Qt.ArrowType.RightArrow)
-    # The log container is the direct parent installed by the page layout.
-    panel._log_text.parentWidget().setVisible(panel._log_toggle.isChecked())
-    for name, value in state["scrolls"].items():
-        getattr(panel, name).verticalScrollBar().setValue(value)
+    toggle = panel._filename_details_toggle
+    toggle.setArrowType(Qt.ArrowType.DownArrow if toggle.isChecked() else Qt.ArrowType.RightArrow)
+
+    workflow_scroll = state["scrolls"]["_workflow_scroll"]
+    panel._workflow_scroll.verticalScrollBar().setValue(workflow_scroll)
+    QTimer.singleShot(0, panel, lambda: panel._workflow_scroll.verticalScrollBar().setValue(workflow_scroll))
+    inspector_scrolls = dict(state.get("inspector_scrolls", {}))
+    inspector_scrolls.setdefault("DualGateResultsScroll", state["scrolls"].get("_results_scroll", 0))
+    inspector_scrolls.setdefault("DualGateRunLog", state["log_scroll"])
+    _restore_inspector_scrolls(panel, inspector_scrolls)
 
 
 def detach_dual_gate_windows(panel):

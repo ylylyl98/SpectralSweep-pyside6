@@ -169,10 +169,7 @@ class QuickWorkbench(QObject):
 
     def _command_pane(self, panel, page_id):
         if page_id == "spectrum":
-            splitter = getattr(panel, "_content_splitter", None)
-            if not isinstance(splitter, QSplitter) or splitter.count() < 2:
-                return None
-            return self._wrap_command_pane(panel, splitter)
+            return getattr(panel, "_spectrum_command_pane", None)
         if page_id == "dual_gate":
             return getattr(panel, "_results_pane", None)
         pane = getattr(panel, "_right_panel", None)
@@ -187,8 +184,7 @@ class QuickWorkbench(QObject):
         return self._wrap_command_pane(panel, splitter)
 
     def _wrap_command_pane(self, panel, splitter):
-        # Spectrum's existing reference/current-acquisition splitter and BFP's
-        # existing tab view retain their owners inside the same splitter slot.
+        # BFP's existing tab view retains its owner inside the same splitter slot.
         # Only the action area stays fixed below that scrollable/view content.
         wrapper = getattr(panel, "_quick_command_pane", None)
         if wrapper is None:
@@ -255,18 +251,18 @@ class QuickWorkbench(QObject):
         panel._quick_output_actions = holder
 
     def _dock_page_commands(self, panel, page_id):
-        """Dock actions in the monitoring pane, keeping Stop reachable."""
+        """Dock actions in the workspace, keeping Stop reachable."""
         command = self._commands.get(page_id)
         if command is None:
             return False
         pane = self._command_pane(panel, page_id) if panel is not None else None
-        top_dock = page_id in {"mcd", "mcd2100"}
+        top_dock = page_id in {"mcd", "mcd2100", "spectrum"}
         # The narrow instrument view hides the entire workspace, so its
         # monitoring pane cannot host accessible commands even when idle.
         use_header = top_dock and self._instrument_focus
         if isinstance(pane, QWidget) and not use_header:
             # A running measurement's Stop must remain reachable when the
-            # outer laptop viewport scrolls the lower action area off screen.
+            # workspace viewport scrolls the action area off screen.
             safety_active = any(button.isEnabled() for key, button in command.adapter.buttons.items()
                                 if key in {"stop", "abort"})
             top = pane.mapTo(self.body_scroll.viewport(), QPoint()).y()
@@ -325,8 +321,12 @@ class QuickWorkbench(QObject):
         if narrow:
             return
         automatic = getattr(self, "_auto_sidebar_width", False)
-        width = (max(350, min(460, round(self.window.width() * .24)))
-                 if automatic else self._wide_sidebar_width)
+        width = self._wide_sidebar_width
+        if automatic:
+            if self.window._tabs.currentWidget() is getattr(self.window, "_spectrum", None):
+                width = 300
+            else:
+                width = max(350, min(460, round(self.window.width() * .24)))
         width = max(splitter.widget(0).minimumWidth(), width)
         if automatic:
             # Respect the selected page's current limits, including transient

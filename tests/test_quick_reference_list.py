@@ -274,6 +274,21 @@ def test_empty_name_cancels_edit_without_blocking_session_commit(references):
     assert not view.model._drafts
 
 
+def test_typing_and_discard_read_only_the_edited_reference(references):
+    panel, view, _ = references
+    for i in range(5):
+        panel.add_reference(np.array([700., 701.]), np.array([1., 2.]), name=f"Ref {i}", auto_save=False)
+    view.model.refresh()
+    row = view.model.rows[-1]
+    source = panel._reference_list
+    with patch.object(source, "item", wraps=source.item) as read:
+        row.stageName("draft")
+        assert row.name == "draft"
+        view.discardEdits()
+        assert row.name == "Ref 4"
+    assert read.call_count and all(call.args == (source.count() - 1,) for call in read.call_args_list)
+
+
 def test_idle_and_selection_do_not_rescan_reference_library(references, monkeypatch):
     from ui.quick_reference_list import ReferenceRow
     panel, view, ref = references

@@ -3,11 +3,12 @@ import json
 import os
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pandas as pd
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSignalBlocker, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox
 from ui import presets_panel as panel
@@ -101,7 +102,7 @@ def test_invalid_values_survive_another_selector_and_repair_clears_error(widget)
 
 def test_full_group_mismatch_is_rejected_even_if_selected_position_exists(widget):
     choose(widget, 0, [0])
-    widget._loop_table.item(1, 2).setText("730")
+    widget._loop_table.item(1, 2).setText("730, 740, 750, 760, 770")
     assert not widget._apply_btn.isEnabled()
     assert "mismatch" in widget._draft_detail_lbl.toolTip().lower()
 
@@ -146,6 +147,23 @@ def test_row_move_keeps_selection_and_execution_order(widget):
     widget._on_apply()
     assert len(widget._acquisition_schedule) == 4
     assert {t["ctx"]["Measurement setup"] for t in widget._acquisition_schedule} == {"winspec_ingaas"}
+
+
+def test_loop_add_and_adjacent_move_keep_other_editors_and_refresh_once(widget):
+    table = widget._loop_table
+    untouched = [table.cellWidget(2, column) for column in (0, 1, 4)]
+    with patch.object(widget, "_refresh_draft_state", wraps=widget._refresh_draft_state) as refresh:
+        widget._add_loop_row()
+        assert refresh.call_count == 1
+        original = panel._read_loop_table_raw(table)
+        table.selectRow(0)
+        widget._move_loop_row(1)
+        assert refresh.call_count == 2
+    assert panel._read_loop_table_raw(table) == [original[1], original[0], *original[2:]]
+    assert table.currentRow() == 1
+    assert [table.cellWidget(2, column) for column in (0, 1, 4)] == untouched
+    assert isinstance(table.cellWidget(1, 2), panel.QPushButton)
+    assert table.cellWidget(0, 2) is None
 
 
 def test_group_renumber_preserves_selection_but_regroup_requires_review(widget):
@@ -296,6 +314,76 @@ def test_run_lifecycle_disables_then_restores_selectors_without_an_edit(widget):
         assert widget._loop_table.cellWidget(0, 4).isEnabled()
     finally:
         widget._run_thread = None
+
+
+def test_other_group_edits_and_run_lifecycle_keep_long_picker_payload(widget):
+    table = widget._loop_table
+    with QSignalBlocker(table):
+        table.item(2, 2).setText("1:1:100000")
+    widget._sync_loop_run_selectors()
+    combo = table.cellWidget(2, 4)
+    labels = combo.labels
+    baseline = widget._loop_run_selections.groups[2]["baseline"]
+    row_id = combo.property("loop_row_id")
+    assert len(labels) == 100000
+    assert labels._counts is None
+
+    with patch.object(combo, "configure", wraps=combo.configure) as configure:
+        with QSignalBlocker(table):
+            table.item(1, 2).setText("750, 1160")
+        widget._sync_loop_run_selectors()
+        widget._run_thread = SimpleNamespace(isRunning=lambda: True)
+        try:
+            widget._sync_loop_run_selectors()
+            assert not combo.isEnabled()
+        finally:
+            widget._run_thread = None
+        widget._sync_loop_run_selectors()
+        assert combo.isEnabled()
+        assert configure.call_count == 0
+    assert combo.labels is labels
+    assert widget._loop_run_selections.groups[2]["baseline"][row_id] is baseline[row_id]
+    assert table.cellWidget(0, 4).labels[1].endswith("1160 nm")
+
+
+def test_unchanged_setup_summary_does_not_parse_values_again(widget):
+    table = widget._loop_table
+    button = table.cellWidget(0, 2)
+    with patch.object(panel, "_parse_values", wraps=panel._parse_values) as parse:
+        widget._sync_setup_value_editors()
+        assert parse.call_count == 0
+        with QSignalBlocker(table):
+            table.item(0, 2).setText("invalid setup")
+        widget._sync_setup_value_editors()
+        assert parse.call_count == 1
+    assert table.cellWidget(0, 2) is button
+    assert button.text() == "Fix setup selection..."
+
+
+def test_switch_to_setup_finishes_live_values_editor_and_can_edit_again(widget, app):
+    widget.show()
+    app.processEvents()
+    table = widget._loop_table
+    item = table.item(2, 2)
+    table.setCurrentItem(item)
+    table.editItem(item)
+    editor = table.cellWidget(2, 2)
+    assert isinstance(editor, panel.QLineEdit)
+    editor.setText("PIXIS, WinSpec")
+    parameter = table.cellWidget(2, 1)
+    parameter.setCurrentIndex(parameter.findData(panel._SETUP_PARAM))
+    assert table.state() == table.State.NoState
+    assert isinstance(table.cellWidget(2, 2), panel.QPushButton)
+    assert item.text() == "PIXIS, WinSpec"
+
+    parameter.setCurrentIndex(parameter.findData("Exposure Time (ms)"))
+    table.editItem(item)
+    editor = table.cellWidget(2, 2)
+    assert isinstance(editor, panel.QLineEdit)
+    editor.setText("100, 200")
+    QTest.keyClick(editor, Qt.Key.Key_Return)
+    app.processEvents()
+    assert item.text() == "100, 200"
 
 
 def test_duplicate_saved_indices_display_one_selected_occurrence(widget):

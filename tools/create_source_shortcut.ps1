@@ -13,23 +13,35 @@ try {
             throw "Project file is missing: $required. Extract or clone the complete project first."
         }
     }
-    if (-not $DestinationDirectory) {
-        $DestinationDirectory = [Environment]::GetFolderPath('DesktopDirectory')
+    $destinations = if ($DestinationDirectory) {
+        @($DestinationDirectory)
+    } else {
+        @([Environment]::GetFolderPath('DesktopDirectory'), [Environment]::GetFolderPath('Programs'))
     }
-    if (-not (Test-Path -LiteralPath $DestinationDirectory -PathType Container)) {
-        throw "Shortcut destination does not exist: $DestinationDirectory"
-    }
-    $shortcutPath = Join-Path $DestinationDirectory 'SpectralSweep (Source).lnk'
     Add-Type -Path (Join-Path $PSScriptRoot 'windows_shortcut.cs')
     $target = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $launcher + '"'
-    [SpectralSweep.SourceShortcut]::Save($shortcutPath, $target, $arguments, $projectRoot, $icon)
-    if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
-        throw 'Windows did not save the shortcut.'
+    $appId = [SpectralSweep.SourceShortcut]::ApplicationId($projectRoot)
+    $failed = $false
+    foreach ($directory in $destinations) {
+        try {
+            if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) {
+                throw "Shortcut destination does not exist: $directory"
+            }
+            $shortcutPath = Join-Path $directory 'SpectralSweep (Source).lnk'
+            [SpectralSweep.SourceShortcut]::Save($shortcutPath, $target, $arguments, $projectRoot, $icon, $appId)
+            if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
+                throw "Windows did not save the shortcut: $shortcutPath"
+            }
+            Write-Host "Created: $shortcutPath"
+        } catch {
+            Write-Warning "Could not save shortcut: $($_.Exception.Message)"
+            $failed = $true
+        }
     }
-    Write-Host "Created: $shortcutPath"
+    if ($failed) { exit 1 }
     Write-Host 'Double-click SpectralSweep (Source) to check for updates and start the app.'
-    Write-Host 'For one-click access, start the app, then right-click its taskbar icon and choose Pin to taskbar.'
+    Write-Host 'To pin it, right-click SpectralSweep (Source) in Start or right-click the running app on the taskbar.'
     Write-Host 'Run launch.bat again if you move the project folder.'
     exit 0
 } catch {

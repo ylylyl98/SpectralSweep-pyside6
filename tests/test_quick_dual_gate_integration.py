@@ -103,6 +103,50 @@ def test_quick_view_state_survives_idle_page_transfer(panel):
         drain_qt_deletions()
 
 
+@pytest.mark.parametrize("leave_output_open", [True, False])
+def test_inspector_tab_scroll_and_collapsed_sequence_survive_idle_transfer(panel, leave_output_open):
+    panel.resize(1000, 530)
+    panel._sequence_toggle.setChecked(False)
+    panel._filename_details_toggle.setChecked(True)
+    panel._set_inspector_page("DualGateOutputScroll")
+    app = quick_application()
+    app.processEvents()
+    output = panel._results_tabs.currentWidget()
+    output.verticalScrollBar().setValue(40)
+    scroll = output.verticalScrollBar().value()
+    assert scroll > 0
+    if not leave_output_open:
+        panel._set_inspector_page("DualGateResultsScroll")
+    saved_page = panel._results_tabs.currentWidget().objectName()
+    state = capture_dual_gate_state(panel)
+
+    restored = PresetsPanel(initialize_plan=False)
+    try:
+        # A plain session persists the inspector selection and sequence disclosure.
+        restored.resize(panel.size())
+        restored.restore_session_state(state["session"])
+        assert restored._results_tabs.currentWidget().objectName() == saved_page
+        assert restored._tree.isHidden()
+        restore_dual_gate_state(restored, state)
+        restored.show()
+        QTest.qWait(30)
+        assert restored._filename_details_toggle.isChecked()
+        assert restored._results_tabs.currentWidget().objectName() == saved_page
+        restored._set_inspector_page("DualGateOutputScroll")
+        QTest.qWait(30)
+        restored_output = restored._results_tabs.currentWidget()
+        assert restored_output.verticalScrollBar().value() == scroll
+        restored._set_inspector_page("DualGateResultsScroll")
+        assert restored._tree.isHidden()
+        restored._sequence_toggle.setChecked(True)
+        assert not restored._tree.isHidden()
+    finally:
+        restored.dispose_reloaded_page()
+        restored.close()
+        restored.deleteLater()
+        drain_qt_deletions()
+
+
 def test_full_quick_review_blocks_reload_until_closed(panel):
     panel._tree.show_full_sequence()
     QTest.qWait(20)

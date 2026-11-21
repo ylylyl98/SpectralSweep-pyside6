@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from contextlib import nullcontext
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -59,14 +60,17 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pyqtgraph as pg
 from ui.plot_factory import create_plot, create_image_view
 from utils.config import cfg
-from utils.bias_control import resolve_bias2, apply_bias_pair
+from utils.bias_control import resolve_bias2, apply_bias_pair, check_setpoint_readings
 from ui.bias_controls import Bias2Control
 from ui.workflow_sections import DisclosureSection, divide_grid_fields, inline_divider
-from ui.table_layout import fit_table_columns
+from ui.table_layout import batch_table_updates, fit_table_columns
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from copy import deepcopy
 from ui.sensor_readout_preflight import ensure_sensor_readout
+from ui.station_pair_controls import PAIR_LABELS, StationPairControls
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
+from app.paired_spectrum_files import PairedSpectrumFiles
+from app.paired_spectra import PAIRED_STATION_ID, validate_pair_recipes
 from utils.filename_builder import format_compact_number, format_decimal_token, format_power_uw_decimal, sanitize_token
 from utils.mcd_common import (
     mcd_coordinates as _mcd_coordinates,
@@ -156,6 +160,7 @@ class _OpticalSequenceWidget(QWidget):
     """Editable ordered list of optical recipes, one full map per row."""
 
     changed = Signal()
+    rowStructureChanged = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -329,7 +334,9 @@ class _OpticalSequenceWidget(QWidget):
                 flags |= Qt.ItemFlag.ItemIsEditable
             else:
                 flags &= ~Qt.ItemFlag.ItemIsEditable
-            name_item.setFlags(flags)
+            if name_item.flags() != flags:
+                with QSignalBlocker(self._table):
+                    name_item.setFlags(flags)
 
     def _on_cell_changed(self, row: int, column: int) -> None:
         if column == 0:
@@ -343,54 +350,35 @@ class _OpticalSequenceWidget(QWidget):
     def conditions(self, *, enabled_only: bool = False) -> list[OpticalCondition]:
         result: list[OpticalCondition] = []
         for row in range(self._table.rowCount()):
-            enabled_item = self._table.item(row, 0)
-            name_item = self._table.item(row, 1)
-            center = self._table.cellWidget(row, 2)
-            exposure = self._table.cellWidget(row, 3)
-            frames = self._table.cellWidget(row, 4)
-            if not isinstance(center, QDoubleSpinBox):
-                continue
-            if not isinstance(exposure, QDoubleSpinBox):
-                continue
-            if not isinstance(frames, QSpinBox):
-                continue
-            condition = OpticalCondition(
-                enabled=(
-                    enabled_item is not None
-                    and enabled_item.checkState() == Qt.CheckState.Checked
-                ),
-                name=(name_item.text().strip() if name_item else "") or f"C{row + 1}",
-                center_nm=float(center.value()),
-                exposure_ms=float(exposure.value()),
-                frames=int(frames.value()),
-                backend=str(self._table.cellWidget(row, 5).currentData()),
-                reduction=str(self._table.cellWidget(row, 6).currentData()),
-            )
-            if condition.enabled or not enabled_only:
+            condition = self._read_condition(row)
+            if condition is not None and (condition.enabled or not enabled_only):
                 result.append(condition)
         return result
 
+    def _read_condition(self, row: int, *, raw: bool = False) -> OpticalCondition | None:
+        enabled = self._table.item(row, 0)
+        name_item = self._table.item(row, 1)
+        center = self._table.cellWidget(row, 2)
+        exposure = self._table.cellWidget(row, 3)
+        frames = self._table.cellWidget(row, 4)
+        if (not isinstance(center, QDoubleSpinBox) or not isinstance(exposure, QDoubleSpinBox)
+                or not isinstance(frames, QSpinBox)):
+            return None
+        name = name_item.text() if name_item is not None else ""
+        return OpticalCondition(
+            enabled=bool(enabled and enabled.checkState() == Qt.CheckState.Checked),
+            name=name if raw else name.strip() or f"C{row + 1}",
+            center_nm=float(center.value()),
+            exposure_ms=float(exposure.value()),
+            frames=int(frames.value()),
+            backend=str(self._table.cellWidget(row, 5).currentData()),
+            reduction=str(self._table.cellWidget(row, 6).currentData()),
+        )
+
     def raw_conditions(self) -> list[dict]:
         """Capture table text exactly, including blank/partial names."""
-        rows = []
-        for row in range(self._table.rowCount()):
-            enabled = self._table.item(row, 0)
-            name = self._table.item(row, 1)
-            center = self._table.cellWidget(row, 2)
-            exposure = self._table.cellWidget(row, 3)
-            frames = self._table.cellWidget(row, 4)
-            if center is None or exposure is None or frames is None:
-                continue
-            rows.append({
-                "enabled": bool(enabled and enabled.checkState() == Qt.CheckState.Checked),
-                "name": name.text() if name is not None else "",
-                "center_nm": float(center.value()),
-                "exposure_ms": float(exposure.value()),
-                "frames": int(frames.value()),
-                "backend": str(self._table.cellWidget(row, 5).currentData()),
-                "reduction": str(self._table.cellWidget(row, 6).currentData()),
-            })
-        return rows
+        return [condition.as_dict() for row in range(self._table.rowCount())
+                if (condition := self._read_condition(row, raw=True)) is not None]
 
     def set_conditions(self, conditions: list[OpticalCondition | dict]) -> None:
         parsed: list[OpticalCondition] = []
@@ -416,20 +404,14 @@ class _OpticalSequenceWidget(QWidget):
                 continue
         if not parsed:
             parsed = [OpticalCondition(True, "C1", 720.0, 30.0, 1)]
-        self._table.blockSignals(True)
-        self._table.setRowCount(0)
-        for condition in parsed:
-            self._append_row(condition)
-        self._table.blockSignals(False)
-        table_height = (
-            self._table.horizontalHeader().sizeHint().height()
-            + sum(self._table.rowHeight(row) for row in range(self._table.rowCount()))
-            + 2 * self._table.frameWidth()
-        )
-        self._table.setMaximumHeight(
-            min(_OPTICAL_TABLE_MAX_HEIGHT, max(_OPTICAL_TABLE_MIN_HEIGHT, table_height))
-        )
+        with batch_table_updates(self._table), QSignalBlocker(self._table):
+            self._table.setRowCount(0)
+            self._table.setRowCount(len(parsed))
+            for row, condition in enumerate(parsed):
+                self._append_row(condition, row, insert=False)
+        self._resize_table_height()
         self._table.selectRow(0)
+        self.rowStructureChanged.emit(range(len(parsed)))
         self.changed.emit()
 
     def first_editors(self) -> tuple[QDoubleSpinBox, QDoubleSpinBox, QSpinBox]:
@@ -444,34 +426,41 @@ class _OpticalSequenceWidget(QWidget):
         return row if row >= 0 else max(0, self._table.rowCount() - 1)
 
     def _resize_table_height(self):
-        table_height = (self._table.horizontalHeader().sizeHint().height()
-                        + sum(self._table.rowHeight(row) for row in range(self._table.rowCount()))
-                        + 2 * self._table.frameWidth())
+        table_height = self._table.horizontalHeader().sizeHint().height() + 2 * self._table.frameWidth()
+        for row in range(self._table.rowCount()):
+            table_height += self._table.rowHeight(row)
+            if table_height >= _OPTICAL_TABLE_MAX_HEIGHT:
+                break
         self._table.setMaximumHeight(min(_OPTICAL_TABLE_MAX_HEIGHT,
                                      max(_OPTICAL_TABLE_MIN_HEIGHT, table_height)))
 
     def _add_condition(self) -> None:
-        conditions = self.conditions()
-        previous = conditions[-1]
-        condition = OpticalCondition(True, f"C{len(conditions) + 1}", previous.center_nm,
+        row = self._table.rowCount()
+        previous = self._read_condition(row - 1)
+        if previous is None:
+            return
+        condition = OpticalCondition(True, f"C{row + 1}", previous.center_nm,
                                      previous.exposure_ms, previous.frames,
                                      previous.backend, previous.reduction)
         with QSignalBlocker(self._table):
             self._append_row(condition)
             self._table.selectRow(self._table.rowCount() - 1)
         self._resize_table_height()
+        self.rowStructureChanged.emit((row,))
         self.changed.emit()
 
     def _duplicate_selected(self) -> None:
-        conditions = self.conditions()
         row = self._selected_row()
-        source = conditions[row]
+        source = self._read_condition(row)
+        if source is None:
+            return
         duplicate = OpticalCondition(source.enabled, f"{source.name}_copy", source.center_nm,
                                      source.exposure_ms, source.frames, source.backend, source.reduction)
         with QSignalBlocker(self._table):
             self._append_row(duplicate, row + 1)
             self._table.selectRow(row + 1)
         self._resize_table_height()
+        self.rowStructureChanged.emit((row + 1,))
         self.changed.emit()
 
     def _remove_selected(self) -> None:
@@ -482,18 +471,23 @@ class _OpticalSequenceWidget(QWidget):
             self._table.removeRow(row)
             self._table.selectRow(min(row, self._table.rowCount() - 1))
         self._resize_table_height()
+        self.rowStructureChanged.emit(())
         self.changed.emit()
 
     def _move_selected(self, delta: int) -> None:
-        conditions = self.conditions()
         row = self._selected_row()
         target = row + int(delta)
-        if not 0 <= target < len(conditions):
+        if not 0 <= target < self._table.rowCount() or row == target:
+            return
+        source = self._read_condition(row, raw=True)
+        destination = self._read_condition(target, raw=True)
+        if source is None or destination is None:
             return
         with QSignalBlocker(self._table):
-            self._append_row(conditions[target], row, insert=False)
-            self._append_row(conditions[row], target, insert=False)
+            self._append_row(destination, row, insert=False)
+            self._append_row(source, target, insert=False)
             self._table.selectRow(target)
+        self.rowStructureChanged.emit((row, target))
         self.changed.emit()
 
 
@@ -571,6 +565,10 @@ class _MegaSweepStopRequested(Exception):
     pass
 
 
+class _MegaSweepPairError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class OpticalCondition:
     """One complete 2D-map acquisition recipe."""
@@ -634,6 +632,9 @@ AXIS_CODES = {
 }
 
 
+_MAX_AXIS_POINTS = 100_000
+
+
 def _get_linear_array(start: float, stop: float, param: float, mode: str) -> np.ndarray:
     if mode == "Total Points":
         return np.linspace(start, stop, max(2, int(round(param))))
@@ -642,6 +643,13 @@ def _get_linear_array(start: float, stop: float, param: float, mode: str) -> np.
         return np.array([start], dtype=float)
     step = step if stop >= start else -step
     n = int(np.floor((stop - start) / step + 1e-9)) + 1
+    if n > _MAX_AXIS_POINTS:
+        # A mistyped step (1e-6 over a 10 V span) would allocate millions of
+        # points on the GUI thread while the preview refreshes.
+        raise ValueError(
+            f"Step size {abs(step):g} gives {n} points on one axis; "
+            f"the limit is {_MAX_AXIS_POINTS}."
+        )
     vals = start + np.arange(max(1, n), dtype=float) * step
     if vals.size == 0:
         vals = np.array([start], dtype=float)
@@ -845,15 +853,17 @@ def _is_in_bounds(vtg: float, vbg: float, vbias: float, safety: dict) -> bool:
 
 
 def _format_exposure_seconds_token(exp_ms: float) -> str:
-    return f"{int(exp_ms // 1000)}" if exp_ms % 1000 == 0 else format_decimal_token(exp_ms / 1000.0, decimals=3)
+    return f"{int(exp_ms // 1000)}" if exp_ms % 1000 == 0 else format_decimal_token(
+        exp_ms / 1000.0, decimals=3, decimal_style="dot")
 
 
 def _format_axis_range_token(axis_name: str, desc: dict) -> str:
     code = AXIS_CODES.get(axis_name, sanitize_token(axis_name) or "Axis")
-    start = format_compact_number(desc.get("start", 0.0), keep_sign=True, decimals=3)
-    stop = format_compact_number(desc.get("stop", 0.0), keep_sign=True, decimals=3)
+    # Map names write decimals with a point (-0.7, r1.1), as Dual Gate names do.
+    start = format_compact_number(desc.get("start", 0.0), keep_sign=True, decimals=3, decimal_style="dot")
+    stop = format_compact_number(desc.get("stop", 0.0), keep_sign=True, decimals=3, decimal_style="dot")
     points = int(desc.get("points", 0) or 0)
-    return f"{code}{start}to{stop}_{points}pts"
+    return f"{code}{start}to{stop}x{points}"
 
 
 def _format_laser_power_token(laser_nm, power_uw) -> str:
@@ -862,7 +872,9 @@ def _format_laser_power_token(laser_nm, power_uw) -> str:
     if laser_txt:
         parts.append(f"{laser_txt}nm")
     try:
-        power_txt = format_power_uw_decimal(float(power_uw)) if str(power_uw).strip() else ""
+        # 1.000uW -> 1uW, 0.250uW -> 0.25uW: the map name omits padding zeros.
+        power_txt = (f"{format_compact_number(float(power_uw), decimals=3, decimal_style='dot')}uW"
+                     if str(power_uw).strip() else "")
     except Exception:
         power_txt = ""
     if power_txt:
@@ -889,7 +901,16 @@ def _describe_array(arr: np.ndarray, mode: str, param: float) -> dict:
     }
 
 
-def build_megasweep_filename(params: dict) -> str:
+# Names a detector setup briefly; a row named after its setup adds nothing.
+_SETUP_FILE_LABELS = {"lightfield": "PIXIS", "winspec_ingaas": "WinSpec",
+                      "andor_ingaas": "AndorInGaAs", "andor_si": "AndorSi"}
+_SETUP_ROW_NAMES = {sanitize_token(name).lower() for name in (
+    "PIXIS", "WinSpec", "Andor InGaAs", "Andor Silicon", "PIXIS + Andor InGaAs",
+    "PIXIS + Andor Silicon", "Current setup", "lightfield", "winspec_ingaas", "andor_ingaas", "andor_si")}
+
+
+def build_megasweep_filename(params: dict, *, detector: str = "") -> str:
+    """Name one map. ``detector`` names a paired detector's file by its own recipe."""
     sample = params.get("sample", "SampleID") or "SampleID"
     tag = params.get("tag", "2DSweep") or "2DSweep"
     axis_a = params["axis_a"]
@@ -908,40 +929,54 @@ def build_megasweep_filename(params: dict) -> str:
         ])
     else:
         sweep_token = f"{AXIS_CODES[axis_a]}-{AXIS_CODES[axis_b]}"
-    if coord == CoordSystem.PHYSICAL:
-        sweep_token = f"{sweep_token}_r{format_decimal_token(ratio, decimals=2)}"
+    if coord == CoordSystem.PHYSICAL and abs(ratio - 1.0) > 5e-3:
+        # r = 1 is the default; only a different ratio is worth naming.
+        sweep_token = f"{sweep_token}_r{format_decimal_token(ratio, decimals=2, decimal_style='dot')}"
 
     fixed_tokens: list[str] = []
     for key in sorted(fixed.keys(), key=lambda name: ("Vbias" not in name, name)):
         if key == "Vbias" and not vbias_available:
             fixed_tokens.append("VbNC")
         else:
-            fixed_tokens.append(f"{AXIS_CODES[key]}{format_compact_number(fixed[key], keep_sign=True, decimals=3)}")
-    fixed_token = "_".join(fixed_tokens) if fixed_tokens else "None"
+            fixed_tokens.append(AXIS_CODES[key] + format_compact_number(
+                fixed[key], keep_sign=True, decimals=3, decimal_style="dot"))
 
-    exp_s = _format_exposure_seconds_token(float(params.get("exp_ms", 0.0)))
-    optical_token = f"{float(params.get('center_nm', 0.0)):.0f}nm_{exp_s}sx{int(params.get('frames', 1))}"
-    laser_power_token = _format_laser_power_token(params.get("laser_nm", ""), params.get("power_uw", ""))
-    parts = [sample, sweep_token, fixed_token]
+    recipe = (params.get("pair_recipes") or {}).get(detector) if detector else None
+    center_nm = recipe["center_nm"] if recipe else params.get("center_nm", 0.0)
+    exposure_ms = recipe["exposure_ms"] if recipe else params.get("exp_ms", 0.0)
+    frames = int(recipe["frames"] if recipe else params.get("frames", 1))
+    exp_s = _format_exposure_seconds_token(float(exposure_ms))
+    optical_token = f"{float(center_nm):.0f}nm_{exp_s}sx{frames}"
+    # Laser and power always reach the file header; the name carries them only when wanted.
+    laser_power_token = (_format_laser_power_token(params.get("laser_nm", ""), params.get("power_uw", ""))
+                         if params.get("name_laser_power", True) else "")
+    parts = [sample, sweep_token]
+    if fixed_tokens:
+        parts.append("_".join(fixed_tokens))
     bias2 = params.get("bias2", {})
     if bias2.get("bias2_mode") == "follow":
-        parts.append(f"Vb2offset{format_compact_number(bias2.get('bias2_offset_v', 0.0), keep_sign=True, decimals=4)}")
+        parts.append("Vb2offset" + format_compact_number(
+            bias2.get('bias2_offset_v', 0.0), keep_sign=True, decimals=4, decimal_style="dot"))
     if laser_power_token:
         parts.append(laser_power_token)
     condition_index = params.get("condition_index")
     if condition_index is not None:
         index_value = int(condition_index)
         condition_name = sanitize_token(params.get("condition_name", ""))[:24]
-        condition_token = f"C{index_value:02d}"
-        default_names = {f"c{index_value}", f"c{index_value:02d}"}
-        if condition_name and condition_name.lower() not in default_names:
-            condition_token = f"{condition_token}_{condition_name}"
-        parts.append(condition_token)
+        if condition_name.lower() in {f"c{index_value}", f"c{index_value:02d}", *_SETUP_ROW_NAMES}:
+            condition_name = ""
+        # A single map needs no index; several maps keep C01, C02, ... to stay distinct.
+        numbered = int(params.get("condition_count", 2) or 2) > 1
+        condition_token = "_".join(filter(None, (f"C{index_value:02d}" if numbered else "", condition_name)))
+        if condition_token:
+            parts.append(condition_token)
     parts.extend([optical_token, tag])
-    if params.get('backend'):
-        parts.append(sanitize_token(params['backend']))
+    paired = bool(params.get("pair_andor_backend"))
+    if params.get('backend') and not paired:
+        # Paired files already end in _PIXIS / _Andor_*.
+        parts.append(_SETUP_FILE_LABELS.get(str(params['backend']), sanitize_token(params['backend'])))
     if params.get('reduction') == 'average':
-        parts.append(f"Avg{int(params['frames'])}")
+        parts.append(f"Avg{frames}")
     return "~".join(parts)
 
 
@@ -1047,9 +1082,10 @@ def _build_csv_metadata_text(
         f"# Center_nm: {params['center_nm']:.2f}",
         f"# Exposure_ms: {params['exp_ms']}",
         f"# Frames_EPF: {1 if params.get('reduction') == 'average' else params['frames']}",
-        f"# Wavelength_start_nm: {float(wls[0]):.2f}",
-        f"# Wavelength_end_nm: {float(wls[-1]):.2f}",
-        f"# Wavelength_pixels: {int(wls.size)}",
+        *([f"# Wavelength_start_nm: {float(wls[0]):.2f}",
+           f"# Wavelength_end_nm: {float(wls[-1]):.2f}",
+           f"# Wavelength_pixels: {int(wls.size)}"] if wls.size else
+          ["# Detector-specific wavelengths are stored in the paired spectrum CSVs."]),
         "#",
         "# === Hardware ===",
         f"# SMU_Connected: {smu_connected}",
@@ -1418,44 +1454,63 @@ class _FixedParamsWidget(QGroupBox):
         super().__init__("Fixed Parameters", parent)
         self._layout = QFormLayout(self)
         _configure_compact_form(self._layout)
+        # Every axis keeps one permanent row that is shown while the axis is
+        # fixed. Rebuilding rows left the Quick form bound to deleted editors,
+        # so the group appeared empty after an axis or connection change.
+        self._all_spins: dict[str, QDoubleSpinBox] = {}
+        self._rows: dict[str, QWidget] = {}
         self._spins: dict[str, QDoubleSpinBox] = {}
+        for axis in dict.fromkeys((*RAW_AXIS_ORDER, *PHYS_AXIS_ORDER)):
+            self._add_axis(axis)
+
+    def _add_axis(self, axis: str) -> None:
+        spin = _NoWheelDoubleSpinBox()
+        spin.setRange(-200.0, 200.0)
+        spin.setDecimals(4)
+        _set_compact_editor(spin)
+        if axis == "E-field":
+            spin.setToolTip(
+                "Fixed electric field - held constant for all sweep points.\n"
+                "Gate voltages are derived from Doping + this value:\n"
+                "  Vtg = (Doping + E-field) / 2\n"
+                "  Vbg = (Doping - E-field) / (2r)"
+            )
+        row = spin
+        if axis == "Vbias":
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(6)
+            self._vbias_badge = QLabel("N/A")
+            self._vbias_badge.setToolTip("No usable Vbias Keithley channel is connected.")
+            set_style_role(self._vbias_badge, 'text', tone='warning')
+            row_lay.addWidget(spin)
+            row_lay.addWidget(self._vbias_badge)
+            row_lay.addStretch(1)
+        spin.valueChanged.connect(self.changed)
+        self._layout.addRow(axis, row)
+        self._layout.setRowVisible(row, False)
+        self._all_spins[axis], self._rows[axis] = spin, row
 
     def set_fixed_axes(self, axes: list[str], vbias_available: bool):
         previous = self.get_values()
-        while self._layout.rowCount():
-            self._layout.removeRow(0)
-        self._spins.clear()
         display_axes = list(axes)
-        self.setVisible(bool(display_axes))
         for axis in display_axes:
-            spin = _NoWheelDoubleSpinBox()
-            spin.setRange(-200.0, 200.0)
-            spin.setDecimals(4)
-            spin.setValue(previous.get(axis, 0.0))
-            _set_compact_editor(spin)
-            if axis == "E-field":
-                spin.setToolTip(
-                    "Fixed electric field - held constant for all sweep points.\n"
-                    "Gate voltages are derived from Doping + this value:\n"
-                    "  Vtg = (Doping + E-field) / 2\n"
-                    "  Vbg = (Doping - E-field) / (2r)"
-                )
-            if axis == "Vbias" and not vbias_available:
-                spin.setEnabled(False)
-                row = QWidget()
-                row_lay = QHBoxLayout(row)
-                row_lay.setContentsMargins(0, 0, 0, 0)
-                row_lay.setSpacing(6)
-                badge = QLabel("N/A")
-                badge.setToolTip("No usable Vbias Keithley channel is connected.")
-                set_style_role(badge, 'text', tone='warning')
-                row_lay.addWidget(spin)
-                row_lay.addWidget(badge)
-                row_lay.addStretch(1)
-                self._layout.addRow(axis, row)
-            else:
-                spin.valueChanged.connect(self.changed)
-                self._layout.addRow(axis, spin)
+            if axis not in self._all_spins:
+                self._add_axis(axis)
+        self.setVisible(bool(display_axes))
+        self._spins = {}
+        for axis, spin in self._all_spins.items():
+            self._layout.setRowVisible(self._rows[axis], axis in display_axes)
+        for axis in display_axes:
+            spin = self._all_spins[axis]
+            if axis not in previous:
+                # An axis that becomes fixed starts from zero, as a new row did.
+                with QSignalBlocker(spin):
+                    spin.setValue(0.0)
+            if axis == "Vbias":
+                spin.setEnabled(bool(vbias_available))
+                self._vbias_badge.setVisible(not vbias_available)
             self._spins[axis] = spin
 
     def get_values(self) -> dict[str, float]:
@@ -1488,7 +1543,9 @@ class _SafetyWidget(QGroupBox):
             (("vtg", "Vtg"), ("vbg", "Vbg"), ("vbias", "Vbias"), ("vbias2", "Vbias2")),
             start=1,
         ):
-            grid.addWidget(QLabel(row_label), row, 0)
+            row_title = QLabel(row_label)
+            self._row_titles = {**getattr(self, "_row_titles", {}), prefix: row_title}
+            grid.addWidget(row_title, row, 0)
             for column, suffix in enumerate(("min", "max"), start=1):
                 key = f"{prefix}_{suffix}"
                 spin = _NoWheelDoubleSpinBox()
@@ -1510,10 +1567,10 @@ class _SafetyWidget(QGroupBox):
         return {name: float(spin.value()) for name, spin in self._spins.items()}
 
     def set_bias2_visible(self, visible: bool):
-        for column in range(3):
-            item = self.layout().itemAtPosition(4, column)
-            if item and item.widget():
-                item.widget().setVisible(visible)
+        # Hold the row's own widgets: the Quick form re-homes this group's
+        # layout, so looking the row up by grid position fails there.
+        for widget in (self._row_titles["vbias2"], self._spins["vbias2_min"], self._spins["vbias2_max"]):
+            widget.setVisible(visible)
 
 
 class _TimingWidget(QGroupBox):
@@ -2190,7 +2247,7 @@ class _MegaSweepWorker(QObject):
         try:
             self._run_sweep(self._p)
         except Exception as exc:
-            if self._stop.is_set():
+            if self._stop.is_set() and not isinstance(exc, _MegaSweepPairError):
                 self._emit_log('Optical sequence stopped.')
             else:
                 self.error.emit(str(exc))
@@ -2198,6 +2255,9 @@ class _MegaSweepWorker(QObject):
             self.finished.emit()
 
     def _run_sweep(self, p: dict):
+        andor_backend = p.get("pair_andor_backend")
+        if andor_backend:
+            self._lf6.validate_station_pair(andor_backend, p["pair_recipes"])
         iv = self._smu.device if self._smu and self._smu.is_connected else None
         second = p.get("bias2", {})
         if second.get("bias2_mode", "off") != "off":
@@ -2240,7 +2300,12 @@ class _MegaSweepWorker(QObject):
 
         map_count = len(conditions)
         multi_setup = any(c.get('backend') or c.get('reduction') == 'average' for c in conditions)
-        if multi_setup:
+        if andor_backend:
+            pixis = p["pair_recipes"]["lightfield"]
+            conditions = [{**pixis, "name": f"PIXIS + {PAIR_LABELS[andor_backend]}"}]
+            map_count = 1
+            multi_setup = False
+        elif multi_setup:
             initial_backend = getattr(self._lf6, 'backend', '')
             for condition in conditions:
                 condition['backend'] = condition.get('backend') or initial_backend
@@ -2319,8 +2384,8 @@ class _MegaSweepWorker(QObject):
                 )
             except _MegaSweepStopRequested:
                 break
-            except Exception:
-                if self._stop.is_set():
+            except Exception as exc:
+                if self._stop.is_set() and not isinstance(exc, _MegaSweepPairError):
                     break
                 map_failed = True
                 raise
@@ -2380,22 +2445,34 @@ class _MegaSweepWorker(QObject):
         global_done_before: int,
         total_acquisitions: int,
     ) -> None:
-        self._apply_optical_settings(p, spec, lf6)
         points = p["valid_points"]
-        self._emit_log("Acquiring wavelength calibration...")
-        wls = _get_wavelengths(spec, lf6, float(p["center_nm"]), tol_nm=1.0)
-        if wls.size <= 2:
-            raise RuntimeError(
-                f"Could not obtain wavelength calibration for "
-                f"{p['center_nm']:g} nm. Aborting."
-            )
-
         out_path: Path = p["out_path"]
-        fp = out_path / f"{p['base_name']}.csv"
-        k = 2
-        while fp.exists():
-            fp = out_path / f"{p['base_name']}_{k:03d}.csv"
-            k += 1
+        andor_backend = p.get("pair_andor_backend")
+        if andor_backend:
+            # Each detector's file carries its own centre and exposure.
+            pair_files = PairedSpectrumFiles(
+                out_path, p["base_name"], andor_backend,
+                pixis_stem=build_megasweep_filename(p, detector="lightfield"),
+                andor_stem=build_megasweep_filename(p, detector=andor_backend))
+            fp = pair_files.manifest_path
+            meta_fp = fp.with_suffix(".meta.txt")
+            wls = np.array([])
+        else:
+            pair_files = None
+            self._apply_optical_settings(p, spec, lf6)
+            self._emit_log("Acquiring wavelength calibration...")
+            wls = _get_wavelengths(spec, lf6, float(p["center_nm"]), tol_nm=1.0)
+            if wls.size <= 2:
+                raise RuntimeError(
+                    f"Could not obtain wavelength calibration for "
+                    f"{p['center_nm']:g} nm. Aborting."
+                )
+            fp = out_path / f"{p['base_name']}.csv"
+            k = 2
+            while fp.exists():
+                fp = out_path / f"{p['base_name']}_{k:03d}.csv"
+                k += 1
+            meta_fp = fp.with_suffix(".meta.txt")
 
         cols = [
             f"{p['axis_a']}_axis_a_set", f"{p['axis_b']}_axis_b_set",
@@ -2405,9 +2482,6 @@ class _MegaSweepWorker(QObject):
         bias2_active = p.get("bias2", {}).get("bias2_mode", "off") != "off"
         if bias2_active:
             cols.extend(["Vbias2_set", "Vbias2_meas", "Ibias2_A"])
-        wl_str = np.array([f"{x:g}" for x in wls], dtype="U")
-        header = np.concatenate((np.array(cols, dtype="U"), wl_str)).reshape(1, -1)
-        meta_fp = fp.with_suffix(".meta.txt")
         completed_points = 0
         status = "Running"
         if self._metadata_run is not None:
@@ -2431,8 +2505,12 @@ class _MegaSweepWorker(QObject):
                           "point_count": len(points),
                           "optical_condition": p.get("condition_name")},
             )
-        with open(fp, "w", newline="") as fh:
-            np.savetxt(fh, header, fmt="%s", delimiter=",")
+        if pair_files is None:
+            # Wavelength columns use four decimals on every page.
+            wl_str = np.array([f"{float(x):.4f}" for x in wls], dtype="U")
+            header = np.concatenate((np.array(cols, dtype="U"), wl_str)).reshape(1, -1)
+            with open(fp, "w", newline="") as fh:
+                np.savetxt(fh, header, fmt="%s", delimiter=",")
         self._emit_log(f"Writing data to {fp}")
         self._emit_log(f"Writing metadata to {meta_fp.name}")
 
@@ -2460,11 +2538,14 @@ class _MegaSweepWorker(QObject):
                         stop_cb=self._stop.is_set,
                         stop_exc=_MegaSweepStopRequested,
                     )
-                time.sleep(p["settle"])
+                if pair_files is None:
+                    time.sleep(p["settle"])
+                elif self._stop.wait(p["settle"]):
+                    raise _MegaSweepStopRequested()
 
             total = len(points)
-            prev = None
-            with open(fp, "a", newline="") as fh:
+            prev = points[0]["raw"] if pair_files is not None and iv is not None else None
+            with (nullcontext() if pair_files is not None else open(fp, "a", newline="")) as fh:
                 for done, point in enumerate(points, start=1):
                     if self._stop.is_set():
                         raise _MegaSweepStopRequested()
@@ -2479,7 +2560,7 @@ class _MegaSweepWorker(QObject):
                                 stop_cb=self._stop.is_set,
                                 stop_exc=_MegaSweepStopRequested,
                             )
-                        if bias2_active:
+                        if bias2_active and (pair_files is None or done > 1):
                             apply_bias_pair(iv, vbias=vbias if p.get("vbias_available", True) else None,
                                             settings=point.get("bias2", p["bias2"]),
                                             ramp_step=min(p["ramp_step"], cfg.ramp.vbias_step_V, cfg.ramp.vbias2_step_V), delay_s=p["step_delay_s"],
@@ -2493,7 +2574,10 @@ class _MegaSweepWorker(QObject):
                                 stop_exc=_MegaSweepStopRequested,
                             )
                         prev = point["raw"]
-                        time.sleep(p["settle"])
+                        if pair_files is None:
+                            time.sleep(p["settle"])
+                        elif done > 1 and self._stop.wait(p["settle"]):
+                            raise _MegaSweepStopRequested()
 
                     vbg_m, vtg_m, vbias_m, Ibg, Itg, Ib = _read_point_electrical(iv)
                     set_lightfield_context(self._lf6, output_file=fp, point_index=done, Vtg_set=float(vtg), Vbg_set=float(vbg), Vbias_set=float(vbias))
@@ -2502,7 +2586,15 @@ class _MegaSweepWorker(QObject):
                         second_target = point["Vbias2_set"]
                         second_readings = [second_target, iv.read_current_bias2(strict=True), iv.read_bias2_current(strict=True)]
                         set_lightfield_context(self._lf6, Vbias2_set=second_target, bias2_mode=p["bias2"]["bias2_mode"], bias2_offset_v=p["bias2"].get("bias2_offset_v", 0.0))
-                    y = _read_intensity(spec, int(wls.size), expected_wavelengths=wls) if spec is not None else np.full(wls.size, NAN, dtype=float)
+                    if iv is not None:
+                        check_setpoint_readings(
+                            iv,
+                            {"Vbg": vbg, "Vtg": vtg,
+                             "Vbias": vbias if p.get("vbias_available", True) else None,
+                             "Vbias2": second_readings[0] if second_readings else None},
+                            {"Vbg": (vbg_m, Ibg), "Vtg": (vtg_m, Itg), "Vbias": (vbias_m, Ib),
+                             "Vbias2": tuple(second_readings[1:3]) if second_readings else (None, None)},
+                        )
                     axis_vals = point["axis_values"]
                     prefix = np.array([
                         point["axis_a"], point["axis_b"],
@@ -2511,10 +2603,26 @@ class _MegaSweepWorker(QObject):
                         vbg_m, vtg_m, vbias_m, Ibg, Itg, Ib,
                         *second_readings,
                     ], dtype=np.float64)
-                    row = np.concatenate((prefix, y)).reshape(1, -1)
-                    np.savetxt(fh, row, fmt="%.6e", delimiter=",")
+                    if pair_files is not None:
+                        records = self._lf6.acquire_station_pair(
+                            andor_backend, p["pair_recipes"], self._stop, owner="megasweep")
+                        try:
+                            paths = pair_files.write_point(done, records, scalars=dict(zip(cols, prefix)))
+                        except Exception as exc:
+                            raise _MegaSweepPairError(f"Paired output write failed: {exc}") from exc
+                        if len(paths) != 2:
+                            requires_recovery = any(record.get("recovery_required") for record in records.values())
+                            if self._stop.is_set() and not requires_recovery:
+                                raise _MegaSweepStopRequested()
+                            failures = [f"{PAIR_LABELS[backend]}: {records.get(backend, {}).get('error', 'No capture result received')}"
+                                        for backend in pair_files.backends if backend not in paths]
+                            raise _MegaSweepPairError("Incomplete detector pair. " + ". ".join(failures))
+                    else:
+                        y = _read_intensity(spec, int(wls.size), expected_wavelengths=wls) if spec is not None else np.full(wls.size, NAN, dtype=float)
+                        row = np.concatenate((prefix, y)).reshape(1, -1)
+                        np.savetxt(fh, row, fmt="%.6e", delimiter=",")
                     completed_points = done
-                    if done % _FLUSH_EVERY_POINTS == 0 or done == total:
+                    if fh is not None and (done % _FLUSH_EVERY_POINTS == 0 or done == total):
                         fh.flush()
                     self.progress.emit(
                         global_done_before + done,
@@ -2533,14 +2641,14 @@ class _MegaSweepWorker(QObject):
             status = "Stopped"
             self._emit_log("Stopped by user.")
             raise
-        except Exception:
-            if self._stop.is_set():
+        except Exception as exc:
+            if self._stop.is_set() and not isinstance(exc, _MegaSweepPairError):
                 status = 'Stopped'
                 raise _MegaSweepStopRequested()
             status = "Failed"
             raise
         else:
-            status = "Complete"
+            status = "Stopped" if self._stop.is_set() else "Complete"
         finally:
             original_error = sys.exc_info()[1]
             projection_ready = True
@@ -2583,7 +2691,7 @@ class _MegaSweepWorker(QObject):
                         completed_points=completed_points,
                     ))
 
-        self._emit_log(f"Map complete. Saved -> {fp.name}")
+        self._emit_log(f"Map {status.lower()}. Saved -> {fp.name}")
 
     def _safe_ramp_to_zero(self, iv) -> bool:
         if iv is None:
@@ -2713,9 +2821,18 @@ class MegaSweepPanel(QWidget):
 
         self._optical_widget = _OpticalSequenceWidget()
         self._sync_primary_optical_aliases()
+        optical_controls = QWidget()
+        optical_layout = QVBoxLayout(optical_controls)
+        optical_layout.setContentsMargins(0, 0, 0, 0)
+        self._pair_controls = StationPairControls(optical_controls)
+        for spin in self._pair_controls.findChildren(QAbstractSpinBox):
+            _set_compact_editor(spin)
+            spin.resize(spin.sizeHint())
+        optical_layout.addWidget(self._pair_controls)
+        optical_layout.addWidget(self._optical_widget)
         self._optical_group = _CollapsibleSection(
             "Optical Sequence",
-            self._optical_widget,
+            optical_controls,
             expanded=True,
         )
 
@@ -2743,6 +2860,11 @@ class MegaSweepPanel(QWidget):
             (QLabel("Laser (nm)"), self._laser_edit),
             (QLabel("Power (µW)"), self._power_edit),
         )
+        self._name_laser_power = QCheckBox("Laser and power in file name")
+        self._name_laser_power.setObjectName("MegaSweepNameLaserPower")
+        self._name_laser_power.setChecked(True)
+        self._name_laser_power.setToolTip(
+            "Off: laser and power are still saved in the file header, but left out of the file name.")
         for label, editor in self._metadata_fields:
             label.setBuddy(editor)
             editor.setMaximumWidth(16777215)
@@ -2881,6 +3003,8 @@ class MegaSweepPanel(QWidget):
                 label_column = 0
             self._metadata_grid.addWidget(label, row, label_column)
             self._metadata_grid.addWidget(editor, row, label_column + 1)
+        rows = (len(self._metadata_fields) + 1) // 2 if two_column else len(self._metadata_fields)
+        self._metadata_grid.addWidget(self._name_laser_power, rows, 0, 1, 5 if two_column else 2)
         self._metadata_grid.setColumnStretch(1, 1)
         if two_column:
             self._metadata_grid.setColumnStretch(4, 1)
@@ -3003,7 +3127,6 @@ class MegaSweepPanel(QWidget):
             self._optical_scroll.setMinimumHeight(min(90, optical_height))
             self._optical_scroll.setMaximumHeight(optical_height)
         self._apply_settings_card_layout()
-        self._install_settings_wheel_redirects()
         self._left_lay.invalidate()
         self._left_lay.activate()
         required_height = max(
@@ -3015,13 +3138,16 @@ class MegaSweepPanel(QWidget):
         self._settings_scroll.widget().updateGeometry()
         self._settings_scroll.viewport().update()
 
-    def _install_settings_wheel_redirects(self):
-        controls = [
-            *self._settings_content.findChildren(QAbstractSpinBox),
-            *self._settings_content.findChildren(QComboBox),
-            *self._optical_widget.findChildren(QAbstractSpinBox),
-            *self._optical_widget.findChildren(QComboBox),
-        ]
+    def _install_settings_wheel_redirects(self, controls=None):
+        if controls is None:
+            controls = (
+                *self._settings_content.findChildren(QAbstractSpinBox),
+                *self._settings_content.findChildren(QComboBox),
+                *self._optical_widget.findChildren(QAbstractSpinBox),
+                *self._optical_widget.findChildren(QComboBox),
+                *self._pair_controls.findChildren(QAbstractSpinBox),
+                *self._pair_controls.findChildren(QComboBox),
+            )
         for control in controls:
             if not control.property("settings_wheel_redirect"):
                 control.installEventFilter(self)
@@ -3040,10 +3166,12 @@ class MegaSweepPanel(QWidget):
             and isinstance(watched, (QAbstractSpinBox, QComboBox))
             and hasattr(self, "_settings_content")
             and (self._settings_content.isAncestorOf(watched)
-                 or self._optical_widget.isAncestorOf(watched))
+                 or self._optical_widget.isAncestorOf(watched)
+                 or self._pair_controls.isAncestorOf(watched))
         ):
-            scroll = (self._optical_scroll if self._optical_widget.isAncestorOf(watched)
-                      else self._settings_scroll)
+            in_optical = (self._optical_widget.isAncestorOf(watched)
+                          or self._pair_controls.isAncestorOf(watched))
+            scroll = self._optical_scroll if in_optical else self._settings_scroll
             scrollbar = scroll.verticalScrollBar()
             pixel_delta = int(event.pixelDelta().y())
             if pixel_delta:
@@ -3089,16 +3217,34 @@ class MegaSweepPanel(QWidget):
                     0, self._refresh_settings_scroll_range
                 )
             )
-        self._optical_widget.changed.connect(
-            self._on_optical_sequence_changed
-        )
+        self._optical_widget.changed.connect(self._schedule_preview)
+        self._optical_widget.rowStructureChanged.connect(self._on_optical_structure_changed)
+        self._pair_controls.backend_changed.connect(self._on_pair_mode_changed)
+        for editor_type in (QDoubleSpinBox, QSpinBox):
+            for spin in self._pair_controls.findChildren(editor_type):
+                spin.valueChanged.connect(self._schedule_preview)
+        self._pair_controls.bind_controller(self._lf6)
         for w in (self._sample_edit, self._tag_edit, self._laser_edit, self._power_edit):
             w.textChanged.connect(self._schedule_preview)
+        self._name_laser_power.toggled.connect(self._schedule_preview)
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn.clicked.connect(self._on_stop)
         if self._smu is not None:
             self._smu.connected.connect(lambda *_: self._sync_vbias_availability())
             self._smu.disconnected.connect(self._sync_vbias_availability)
+
+    @Slot(str)
+    def _on_pair_mode_changed(self, backend):
+        self._optical_widget.setVisible(not backend)
+        QTimer.singleShot(0, self._refresh_settings_scroll_range)
+        self._schedule_preview()
+
+    def _measurement_conditions(self):
+        backend = self._pair_controls.andor_backend
+        if not backend:
+            return self._optical_widget.conditions()
+        pixis = self._pair_controls.recipes()["lightfield"]
+        return [OpticalCondition(True, f"PIXIS + {PAIR_LABELS[backend]}", **pixis)]
 
     def _sync_primary_optical_aliases(self) -> None:
         """Keep legacy first-row attributes available to callers and tests."""
@@ -3107,12 +3253,14 @@ class MegaSweepPanel(QWidget):
         self._center_spin = center
         self._frames_spin = frames
 
-    @Slot()
-    def _on_optical_sequence_changed(self) -> None:
+    @Slot(object)
+    def _on_optical_structure_changed(self, added_editor_rows) -> None:
         self._sync_primary_optical_aliases()
-        self._install_settings_wheel_redirects()
+        table = self._optical_widget._table
+        self._install_settings_wheel_redirects(
+            table.cellWidget(row, column) for row in added_editor_rows for column in range(2, 7)
+        )
         QTimer.singleShot(0, self._refresh_settings_scroll_range)
-        self._schedule_preview()
 
     def capture_session_state(self) -> dict:
         """Capture the editable sweep recipe, never controller/runtime state."""
@@ -3154,11 +3302,13 @@ class MegaSweepPanel(QWidget):
                 condition.as_dict() for condition in optical_conditions
             ],
             "optical_sequence_drafts": self._optical_widget.raw_conditions(),
+            "station_pair": self._pair_controls.request_state(),
             "metadata": {
                 "sample_id": self._sample_edit.text(),
                 "tag": self._tag_edit.text(),
                 "laser_nm": self._laser_edit.text(),
                 "power_uw": self._power_edit.text(),
+                "name_laser_power": self._name_laser_power.isChecked(),
             },
             "sections": {
                 "timing": self._timing_section.is_expanded(),
@@ -3176,9 +3326,23 @@ class MegaSweepPanel(QWidget):
             "frames": lambda v: self._optical_widget.set_frames(int(v)),
         }
         if keys_only:
-            return {"supported_keys": list(allowed)}
+            return {"supported_keys": [*allowed, "pair_andor_backend", "pair_recipes"]}
+        settings = dict(settings or {})
+        backend = settings.get("pair_andor_backend")
+        applied = []
+        if backend:
+            if cfg.lf6.station_id != PAIRED_STATION_ID:
+                raise ValueError("The saved PIXIS + Andor recipe requires the attoDRY 2100 station.")
+            recipes = validate_pair_recipes(backend, settings.get("pair_recipes", {}))
+            self._pair_controls.restore_state({"backend": backend, "andor_detector": backend,
+                                              "pixis": recipes["lightfield"], "andor": recipes[backend]})
+            applied.extend(["pair_andor_backend", "pair_recipes"])
+        elif self._pair_controls.andor_backend and any(key in settings for key in allowed):
+            self._pair_controls.mode.setCurrentIndex(0)
         skipped = []
-        for key, value in dict(settings or {}).items():
+        for key, value in settings.items():
+            if key in applied:
+                continue
             setter = allowed.get(key)
             if setter is None:
                 skipped.append(key)
@@ -3192,6 +3356,12 @@ class MegaSweepPanel(QWidget):
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
             return
+
+        pair = state.get("station_pair", {})
+        if isinstance(pair, dict) and pair.get("backend") and cfg.lf6.station_id != PAIRED_STATION_ID:
+            raise ValueError("The saved PIXIS + Andor recipe requires the attoDRY 2100 station.")
+        if isinstance(pair, dict):
+            self._pair_controls.restore_state(pair)
 
         self._bias2_control.set_settings(state.get("bias2", {}))
 
@@ -3298,6 +3468,8 @@ class MegaSweepPanel(QWidget):
                 value = metadata.get(key)
                 if isinstance(value, str):
                     edit.setText(value)
+            if isinstance(metadata.get("name_laser_power"), bool):
+                self._name_laser_power.setChecked(metadata["name_laser_power"])
         sections = state.get("sections")
         if isinstance(sections, dict):
             for key, section in (
@@ -3523,7 +3695,7 @@ class MegaSweepPanel(QWidget):
         conditions: list[OpticalCondition] | None = None,
     ) -> float:
         if conditions is None:
-            conditions = self._optical_widget.conditions(enabled_only=True)
+            conditions = [condition for condition in self._measurement_conditions() if condition.enabled]
         ramp_rate = self._timing_widget.ramp_step() / max(self._timing_widget.step_delay_s(), EPS)
         avg_ramp_time = self._timing_widget.ramp_step() / max(ramp_rate, EPS)
         common_per_point = (
@@ -3531,6 +3703,11 @@ class MegaSweepPanel(QWidget):
             + avg_ramp_time
             + self._timing_widget.extra_overhead_s()
         )
+        backend = self._pair_controls.andor_backend
+        if backend:
+            pair_seconds = max(recipe["exposure_ms"] * recipe["frames"] / 1000.0
+                               for recipe in self._pair_controls.recipes().values())
+            return len(valid_points) * (common_per_point + pair_seconds)
         return sum(
             len(valid_points) * (
                 common_per_point
@@ -3620,7 +3797,7 @@ class MegaSweepPanel(QWidget):
             self._last_drawn_preview = data
 
         fixed_txt = ", ".join(f"{k} = {v:.4f} V" for k, v in data["fixed"].items()) if data["fixed"] else "None"
-        conditions = self._optical_widget.conditions(enabled_only=True)
+        conditions = [condition for condition in self._measurement_conditions() if condition.enabled]
         est_s = self._estimate_duration_s(valid_points, conditions)
         preview_condition = conditions[0] if conditions else OpticalCondition(
             False, "None", self._center_spin.value(), self._exp_spin.value(), self._frames_spin.value()
@@ -3644,27 +3821,34 @@ class MegaSweepPanel(QWidget):
             "condition_name": preview_condition.name,
             "laser_nm": self._laser_edit.text().strip(),
             "power_uw": self._power_edit.text().strip(),
+            "name_laser_power": self._name_laser_power.isChecked(),
             "tag": self._tag_edit.text().strip() or "2DSweep",
             "sample": self._sample_edit.text().strip() or "SampleID",
             "vbias_available": self._vbias_available(),
         })
         sample = self._sample_edit.text().strip()
         folder_preview = Path(cfg.filename.base_out) / sample / "megasweep"
-        full_preview = folder_preview / f"{filename_preview}.csv"
+        pair_backend = self._pair_controls.andor_backend
+        filename = f"{filename_preview}{'_pairs.jsonl' if pair_backend else '.csv'}"
+        full_preview = folder_preview / filename
         optical_txt = "; ".join(
             f"{index}: {condition.backend or 'current'} {condition.center_nm:g} nm/{condition.exposure_ms:g} ms/{condition.frames} {condition.reduction}"
             for index, condition in enumerate(conditions, start=1)
         ) or "No enabled conditions"
+        if pair_backend:
+            optical_txt = "; ".join(
+                f"{PAIR_LABELS[backend]} {recipe['center_nm']:g} nm/{recipe['exposure_ms']:g} ms/{recipe['frames']} frames"
+                for backend, recipe in self._pair_controls.recipes().items())
         lines = [
             self._format_axis_summary(f"Outer ({data['axis_a']})", self._axis_a.describe()),
             self._format_axis_summary(f"Inner ({data['axis_b']})", self._axis_b.describe()),
             f"Fixed:            {fixed_txt}",
             f"Folder:           {folder_preview}",
-            f"Filename:         {filename_preview}.csv",
+            f"Filename:         {filename}",
             f"Full path:        {full_preview}",
             f"Optical maps:     {len(conditions)} ({optical_txt})",
             f"Total planned:    {len(all_points)}    In-bounds: {len(valid_points)}    Skipped: {skipped}",
-            f"Total spectra:    {len(valid_points) * len(conditions)}",
+            f"Total spectra:    {len(valid_points) * len(conditions) * (2 if pair_backend else 1)}",
             f"Est. duration:    {self._format_duration(est_s)}   "
             f"({len(conditions)} complete gate map(s), with a zero ramp between maps)",
             f"Run output cadence: flush every {_FLUSH_EVERY_POINTS} pts, plot every {_PLOT_UPDATE_EVERY_POINTS} pts, UI log every {_UI_LOG_EVERY_POINTS} pts",
@@ -3697,7 +3881,7 @@ class MegaSweepPanel(QWidget):
         data = dict(self._last_preview)
         sample = self._sample_edit.text().strip() or "SampleID"
         tag = self._tag_edit.text().strip() or "2DSweep"
-        conditions = self._optical_widget.conditions()
+        conditions = self._measurement_conditions()
         enabled_conditions = [c for c in conditions if c.enabled]
         primary = enabled_conditions[0] if enabled_conditions else conditions[0]
         data.update({
@@ -3712,6 +3896,7 @@ class MegaSweepPanel(QWidget):
             "snake": self._axis_selector.snake(),
             "laser_nm": self._laser_edit.text().strip(),
             "power_uw": self._power_edit.text().strip(),
+            "name_laser_power": self._name_laser_power.isChecked(),
             "settle": self._timing_widget.settle(),
             "extra_overhead_s": self._timing_widget.extra_overhead_s(),
             "ramp_step": self._timing_widget.ramp_step(),
@@ -3727,9 +3912,19 @@ class MegaSweepPanel(QWidget):
             "condition_name": primary.name,
         })
         data["base_name"] = build_megasweep_filename(data)
+        if self._pair_controls.andor_backend:
+            data["pair_andor_backend"] = self._pair_controls.andor_backend
+            data["pair_recipes"] = self._pair_controls.recipes()
         return data
 
     def _validate(self, params: dict) -> bool:
+        pair_backend = params.get("pair_andor_backend")
+        if pair_backend:
+            try:
+                self._lf6.validate_station_pair(pair_backend, params["pair_recipes"])
+            except (AttributeError, RuntimeError, ValueError) as exc:
+                QMessageBox.critical(self, "Detector pair unavailable", str(exc))
+                return False
         second = params.get("bias2", {})
         if second.get("bias2_mode", "off") != "off":
             needed = ["Vbias2"] + (["Vbias"] if second.get("bias2_mode") == "follow" else [])
@@ -3837,6 +4032,10 @@ class MegaSweepPanel(QWidget):
     def _on_run(self):
         if getattr(self, "_sensor_preflight_pending", False):
             return
+        if getattr(self, "_thread", None) is not None:
+            # A run is active; a shortcut or programmatic trigger must not
+            # start a second worker over the same instruments.
+            return
         if bool(getattr(self._lf6, "switching_locked", False)):
             self._set_status("Wait for the current device operation to finish", 'muted')
             return
@@ -3845,9 +4044,10 @@ class MegaSweepPanel(QWidget):
         if not self._validate(params):
             return
         active_backend = getattr(self._lf6, "backend", "")
-        requested_setups = sorted({condition.get("backend") or active_backend
-                                  for condition in params.get("optical_conditions", [])
-                                  if condition.get("enabled", True)})
+        requested_setups = (list(params["pair_recipes"]) if params.get("pair_andor_backend") else
+                            sorted({condition.get("backend") or active_backend
+                                    for condition in params.get("optical_conditions", [])
+                                    if condition.get("enabled", True)}))
         if not ensure_sensor_readout(self, self._lf6, mode="1d", backends=requested_setups or None):
             return
         params["sensor_readout_intents"] = deepcopy(getattr(self._lf6, "sensor_readout_intents", {}))
@@ -3878,6 +4078,7 @@ class MegaSweepPanel(QWidget):
         self._run_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._bias2_control.setEnabled(False)
+        self._pair_controls.set_editing_enabled(False)
         self._set_status("Running...", 'warning')
         self._run_inner_count = max(1, len(params.get("axis_b_vals", [])))
         self._worker = _MegaSweepWorker(params, self._smu, self._lf6, self._experiment_run)
@@ -3978,7 +4179,7 @@ class MegaSweepPanel(QWidget):
                 self._set_status("Saving experiment metadata...", 'muted')
                 files = []
                 for data_file in Path(run.path.parent).glob("*"):
-                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".txt", ".log", ".json"}:
+                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".txt", ".log", ".json", ".jsonl"}:
                         continue
                     files.append({
                         "path": data_file,
@@ -4005,6 +4206,7 @@ class MegaSweepPanel(QWidget):
         self._run_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._bias2_control.setEnabled(True)
+        self._pair_controls.set_editing_enabled(True)
         if self._run_failed:
             self._set_status("Error", 'danger')
         elif worker is not None and worker._stop.is_set():

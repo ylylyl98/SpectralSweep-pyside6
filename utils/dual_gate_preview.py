@@ -12,7 +12,7 @@ def _numeric_wavelength_columns(header: list[str]) -> tuple[list[int], np.ndarra
     values: list[float] = []
     for index, name in enumerate(header):
         try:
-            value = float(name)
+            value = float(name.removeprefix("nm_").removeprefix("pixel_"))
         except (TypeError, ValueError):
             continue
         indices.append(index)

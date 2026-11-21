@@ -53,6 +53,32 @@ def test_nested_budget_counts_filtered_short_condition_candidates():
     with patch.object(panel.itertools, "product", side_effect=AssertionError("expanded product")):
         with pytest.raises(ValueError, match="150,000 planning steps"):
             panel._build_nested_execution_schedule(rotation_rows("0"), batch)
+        with pytest.raises(ValueError, match="150,000 planning steps"):
+            panel._resolve_execution_plan(
+                rotation_rows("0"), batch, mode="Synchronize", acquisition_grouping="loop_first",
+                execution_order=["conditions", "points"],
+            )
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_resolver_normalizes_and_resolves_each_table_once(nested):
+    batch = pd.concat([panel._DEFAULT_BATCH] * 2, ignore_index=True)
+    batch.loc[:, "Run"] = [False, True]
+    batch.loc[:, "When"] = ["", "Rotation1_Angle == 90"]
+    execution_order = ["group:1", "conditions", "points"] if nested else None
+    with patch.object(panel, "_normalize_loop", wraps=panel._normalize_loop) as normalize_loop, \
+         patch.object(panel, "_normalize_batch", wraps=panel._normalize_batch) as normalize_batch, \
+         patch.object(panel, "_loop_group_combinations", wraps=panel._loop_group_combinations) as groups:
+        seq, enabled_batch, total, schedule = panel._resolve_execution_plan(
+            rotation_rows("0,90"), batch, mode="Synchronize", acquisition_grouping="loop_first",
+            execution_order=execution_order,
+        )
+    assert (normalize_loop.call_count, normalize_batch.call_count, groups.call_count) == (1, 1, 1)
+    assert len(seq) == 4
+    assert len(enabled_batch) == 1
+    assert len(schedule) == total == 2
+    assert {task["row_i"] for task in schedule} == {1 if nested else 0}
+    assert {task["ctx"]["Rotation1 Angle (deg)"] for task in schedule} == {90.0}
 
 
 def test_exact_total_limit_and_disabled_rows_are_allowed():

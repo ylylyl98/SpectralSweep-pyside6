@@ -89,6 +89,39 @@ def test_full_point_run_writes_paired_rows(tmp_path):
     assert rows[0]['pair_id'] == rows[1]['pair_id']
     assert rows[0]['field_target_t'] == '0.0'
 
+
+def test_two_detectors_record_each_polarization_before_advancing(tmp_path):
+    from types import SimpleNamespace
+    from app.engine.mcd_paired_spectra import MCDPairedSpectra
+    controller = _ContinuousFakeController([])
+    def snapshot():
+        snap = _safe_snapshot(controller.target)
+        snap.status.backend_details["h_state"] = "IDLE"
+        return controller._handle("read", snap)
+    controller.read_snapshot_async = snapshot
+    optical = _ContinuousFakeOptical()
+    optical.move_to = lambda angle: setattr(optical, "position", angle)
+    optical.get_position = lambda: optical.position
+    captures = []
+    def capture(backend, recipes, stop, *, owner):
+        assert owner == "mcd" and backend == "andor_ingaas"
+        captures.append((controller.target, optical.position))
+        return {"lightfield": {"wavelengths": [700, 701], "counts": [1, 2]},
+                backend: {"wavelengths": [1100, 1101, 1102], "counts": [3, 4, 5]}}
+    optical.station_pair = MCDPairedSpectra(SimpleNamespace(acquire_station_pair=capture),
+                                             "andor_ingaas", {}, tmp_path, "dual")
+    worker = MCD2100Worker(controller, optical, 0, .05, [0, 90], tmp_path,
+                           point_pairing=True, point_stable_s=0)
+    result = worker.run()
+    assert result["status"] == "COMPLETED", result
+    assert captures == [(0, 0), (0, 90), (.05, 0), (.05, 90)]
+    with open(result["csv_path"], newline="") as f:
+        ids = [row["point_id"] for row in csv.DictReader(f)]
+    assert len(set(ids)) == 4
+    for detector in ("PIXIS", "Andor_InGaAs"):
+        with (tmp_path / f"dual_{detector}.csv").open(newline="") as f:
+            assert [row["point_id"] for row in csv.DictReader(f)] == ids
+
 def test_drift_rejects_pair_but_keeps_acquired_spectrum(tmp_path):
     controller = _ContinuousFakeController([])
     optical = _ContinuousFakeOptical()

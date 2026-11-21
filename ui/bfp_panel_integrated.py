@@ -71,6 +71,8 @@ from utils.config import cfg
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from copy import deepcopy
 from ui.sensor_readout_preflight import ensure_sensor_readout
+from ui.spectrum_pair import SpectrumPairCapture, SpectrumPairDisplay
+from ui.station_pair_controls import PAIR_LABELS, StationPairControls
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 
 
@@ -1350,9 +1352,12 @@ class BFPPanel(QWidget):
         self._thread: Optional[QThread] = None
         self._worker: Optional[_AcquireWorker] = None
         self._record: Optional[_AcquiredRecord] = None
+        self._pair_display = None
+        self._pair_result = None
         self._build()
         self._wire()
         self._sync_from_config()
+        self._pair_controls.bind_controller(self._ctrl)
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -1417,6 +1422,8 @@ class BFPPanel(QWidget):
         compact_form_rows(name_form, (self._run_idx_spin, self._auto_inc_chk))
         left_lay.addWidget(name_grp)
 
+        self._pair_controls = StationPairControls(side_by_side=False)
+        left_lay.addWidget(self._pair_controls)
         acq_grp = QGroupBox("Acquisition Settings")
         acq_form = QFormLayout(acq_grp)
         self._roi_combo = QComboBox()
@@ -1448,15 +1455,18 @@ class BFPPanel(QWidget):
         acq_form.addRow("", self._auto_apply_chk)
         acq_form.addRow("", self._warmup_chk)
         acq_form.addRow("Est. time:", self._est_lbl)
-        compact_form_rows(acq_form, (self._center_spin, self._exp_spin), labels_above=True)
-        compact_form_rows(acq_form, (self._epf_spin, self._repeat_spin))
+        self._single_optics = compact_form_rows(acq_form, (self._center_spin, self._exp_spin), labels_above=True)
+        self._acquisition_form = acq_form
         left_lay.addWidget(acq_grp)
 
         btn_row = QHBoxLayout()
         self._acquire_btn = QPushButton("Acquire")
         self._acquire_btn.setEnabled(False)
+        self._abort_pair_btn = QPushButton("Stop pair")
+        self._abort_pair_btn.hide()
         self._clear_btn = QPushButton("Clear")
         btn_row.addWidget(self._acquire_btn)
+        btn_row.addWidget(self._abort_pair_btn)
         btn_row.addWidget(self._clear_btn)
 
         save_row = QHBoxLayout()
@@ -1511,6 +1521,8 @@ class BFPPanel(QWidget):
 
     def _wire(self):
         self._acquire_btn.clicked.connect(self._on_acquire)
+        self._abort_pair_btn.clicked.connect(self._stop_pair)
+        self._pair_controls.backend_changed.connect(self._on_pair_mode_changed)
         self._clear_btn.clicked.connect(self._on_clear)
         self._save_csv_btn.clicked.connect(self._on_save_csv)
         self._save_png_btn.clicked.connect(self._on_save_png)
@@ -1529,6 +1541,9 @@ class BFPPanel(QWidget):
         if self._ctrl is not None:
             self._ctrl.connected.connect(self._on_lf6_connected)
             self._ctrl.disconnected.connect(self._on_lf6_disconnected)
+            lock = getattr(self._ctrl, "switching_lock_changed", None)
+            if lock is not None:
+                lock.connect(self._refresh_pair_controls)
 
     def _sync_from_config(self):
         self._center_spin.setValue(cfg.lf6.center_nm)
@@ -1575,8 +1590,11 @@ class BFPPanel(QWidget):
         note = _sanitize(self._note_edit.text())
         if note:
             parts.append(note)
-        parts.append(f"{self._center_spin.value():g}nm")
-        parts.append(f"{self._exp_spin.value():g}ms")
+        if self._pair_controls.andor_backend:
+            parts.append("paired")
+        else:
+            parts.append(f"{self._center_spin.value():g}nm")
+            parts.append(f"{self._exp_spin.value():g}ms")
         parts.append(f"{self._repeat_spin.value()}x")
         suffix = _sanitize(self._suffix_edit.text())
         if suffix:
@@ -1649,7 +1667,7 @@ class BFPPanel(QWidget):
                 "wavelength_tolerance_nm": float(self._bg_panel._tol_spin.value()),
             },
             "display": {
-                "panel_tab": int(self._tabs.currentIndex()),
+                "panel_tab": 0 if self._tabs.currentWidget() is self._pair_display else int(self._tabs.currentIndex()),
                 "data_tab": int(self._display._tabs.currentIndex()),
                 "scale": self._display._scale_combo.currentText(),
                 "colormap": self._display._cmap_combo.currentText(),
@@ -1803,12 +1821,14 @@ class BFPPanel(QWidget):
     @Slot(list)
     def _on_lf6_connected(self, _experiments):
         self._acquire_btn.setEnabled(True)
+        self._refresh_pair_controls()
         self._status_lbl.setText("Connected")
         set_style_role(self._status_lbl, 'text', tone='success')
 
     @Slot()
     def _on_lf6_disconnected(self):
         self._acquire_btn.setEnabled(False)
+        self._refresh_pair_controls()
         self._status_lbl.setText("Disconnected")
         set_style_role(self._status_lbl, 'text', tone='muted')
 
@@ -1827,6 +1847,10 @@ class BFPPanel(QWidget):
         if not device_id:
             self._status_lbl.setText("Sample ID is required before acquisition")
             set_style_role(self._status_lbl, 'text', tone='danger')
+            return
+        backend = self._pair_controls.andor_backend
+        if backend:
+            self._start_pair(backend)
             return
         sensor_mode = "2d" if self._roi_combo.currentText().strip().lower().startswith("full") else "1d"
         if not ensure_sensor_readout(self, self._ctrl, mode=sensor_mode):
@@ -1850,6 +1874,7 @@ class BFPPanel(QWidget):
             set_style_role(self._status_lbl, 'text', tone='danger')
             return
         self._acquire_btn.setEnabled(False)
+        self._pair_controls.set_editing_enabled(False)
         self._status_lbl.setText("Acquiring...")
         set_style_role(self._status_lbl, 'text', tone='warning')
         self._worker = _AcquireWorker(
@@ -1946,6 +1971,128 @@ class BFPPanel(QWidget):
         pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
         if callable(pause):
             pause("bfp", False)
+        self._refresh_pair_controls()
+
+    @property
+    def paired_acquisition_pending(self):
+        return isinstance(self._thread, SpectrumPairCapture)
+
+    @Slot(str)
+    def _on_pair_mode_changed(self, backend):
+        paired = bool(backend)
+        self._acquire_btn.setText("Acquire pair" if paired else "Acquire")
+        for editor in (self._roi_combo, self._single_optics, self._epf_spin, self._est_lbl):
+            self._acquisition_form.setRowVisible(editor, not paired)
+        for editor in (self._auto_save_csv_chk, self._auto_apply_chk, self._warmup_chk):
+            editor.setEnabled(not paired)
+        for button in (self._save_csv_btn, self._save_png_btn, self._apply_bg_btn,
+                       self._use_sample_btn, self._use_bg_btn):
+            button.setEnabled(not paired and self._record is not None)
+        if paired:
+            if self._pair_display is None:
+                self._pair_display = SpectrumPairDisplay(self._tabs)
+                self._tabs.addTab(self._pair_display, "Paired Binned 1D")
+            self._tabs.setTabVisible(self._tabs.indexOf(self._pair_display), True)
+            self._tabs.setCurrentWidget(self._pair_display)
+            if self._pair_result is None or self._pair_result[0] != backend:
+                self._pair_display.show_result(backend, {}, {}, None)
+            else:
+                self._pair_display.show_result(*self._pair_result)
+        elif self._pair_display is not None:
+            if self._tabs.currentWidget() is self._pair_display:
+                self._tabs.setCurrentIndex(0)
+            self._tabs.setTabVisible(self._tabs.indexOf(self._pair_display), False)
+        self._acquire_btn.setEnabled(bool(getattr(self._ctrl, "is_connected", False)) and self._thread is None)
+        self._refresh_pair_controls()
+        self._refresh_preview()
+
+    @Slot()
+    def _refresh_pair_controls(self):
+        locked = (not self._pair_controls.isHidden()
+                  and bool(getattr(self._ctrl, "switching_locked", False)))
+        idle = self._thread is None and not locked
+        self._pair_controls.set_editing_enabled(idle)
+        backend = self._pair_controls.andor_backend
+        if not backend:
+            return
+        missing = {"lightfield", backend}.difference(getattr(self._ctrl, "connected_backends", ()))
+        available = callable(getattr(self._ctrl, "acquire_station_pair", None))
+        if not available:
+            status = "Dual detector capture is unavailable."
+        elif missing:
+            devices = " and ".join(PAIR_LABELS[key] for key in ("lightfield", backend) if key in missing)
+            status = f"Connect {devices} in Instruments before acquiring."
+        else:
+            status = "Binned 1D. Repeat avg applies to both detectors. Pair results save automatically."
+        self._pair_controls.set_pair_status(status)
+        self._acquire_btn.setEnabled(idle and available and not missing)
+
+    def _start_pair(self, backend):
+        if not self._acquire_btn.isEnabled() or self._thread is not None:
+            return
+        recipes = self._pair_controls.recipes()
+        validate = getattr(self._ctrl, "validate_station_pair", None)
+        try:
+            if callable(validate):
+                validate(backend, recipes)
+        except (ValueError, RuntimeError) as exc:
+            self._on_acquire_error(str(exc))
+            return
+        if not ensure_sensor_readout(self, self._ctrl, mode="1d", backends=("lightfield",)):
+            return
+        capture = SpectrumPairCapture(self._ctrl, backend, recipes, self._out_dir(),
+                                      self, stem=self._build_prefix_without_time_and_run(),
+                                      owner="bfp", repeats=self._repeat_spin.value())
+        capture.finished.connect(self._finish_pair)
+        self._thread = capture
+        self._tabs.setCurrentWidget(self._pair_display)
+        self._pair_display.show_result(backend, {}, {}, None, waiting=True)
+        self._abort_pair_btn.show()
+        self._abort_pair_btn.setEnabled(True)
+        self._repeat_spin.setEnabled(False)
+        self._clear_btn.setEnabled(False)
+        self._status_lbl.setText("Acquiring PIXIS and Andor…")
+        self._status_lbl.setToolTip("")
+        set_style_role(self._status_lbl, 'text', tone='warning')
+        self._refresh_pair_controls()
+        pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("bfp", True)
+        capture.start()
+
+    @Slot()
+    def _stop_pair(self):
+        if self.paired_acquisition_pending:
+            self._thread.stop.set()
+            self._abort_pair_btn.setEnabled(False)
+            self._status_lbl.setText("Stopping paired acquisition…")
+
+    @Slot()
+    def _finish_pair(self):
+        capture = self._thread
+        self._thread = None
+        self._abort_pair_btn.hide()
+        self._repeat_spin.setEnabled(True)
+        self._clear_btn.setEnabled(True)
+        self._pair_result = (capture.backend, capture.records, capture.paths, capture.manifest_path)
+        self._pair_display.show_result(*self._pair_result)
+        error = capture.save_error or capture.capture_error or capture.repeat_error
+        if capture.save_error:
+            status = "Pair save failed"
+        elif len(capture.paths) == 2:
+            status = "Both spectra saved from partial repeats" if error else "Both binned spectra saved"
+        elif capture.paths:
+            status = "Partial result · one binned spectrum saved"
+        else:
+            status = "Pair stopped" if capture.stop.is_set() else "Pair did not return spectra"
+        self._status_lbl.setText(status)
+        self._status_lbl.setToolTip(error)
+        set_style_role(self._status_lbl, 'text', tone='success' if len(capture.paths) == 2 and not error else 'warning')
+        pause = getattr(self._ctrl, "set_temperature_monitor_paused", None)
+        if callable(pause):
+            pause("bfp", False)
+        self._refresh_pair_controls()
+        capture.deleteLater()
 
     @Slot(str)
     def _on_acquire_error(self, message: str):
@@ -1955,6 +2102,13 @@ class BFPPanel(QWidget):
 
     @Slot()
     def _on_clear(self):
+        backend = self._pair_controls.andor_backend
+        if backend:
+            self._pair_result = None
+            self._pair_display.show_result(backend, {}, {}, None)
+            self._status_lbl.setText("Cleared")
+            set_style_role(self._status_lbl, 'text', tone='muted')
+            return
         self._record = None
         self._display.clear()
         for btn in (self._save_csv_btn, self._save_png_btn, self._apply_bg_btn, self._use_sample_btn, self._use_bg_btn):

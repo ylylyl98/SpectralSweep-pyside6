@@ -16,7 +16,7 @@ try {
     if (-not $maintenance) {
         & $powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'create_source_shortcut.ps1')
         if ($LASTEXITCODE -ne 0) {
-            Write-Host 'Desktop shortcut could not be saved. Continuing startup.' -ForegroundColor Yellow
+            Write-Host 'A source shortcut could not be saved. Continuing startup.' -ForegroundColor Yellow
         }
         Write-Host 'SpectralSweep (Source) - checking main for updates...'
         & $powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'update_source.ps1')

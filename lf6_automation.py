@@ -221,6 +221,8 @@ class LF6Setup:
                 buf_type = ctypes.c_uint * len(net_array)
             elif (image_format == ImageDataFormat.MonochromeFloating32):
                 buf_type = ctypes.c_float * len(net_array)
+            else:
+                raise RuntimeError(f"Unsupported LightField image format: {image_format}")
 
             cbuf = buf_type.from_address(src_ptr)
             resultArray = np.frombuffer(cbuf, dtype=cbuf._type_)
@@ -628,6 +630,8 @@ class LF6Setup:
         timeout_s: float = LIGHTFIELD_SETTING_TIMEOUT_S,
         poll_interval_s: float = LIGHTFIELD_POLL_INTERVAL_S,
         update_acquisition_recipe: bool = True,
+        stop_event=None,
+        record_diagnostics: bool = True,
         _deadline=None,
     ) -> None:
         """Verify a write, with bounded recovery only after a matching read reverts."""
@@ -663,6 +667,8 @@ class LF6Setup:
         }
         self._center_wavelength_write_stats = stats
         while True:
+            if stop_event is not None and stop_event.is_set():
+                raise RuntimeError("LightField center change stopped.")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 stats.update({
@@ -694,13 +700,15 @@ class LF6Setup:
                         optical_identity = None
                 context = None
                 try:
-                    if diagnostic_path(self) is not None:
+                    if record_diagnostics and diagnostic_path(self) is not None:
                         context = center_context(self, value)
                         stats.setdefault('before_write', context)
                 except builtins.Exception as exc:
                     stats['diagnostic_error'] = str(exc)
                 def record_write():
                     nonlocal attempts
+                    if stop_event is not None and stop_event.is_set():
+                        raise RuntimeError("LightField center change stopped.")
                     if stats['rewrites']:
                         current = self._read_optical_state()
                         identity = {key: item for key, item in current.items() if key != 'wavelength_nm'}
@@ -799,6 +807,29 @@ class LF6Setup:
                 last_error = frozen
                 stats["last_exception"] = self._exception_description(frozen)
                 time.sleep(min(float(poll_interval_s), max(0.0, deadline - time.monotonic())))
+
+    @_guard_setup_call
+    def apply_center_wavelength(self, center_nm, *, stop_event=None):
+        """Verify the selected exit and change only the grating center."""
+        center_nm = float(center_nm)
+        self._ensure_detector_output(apply=False)
+        setting = SpectrometerSettings.GratingCenterWavelength
+        if not np.isfinite(center_nm) or center_nm < 0 or not self.experiment.IsValid(setting, center_nm):
+            raise ValueError(f"LightField center {center_nm:g} nm is invalid for the selected grating.")
+        try:
+            self.set_center_wavelength_when_ready(
+                center_nm, update_acquisition_recipe=False, stop_event=stop_event, record_diagnostics=False)
+            self._ensure_detector_output(apply=False)
+            actual = self._read_center_wavelength(setting)
+            if not self._numeric_readback_matches(actual, center_nm, LIGHTFIELD_CENTER_TOLERANCE_NM):
+                raise RuntimeError(f"LightField center readback {actual!r} nm does not match {center_nm:g} nm.")
+        except builtins.Exception:
+            self._acquisition_prepared = False
+            raise
+        # Update only this field. A later acquisition still verifies any
+        # previously configured exposure, frame count and other settings.
+        self._acquisition_recipe = dict(getattr(self, "_acquisition_recipe", {}), center_nm=center_nm)
+        return float(actual)
 
     @_guard_setup_call
     def configure_for_acquisition(self, *, center_nm, exposure_ms, frames,
@@ -1129,7 +1160,21 @@ class LF6Setup:
         if not self.experiment.Exists(setting):
             raise RuntimeError('LightField exposures-per-frame setting is unavailable')
         self.experiment.SetValue(setting, Int64(frames))
+        self._average_combined_frames()
         self._finish_recipe_change(resume)
+
+    def _average_combined_frames(self):
+        """Combine exposures by Average: Sum overflows the 16-bit range (bias alone adds up)."""
+        setting = getattr(ExperimentSettings, 'OnlineProcessingFrameCombinationMethod', None)
+        average = getattr(globals().get('FrameCombinationMethod'), 'Average', None)
+        if setting is None or average is None or not self.experiment.Exists(setting):
+            return
+        self.experiment.SetValue(setting, average)
+        value = self.experiment.GetValue(setting)
+        if value != average and str(value) != 'Average':
+            raise RuntimeError(
+                f'LightField frame combination readback mismatch: requested=Average, readback={value}. '
+                'Acquisition blocked; apply settings again.')
 
     @_guard_setup_call
     def readback_online_process(self) -> dict:

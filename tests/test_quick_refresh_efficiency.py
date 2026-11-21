@@ -227,6 +227,12 @@ def test_spectrum_footer_is_quick_and_actions_keep_exact_fit_policy():
             fit.assert_called_with('visible')
         widget._plot.model.pan(.1, .1)
         assert not widget._autoscale_chk.isChecked()
+        for button in (widget._fit_live_btn, widget._fit_visible_btn):
+            adapter = next(form.adapter for form in widget._quick_footer_forms['forms']
+                           if button in form.adapter._fields.values())
+            field = next(field for field, source in adapter._fields.items() if source is button)
+            assert adapter.trigger(field)
+            assert not widget._autoscale_chk.isChecked() and not widget._follow_y
         adapter = next(form.adapter for form in widget._quick_footer_forms['forms']
                        if widget._autoscale_chk in form.adapter._fields.values())
         field = next(field for field, source in adapter._fields.items() if source is widget._autoscale_chk)

@@ -42,6 +42,18 @@ class MotionConditionPanelTests(unittest.TestCase):
         panel._update_position_preview()
         self.assertIn("2 sweeps × 1 points = 2 spectra", panel._condition_preview_lbl.text())
 
+    def test_summary_counts_large_plan_without_expanding_rows(self):
+        panel = self.panel()
+        self._conditions(panel)
+        editor = panel._condition_editor
+        with patch.object(editor, "sequence", side_effect=AssertionError("expanded summary")):
+            editor.rot1_plan.setText("(1, 100, 1)")
+            editor.repeats.setValue(500)
+            editor.table.item(0, 1).setText("edited")
+            self.assertIn("100000 sweeps × 2 points = 200000 spectra", panel._condition_preview_lbl.text())
+            editor.repeats.setValue(501)
+            self.assertIn("Expanded sequence exceeds 100000 entries", panel._condition_preview_lbl.text())
+
     def test_inner_axis_excludes_outer_plan_and_restores_it_on_switch(self):
         panel = self.panel()
         self._conditions(panel)

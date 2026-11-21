@@ -42,7 +42,7 @@ if "pyvisa" not in sys.modules:
 
 from app.devices.iv_adapter import IVDevice, SMUCommunicationError
 from controllers.smu_controller import _SMUWorker
-from iv_automation import KeithControl, PyvisaInstrument, should_send_rsyn
+from iv_automation import IVSetup, KeithControl, PyvisaInstrument, should_send_rsyn
 from ui.presets_panel import (
     _RunWorker,
     _format_current_readback,
@@ -142,6 +142,48 @@ class _FakeResourceManager:
 
     def close(self):
         return None
+
+
+class _RecordingRampResource(_FakeResource):
+    """Keep physical voltage separate from the adapter's cached setpoint."""
+
+    def __init__(self, role, voltage, events):
+        super().__init__()
+        self.role = role
+        self.voltage = voltage
+        self.events = events
+
+    def query(self, command, *args, **kwargs):
+        self.events.append(("read", self.role, command))
+        if command == "READ?":
+            self.responses[command] = f"{self.voltage},0"
+        return super().query(command, *args, **kwargs)
+
+    def write(self, command, *args, **kwargs):
+        if command.startswith(":SOUR:VOLT:LEV "):
+            voltage = float(command.rsplit(" ", 1)[-1])
+            self.events.append(("write", self.role, voltage))
+            result = super().write(command, *args, **kwargs)
+            self.voltage = voltage
+            return result
+        self.events.append(("other", self.role, command))
+        return super().write(command, *args, **kwargs)
+
+
+def _recording_ramp_device(starts):
+    events = []
+    addresses = {role: f"GPIB1::{index}::INSTR" for index, role in enumerate(starts, start=2)}
+    resources = {role: _RecordingRampResource(role, start, events) for role, start in starts.items()}
+    manager = _FakeResourceManager({address: resources[role] for role, address in addresses.items()})
+    instruments = []
+    for role, address in addresses.items():
+        instrument = KeithControl(address, role, role, manager, configure_on_connect=False, recover_on_open=False)
+        instrument.mode = "volt_step"
+        instrument.x_values[0] = 9.0  # Deliberately stale cached voltage.
+        instruments.append(instrument)
+    setup = IVSetup(instruments)
+    events.clear()
+    return IVDevice(setup, role_map=addresses), resources, events
 
 
 class _DeadInstrument:
@@ -1264,6 +1306,151 @@ class SMUResilienceTests(unittest.TestCase):
         self.assertEqual(calls, ["Vbias", "Vbias", "Vbg", "Vtg", "Vtg"])
         self.assertEqual(len(errors), 1)
         self.assertIn("Vbg", errors[0])
+
+    def test_coordinated_zero_pairs_measured_gate_steps_before_each_delay(self):
+        for bg, tg, ticks in ((0.20, -0.08, 4), (-0.075, 0.15, 3)):
+            with self.subTest(bg=bg, tg=tg):
+                device, resources, events = _recording_ramp_device({"Vbg": bg, "Vtg": tg})
+                with patch("app.devices.iv_adapter.time.sleep", side_effect=lambda delay: events.append(("wait", delay))):
+                    report = device.ramp_all_to_zero_report(
+                        ramp_step=0.05, delay_s=0.04, coordinated_gates=True)
+
+                self.assertEqual(
+                    {role: result["status"] for role, result in report.items()},
+                    {"Vbg": "reached_zero", "Vtg": "reached_zero"},
+                )
+                self.assertCountEqual(events[:2], [("read", "Vbg", "READ?"), ("read", "Vtg", "READ?")])
+                self.assertEqual(len(events), 2 + 3 * ticks)
+                previous = (bg, tg)
+                for tick in range(1, ticks + 1):
+                    offset = 2 + 3 * (tick - 1)
+                    bg_write, tg_write, wait = events[offset:offset + 3]
+                    self.assertEqual(bg_write[:2], ("write", "Vbg"))
+                    self.assertEqual(tg_write[:2], ("write", "Vtg"))
+                    self.assertEqual(wait, ("wait", 0.04))
+                    current = (bg_write[2], tg_write[2])
+                    for start, before, after in zip((bg, tg), previous, current):
+                        self.assertAlmostEqual(after, start * (1 - tick / ticks), places=3)
+                        self.assertLessEqual(abs(after - before), 0.05 + 1e-12)
+                    previous = current
+                self.assertEqual(previous, (0.0, 0.0))
+                self.assertEqual([resource.voltage for resource in resources.values()], [0.0, 0.0])
+
+    def test_coordinated_zero_keeps_bias_axes_independent_and_bias2_optional(self):
+        for include_bias2 in (False, True):
+            with self.subTest(include_bias2=include_bias2):
+                device, resources, events = _recording_ramp_device(
+                    {"Vbg": 0.10, "Vtg": -0.08, "Vbias": 0.10, "Vbias2": -0.10})
+                report = device.ramp_all_to_zero_report(
+                    ramp_step=0.05, delay_s=0, include_bias2=include_bias2, coordinated_gates=True)
+                roles = [event[1] for event in events if event[0] == "write"]
+                paired = ["Vbg", "Vtg"] * 2
+                expected = (["Vbias2"] * 3 if include_bias2 else []) + ["Vbias"] * 3 + paired
+                self.assertEqual(roles, expected)
+                self.assertTrue(all(result["status"] == "reached_zero" for result in report.values()))
+                self.assertEqual(resources["Vbias"].voltage, 0.0)
+                self.assertEqual(resources["Vbias2"].voltage, 0.0 if include_bias2 else -0.10)
+
+    def test_coordinated_zero_requires_finite_readback_from_both_gates(self):
+        for invalid in (float("nan"), float("inf"), -float("inf")):
+            for role in ("Vbg", "Vtg"):
+                with self.subTest(invalid=invalid, role=role):
+                    starts = {"Vbg": 0.15, "Vtg": -0.10}
+                    starts[role] = invalid
+                    device, _resources, events = _recording_ramp_device(starts)
+                    with patch("app.devices.iv_adapter.time.sleep") as wait:
+                        report = device.ramp_all_to_zero_report(
+                            ramp_step=0.05, delay_s=0.04, coordinated_gates=True)
+                    self.assertEqual(set(report), {"Vbg", "Vtg"})
+                    self.assertTrue(all(result["status"] != "reached_zero" for result in report.values()))
+                    self.assertTrue(events)
+                    self.assertTrue(all(event[0] == "read" for event in events))
+                    wait.assert_not_called()
+
+    def test_coordinated_zero_read_timeout_freezes_without_cached_ramp(self):
+        device, resources, events = _recording_ramp_device({"Vbg": 0.15, "Vtg": -0.10})
+        resources["Vbg"].fail_on_query.add("READ?")
+        report = device.ramp_all_to_zero_report(ramp_step=0.05, delay_s=0, coordinated_gates=True)
+        self.assertTrue(device.io_frozen)
+        self.assertEqual(events, [("read", "Vbg", "READ?")])
+        self.assertEqual(set(report), {"Vbg", "Vtg"})
+        self.assertTrue(all(result["status"] != "reached_zero" for result in report.values()))
+
+    def test_coordinated_zero_refuses_gate_without_a_read_instrument(self):
+        device, _resources, events = _recording_ramp_device({"Vbg": 0.15, "Vtg": -0.10})
+        channels = device.setup.y_channel_collection
+        lookup = channels.get_instrument
+        # Keep the cached Y entry and the write instrument available.
+        with patch.object(channels, "get_instrument",
+                          side_effect=lambda name: None if name == "measured_Vtg" else lookup(name)):
+            report = device.ramp_all_to_zero_report(ramp_step=0.05, delay_s=0, coordinated_gates=True)
+        self.assertEqual(events, [("read", "Vbg", "READ?")])
+        self.assertEqual(set(report), {"Vbg", "Vtg"})
+        self.assertTrue(all(result["status"] != "reached_zero" for result in report.values()))
+
+    def test_coordinated_zero_partial_tick_failure_sends_no_retry_or_later_writes(self):
+        device, resources, events = _recording_ramp_device({"Vbg": 0.20, "Vtg": -0.08})
+        resources["Vtg"].fail_on_write.add(":SOUR:VOLT:LEV -0.040")
+        with patch("app.devices.iv_adapter.time.sleep", side_effect=lambda delay: events.append(("wait", delay))):
+            report = device.ramp_all_to_zero_report(
+                ramp_step=0.05, delay_s=0.04, coordinated_gates=True)
+        self.assertEqual(events, [
+            ("read", "Vbg", "READ?"), ("read", "Vtg", "READ?"),
+            ("write", "Vbg", 0.15), ("write", "Vtg", -0.06), ("wait", 0.04),
+            ("write", "Vbg", 0.10), ("write", "Vtg", -0.04),
+        ])
+        self.assertTrue(device.io_frozen)
+        self.assertEqual(device.last_communication_error.role, "Vtg")
+        self.assertEqual((resources["Vbg"].voltage, resources["Vtg"].voltage), (0.10, -0.06))
+        self.assertEqual(set(report), {"Vbg", "Vtg"})
+        self.assertTrue(all(result["status"] != "reached_zero" for result in report.values()))
+        events.clear()
+        frozen = device.ramp_all_to_zero_report(ramp_step=0.05, delay_s=0, coordinated_gates=True)
+        self.assertEqual(events, [])
+        self.assertTrue(all(result["status"] == "skipped_frozen_after_error" for result in frozen.values()))
+
+    def test_coordinated_zero_final_tick_failure_reports_only_confirmed_command(self):
+        device, resources, events = _recording_ramp_device({"Vbg": 0.10, "Vtg": -0.08})
+        resources["Vtg"].fail_on_write.add(":SOUR:VOLT:LEV 0.000")
+        with patch("app.devices.iv_adapter.time.sleep") as wait:
+            report = device.ramp_all_to_zero_report(
+                ramp_step=0.05, delay_s=0.04, coordinated_gates=True)
+        self.assertEqual(report["Vbg"]["status"], "reached_zero")
+        self.assertNotEqual(report["Vtg"]["status"], "reached_zero")
+        self.assertEqual(events[-2:], [("write", "Vbg", 0.0), ("write", "Vtg", 0.0)])
+        self.assertEqual((resources["Vbg"].voltage, resources["Vtg"].voltage), (0.0, -0.04))
+        self.assertTrue(device.io_frozen)
+        wait.assert_called_once_with(0.04)
+
+    def test_coordinated_zero_invalid_parameters_never_write_bias_or_gates(self):
+        for step, delay in ((0, 0.04), (-0.05, 0.04), (float("nan"), 0.04),
+                            (0.05, -0.04), (0.05, float("inf"))):
+            with self.subTest(step=step, delay=delay):
+                device, _resources, events = _recording_ramp_device(
+                    {"Vbg": 0.1, "Vtg": -0.1, "Vbias": 0.08})
+                report = device.ramp_all_to_zero_report(
+                    ramp_step=step, delay_s=delay, coordinated_gates=True)
+                self.assertEqual(set(report), {"Vbg", "Vtg", "Vbias"})
+                self.assertTrue(all(result["status"] == "failed" for result in report.values()))
+                self.assertEqual(events, [])
+
+    def test_coordinated_zero_wrapper_forwards_options_and_reports_failures(self):
+        device, _resources, events = _recording_ramp_device({"Vbg": float("nan"), "Vtg": -0.08})
+        errors = device.ramp_all_to_zero(ramp_step=0.05, delay_s=0, coordinated_gates=True)
+        self.assertEqual({error.split(":", 1)[0] for error in errors}, {"Vbg", "Vtg"})
+        self.assertTrue(events)
+        self.assertFalse(any(event[0] == "write" for event in events))
+
+    def test_default_zero_is_serial_and_coordinated_mode_can_zero_one_gate(self):
+        device, _resources, events = _recording_ramp_device({"Vbg": 0.10, "Vtg": -0.10})
+        self.assertEqual(device.ramp_all_to_zero(ramp_step=0.05, delay_s=0), [])
+        self.assertEqual([event[1] for event in events if event[0] == "write"], ["Vbg"] * 3 + ["Vtg"] * 3)
+
+        device, resources, events = _recording_ramp_device({"Vtg": -0.10})
+        report = device.ramp_all_to_zero_report(ramp_step=0.05, delay_s=0, coordinated_gates=True)
+        self.assertEqual(set(report), {"Vtg"})
+        self.assertEqual(report["Vtg"]["status"], "reached_zero")
+        self.assertEqual(resources["Vtg"].voltage, 0.0)
 
     def test_duplicate_connection_is_rejected_before_opening_visa(self):
         worker = _SMUWorker()

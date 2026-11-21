@@ -225,19 +225,10 @@ def resolve_rotation_plan(spec: str, current: Mapping[str, float], *, axis: str 
     return {"mode": ROTATION_LIST, "axis": axis, "values": vals, "requested": vals}
 
 
-def expand_sequence(conditions: Iterable[Mapping[str, Any]], rotations: Iterable[float] | Mapping[str, Iterable[float]],
-                    *, rotation2: Iterable[float] | None = None,
-                    order: str = "gate-first", repeats: int = 1,
-                    selected: Iterable[tuple[int, ...]] | None = None,
-                    maximum_entries: int = 100000) -> list[dict[str, int]]:
-    """Expand a condition/rotation plan without allocating an oversized plan.
+MAX_EXPANDED_SEQUENCE_ENTRIES = 100_000
 
-    ``rotations`` may be the historical one-axis list, or a mapping containing
-    ``rot1`` and ``rot2`` lists.  The latter produces the independent Cartesian
-    rotation combinations.  A selected iterable may contain ``(condition,
-    rot1)`` for the old API or ``(condition, rot1, rot2)`` for two axes.
-    """
-    conds = list(conditions)
+
+def _sequence_dimensions(condition_count, rotations, rotation2, order, repeats, maximum_entries):
     if isinstance(maximum_entries, bool) or not isinstance(maximum_entries, int) or maximum_entries < 1:
         raise ValueError("maximum_entries must be a positive integer")
     if isinstance(rotations, Mapping):
@@ -246,33 +237,55 @@ def expand_sequence(conditions: Iterable[Mapping[str, Any]], rotations: Iterable
     else:
         r1 = list(rotations)
         r2 = list(rotation2) if rotation2 is not None else []
-    if not conds or repeats < 1 or int(repeats) != repeats:
+    if condition_count < 1 or repeats < 1 or int(repeats) != repeats:
         raise ValueError("Sequence requires conditions, rotations, and at least one repeat")
-    repeats = int(repeats)
-    if not r1:
-        # A rot2-only or gate-only plan uses a singleton placeholder for the
-        # absent first axis; the worker never treats it as a commanded angle.
-        r1 = [0.0]
     if order not in ("gate-first", "rotation-first"):
         raise ValueError("Sequence order must be gate-first or rotation-first")
     if any(not isinstance(value, (int, float)) or not math.isfinite(float(value))
            for value in r1 + r2):
         raise ValueError("Rotation values must be finite")
-    # A missing second axis is the one-axis compatibility case.  Keep an
-    # explicit rot2 list independent, including its own one-value plan.
-    n2 = len(r2) if r2 else 1
+    # An unspecified axis contributes one index without commanding an angle.
+    return len(r1) or 1, len(r2) or 1, int(repeats)
+
+
+def _check_sequence_size(size, maximum_entries):
+    if size > maximum_entries:
+        raise ValueError(f"Expanded sequence exceeds {maximum_entries} entries")
+    return size
+
+
+def sequence_size(condition_count: int, rotations: Iterable[float] | Mapping[str, Iterable[float]],
+                  *, rotation2: Iterable[float] | None = None, order: str = "gate-first", repeats: int = 1,
+                  maximum_entries: int = MAX_EXPANDED_SEQUENCE_ENTRIES) -> int:
+    """Validate and count a full sequence without building its rows."""
+    n1, n2, repeats = _sequence_dimensions(condition_count, rotations, rotation2, order, repeats, maximum_entries)
+    return _check_sequence_size(condition_count * n1 * n2 * repeats, maximum_entries)
+
+
+def expand_sequence(conditions: Iterable[Mapping[str, Any]], rotations: Iterable[float] | Mapping[str, Iterable[float]],
+                    *, rotation2: Iterable[float] | None = None,
+                    order: str = "gate-first", repeats: int = 1,
+                    selected: Iterable[tuple[int, ...]] | None = None,
+                    maximum_entries: int = MAX_EXPANDED_SEQUENCE_ENTRIES) -> list[dict[str, int]]:
+    """Expand a condition/rotation plan without allocating an oversized plan.
+
+    ``rotations`` may be the historical one-axis list, or a mapping containing
+    ``rot1`` and ``rot2`` lists.  The latter produces the independent Cartesian
+    rotation combinations.  A selected iterable may contain ``(condition,
+    rot1)`` for the old API or ``(condition, rot1, rot2)`` for two axes.
+    """
+    condition_count = sum(1 for _ in conditions)
+    n1, n2, repeats = _sequence_dimensions(condition_count, rotations, rotation2, order, repeats, maximum_entries)
     if selected is None:
-        pair_count = len(conds) * len(r1) * n2
-        if pair_count * repeats > maximum_entries:
-            raise ValueError(f"Expanded sequence exceeds {maximum_entries} entries")
+        _check_sequence_size(condition_count * n1 * n2 * repeats, maximum_entries)
         if order == "gate-first":
-            pairs = [(ci, ri, rj) for ci in range(len(conds))
-                     for ri in range(len(r1)) for rj in range(n2)]
+            pairs = ((ci, ri, rj) for ci in range(condition_count)
+                     for ri in range(n1) for rj in range(n2))
         else:
-            pairs = [(ci, ri, rj) for ri in range(len(r1)) for rj in range(n2)
-                     for ci in range(len(conds))]
+            pairs = ((ci, ri, rj) for ri in range(n1) for rj in range(n2)
+                     for ci in range(condition_count))
     else:
-        pairs = []
+        selected_pairs = []
         for raw in selected:
             if not isinstance(raw, (tuple, list)) or len(raw) not in (2, 3):
                 raise ValueError("Sequence selection entries must contain condition and rotation indices")
@@ -280,13 +293,13 @@ def expand_sequence(conditions: Iterable[Mapping[str, Any]], rotations: Iterable
                 raise ValueError("Sequence selection indices must be integers")
             ci, ri = raw[:2]
             rj = raw[2] if len(raw) == 3 else 0
-            if not (0 <= ci < len(conds) and 0 <= ri < len(r1) and 0 <= rj < n2):
+            if not (0 <= ci < condition_count and 0 <= ri < n1 and 0 <= rj < n2):
                 raise ValueError("Sequence selection is out of range")
-            pairs.append((ci, ri, rj))
-            if len(pairs) * repeats > maximum_entries:
-                raise ValueError(f"Expanded sequence exceeds {maximum_entries} entries")
-        if not pairs:
+            selected_pairs.append((ci, ri, rj))
+            _check_sequence_size(len(selected_pairs) * repeats, maximum_entries)
+        if not selected_pairs:
             raise ValueError("Sequence selection cannot be empty")
+        pairs = selected_pairs
     result: list[dict[str, int]] = []
     for ci, ri, rj in pairs:
         for rep in range(1, repeats + 1):

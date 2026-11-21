@@ -103,6 +103,7 @@ class ScientificPlotModel(QObject):
         self.x_label = ""
         self.y_label = ""
         self.energy_axis = False
+        self.show_left_axis = True
         self.reverse_x = False
         self.reverse_y = False
         self.grid = True

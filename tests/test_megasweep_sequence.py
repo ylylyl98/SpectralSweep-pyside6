@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import csv
 import json
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 from app.experiment_metadata import ExperimentMetadataService
+from utils.config import cfg
 
 from ui.megasweep_panel import (
     CoordSystem,
@@ -154,6 +156,106 @@ def _params(out_path: Path) -> dict:
             {"enabled": True, "name": "blue", "center_nm": 750.0, "exposure_ms": 40.0, "frames": 3},
         ],
     }
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_station_pair_map_writes_both_sides_of_each_held_point(tmp_path, partial):
+    app = QApplication.instance() or QApplication([])
+    smu = _FakeSMUController()
+    calls = []
+    set_gates = smu.device.set_gates
+
+    def tracked_gates(Vtg, Vbg, **kwargs):
+        calls.append(("gates", Vtg, Vbg))
+        set_gates(Vtg, Vbg, **kwargs)
+
+    smu.device.set_gates = tracked_gates
+    settings = {
+        "lightfield": {"center_nm": 770, "exposure_ms": 45, "frames": 2},
+        "andor_ingaas": {"center_nm": 1200, "exposure_ms": 120, "frames": 3},
+    }
+
+    class PairController(_FakeLF6Controller):
+        def validate_station_pair(self, backend, recipes):
+            assert backend == "andor_ingaas" and recipes == settings
+            calls.append(("validate",))
+
+        def acquire_station_pair(self, backend, recipes, stop_event, *, owner):
+            assert owner == "megasweep" and backend == "andor_ingaas" and recipes == settings
+            calls.append(("pair", *smu.device.gates))
+            return {name: ({"error": "Andor stopped unexpectedly"} if partial and name == backend else
+                           {"wavelengths": np.arange(3) + recipe["center_nm"],
+                            "counts": np.linspace(10, 30, 3), "settings": recipe})
+                    for name, recipe in recipes.items()}
+
+    params = _params(tmp_path)
+    params.update(pair_andor_backend="andor_ingaas", pair_recipes=settings)
+    controller = PairController()
+    run = ExperimentMetadataService(tmp_path, tmp_path / "history.sqlite").begin(
+        "gate_map_2d", "device", output_dir=tmp_path, settings=params)
+    worker = _MegaSweepWorker(params, smu, controller, run)
+    failures = []
+    worker.error.connect(failures.append)
+    worker.run()
+    assert controller.adapter.acquire_count == 0
+    assert calls[:3] == [("validate",), ("gates", 0., 0.), ("pair", 0., 0.)], failures
+    if partial:
+        assert len(calls) == 3
+        assert "Andor stopped unexpectedly" in failures[0]
+        assert smu.device.zero_ramps == 0
+    else:
+        assert not failures
+        assert calls[3:] == [("gates", 0.1, 0.2), ("pair", 0.1, 0.2)]
+        assert smu.device.zero_ramps == 1
+    manifest, = tmp_path.glob("*_pairs.jsonl")
+    entries = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+    assert [entry["status"] for entry in entries if entry["status"] != "writing"] == (
+        ["incomplete"] if partial else ["complete", "complete"])
+    spectra = list(tmp_path.glob("*.csv"))
+    assert len(spectra) == (1 if partial else 2)
+    for path in spectra:
+        with path.open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        assert [row["point_id"] for row in rows] == (["1"] if partial else ["1", "2"])
+    panel = MegaSweepPanel()
+    try:
+        panel._worker = worker
+        panel._run_failed = bool(failures)
+        panel._experiment_run = run
+        panel._on_finished()
+        metadata = ExperimentMetadataService.load_metadata(run.path)
+        assert metadata["status"] == ("failed" if partial else "completed")
+        assert {manifest.name, *(path.name for path in spectra)} <= {
+            Path(record["path"]).name for record in metadata["files"]}
+    finally:
+        panel.close()
+
+
+def test_station_pair_control_defaults_to_single_and_ingaas_when_selected(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(cfg.lf6, "station_id", "attodry2100")
+    widget = MegaSweepPanel()
+    try:
+        widget._refresh_preview()
+        assert "pair_andor_backend" not in widget._collect_params()
+        widget._pair_controls.mode.setCurrentIndex(1)
+        params = widget._collect_params()
+        assert params["pair_andor_backend"] == "andor_ingaas"
+        assert set(params["pair_recipes"]) == {"lightfield", "andor_ingaas"}
+        state = widget.capture_session_state()
+        widget._pair_controls.set_station("default")
+        monkeypatch.setattr(cfg.lf6, "station_id", "default")
+        assert "pair_andor_backend" not in widget._collect_params()
+        with pytest.raises(ValueError, match="2100 station"):
+            widget.restore_session_state(state)
+        with pytest.raises(ValueError, match="2100 station"):
+            widget.apply_saved_experiment_settings(params)
+        monkeypatch.setattr(cfg.lf6, "station_id", "attodry2100")
+        widget._pair_controls.set_station("attodry2100")
+        widget.apply_saved_experiment_settings(params)
+        assert widget._collect_params()["pair_recipes"] == params["pair_recipes"]
+    finally:
+        widget.close()
 
 
 class MegaSweepSequenceTests(unittest.TestCase):
@@ -406,3 +508,19 @@ def test_map_stops_before_writing_invalid_frame_and_retains_verified_rows(tmp_pa
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_map_filename_is_compact_and_names_each_paired_detector_by_its_own_recipe():
+    from ui import megasweep_panel as mega
+    params = dict(sample="S1", tag="Tag", axis_a="Vbias", axis_b="Doping", coord=mega.CoordSystem.PHYSICAL,
+                  ratio=1.0, fixed={"E-field": 0.0}, laser_nm="730", power_uw="1",
+                  axis_a_desc=dict(start=-0.7, stop=-2.2, points=31), axis_b_desc=dict(start=-5, stop=5, points=201),
+                  condition_index=1, condition_count=1, condition_name="PIXIS + Andor InGaAs",
+                  center_nm=650, exp_ms=50, frames=20, pair_andor_backend="andor_ingaas",
+                  pair_recipes={"lightfield": dict(center_nm=650, exposure_ms=50, frames=20),
+                                "andor_ingaas": dict(center_nm=1100, exposure_ms=500, frames=4)})
+    assert mega.build_megasweep_filename(params, detector="lightfield") == (
+        "S1~Vb-0.7to-2.2x31_D-5to+5x201~E0~730nm1uW~650nm_0.05sx20~Tag")
+    assert "~1100nm_0.5sx4~" in mega.build_megasweep_filename(params, detector="andor_ingaas")
+    several = dict(params, pair_andor_backend="", backend="winspec_ingaas", condition_count=2, ratio=1.1)
+    assert mega.build_megasweep_filename(several).endswith("x201_r1.1~E0~730nm1uW~C01~650nm_0.05sx20~Tag~WinSpec")

@@ -1,15 +1,18 @@
 """Keep table columns inside their viewport, including after model changes."""
+from contextlib import contextmanager, nullcontext
+
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt, Slot
 from PySide6.QtWidgets import QHeaderView, QToolTip
 from shiboken6 import isValid
 
 
 class _FittedColumns(QObject):
-    def __init__(self, table, widths):
+    def __init__(self, table, widths, minimum_widths):
         super().__init__(table)
         self.table = table
         self.viewport = table.viewport()
         self.widths = tuple(widths)
+        self.minimum_widths = minimum_widths
         self._fitting = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -65,22 +68,34 @@ class _FittedColumns(QObject):
         self._fitting = True
         try:
             header = table.horizontalHeader()
-            weights = [self.widths[c] if c < len(self.widths) else 80 for c in columns]
-            # Reserve Qt's minimum for each column before sharing remaining space.
-            # A low-weight checkbox column must not overflow at narrow widths.
-            weights = [max(1, weight - 16) for weight in weights]
+            requested = self.minimum_widths() if callable(self.minimum_widths) else self.minimum_widths
+            minimums = [max(16, requested[c]) if c < len(requested) else 16 for c in columns]
+            if sum(minimums) > available:
+                minimums = [16] * len(columns)
+            # Reserve the fitted minima before sharing remaining space. A
+            # low-weight control column can keep room for its actual widgets.
+            weights = [max(1, (self.widths[c] if c < len(self.widths) else 80) - minimum)
+                       for c, minimum in zip(columns, minimums)]
             total = sum(weights)
-            extra = available - len(columns) * 16
+            extra = available - sum(minimums)
             # Allocate by cumulative boundaries to avoid rounding overflow.
             used = 0
             cumulative = 0
-            for position, (column, weight) in enumerate(zip(columns, weights)):
+            reserved = 0
+            for column, minimum, weight in zip(columns, minimums, weights):
+                reserved += minimum
                 cumulative += weight
-                edge = 16 * (position + 1) + round(extra * cumulative / total)
-                header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
-                header.resizeSection(column, edge - used)
+                edge = reserved + round(extra * cumulative / total)
+                if header.sectionResizeMode(column) != QHeaderView.ResizeMode.Fixed:
+                    header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+                if header.sectionSize(column) != edge - used:
+                    header.resizeSection(column, edge - used)
                 used = edge
             table.horizontalScrollBar().setValue(0)
+            # The Quick editor lays out its own delegates. Its parked source
+            # still supplies column widths but has no rows to paint.
+            if getattr(table, "_quick_editor", None) is not None and not table.isVisible():
+                return
             # Only measure visible rows; sequence previews may contain thousands.
             first = max(0, table.rowAt(0))
             last = table.rowAt(table.viewport().height() - 1)
@@ -91,13 +106,28 @@ class _FittedColumns(QObject):
             self._fitting = False
 
 
-def fit_table_columns(table, widths):
-    """Install once; callers may reconfigure widths after repopulating a table."""
+def fit_table_columns(table, widths, *, minimum_widths=()):
+    """Fit weighted columns, reserving optional width floors when they fit."""
     controller = getattr(table, "_fitted_columns", None)
     if controller is None:
-        controller = _FittedColumns(table, widths)
+        controller = _FittedColumns(table, widths, minimum_widths)
         table._fitted_columns = controller
     else:
         controller.widths = tuple(widths)
+        controller.minimum_widths = minimum_widths
         controller.schedule()
     return controller
+
+
+@contextmanager
+def batch_table_updates(table):
+    """Defer painting and Quick structural resets until the table is filled."""
+    editor = getattr(table, "_quick_editor", None)
+    batch_updates = getattr(getattr(editor, "model", None), "batch_updates", nullcontext)
+    updates_enabled = table.updatesEnabled()
+    table.setUpdatesEnabled(False)
+    try:
+        with batch_updates():
+            yield
+    finally:
+        table.setUpdatesEnabled(updates_enabled)

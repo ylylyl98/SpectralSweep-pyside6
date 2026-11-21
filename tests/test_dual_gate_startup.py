@@ -38,7 +38,7 @@ def events(run):
 
 @pytest.fixture
 def startup(app, tmp_path, monkeypatch):
-    state = SimpleNamespace(commands=[], runs=[], release=threading.Event(), entered=threading.Event(),
+    state = SimpleNamespace(commands=[], zero_options=[], runs=[], release=threading.Event(), entered=threading.Event(),
                             begin_threads=[], dialogs=[], tmp_path=tmp_path)
 
     def command(name):
@@ -64,6 +64,7 @@ def startup(app, tmp_path, monkeypatch):
 
         def ramp_all_to_zero_report(self, **kwargs):
             command("zero")
+            state.zero_options.append(kwargs)
             return super().ramp_all_to_zero_report(**kwargs)
 
     class Detector(smu_fixtures._FakeLFController):
@@ -164,6 +165,8 @@ def test_slow_metadata_keeps_gui_live_and_precedes_all_device_io(startup, app, m
     startup.release.set()
     pump_until(app, lambda: not startup.widget._run_thread.isRunning())
     assert "acquire" in startup.commands
+    assert len(startup.zero_options) == 1
+    assert startup.zero_options[0]["coordinated_gates"] is True
     assert startup.runs[0].metadata["status"] == "completed"
     assert startup.widget._run_outcome == "completed"
     assert not startup.widget._run_time_timer.isActive()

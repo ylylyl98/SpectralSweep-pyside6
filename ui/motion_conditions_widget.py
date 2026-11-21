@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from utils.config import cfg
-from ui.table_layout import fit_table_columns
+from ui.table_layout import batch_table_updates, fit_table_columns
 from utils.mcd_common import (
     MODE_DOPING_EFIELD, MODE_DIRECT, mcd_coordinates, parse_numeric_spec,
     validate_gate_conditions, vtg_vbg_from_doping_efield,
@@ -69,7 +69,6 @@ class MotionConditionsWidget(QWidget):
         self._build_ui()
         self._connect_signals()
         self._update_labels()
-        self._input_changed()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -275,13 +274,13 @@ class MotionConditionsWidget(QWidget):
         self._set_derived_flags()
         self._input_changed()
 
-    def _set_derived_flags(self) -> None:
+    def _set_derived_flags(self, first_row: int = 0) -> None:
         direct = self.mode.currentData() == MODE_DIRECT
         # Flag updates are presentation changes, not edits to gate values.
         # QTableWidget emits itemChanged for setFlags, so block its signal while
         # retaining model dataChanged notifications for Quick views.
         with QSignalBlocker(self.table):
-            for row in range(self.table.rowCount()):
+            for row in range(first_row, self.table.rowCount()):
                 for column in (2, 3, 4, 5):
                     item = self.table.item(row, column)
                     if item is None:
@@ -307,7 +306,9 @@ class MotionConditionsWidget(QWidget):
         validate_gate_conditions(rows, self._voltage_limit())
         return rows
 
-    def _input_changed(self, *_: Any) -> None:
+    def _input_changed(self, *_: Any, notify: bool = True) -> None:
+        if self._busy:
+            return
         try:
             values_a, values_b = self._parsed_inputs()
             show_pairing = len(values_a) > 1 and len(values_b) > 1
@@ -333,7 +334,8 @@ class MotionConditionsWidget(QWidget):
             if "values_a" not in locals() or "values_b" not in locals():
                 self._expansion_label.setVisible(False)
                 self.expansion.setVisible(False)
-        self.changed.emit()
+        if notify:
+            self.changed.emit()
 
     # --------------------------------------------------------------- row data
     @staticmethod
@@ -348,9 +350,7 @@ class MotionConditionsWidget(QWidget):
         if mode == "independent": return _format(row.get("vbias2_v", 0.0))
         return "off"
 
-    def _append_row(self, row: Mapping[str, Any], *, label: str | None = None) -> None:
-        index = self.table.rowCount()
-        self.table.insertRow(index)
+    def _populate_row(self, index: int, row: Mapping[str, Any], *, label: str | None = None) -> None:
         values = ["", label if label is not None else f"Condition {index + 1}",
                   _format(row.get("doping_v", 0.0)), _format(row.get("efield_v", 0.0)),
                   _format(row.get("vtg_v", 0.0)), _format(row.get("vbg_v", 0.0)),
@@ -362,7 +362,7 @@ class MotionConditionsWidget(QWidget):
             if column == 0:
                 item.setCheckState(Qt.CheckState.Checked if row.get("enabled", True) else Qt.CheckState.Unchecked)
             if column == 1:
-                item.setData(_ROW_ROLE, copy.deepcopy(bundle))
+                item.setData(_ROW_ROLE, bundle)
             if column == 7: item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(index, column, item)
 
@@ -389,14 +389,15 @@ class MotionConditionsWidget(QWidget):
         if abs(expected_d - values[0]) > 1e-7 or abs(expected_f - values[1]) > 1e-7:
             raise ValueError(f"Condition row {row + 1} D/F do not match Vtg/Vbg at r={self.ratio.value():g}")
         label_item = self.table.item(row, 1)
+        saved_condition = bundle.get("condition", {})
         return {"enabled": self._is_enabled(row), "mode": MODE_DIRECT,
                 "label": label_item.text() if label_item is not None else "",
                 "input_a": values[2], "input_b": values[3], "gate_ratio": self.ratio.value(),
                 "doping_v": values[0], "efield_v": values[1],
                 "vtg_v": values[2], "vbg_v": values[3],
-                "vbias_v": values[4], **{key: self._row_bundle(row).get("condition", {}).get(key, default)
+                "vbias_v": values[4], **{key: saved_condition.get(key, default)
                     for key, default in (("bias2_mode", "off"), ("vbias2_v", 0.0), ("bias2_offset_v", 0.0))},
-                "provenance": self._row_bundle(row).get("provenance", {})}
+                "provenance": bundle.get("provenance", {})}
 
     def _snapshot(self) -> list[dict[str, Any]]:
         snapshot = []
@@ -405,14 +406,15 @@ class MotionConditionsWidget(QWidget):
             item = self.table.item(row, 0)
             snapshot.append({"values": values, "checked": bool(item and item.checkState() == Qt.CheckState.Checked),
                              "bundle": self._row_bundle(row)})
-        return copy.deepcopy(snapshot)
+        return snapshot
 
     def _restore(self, snapshot: list[Any]) -> None:
         self._busy = True
         try:
-            with QSignalBlocker(self.table):
+            with batch_table_updates(self.table), QSignalBlocker(self.table):
                 self.table.setRowCount(0)
-                for entry in snapshot or []:
+                self.table.setRowCount(len(snapshot))
+                for row, entry in enumerate(snapshot):
                     if isinstance(entry, dict) and "values" in entry:
                         values = list(entry.get("values", [])); bundle = copy.deepcopy(entry.get("bundle", {}))
                         checked = bool(entry.get("checked", True))
@@ -421,7 +423,6 @@ class MotionConditionsWidget(QWidget):
                         checked = bool(values and str(values[0]).strip().lower() not in _FALSE_TEXT)
                         bundle = {"condition": {}, "provenance": {}, "edited": False}
                     values.extend([""] * (self.table.columnCount() - len(values)))
-                    row = self.table.rowCount(); self.table.insertRow(row)
                     for column in range(self.table.columnCount()):
                         # The checkbox is the source of truth; keeping the
                         # legacy text out of this column avoids a distracting
@@ -438,6 +439,7 @@ class MotionConditionsWidget(QWidget):
                         self.table.setItem(row, column, item)
         finally:
             self._busy = False
+        self._set_derived_flags()
 
     def _push_undo(self) -> None:
         self._undo.append(self._snapshot())
@@ -451,13 +453,16 @@ class MotionConditionsWidget(QWidget):
         except Exception:
             self._input_changed(); return
         self._push_undo(); self._busy = True
+        first_row = self.table.rowCount()
         try:
-            with QSignalBlocker(self.table):
-                for row in rows: self._append_row(row)
+            with batch_table_updates(self.table), QSignalBlocker(self.table):
+                self.table.setRowCount(first_row + len(rows))
+                for index, row in enumerate(rows, start=first_row):
+                    self._populate_row(index, row)
         finally:
             self._busy = False
-        self._set_derived_flags()
-        self._input_changed()
+        self._set_derived_flags(first_row)
+        self.changed.emit()
 
     def _selection_changed(self) -> None:
         if self._busy or self.table.currentRow() < 0:
@@ -469,13 +474,18 @@ class MotionConditionsWidget(QWidget):
         if row < 0:
             return
         try:
-            self._editing_row = row
-            self.mode.setCurrentIndex(self.mode.findData(MODE_DIRECT))
-            self.a.setText(self.table.item(row, 4).text())
-            self.b.setText(self.table.item(row, 5).text())
-            self.bias.setValue(float(self.table.item(row, 6).text()))
-            self.bias2.set_settings(self._row_bundle(row).get("condition", {}))
-            self.bias2_values.clear()
+            self._busy = True
+            try:
+                self._editing_row = row
+                self.mode.setCurrentIndex(self.mode.findData(MODE_DIRECT))
+                self.a.setText(self.table.item(row, 4).text())
+                self.b.setText(self.table.item(row, 5).text())
+                self.bias.setValue(float(self.table.item(row, 6).text()))
+                self.bias2.set_settings(self._row_bundle(row).get("condition", {}))
+                self.bias2_values.clear()
+            finally:
+                self._busy = False
+            self._input_changed(notify=False)
             self._add_button.setEnabled(False); self._update_button.setEnabled(True); self._cancel_button.setEnabled(True)
             self._status_label.setText(f"Editing condition row {row + 1}; Update applies one scalar condition.")
         except Exception as exc:
@@ -521,9 +531,12 @@ class MotionConditionsWidget(QWidget):
         self._busy = True
         try:
             with QSignalBlocker(self.table):
-                self._append_row(row, label=f"Condition {self.table.rowCount() + 1}")
+                index = self.table.rowCount()
+                self.table.insertRow(index)
+                self._populate_row(index, row)
         finally:
             self._busy = False
+        self._set_derived_flags(self.table.rowCount() - 1)
         self.table.selectRow(self.table.rowCount() - 1)
         self.changed.emit()
         try:
@@ -621,7 +634,8 @@ class MotionConditionsWidget(QWidget):
             bundle = self._row_bundle(row); bundle["error"] = str(exc)
             label_item = self.table.item(row, 1)
             if label_item is not None:
-                label_item.setData(_ROW_ROLE, bundle)
+                with QSignalBlocker(self.table):
+                    label_item.setData(_ROW_ROLE, bundle)
             self._status_label.setText(f"Condition row {row + 1}: {exc}")
         self.changed.emit()
 
@@ -723,14 +737,15 @@ class MotionConditionsWidget(QWidget):
             self.repeats.setValue(int(state.get("repeats", 1))); self._restore(list(state.get("rows", [])))
         finally:
             self._busy = False
-        self._set_derived_flags()
         self._input_changed()
 
     def _rotation_changed(self, *_: Any) -> None:
-        self.changed.emit()
+        if not self._busy:
+            self.changed.emit()
 
     def _sequence_changed(self, *_: Any) -> None:
-        self.changed.emit()
+        if not self._busy:
+            self.changed.emit()
 
 
 __all__ = ["MotionConditionsWidget"]

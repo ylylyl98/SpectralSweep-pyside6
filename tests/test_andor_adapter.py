@@ -215,6 +215,28 @@ class _FakeAndorModule:
 
 
 class AndorAdapterTests(unittest.TestCase):
+    def test_center_only_checks_readback_on_owner_and_leaves_camera_and_output_unchanged(self):
+        module = _FakeAndorModule()
+        setup = AndorSDK2Setup(
+            AndorConnectionOptions(camera_role="si", output_port="direct"), andor_module=module)
+        self.addCleanup(setup.close)
+        module.calls.clear()
+        self.assertAlmostEqual(setup.apply_center_wavelength(720), 720)
+        self.assertTrue(all(thread_id == setup._owner.ident for _, thread_id, _ in module.calls))
+        names = [name for name, _, _ in module.calls]
+        self.assertEqual([name for name in names if name.startswith("set_")], ["set_wavelength"])
+        self.assertIn("get_wavelength", names)
+        self.assertNotIn("snap", names)
+        module.calls.clear()
+        with self.assertRaisesRegex(ValueError, "outside its grating range"):
+            setup.apply_center_wavelength(2600)
+        self.assertNotIn("set_wavelength", [name for name, *_ in module.calls])
+        setup._owner.call(lambda: setattr(setup._spectrograph, "output_port", "side"), timeout_s=2)
+        module.calls.clear()
+        with self.assertRaisesRegex(RuntimeError, "direct output is not selected"):
+            setup.apply_center_wavelength(730)
+        self.assertFalse(any(name.startswith("set_") for name, *_ in module.calls))
+
     def test_single_camera_is_selected_by_model_despite_stale_index(self):
         for role, model in (("si", "DU420A-BEX2-DD"), ("ingaas", "DU490_17")):
             with self.subTest(role=role):
@@ -382,8 +404,11 @@ class AndorAdapterTests(unittest.TestCase):
             self.assertEqual(setup.identity["camera_index"], 1)
             self.assertEqual(setup.identity["camera_serial"], "SI-002")
             self.assertEqual(setup.identity["camera_role"], "si")
-            self.assertEqual(module.camera_opens[0][1]["temperature"], "off")
-            self.assertEqual(module.camera_opens[1][1]["temperature"], "off")
+            # Identification probes must not switch a cooler off ("off") or on
+            # (None); pylablib leaves the cooler alone for a numeric setpoint.
+            for probe in module.camera_opens[:2]:
+                self.assertEqual(probe[1]["temperature"], -70.0)
+                self.assertEqual(probe[1]["fan_mode"], "full")
             self.assertEqual(module.camera_opens[-1][1]["temperature"], -70.0)
             setup.configure_for_acquisition(
                 center_nm=1210.0, exposure_ms=250.0, frames=2
@@ -514,16 +539,27 @@ class AndorAdapterTests(unittest.TestCase):
         finally:
             setup.close()
 
-    def test_disconnect_safety_snapshot_reports_live_cooling_state(self):
-        _, setup = self.make_setup()
+    def test_cold_camera_closes_and_reopens_with_its_connection_profile(self):
+        module, setup = self.make_setup()
         try:
-            state = setup.get_disconnect_safety_snapshot()
-            self.assertEqual(state["camera_role"], "si")
-            self.assertTrue(state["cooler_on"])
-            self.assertEqual(state["temperature_status"], "stabilized")
-            self.assertAlmostEqual(state["temperature_c"], -70.0)
+            self.assertEqual(setup.get_temperature(), -70.0)
+            module.calls.clear()
+            setup.close()
+            calls = [name for name, *_ in module.calls]
+            self.assertIn("spectrograph_close", calls)
+            self.assertIn("camera_close", calls)
+            self.assertNotIn("get_temperature", calls)
+            self.assertNotIn("set_temperature", calls)
+            self.assertNotIn("set_cooler", calls)
         finally:
             setup.close()
+        reopened = AndorSDK2Setup(setup.options, andor_module=module)
+        try:
+            snapshot = reopened.get_temperature_snapshot()
+            self.assertTrue(snapshot["cooler_on"])
+            self.assertEqual(snapshot["temperature_c"], -70.0)
+        finally:
+            reopened.close()
 
     def test_shamrock_decode_failure_retries_with_raw_device_count(self):
         module = _FakeAndorModule()

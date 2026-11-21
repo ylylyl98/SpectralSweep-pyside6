@@ -119,6 +119,12 @@ def _jsonable(value: Any) -> Any:
             }
         except Exception as exc:
             raise TypeError(f"Could not serialize DataFrame: {exc}") from exc
+    # NumPy scalars (np.int64, np.float32, np.bool_ ...) also expose shape,
+    # dtype and tolist; store them as the plain number they are rather than as
+    # a 0-d array mapping that readers expecting a number cannot use.
+    if any(base.__name__ == "generic" and base.__module__ == "numpy"
+           for base in type(value).__mro__):
+        return _jsonable(value.item())
     # ndarray-like values must be checked before ``item``.  A scalar ndarray
     # has item(), while a multidimensional ndarray may expose a huge repr.
     shape = getattr(value, "shape", None)

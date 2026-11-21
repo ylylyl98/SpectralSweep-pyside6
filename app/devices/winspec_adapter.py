@@ -22,6 +22,9 @@ from .lightfield_optics import ensure_output_route, read_optics as _read_optics
 
 log = logging.getLogger(__name__)
 
+# How long a Stop issued from the GUI thread may wait for the XP bridge.
+_GUI_STOP_WAIT_S = 0.5
+
 
 def read_optics(setup):
     return _read_optics(setup, include_capabilities=False)
@@ -222,7 +225,12 @@ class WinSpecSetup:
 
     def close(self):
         if not self._closed and self.start_acceleration:
-            self.client.request('RELEASE_START_ACCELERATION',{'session':self._start_session},timeout_s=25.)
+            try:
+                self.client.request('RELEASE_START_ACCELERATION',{'session':self._start_session},timeout_s=25.)
+            except Exception as exc:
+                # An unreachable XP bridge must not make this adapter (and the
+                # LightField session that closes it) impossible to disconnect.
+                log.warning("WinSpec start-acceleration release failed during close: %s", exc)
         self._closed = True  # Borrowed LightField and XP service stay alive; no cooling writes.
 
     def invalidate_wavelengths(self): pass
@@ -427,6 +435,34 @@ class WinSpecSetup:
 
     def abort_acquisition(self):
         self._abort.set()
+        if threading.current_thread() is not threading.main_thread():
+            return self._send_stop()
+        # Called from the GUI thread: the XP bridge round trip can take
+        # seconds when the machine is slow or unreachable, so do not hold the
+        # event loop for it. The local abort flag above already ends the
+        # acquisition loop; the STOP request finishes in the background.
+        outcome = {}
+
+        def send():
+            try:
+                outcome["value"] = self._send_stop()
+            except Exception as exc:
+                outcome["error"] = exc
+                if outcome.get("detached"):
+                    log.warning("WinSpec stop was not confirmed: %s", exc)
+
+        sender = threading.Thread(target=send, name="WinSpecStop", daemon=True)
+        sender.start()
+        sender.join(_GUI_STOP_WAIT_S)
+        if sender.is_alive():
+            outcome["detached"] = True
+            log.warning("WinSpec stop is still waiting for the XP bridge; continuing in the background")
+            return False
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["value"]
+
+    def _send_stop(self):
         deadline = time.monotonic() + 5
         while True:
             reply, _ = self.client.request('STOP', {'reason': 'SpectralSweep user stop'},

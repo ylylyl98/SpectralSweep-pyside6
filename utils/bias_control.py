@@ -79,3 +79,21 @@ def apply_bias_pair(device, *, vbias: float | None, settings, ramp_step: float,
                 raise RuntimeError(f"Failed to set {role}")
         if delay:
             time.sleep(delay)
+
+
+def check_setpoint_readings(device, targets, readings) -> None:
+    """Abort rather than label data with a voltage the source did not reach.
+
+    ``readings`` maps role -> (voltage, current) taken after the settle time;
+    no instrument I/O happens here. Adapters without the check are skipped.
+    """
+    check = getattr(device, "check_setpoint_readings", None)
+    if callable(check):
+        check(dict(targets), dict(readings))
+
+
+def verify_setpoints(device, targets) -> None:
+    """Read each targeted role once and check it; use once per condition."""
+    verify = getattr(device, "verify_setpoints", None)
+    if callable(verify):
+        verify(dict(targets))

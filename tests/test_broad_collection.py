@@ -1,13 +1,37 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication
-from ui.broad_calibration_dialog import BroadCalibrationDialog
+from ui.broad_calibration_dialog import BroadCalibrationDialog, cfg
 
 
 def context(center):
     return dict(profile='bench', grating='300', center_nm=center,
                 output_port='SideExit', detector='camera', geometry=[512, 1],
                 spectrometer='sp')
+
+
+def test_refresh_saved_calibrations_inserts_single_range_and_wires_roles(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(cfg.lf6, "winspec_wavelength_calibrations", [])
+    dialog = BroadCalibrationDialog()
+    try:
+        records = [{"context": context(center)} for center in range(900, 1701, 50)]
+        monkeypatch.setattr(cfg.lf6, "winspec_wavelength_calibrations",
+                            [records[0], {"kind": "broad_piecewise"}, *records[1:]])
+        inserted = QSignalSpy(dialog.table.model().rowsInserted)
+        dialog.refresh()
+        assert inserted.count() == 1
+        assert inserted.at(0)[1:] == [0, 16]
+        assert dialog.records == records
+        assert dialog.table.cellWidget(16, 0).currentText() == "Ignore"
+        assert "1700 nm" in dialog.table.cellWidget(16, 1).text()
+        dialog.record = {}
+        dialog.save.setEnabled(True)
+        dialog.table.cellWidget(0, 0).setCurrentText("Anchor")
+        assert dialog.record is None and not dialog.save.isEnabled()
+    finally:
+        dialog.close()
 
 
 def test_collection_all_centers_and_rejects_duplicate_start(monkeypatch):

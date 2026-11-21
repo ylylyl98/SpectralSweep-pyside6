@@ -2,6 +2,7 @@
 import copy
 import threading
 from dataclasses import FrozenInstanceError
+from unittest.mock import Mock
 
 import pytest
 
@@ -74,6 +75,23 @@ def test_progress_notifies_only_changed_presentation_properties():
     model.update_plan(contexts, rows, current_frame_i=2, done=1, **kwargs)
     assert counts["overview"] == 2 and counts["focus"] == 2 and counts["detail"] == 2
     assert model.focusStep["statusKind"] == "failed"
+
+
+def test_edit_preview_reads_loop_definition_once_and_picks_up_next_edit():
+    contexts, rows, tasks = flat_plan()
+    definition = Mock()
+    wavelength = {"Enable": True, "Parameter": "Center Wavelength (nm)", "Group": 1}
+    definition.to_dict.return_value = [wavelength]
+    model = DualGateSequenceModel()
+    kwargs = dict(acquisition_schedule=tasks, loop_definition=definition, loop_mode="Customized")
+    model.update_plan(contexts, rows, **kwargs)
+    model.selectRow(1)
+    assert model._flat_loop_groups(tasks[0]) == [["Center Wavelength (nm)"]]
+    definition.to_dict.assert_called_once_with("records")
+    definition.to_dict.return_value = [dict(wavelength, Enable=False)]
+    model.update_plan(contexts, rows, **kwargs)
+    assert model._flat_loop_groups(tasks[0]) == []
+    assert definition.to_dict.call_count == 2
 
 
 def test_nested_points_files_repeats_and_details_are_distinct():

@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QSignalBlocker, QTimer
-from PySide6.QtGui import QFontMetricsF
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QCheckBox, QPushButton, QStackedWidget, QSizePolicy
+from PySide6.QtCore import QSize, Qt, QSignalBlocker, QTimer
+from PySide6.QtGui import QFontMetricsF, QPalette
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QCheckBox, QPushButton, QStackedWidget, QSizePolicy, QStylePainter
 
 PHOTON_EV_NM = 1239.8419843320026
 LIVE_SPECTRUM_COLOR = "#1565C0"
@@ -66,17 +66,47 @@ larger than ten typical sample steps. Intensity is deliberately not inspected.
     return merged
 
 
+class ElidedSpectrumLabel(QLabel):
+    """A one-line readout that keeps its full value for Qt accessibility."""
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setToolTip(text)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def sizeHint(self):
+        return QSize(super().sizeHint().width(), self.fontMetrics().height())
+
+    def minimumSizeHint(self):
+        return QSize(0, self.fontMetrics().height())
+
+    def paintEvent(self, event):
+        rect = self.contentsRect()
+        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, rect.width())
+        painter = QStylePainter(self)
+        painter.drawItemText(rect, self.alignment(), self.palette(), self.isEnabled(),
+                             text, QPalette.ColorRole.WindowText)
+
+
 class _SpectrumPlot(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, paired_pane=False):
         super().__init__(parent)
+        self._paired_pane = paired_pane
         self.axis_unit = "nm"
         self._reverse_pixels = False
         self._normalized = False
         self._compare = self._hide_gaps = False
+        self._fold_overlay_gaps = False
         self._range_mode = "live"
         self._follow_x = self._follow_y = True
         self._setting_range = False
         self._wl = self._cts = np.array([])
+        self._secondary_live_id = None
         self._reference_curves = {}
         self._reference_units = {}
         self._reference_visible = {}
@@ -91,6 +121,9 @@ class _SpectrumPlot(QWidget):
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
         self._empty_label.setAccessibleName("Spectrum empty state")
+        if paired_pane:
+            self._empty_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            layout.setSpacing(3)
         self._display_stack.addWidget(self._empty_label)
         self._plot_container = QWidget()
         self._plot_row = QHBoxLayout(self._plot_container)
@@ -103,12 +136,16 @@ class _SpectrumPlot(QWidget):
         self.segment_plots = [self._plot]
         self._plot_row.addWidget(self._plot, 1)
         info = QGridLayout()
-        self._peak_lbl = QLabel("Peak: —")
-        self._range_lbl = QLabel("Range: —")
-        for label in (self._peak_lbl, self._range_lbl):
-            label.setWordWrap(True)
-            label.setMinimumWidth(0)
-            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        label_class = ElidedSpectrumLabel if paired_pane else QLabel
+        self._peak_lbl = label_class("Peak: —")
+        self._range_lbl = label_class("Range: —")
+        if paired_pane:
+            info.setVerticalSpacing(3)
+        else:
+            for label in (self._peak_lbl, self._range_lbl):
+                label.setWordWrap(True)
+                label.setMinimumWidth(0)
+                label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self._autoscale_chk = QCheckBox("Auto Y")
         self._autoscale_chk.setChecked(True)
         self._autoscale_chk.setToolTip("Follow live intensity, or all visible spectra in Compare. Manual Y zoom pauses this.")
@@ -146,17 +183,13 @@ class _SpectrumPlot(QWidget):
             if self._reference_curves else
             "No spectrum yet\n\nConnect a detector to acquire, or use Load spectra to compare saved data."
         )
-        self._fit_live_btn.setEnabled(live)
+        self._fit_live_btn.setEnabled(live or self._secondary_live_id in self._reference_curves)
         self._fit_visible_btn.setEnabled(visible)
         self._autoscale_chk.setEnabled(visible)
 
     def _make_plot(self):
         plot = pg.PlotWidget(axisItems={"top": _EnergyAxis()})
-        # Keep the right edge and endpoint tick labels inside the canvas,
-        # including when the reference pane narrows the plot. Font-relative
-        # spacing scales with the native Qt font instead of changing data ranges.
-        margin = int(QFontMetricsF(self.font()).horizontalAdvance("0000.0000") / 2) + 4
-        plot.getPlotItem().layout.setContentsMargins(0, 0, margin, 0)
+        self._set_break_edges(plot)
         plot.showAxis("right")
         plot.getAxis("right").setStyle(showValues=False, tickLength=0)
         plot.getAxis("right").setWidth(1)
@@ -172,14 +205,30 @@ class _SpectrumPlot(QWidget):
         self._label_plot(plot)
         return plot
 
+    def _set_break_edges(self, plot, *, left=False, right=False):
+        # Keep room for endpoint ticks on both sides of a break, and preserve
+        # the larger outer right gutter when the reference pane is narrow.
+        metrics = QFontMetricsF(self.font())
+        inner = int(metrics.height() * .75)
+        outer = int(metrics.horizontalAdvance("0000.0000") / 2) + 4
+        plot.getPlotItem().layout.setContentsMargins(inner if left else 0, 0, inner if right else outer, 0)
+        plot.showAxis("left", not left)
+
     def _label_plot(self, plot):
         pixel_label = "Pixel (reversed; uncalibrated)" if self._reverse_pixels else "Pixel (uncalibrated)"
         plot.setLabel("bottom", pixel_label if self.axis_unit == "pixel" else "Wavelength",
                       units="" if self.axis_unit == "pixel" else "nm")
-        plot.showAxis("top", self.axis_unit == "nm")
+        self._set_energy_axis(plot, self.axis_unit == "nm")
         plot.setLabel("left", "Normalized intensity" if self._normalized else "Intensity",
                       units="" if self._normalized else "counts")
         plot.getViewBox().invertX(self._reverse_pixels)
+
+    def _set_energy_axis(self, plot, enabled):
+        plot.showAxis("top", enabled or self._paired_pane)
+        if self._paired_pane:
+            # Keep the same ViewBox geometry for a calibrated spectrum and a
+            # zero-order pixel spectrum without drawing an eV scale on pixels.
+            plot.getAxis("top").setOpacity(1.0 if enabled else 0.0)
 
     @staticmethod
     def _make_live_curve(plot):
@@ -250,6 +299,12 @@ class _SpectrumPlot(QWidget):
             self._range_mode = "visible" if compare else "live"
         self._refresh(force=changed)
 
+    def set_fold_overlay_gaps(self, enabled):
+        if self._fold_overlay_gaps != enabled:
+            self._fold_overlay_gaps = enabled
+            self._follow_x = True
+            self._refresh()
+
     def set_reference(self, reference_id, wl, cts, color, visible=True, axis_unit="nm"):
         key = str(reference_id)
         curve = self._reference_curves.get(key)
@@ -293,6 +348,17 @@ class _SpectrumPlot(QWidget):
         self._refresh(live_changed=True)
         self._update_info()
 
+    def update_secondary_spectrum(self, wl, cts, color):
+        """Include the second detector in both Fit live and Fit visible."""
+        key = "secondary-live-spectrum"
+        if wl is None or not len(wl):
+            self._secondary_live_id = None
+            if key in self._reference_curves:
+                self.remove_reference(key)
+            return
+        self._secondary_live_id = key
+        self.set_reference(key, wl, cts, color, axis_unit=self.axis_unit)
+
     def _update_info(self):
         good = np.isfinite(self._cts) & np.isfinite(self._wl)
         self._peak_lbl.setText("Peak: —")
@@ -312,19 +378,35 @@ class _SpectrumPlot(QWidget):
         return series
 
     def _range_series(self):
-        if self._range_mode == "live" and self._wl.size:
-            return [(self._wl, self._cts)]
+        if self._range_mode == "live":
+            series = [(self._wl, self._cts)] if self._wl.size else []
+            secondary = self._reference_curves.get(self._secondary_live_id)
+            if secondary is not None and secondary.xData is not None:
+                series.append((secondary.xData, secondary.yData))
+            if series:
+                return series
         return self._visible_series()
 
-    def _refresh(self, force=False, changed_reference=None, live_changed=False):
+    def _refresh(self, force=False, changed_reference=None, live_changed=False, fit_view=False):
         for key, curve in self._reference_curves.items():
             curve.setVisible(self._reference_visible.get(key, False) and self._reference_units.get(key) == self.axis_unit)
         self._refresh_empty_state()
         series = self._range_series()
         arrays = [x for x, _ in series]
         segments = wavelength_segments(arrays)
-        if segments and not (self._compare and self._hide_gaps and self.axis_unit == "nm" and self._range_mode == "visible"):
+        fold = self.axis_unit == "nm" and (self._fold_overlay_gaps or
+                (self._compare and self._hide_gaps and self._range_mode == "visible"))
+        if segments and not fold:
             segments = [(segments[0][0], segments[-1][1])]
+        elif (len(segments) > 1 and self._fold_overlay_gaps and self._range_mode == "live"
+              and any(key != self._secondary_live_id and curve.isVisible()
+                      for key, curve in self._reference_curves.items())):
+            # Fit live sets the outer limits. A visible reference can cover
+            # part or all of a gap between the two live measurements.
+            low, high = segments[0][0], segments[-1][1]
+            segments = [(max(left, low), min(right, high))
+                        for left, right in wavelength_segments([x for x, _ in self._visible_series()])
+                        if right >= low and left <= high]
         geometry_changed = segments != self._segments
         connections_changed = geometry_changed and (len(segments) > 1 or len(self._segments) > 1)
         self._setting_range = True
@@ -359,7 +441,7 @@ class _SpectrumPlot(QWidget):
                 self._follow_x = self._follow_y = True
                 with QSignalBlocker(self._autoscale_chk):
                     self._autoscale_chk.setChecked(True)
-            self._update_ranges(update_x=force or geometry_changed)
+            self._update_ranges(update_x=force or fit_view or geometry_changed, fit_y=fit_view)
         finally:
             self._setting_range = False
 
@@ -387,10 +469,13 @@ class _SpectrumPlot(QWidget):
         self._break_widgets = []
         self.segment_plots = [self._plot]
         for index in range(1, len(segments)):
-            gap = segments[index][0] - segments[index - 1][1]
-            marker = QLabel(f"//\n{gap:g} nm\nomitted")
+            left, right = segments[index - 1][1], segments[index][0]
+            marker = QLabel("//" if self._fold_overlay_gaps else f"//\n{right - left:g} nm\nomitted")
+            if self._fold_overlay_gaps:
+                marker.setMargin(2)
+                marker.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             marker.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            marker.setToolTip(f"No sampled wavelengths between {segments[index - 1][1]:g} and {segments[index][0]:g} nm")
+            marker.setToolTip(f"Unsampled range omitted: {left:g}–{right:g} nm")
             marker.setAccessibleName(marker.toolTip())
             self._plot_row.addWidget(marker)
             self._break_widgets.append(marker)
@@ -402,6 +487,8 @@ class _SpectrumPlot(QWidget):
             self._extra_curves.append((self._make_live_curve(plot), {}))
         for index, (lo, hi) in enumerate(segments):
             plot = self.segment_plots[index]
+            self._set_break_edges(plot, left=self._fold_overlay_gaps and index > 0,
+                                  right=self._fold_overlay_gaps and index + 1 < len(segments))
             self._plot_row.setStretchFactor(plot, max(1, int(round((hi - lo) * 10))))
             previous = previous_ranges.get((lo, hi))
             pad = max((hi - lo) * .025, .5 if lo == hi else 0.)
@@ -412,7 +499,7 @@ class _SpectrumPlot(QWidget):
     def _schedule_width_update(self, *_args):
         if not self._width_update_pending:
             self._width_update_pending = True
-            QTimer.singleShot(0, self._update_segment_widths)
+            QTimer.singleShot(0, self, self._update_segment_widths)
 
     def _update_segment_widths(self):
         self._width_update_pending = False
@@ -428,7 +515,7 @@ class _SpectrumPlot(QWidget):
         for plot, span, margin in zip(self.segment_plots, spans, overhead):
             self._plot_row.setStretchFactor(plot, max(1, round(100 * (available * span / sum(spans) + margin))))
 
-    def _update_ranges(self, update_x=False):
+    def _update_ranges(self, update_x=False, *, fit_y=False):
         previous_guard = self._setting_range
         self._setting_range = True
         try:
@@ -436,7 +523,7 @@ class _SpectrumPlot(QWidget):
                 for plot, (lo, hi) in zip(self.segment_plots, self._segments):
                     pad = max((hi - lo) * .025, .5 if lo == hi else 0.)
                     plot.setXRange(lo - pad, hi + pad, padding=0)
-            if self._follow_y:
+            if self._follow_y or fit_y:
                 finite = [y[np.isfinite(x) & np.isfinite(y)] for x, y in self._range_series()]
                 finite = [y for y in finite if y.size]
                 if finite:
@@ -449,7 +536,8 @@ class _SpectrumPlot(QWidget):
 
     def fit(self, mode):
         self._range_mode = mode
-        self._refresh(force=True)
+        self._follow_x = True
+        self._refresh(fit_view=True)
 
     def capture_view(self):
         return {"mode": self._range_mode, "follow_x": self._follow_x, "follow_y": self._follow_y,

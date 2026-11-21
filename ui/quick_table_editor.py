@@ -27,6 +27,7 @@ from shiboken6 import isValid
 class TableEditorModel(QAbstractTableModel):
     changed = Signal()
     schemaChanged = Signal()
+    rowTotalChanged = Signal()
     cellChanged = Signal(int, int)
     rowSelectionChanged = Signal(int, bool)
     revealCurrentRowRequested = Signal()
@@ -35,16 +36,22 @@ class TableEditorModel(QAbstractTableModel):
     def __init__(self, table, parent=None):
         super().__init__(parent)
         self.table = table
+        self._execution_order = table.objectName() == "DualGateExecutionOrderTable"
         self._single_line_rows = bool(table.property("quickSingleLineRows"))
         self._closed = False
         self._resetting = False
         self._batch_update_depth = 0
+        self._tail_batches = table.objectName() == "DualGateLoopTable"
+        self._pending_tail = None
         self._error = ""
         self._drafts = {}
         self._generation = 0
+        self._default_row_generation = 0
+        self._row_generations = {}
         self._selection_anchor = -1
         self._selecting_rows = False
         self._columns = self._visible_columns()
+        self._visible_column_positions = {column: position for position, column in enumerate(self._columns)}
         self._mcd_gate_table = bool(table.property("quickMcdGateTable"))
         font = QFont("Segoe UI" if sys.platform == "win32" else "sans-serif")
         font.setPixelSize(12)
@@ -64,14 +71,18 @@ class TableEditorModel(QAbstractTableModel):
         self._active = True
         self._source = table.model()
         self._connections = []
-        for before, after in (("rowsAboutToBeInserted", "rowsInserted"),
-                              ("rowsAboutToBeRemoved", "rowsRemoved"),
-                              ("columnsAboutToBeInserted", "columnsInserted"),
+        self._connect(self._source.rowsAboutToBeInserted,
+                      lambda parent, first, last: self._before_rows_change(parent, first, last, inserting=True))
+        self._connect(self._source.rowsAboutToBeRemoved,
+                      lambda parent, first, last: self._before_rows_change(parent, first, last, inserting=False))
+        self._connect(self._source.rowsInserted, self._finish_structural_updates)
+        self._connect(self._source.rowsRemoved, self._finish_structural_updates)
+        for before, after in (("columnsAboutToBeInserted", "columnsInserted"),
                               ("columnsAboutToBeRemoved", "columnsRemoved"),
                               ("modelAboutToBeReset", "modelReset"),
                               ("layoutAboutToBeChanged", "layoutChanged")):
             self._connect(getattr(self._source, before), self._begin_reset)
-            self._connect(getattr(self._source, after), self._end_reset)
+            self._connect(getattr(self._source, after), self._finish_structural_updates)
         self._connect(self._source.dataChanged, self._data_changed)
         self._connect(table.selectionModel().selectionChanged, self._selection_changed)
         self._connect(table.selectionModel().currentChanged, self._current_changed)
@@ -82,6 +93,10 @@ class TableEditorModel(QAbstractTableModel):
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._flush_dirty)
+        # Temporary delegate editors must not look like replaced index widgets
+        # to the table and viewport event filters.
+        self._editor_host = QWidget(table)
+        self._editor_host.hide()
         table.installEventFilter(self)
         table.viewport().installEventFilter(self)
 
@@ -98,7 +113,9 @@ class TableEditorModel(QAbstractTableModel):
         return {int(Qt.ItemDataRole.DisplayRole): b"display", self.CellRole: b"cell"}
 
     def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() or self._closed else self.table.rowCount()
+        if parent.isValid() or self._closed:
+            return 0
+        return self._pending_tail[0] if self._pending_tail else self.table.rowCount()
 
     def columnCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() or self._closed else len(self._columns)
@@ -128,16 +145,16 @@ class TableEditorModel(QAbstractTableModel):
     @Slot(int)
     def releaseRow(self, row):
         self._active_rows.discard(row)
-        for key in [key for key in self._cells if key[0] == row]:
+        for column in range(len(self._columns)):
+            key = row, column
             self._cells.pop(key, None)
-            self._choices.pop(key, None)
             self._dirty_cells.discard(key)
             self._choice_dirty.discard(key)
             self._unbind_control(key)
 
     def _control(self, row, column):
         container = self.table.cellWidget(row, column)
-        key = row, self._columns.index(column)
+        key = row, self._visible_column_positions[column]
         cached = self._controls.get(key)
         if cached is not None and cached[0] is container and (cached[1] is None or isValid(cached[1])):
             return cached[1]
@@ -202,7 +219,10 @@ class TableEditorModel(QAbstractTableModel):
         self._dirty_cells.add(key)
         if choices:
             self._choice_dirty.add(key)
-        if self._active:
+        self._schedule_flush()
+
+    def _schedule_flush(self):
+        if self._active and not self._timer.isActive():
             self._timer.start(0)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
@@ -212,8 +232,9 @@ class TableEditorModel(QAbstractTableModel):
         item = self.table.item(row, column)
         control = self._control(row, column)
         enabled = self.table.isEnabled() and (control is None or control.isEnabled())
+        generation = self._row_generations.get(row, self._default_row_generation)
         cell = dict(kind="text", value=item.text() if item else "", enabled=enabled,
-                    token=f"{self._generation}:{row}:{index.column()}",
+                    token=f"{generation}:{row}:{index.column()}",
                     label=(self._display_column_title(self._column_key(column)) if self._mcd_gate_table
                            else str(self.headerData(index.column(), Qt.Orientation.Horizontal))),
                     editable=bool(item and item.flags() & Qt.ItemFlag.ItemIsEditable),
@@ -256,6 +277,8 @@ class TableEditorModel(QAbstractTableModel):
             cell.update(kind="choice", options=options, optionEnabled=[True] * len(options),
                         currentIndex=options.index(value) if value in options else -1,
                         editText=value)
+        if self._execution_order and cell["kind"] == "text" and not cell["editable"]:
+            cell["kind"] = "label"
         if control is not None and control.toolTip():
             cell["tooltip"] = control.toolTip()
         draft = self._drafts.get(cell["token"])
@@ -271,7 +294,7 @@ class TableEditorModel(QAbstractTableModel):
         return cell if role == self.CellRole else cell["value"] if role == Qt.ItemDataRole.DisplayRole else None
 
     error = Property(str, lambda self: self._error, notify=changed)
-    rowTotal = Property(int, lambda self: self.rowCount(), notify=schemaChanged)
+    rowTotal = Property(int, lambda self: self.rowCount(), notify=rowTotalChanged)
     columnWidths = Property("QVariantList", lambda self: self._widths, notify=schemaChanged)
     columnTitles = Property("QVariantList", lambda self: self._titles, notify=schemaChanged)
     columnKeys = Property("QVariantList", lambda self: [self._column_key(column) for column in self._columns], notify=schemaChanged)
@@ -337,6 +360,10 @@ class TableEditorModel(QAbstractTableModel):
             self.changed.emit()
 
     def _column_width(self, column):
+        if self._execution_order:
+            # Text and headers wrap. Reserve space for the two move buttons
+            # even when the inspector is at its compact desktop width.
+            return (90, 94, 76)[column]
         header = self.table.horizontalHeaderItem(column)
         name = header.text() if header else ""
         if self._single_line_rows:
@@ -354,8 +381,10 @@ class TableEditorModel(QAbstractTableModel):
         preferred = {
             "Run": 36, "Enable": 50, "MeasurePower": 92, "Group": 50,
             "Parameter": 180, "Values": 140, "This run": 116,
+            "PIXIS": 140, "Andor InGaAs": 140, "Andor Silicon": 140,
             "When": 132, "condition_label": 108, "repeat": 50, "frames": 54,
             "Use": 36, "#": 30, "Input type": 140,
+            "Part": 146, "Preview": 80,
             "Vtg": 60, "Vbg": 60, "Vbias": 64, "Doping": 72, "E-field": 72,
         }.get(name)
         if preferred is None:
@@ -378,8 +407,11 @@ class TableEditorModel(QAbstractTableModel):
             self._dirty_cells.update(self._cells)
         elif event.type() in (QEvent.Type.ChildAdded, QEvent.Type.ChildRemoved):
             self._dirty_cells.update(self._cells)
-            for key in list(self._controls):
-                self._unbind_control(key)
+            # In the loop table, _control checks the current index widget
+            # identity during the flush and keeps unaffected bindings.
+            if not self._tail_batches:
+                for key in list(self._controls):
+                    self._unbind_control(key)
         if event.type() in (QEvent.Type.EnabledChange, QEvent.Type.ChildAdded,
                             QEvent.Type.ChildRemoved, QEvent.Type.LayoutRequest):
             self.schedule()
@@ -387,13 +419,26 @@ class TableEditorModel(QAbstractTableModel):
 
     def schedule(self, *_args):
         self._schema_dirty = True
-        if not self._closed and self._active:
-            self._timer.start(0)
+        if not self._closed:
+            self._schedule_flush()
 
     def set_active(self, active):
         self._active = bool(active)
         if not active:
             self._timer.stop()
+
+    def _before_rows_change(self, parent, first, last, *, inserting):
+        if (self._tail_batches and self._batch_update_depth and not self._resetting
+                and not parent.isValid()):
+            old_count = self.table.rowCount()
+            at_tail = first == old_count if inserting else last == old_count - 1
+            if at_tail and (self._pending_tail is None or self._pending_tail[1] == inserting):
+                # Hold the Quick row count until the synchronous toolbar
+                # operation finishes constructing the new native editors.
+                if self._pending_tail is None:
+                    self._pending_tail = old_count, inserting
+                return
+        self._begin_reset()
 
     def _begin_reset(self, *_args):
         if not self._closed and not self._resetting:
@@ -402,6 +447,8 @@ class TableEditorModel(QAbstractTableModel):
             self._drafts.clear()
             self._selection_anchor = -1
             self._generation += 1
+            self._default_row_generation = self._generation
+            self._row_generations.clear()
             for key in list(self._controls):
                 self._unbind_control(key)
             self._cells.clear()
@@ -414,7 +461,7 @@ class TableEditorModel(QAbstractTableModel):
 
     @contextmanager
     def batch_updates(self):
-        """Rebuild Quick delegates once after a synchronous structural edit.
+        """Publish a synchronous structural edit to Quick once.
 
         Source model signals stay intact for selection and other consumers.
         A value-only edit never starts a reset and keeps its live editors.
@@ -425,17 +472,51 @@ class TableEditorModel(QAbstractTableModel):
         finally:
             self._batch_update_depth -= 1
             if not self._batch_update_depth:
-                self._end_reset()
+                self._finish_structural_updates()
 
-    def _end_reset(self, *_args):
-        if self._resetting and not self._batch_update_depth:
+    def _finish_structural_updates(self, *_args):
+        if self._batch_update_depth:
+            return
+        if self._resetting:
             self._columns = self._visible_columns()
+            self._visible_column_positions = {column: position for position, column in enumerate(self._columns)}
             self._widths = [self._column_width(column) for column in self._columns]
             self._titles = [self.headerData(column, Qt.Orientation.Horizontal) for column in range(len(self._columns))]
             self._resetting = False
+            self._pending_tail = None
             self.endResetModel()
+            self.rowTotalChanged.emit()
             self.schemaChanged.emit()
             self.changed.emit()
+        elif not self._closed and self._pending_tail:
+            self._finish_tail_change()
+
+    def _finish_tail_change(self):
+        old_count, inserting = self._pending_tail
+        count = self.table.rowCount()
+        if inserting:
+            self.beginInsertRows(QModelIndex(), old_count, count - 1)
+            self._generation += 1
+            for row in range(old_count, count):
+                self._row_generations[row] = self._generation
+            self._pending_tail = None
+            self.endInsertRows()
+        else:
+            removed_drafts = [token for token, draft in self._drafts.items() if draft[0] >= count]
+            for token in removed_drafts:
+                del self._drafts[token]
+            if removed_drafts:
+                self._set_error("Table rows changed. Review the value before continuing.")
+            if self._selection_anchor >= count:
+                self._selection_anchor = -1
+            self.beginRemoveRows(QModelIndex(), count, old_count - 1)
+            for row in range(count, old_count):
+                self._row_generations.pop(row, None)
+                self.releaseRow(row)
+            self._pending_tail = None
+            self.endRemoveRows()
+        self.rowTotalChanged.emit()
+        self._schedule_flush()
 
     def _data_changed(self, first, last, *_args):
         if self._closed or self._resetting or not self._columns:
@@ -447,25 +528,28 @@ class TableEditorModel(QAbstractTableModel):
             # even while its own signals are blocked by a bulk command. Look
             # up that cell directly instead of scanning the whole viewport
             # thousands of times (including for rows outside the viewport).
-            if left not in self._columns:
+            column = self._visible_column_positions.get(left)
+            if column is None:
                 return
-            key = top, self._columns.index(left)
-            if key in self._cells:
-                self._dirty_cells.add(key)
+            key = top, column
+            if key not in self._cells:
+                return
+            self._dirty_cells.add(key)
         else:
             for key in self._cells:
                 row, column = key
                 if top <= row <= bottom and left <= self._columns[column] <= right:
                     self._dirty_cells.add(key)
-        if self._dirty_cells and self._active:
-            self._timer.start(0)
+        if self._dirty_cells:
+            self._schedule_flush()
 
     def _selection_changed(self, selected, deselected):
         # Selection is row decoration, not cell data. Do not reread editors or
         # enumerate their choices just because a row was clicked.
         ranges = list(selected) + list(deselected)
-        changed_rows = {row for row, _ in self._cells
-                        if any(part.top() <= row <= part.bottom() for part in ranges)}
+        intervals = [(part.top(), part.bottom()) for part in ranges]
+        changed_rows = [row for row in self._active_rows
+                        if any(top <= row <= bottom for top, bottom in intervals)]
         for row in changed_rows:
             is_selected = self.rowSelected(row)
             for column in range(len(self._columns)):
@@ -492,7 +576,7 @@ class TableEditorModel(QAbstractTableModel):
 
     def refresh(self):
         """Reconcile rendered records, including blocked-signal changes."""
-        if self._closed or self._resetting:
+        if self._closed or self._resetting or self._pending_tail:
             return
         for row in {key[0] for key in self._cells if key[0] not in self._active_rows}:
             self.releaseRow(row)
@@ -502,8 +586,9 @@ class TableEditorModel(QAbstractTableModel):
         self._flush_dirty()
 
     def _flush_dirty(self):
-        if self._closed or self._resetting:
+        if self._closed or self._resetting or self._pending_tail:
             return
+        self._timer.stop()
         if self._schema_dirty:
             self._schema_dirty = False
             self._refresh_schema()
@@ -527,7 +612,7 @@ class TableEditorModel(QAbstractTableModel):
         columns = self._visible_columns()
         if columns != self._columns:
             self._begin_reset()
-            self._end_reset()
+            self._finish_structural_updates()
             return
         widths = [self._column_width(column) for column in self._columns]
         titles = [self.headerData(column, Qt.Orientation.Horizontal) for column in range(len(self._columns))]
@@ -625,7 +710,9 @@ class TableEditorModel(QAbstractTableModel):
             generation, row, column = map(int, token.split(":"))
         except (ValueError, AttributeError):
             return
-        if generation == self._generation and 0 <= row < self.rowCount() and 0 <= column < self.columnCount():
+        row_count = min(self.rowCount(), self.table.rowCount()) if self._pending_tail else self.rowCount()
+        if (generation == self._row_generations.get(row, self._default_row_generation)
+                and 0 <= row < row_count and 0 <= column < self.columnCount()):
             self._drafts[token] = (row, column, text)
             self._set_error("")
             self._queue_cell((row, column))
@@ -650,10 +737,13 @@ class TableEditorModel(QAbstractTableModel):
 
     @Slot()
     def discardEdits(self):
+        drafts = {draft[:2] for draft in self._drafts.values()}
         self._drafts.clear()
         self._set_error("")
-        if not self._closed:
-            self.refresh()
+        if drafts and not self._closed:
+            self._dirty_cells.update(drafts)
+            if self._active:
+                self._flush_dirty()
 
     @staticmethod
     def _display_only_combo(control):
@@ -726,7 +816,7 @@ class TableEditorModel(QAbstractTableModel):
                 elif item.flags() & Qt.ItemFlag.ItemIsEditable:
                     index = self._source.index(row, column)
                     delegate = self.table.itemDelegateForColumn(column) or self.table.itemDelegate()
-                    editor = delegate.createEditor(self.table, QStyleOptionViewItem(), index)
+                    editor = delegate.createEditor(self._editor_host, QStyleOptionViewItem(), index)
                     if editor is None:
                         raise ValueError("Use the dedicated editor for this value")
                     delegate.setEditorData(editor, index)
@@ -778,6 +868,7 @@ class TableEditorModel(QAbstractTableModel):
             except (RuntimeError, TypeError):
                 pass
         self._connections.clear()
+        self._editor_host.deleteLater()
 
 
 class QuickTableEditor(QWidget):
@@ -825,6 +916,10 @@ class QuickTableEditor(QWidget):
         if root is None or self.model._closed:
             return
         height = max(60, min(420, math.ceil(root.property("preferredHeight"))))
+        if self.model._execution_order:
+            if self.minimumHeight() != height or self.maximumHeight() != height:
+                self.setFixedHeight(height)
+            return
         self.setMinimumHeight(min(height, 220))
         self.setMaximumHeight(16777215 if self.source_table.property("quickFillAvailableHeight") else height)
 

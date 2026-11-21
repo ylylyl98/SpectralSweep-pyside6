@@ -29,12 +29,11 @@ class MCDCommonFilenameTests(unittest.TestCase):
         )
         self.assertTrue(name.startswith("YZ365_p5n2_MCD_G01_"), name)
 
-    def test_temperature_token_uses_filename_safe_decimal(self):
+    def test_temperature_token_uses_a_decimal_point(self):
         name = build_mcd2100_filename(
             "YZ365", 1, -2, 2, "roundtrip", temperature_k=1.8
         )
-        self.assertTrue(name.startswith("YZ365_MCD_1p8K_G01_"), name)
-        self.assertNotIn("1.8K", name)
+        self.assertTrue(name.startswith("YZ365_MCD_1.8K_G01_"), name)
 
     def test_two_sided_gate_ratio_accepts_factor_on_either_side(self):
         self.assertEqual(gate_ratio_from_factors(1, 5), 5)

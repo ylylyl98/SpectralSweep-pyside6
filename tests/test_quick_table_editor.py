@@ -43,6 +43,134 @@ def test_loop_controls_and_values_update_the_original_draft(panel):
     assert view.quick_widget.rootObject().property("liveCells") > 0
 
 
+def test_measurement_setup_click_returns_while_the_quick_dialog_is_open(panel):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QDialogButtonBox
+    from tests.setup_sequence_helpers import set_paired_setup_draft
+    from tests.test_quick_dialogs import click_source_button, source_field
+    from ui.quick_dialogs import install_dialog_migration
+    from ui.setup_sequence_editor import SetupSequenceDialog
+
+    manager = install_dialog_migration(panel)
+    set_paired_setup_draft(panel)
+    view = panel._loop_table._quick_editor.quick_widget
+
+    def find_edit(item):
+        if (item.isVisible() and item.property("appearance") is not None
+                and "Edit..." in str(item.property("text"))):
+            return item
+        for child in item.childItems():
+            button = find_edit(child)
+            if button is not None:
+                return button
+
+    # Bound the test if a future click handler enters a nested dialog.exec().
+    escape = QTimer(panel)
+    escape.setSingleShot(True)
+    def dismiss_modal():
+        modal = QApplication.activeModalWidget()
+        if isinstance(modal, SetupSequenceDialog):
+            modal.reject()
+    escape.timeout.connect(dismiss_modal)
+    try:
+        for accept in (False, True):
+            QTest.qWait(50)
+            button = find_edit(view.rootObject())
+            assert button is not None
+            escape.start(2000)
+            QTest.mouseClick(view, Qt.MouseButton.LeftButton,
+                             pos=button.mapToScene(button.boundingRect().center()).toPoint())
+            escape.stop()
+            dialog = QApplication.activeModalWidget()
+            assert isinstance(dialog, SetupSequenceDialog) and dialog.isVisible()
+            QTest.qWait(50)
+            entry = manager._entries[id(dialog)]
+            combo = dialog.rows[0].combo
+            assert source_field(entry, combo).select(combo.findData("andor_si"))
+            action = QDialogButtonBox.StandardButton.Ok if accept else QDialogButtonBox.StandardButton.Cancel
+            click_source_button(entry, dialog.buttons.button(action))
+            expected = "Andor Silicon, WinSpec" if accept else "PIXIS, WinSpec"
+            assert panel._loop_table.item(0, 2).text() == expected
+            assert QApplication.activeModalWidget() is None
+    finally:
+        escape.stop()
+        dismiss_modal()
+        manager.shutdown()
+
+
+def test_loop_toolbar_tail_changes_keep_existing_quick_editors(panel):
+    from tests.test_quick_parameter_forms import find_item
+
+    source = panel._loop_table
+    view = source._quick_editor
+    model = view.model
+    root = view.quick_widget.rootObject()
+    values = model._columns.index(2)
+    first_editor = find_item(root, f"tableCell_0_{values}")
+    assert first_editor is not None
+    tail = source.rowCount()
+    first_token = model.cellAt(0, values)["token"]
+    model.stageEdit(first_token, "850")
+    resets = QSignalSpy(model.modelReset)
+    removed = QSignalSpy(model.rowsRemoved)
+    inserted_rows = []
+
+    def capture_insert(_parent, first, last):
+        fields = [model.cellAt(first, column) for column in range(model.columnCount())]
+        inserted_rows.append((first, last, [field["kind"] for field in fields]))
+
+    model.rowsInserted.connect(capture_insert)
+    panel._loop_add_btn.click()
+    QTest.qWait(30)
+    kinds_by_source_column = ["check", "choice", "text", "text", "choice"]
+    assert inserted_rows == [(tail, tail, [kinds_by_source_column[column] for column in model._columns])]
+    assert model.rowTotal == source.rowCount() == tail + 1
+    assert find_item(root, f"tableCell_0_{values}") is first_editor
+
+    tail_token = model.cellAt(tail, values)["token"]
+    model.stageEdit(tail_token, "value from deleted row")
+    model.selectRow(tail)
+    panel._loop_del_btn.click()
+    QTest.qWait(30)
+    assert removed.count() == 1
+    assert model.rowTotal == source.rowCount() == tail
+    assert set(model._drafts) == {first_token}
+    assert find_item(root, f"tableCell_0_{values}") is first_editor
+
+    panel._loop_add_btn.click()
+    QTest.qWait(30)
+    assert resets.count() == 0
+    assert model.cellAt(0, values)["token"] == first_token
+    assert model.cellAt(tail, values)["token"] != tail_token
+    model.stageEdit(tail_token, "stale edit")
+    assert model.commitCell(tail_token)
+    assert source.item(tail, 2).text() == ""
+    assert model.commitCell(first_token)
+    assert source.item(0, 2).text() == "850"
+    assert not view.qml_warnings
+
+
+@pytest.mark.parametrize("include_tail", [False, True])
+def test_loop_toolbar_middle_removal_invalidates_shifted_tokens(panel, include_tail):
+    source = panel._loop_table
+    model = source._quick_editor.model
+    values = model._columns.index(2)
+    row_count = source.rowCount()
+    token = model.cellAt(1, values)["token"]
+    next_value = source.item(2, 2).text()
+    model.stageEdit(token, "stale middle edit")
+    resets = QSignalSpy(model.modelReset)
+    removed = QSignalSpy(model.rowsRemoved)
+    model.selectRow(1)
+    if include_tail:
+        model.selectRow(row_count - 1, True)
+    panel._loop_del_btn.click()
+    assert resets.count() == 1 and removed.count() == 0
+    assert model.rowTotal == source.rowCount() == row_count - 1 - include_tail
+    assert model.commitCell(token)
+    assert source.item(1, 2).text() == next_value
+
+
 def test_batch_delegate_validation_selection_and_undo_state(panel):
     view = panel._batch_table._quick_editor
     model = view.model
@@ -536,17 +664,19 @@ def test_batch_bulk_edits_and_structural_history_rebuild_quick_only_once(scrolle
     removed = QSignalSpy(source.model().rowsRemoved)
     rows = [panel._batch_row_values(65) for _ in range(10)]
     panel._insert_batch_rows(66, rows)
-    assert inserted.count() == 10 and resets.count() == 1
+    assert inserted.count() == 1 and inserted.at(0)[1:] == [66, 75]
+    assert resets.count() == 1
     QTest.qWait(30)
     _assert_batch_current_visible(panel, grid)
     panel._undo_batch_edit()
-    assert removed.count() == 10 and resets.count() == 2
+    assert removed.count() == 1 and resets.count() == 2
     panel._redo_batch_edit()
-    assert inserted.count() == 20 and resets.count() == 3
+    assert inserted.count() == 2 and resets.count() == 3
     model.selectRow(66)
     model.selectRowWithModifiers(75, Qt.KeyboardModifier.ShiftModifier.value)
     panel._del_batch_row()
-    assert removed.count() == 20 and resets.count() == 4
+    assert removed.count() == 2 and removed.at(1)[1:] == [66, 75]
+    assert resets.count() == 4
     QTest.qWait(30)
     _assert_batch_current_visible(panel, grid)
     # Value-only history restores keep the existing incremental path.

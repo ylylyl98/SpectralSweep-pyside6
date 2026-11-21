@@ -75,10 +75,32 @@ class ScientificPlotItem(QQuickPaintedItem):
         metrics = QFontMetricsF(font)
         labels = [f"{10 ** v if self._model.log_y else v:.5g}" for v in nice_ticks(*self._model.y_range)] if self._model else ["0"]
         left = max(metrics.horizontalAdvance(text) for text in labels) + metrics.height() * 2.1
+        if self._model and not self._model.show_left_axis:
+            left = metrics.height()
+        break_left, break_right = getattr(self._model, "break_edges", (False, False))
+        if break_left:
+            left = metrics.height() * .65
+        right = metrics.height() * (.75 if break_right else 1.9)
         ml, mt, mr, mb = self._model.extra_margins if self._model else (0, 0, 0, 0)
-        return QRectF(left + ml, metrics.height() * (2.5 if self._model and self._model.energy_axis else .8) + mt,
-                      max(1., self.width() - left - metrics.height() * 1.9 - ml - mr),
-                      max(1., self.height() - metrics.height() * (5.8 if self._model and self._model.energy_axis else 4.1) - mt - mb))
+        energy_space = self._model and (self._model.energy_axis or getattr(self._model, "reserve_energy_axis", False))
+        top = metrics.height() * (2.5 if energy_space else .8)
+        return QRectF(left + ml, top + mt,
+                      max(1., self.width() - left - right - ml - mr),
+                      max(1., self.height() - top - metrics.height() * 3.3 - mt - mb))
+
+    def _horizontal_tick_rect(self, text, x, y, height, metrics):
+        break_left, break_right = getattr(self._model, "break_edges", (False, False))
+        if not (break_left or break_right):
+            return QRectF(x - 60, y, 120, height)
+        # Allow the tick to stay at its calibrated coordinate while keeping
+        # its text inside the local canvas on the narrow side of the break.
+        width = metrics.horizontalAdvance(text) + 2
+        left = x - width / 2
+        if break_left:
+            left = max(0., left)
+        if break_right:
+            left = min(left, self.width() - width)
+        return QRectF(left, y, width, height)
 
     def map_point(self, x, y):
         model = self._model
@@ -168,26 +190,32 @@ class ScientificPlotItem(QQuickPaintedItem):
                 painter.drawLine(QPointF(px, rect.top()), QPointF(px, rect.bottom()))
             painter.setPen(foreground)
             physical_value = 10 ** value if model.log_x else value
-            painter.drawText(QRectF(px - 60, rect.bottom() + 4, 120, metrics.height() * 1.4), Qt.AlignmentFlag.AlignHCenter, f"{physical_value:.6g}")
+            wavelength = f"{physical_value:.6g}"
+            label = self._horizontal_tick_rect(wavelength, px, rect.bottom() + 4, metrics.height() * 1.4, metrics)
+            painter.drawText(label, Qt.AlignmentFlag.AlignHCenter, wavelength)
             if model.energy_axis and value > 0:
-                painter.drawText(QRectF(px - 60, rect.top() - metrics.height() * 1.4, 120, metrics.height()), Qt.AlignmentFlag.AlignHCenter, f"{1239.8419843320026 / value:.5g}")
+                energy = f"{1239.8419843320026 / value:.5g}"
+                label = self._horizontal_tick_rect(energy, px, rect.top() - metrics.height() * 1.4, metrics.height(), metrics)
+                painter.drawText(label, Qt.AlignmentFlag.AlignHCenter, energy)
         for value in yticks:
             py = self.map_display_point(model.x_range[0], value).y()
             if model.grid:
                 painter.setPen(QPen(grid, .7))
                 painter.drawLine(QPointF(rect.left(), py), QPointF(rect.right(), py))
             painter.setPen(foreground)
-            painter.drawText(QRectF(metrics.height(), py - metrics.height() / 2, rect.left() - metrics.height() - 7, metrics.height()), Qt.AlignmentFlag.AlignRight, f"{10 ** value if model.log_y else value:.5g}")
+            if model.show_left_axis:
+                painter.drawText(QRectF(metrics.height(), py - metrics.height() / 2, rect.left() - metrics.height() - 7, metrics.height()), Qt.AlignmentFlag.AlignRight, f"{10 ** value if model.log_y else value:.5g}")
         painter.setPen(foreground)
         painter.drawRect(rect)
         painter.drawText(QRectF(rect.left(), rect.bottom() + metrics.height() * 1.7, rect.width(), metrics.height() * 1.3), Qt.AlignmentFlag.AlignHCenter, model.x_label + (" · log scale" if model.log_x else ""))
         if model.energy_axis:
             painter.drawText(QRectF(rect.left(), 0, rect.width(), metrics.height()), Qt.AlignmentFlag.AlignHCenter, "Energy (eV)")
-        painter.save()
-        painter.translate(2, rect.bottom())
-        painter.rotate(-90)
-        painter.drawText(QRectF(0, 0, rect.height(), metrics.height()), Qt.AlignmentFlag.AlignHCenter, model.y_label + (" · log scale" if model.log_y else ""))
-        painter.restore()
+        if model.show_left_axis:
+            painter.save()
+            painter.translate(2, rect.bottom())
+            painter.rotate(-90)
+            painter.drawText(QRectF(0, 0, rect.height(), metrics.height()), Qt.AlignmentFlag.AlignHCenter, model.y_label + (" · log scale" if model.log_y else ""))
+            painter.restore()
         painter.save()
         painter.setClipRect(rect)
         if model.image is not None and not model.raster.isNull():
@@ -587,6 +615,9 @@ class QuickScientificPlot(QWidget):
         if axis == "top":
             self.model.energy_axis = bool(show)
             self.model.changed.emit()
+        elif axis == "left":
+            self.model.show_left_axis = bool(show)
+            self.model.changed.emit()
 
     def showGrid(self, x=True, y=True, **_):
         self.model.grid = bool(x or y)
@@ -767,8 +798,13 @@ def quick_spectrum_plot_class():
     from ui.spectrum_plot import _SpectrumPlot
 
     class QuickSpectrumPlot(_SpectrumPlot):
-        def __init__(self, parent=None):
-            super().__init__(parent)
+        def __init__(self, parent=None, *, paired_pane=False):
+            super().__init__(parent, paired_pane=paired_pane)
+            self._quick_footer_forms = None
+            if paired_pane:
+                # Use the same fixed-height native readouts and controls in
+                # both panes, including when one splitter side is narrower.
+                return
             # Scope migration to the inherited footer. Descending through the
             # plot would duplicate the numerical renderers and their sources.
             layout = self.layout()
@@ -777,10 +813,8 @@ def quick_spectrum_plot_class():
             self._quick_footer.setObjectName("SpectrumPlotFooter")
             self._quick_footer.setLayout(footer_item.layout())
             layout.addWidget(self._quick_footer)
-            self._quick_footer_forms = None
-
         def showEvent(self, event):
-            if self._quick_footer_forms is None:
+            if not self._paired_pane and self._quick_footer_forms is None:
                 from ui.quick_parameter_forms import install_parameter_forms
                 self._quick_footer_forms = install_parameter_forms(self._quick_footer, "spectrum")
             super().showEvent(event)
@@ -798,6 +832,14 @@ def quick_spectrum_plot_class():
                 box.sigRangeChanged.connect(self._range_changed)
             self._label_plot(plot)
             return plot
+
+        def _set_break_edges(self, plot, *, left=False, right=False):
+            plot.model.break_edges = left, right
+            plot.showAxis("left", not left)
+
+        def _set_energy_axis(self, plot, enabled):
+            plot.model.reserve_energy_axis = self._paired_pane
+            plot.showAxis("top", enabled)
 
         def set_theme(self, mode):
             self._quick_theme = mode

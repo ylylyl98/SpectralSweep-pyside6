@@ -81,10 +81,11 @@ py -3.13 -m venv .venv-pyside6-313
 ```
 
 For ordinary source launches, use `launch.bat` in the repository root. It creates
-the **SpectralSweep (Source)** desktop shortcut, safely checks/updates remote `main`,
+the **SpectralSweep (Source)** desktop and Start menu shortcuts, safely checks/updates remote `main`,
 then selects the managed environment and checks Python dependencies when they change.
-After the first launch, use the desktop shortcut or pin the running source app to
-the taskbar. Local edits or update failures preserve and launch the local version.
+After the first launch, use either shortcut, or right-click **SpectralSweep (Source)**
+in Start to pin it to the taskbar. Local edits or update failures preserve and launch
+the local version.
 `--mock` simulates the spectrometer; `--preview-workspaces` is the isolated
 preview with device operations disabled. See [installation](docs/installation.md#source).
 

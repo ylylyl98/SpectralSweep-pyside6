@@ -175,6 +175,44 @@ hardware, and manual flipper actions are locked during measurements.
 The Spectrum sidebar metadata
 snapshot includes its last observed position and readback timestamp.
 
+### attoDRY2100 fixed split optical path
+
+On the 2100 computer, select **Instruments → Physical station → attoDRY2100
+(split optical path)**. This setting describes the local cabling. Both
+spectrometers receive light continuously and automatic routing skips the MFF101.
+Select **Default / other station** on computers using the switching optical path.
+
+On the 2100, **Single detector** uses the current instrument. To acquire
+on both instruments, connect LightField/PIXIS and the intended Andor camera,
+then select **Dual detectors** on the measurement page. The Andor choice starts
+at **InGaAs** and can be changed to **Silicon**. Set center wavelength, exposure
+and frames for each detector. In Dual Gate, select the paired entry in the
+Measurement setup editor. Previously saved comma-separated setups run in sequence.
+
+Spectrum, Dual Gate, 2D Sweep, Motion Sweep, both MCD pages, and BFP binned
+1D support paired acquisitions. Each acquisition dispatches both detectors at
+the same scan point and waits for both results. Each detector retains its own
+axis. The two CSVs share a run ID and point ID. The accompanying
+`*_pairs.jsonl` lists the files and whether each point completed. If one
+detector fails, its partner's successful spectrum is still saved.
+
+In **Spectrum**, **Plot layout → Side by side** places PIXIS on the left and
+the selected Andor on the right. **Overlay** draws both spectra with their
+original coordinates and counts on one plot. **Hide wavelength gaps** folds
+large unsampled intervals and marks the omitted wavelength limits. Clear
+it to display the full continuous axis. When one detector returns
+pixels and the other wavelengths, the page shows the separate axes.
+Changing the display reuses the current measurement.
+**Apply centers** sets the two spectrograph center wavelengths and reports
+their readbacks without taking an exposure. The acquisition buttons sit
+beside the device status at the upper right. **Acquire pair** takes one
+measurement. **Run pair** repeats the paired acquisition until stopped,
+recording each point in the same run.
+The **Spectra** button opens or collapses the reference list. Select the
+**Reference detector** there to keep the latest spectrum or load a reference
+on that detector's plot. **Fit live** and **Fit visible** fit the view once
+and preserve the current **Auto Y** selection for each plot.
+
 ## LightField experiment metadata
 
 LightField runs in Power Sweep, MegaSweep, BFP, and both MCD tabs
@@ -518,9 +556,10 @@ geometry and reads `get_calibration()`; it never fits, resets, or overwrites
 calibration coefficients. Results are cached until detector geometry, read mode,
 grating, or center wavelength changes.
 
-The cooler is disabled on connection by default. Use **Warm up + disconnect**
-for a cold detector; it turns cooling off and waits for the configured safe
-temperature before closing the SDK connection. Before production data, verify
+Use **Disconnect** in Instruments to close the Andor camera and Shamrock at
+the current detector temperature. You can reconnect while the detector is
+still cold. On connection, the app applies the selected camera's **cool on
+connect** setting (off by default). Before production data, verify
 the optional wavelength-axis reversal against a known spectral line without
 changing the stored calibration.
 

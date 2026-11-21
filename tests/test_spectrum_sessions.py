@@ -95,22 +95,21 @@ class SpectrumSessionsTests(unittest.TestCase):
         self.assertTrue(errors)
         worker.disconnect_all()
 
-    def test_scan_lock_rejects_switch_and_exit_checks_inactive_camera(self):
+    def test_scan_lock_rejects_switch_and_disconnect(self):
         controller = LF6Controller()
         try:
             worker = controller._worker
             worker.connect_instrument(True, "andor_si")
-            camera = worker.setup
-            camera.get_disconnect_safety_snapshot = Mock(return_value={"temperature_c": -70, "cooler_on": True})
             worker.connect_instrument(True, "lightfield")
             controller.set_temperature_monitor_paused("sweep", True)
             requests = []
             controller._connect_requested.connect(lambda *args: requests.append(args))
             controller._shamrock_connection_requested.connect(lambda *args: requests.append(args))
+            controller._disconnect_requested.connect(lambda: requests.append("disconnect"))
             controller.connect_instrument(True, "andor_si")
             controller.set_shamrock_connected(False)
+            controller.disconnect_instrument()
             self.assertEqual(requests, [])
-            self.assertEqual(controller.andor_disconnect_safety_snapshot()["temperature_c"], -70)
         finally:
             controller.shutdown()
 

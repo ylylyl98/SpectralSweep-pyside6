@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 from PySide6.QtWidgets import QApplication
 
+from app.devices.iv_adapter import SMUCommunicationError
 from app.engine.csv_writer import CSVWriter
 from app.experiment_metadata import ExperimentMetadataService
 from app.lightfield_metadata import LightFieldRecorder, managed_capture_dataset
@@ -436,6 +437,8 @@ def test_cancellation_during_file_metadata_stops_before_acquire_and_cleanup(tmp_
 
     def zero(**kwargs):
         assert any(event["event"] == "file_stopped" for event in journal(test.run))
+        assert kwargs["coordinated_gates"] is True
+        assert not kwargs.get("include_bias2")
         cleanup_events.append("zero")
         return original_zero(**kwargs)
 
@@ -449,6 +452,58 @@ def test_cancellation_during_file_metadata_stops_before_acquire_and_cleanup(tmp_
     assert events[-1].get("last_point_index") is None
     assert cleanup_events == ["close", "zero"]
     assert test.run.metadata["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+def test_cleanup_failure_keeps_saved_file_but_marks_run_failed(tmp_path, monkeypatch, stopped):
+    test = build_worker(tmp_path, monkeypatch, points=5 if stopped else 2,
+                        stop_on=3 if stopped else None)
+    zero = Mock(return_value={
+        "Vbg": {"status": "reached_zero"},
+        "Vtg": {"status": "failed", "error": "Vtg did not reach zero"},
+    })
+    monkeypatch.setattr(test.worker._smu.device, "ramp_all_to_zero_report", zero)
+    test.worker.run()
+
+    assert not test.finished[-1][0]
+    assert "Vtg did not reach zero" in test.finished[-1][1]
+    assert test.run.metadata["status"] == "failed"
+    assert zero.call_count == 1
+    assert zero.call_args.kwargs["coordinated_gates"] is True
+    file_event = "file_stopped" if stopped else "file_completed"
+    terminal = [event for event in file_events(test.run) if event["event"] == file_event]
+    assert len(terminal) == 1
+    assert terminal[0]["completed_points"] == terminal[0]["csv_rows"] == 2
+    assert len(list(tmp_path.glob("**/*.csv"))) == 1
+
+
+def test_cleanup_transport_failure_retains_role_report_in_incident(tmp_path, monkeypatch):
+    test = build_worker(tmp_path, monkeypatch, points=2)
+    device = test.worker._smu.device
+    roles = {
+        "Vbg": {"status": "failed", "error": "voltage write timed out"},
+        "Vtg": {"status": "skipped_frozen_after_error"},
+    }
+
+    def zero(**kwargs):
+        assert kwargs["coordinated_gates"] is True
+        device.last_communication_error = SMUCommunicationError(
+            "voltage write timed out", role="Vbg", operation="ramp_to_zero")
+        return roles
+
+    mock_zero = Mock(side_effect=zero)
+    monkeypatch.setattr(device, "ramp_all_to_zero_report", mock_zero)
+    test.worker.run()
+
+    assert not test.finished[-1][0]
+    assert mock_zero.call_count == 1
+    incident = json.loads((tmp_path / "hardware_incidents.jsonl").read_text(encoding="utf-8"))
+    assert incident["stage"] == "smu_cleanup"
+    assert incident["hardware"]["role"] == "Vbg"
+    assert incident["cleanup"]["attempted"]
+    assert incident["cleanup"]["roles"] == roles
+    assert test.run.metadata["status"] == "failed"
+    assert any(event["event"] == "file_completed" for event in file_events(test.run))
 
 
 def test_snapshot_read_error_stops_before_first_acquire(tmp_path, monkeypatch):

@@ -21,7 +21,6 @@ QGroupBox[mcdSection="true"][title=""] { border: none; margin-top: 0px; padding-
 /* The calculator already has its own disclosure heading. */
 QGroupBox#SweepLineCalculator { margin: 0px; padding: 0px; border: none; }
 /* Filename preview already has a disclosure heading; its body has no title. */
-QGroupBox#QuickDualGateFilenameContent { margin: 0px; padding: 0px; }
 QGroupBox[quickWorkspaceSurface="true"] { margin-top: 0px; padding-top: 22px; }
 QGroupBox[quickWorkspaceSurface="true"]::title { subcontrol-origin: margin; left: 12px; top: 8px; }
 /* Disclosure headers already own the caption of these retained groups. */

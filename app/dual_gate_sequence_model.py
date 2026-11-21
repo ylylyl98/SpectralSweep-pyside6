@@ -24,6 +24,23 @@ _READABLE_LABELS = {**_ALIASES, "Center Wavelength (nm)": "Wavelength",
                     "Rotation2 Angle (deg)": "RotOut Angle"}
 
 
+_OPTICAL = ("Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)")
+_DETECTORS = {"lightfield": ("PIXIS",), "winspec_ingaas": ("WinSpec",),
+              "andor_ingaas": ("Andor InGaAs",), "andor_si": ("Andor Silicon",),
+              "pixis_andor_ingaas": ("PIXIS", "Andor InGaAs"),
+              "pixis_andor_si": ("PIXIS", "Andor Silicon")}
+_OUTLINE_VALUE_LIMIT = 12
+_VARYING_SAMPLES = 2000
+
+
+def _label(key):
+    """Readable name; paired Andor parameters keep their detector prefix."""
+    key = str(key)
+    if key.startswith("Andor ") and key[6:] in _OPTICAL:
+        return "Andor " + _READABLE_LABELS.get(key[6:], key[6:])
+    return _READABLE_LABELS.get(key, key)
+
+
 def _enabled(value):
     if isinstance(value, (bool, int, float)):
         return bool(value) and (not isinstance(value, float) or math.isfinite(value))
@@ -108,6 +125,29 @@ def _setting_value(key, value):
     return _value(value)
 
 
+def _recipe(context, prefix=""):
+    """One detector's fixed recipe, e.g. ``650 nm, 50 ms ×1``."""
+    parts = [f"{_value(context[prefix + key])} {unit}" for key, unit in zip(_OPTICAL[:2], ("nm", "ms"))
+             if prefix + key in context]
+    text = ", ".join(parts)
+    if prefix + _OPTICAL[2] in context:
+        text = " ".join(filter(None, (text, "×" + _value(context[prefix + _OPTICAL[2]]))))
+    return text
+
+
+def _acquire_text(fixed):
+    """Describe what one acquisition records from settings that never change."""
+    names = _DETECTORS.get(str(fixed.get("Measurement setup", "")), ())
+    used = {"Measurement setup"}
+    detectors = []
+    for name, prefix in zip(names or ("",), ("", "Andor ")):
+        used.update(prefix + key for key in _OPTICAL)
+        detectors.append(" ".join(filter(None, (name, _recipe(fixed, prefix)))))
+    # One line per detector, then the shared settings that never change.
+    other = " · ".join(f"{_label(key)} {_setting_value(key, value)}" for key, value in fixed.items() if key not in used)
+    return "\n".join(filter(None, (*detectors, other))) or "1 spectrum"
+
+
 def _gate_settings(task):
     point, row = task.get("gate_point"), task.get("row", {})
     values = []
@@ -189,8 +229,10 @@ class DualGateSequenceModel(QAbstractListModel):
     followingStepChanged = Signal()
     filtersChanged = Signal()
     nestingChanged = Signal()
+    planOutlineChanged = Signal()
     _ROLE_NAMES = ("step", "status", "statusKind", "condition", "loop", "gate",
-                   "acquisition", "selected", "sourceIndex")
+                   "acquisition", "selected", "sourceIndex",
+                   "loopVarying", "sameCondition", "sameLoop", "sameGate")
     _ROLES = {int(Qt.ItemDataRole.UserRole) + i + 1: name for i, name in enumerate(_ROLE_NAMES)}
 
     def __init__(self, parent=None, *, page_size=8):
@@ -214,8 +256,14 @@ class DualGateSequenceModel(QAbstractListModel):
         self._focus = {}
         self._following = {}
         self._plan = {}
+        self._loop_rows_by_parameter = None
         self._filters = []
         self._nesting = []
+        self._varying = frozenset()
+        self._outline = []
+        self._outline_key = None
+        self._first_task = {}
+        self._loop_enabled_rows = None
         self._error = ""
         self._published = None
         self._property_publications = {}
@@ -236,6 +284,7 @@ class DualGateSequenceModel(QAbstractListModel):
     currentStep = Property(int, lambda self: int(self._plan.get("current_seq_i", -1)) + 1, notify=changed)
     previewState = Property(str, lambda self: self._plan.get("preview_state", "Applied sequence"), notify=changed)
     nesting = Property("QVariantList", lambda self: list(self._nesting), notify=nestingChanged)
+    planOutline = Property("QVariantList", lambda self: list(self._outline), notify=planOutlineChanged)
     filters = Property("QVariantList", lambda self: list(self._filters), notify=filtersChanged)
     followCurrent = Property(bool, lambda self: self._follow, notify=changed)
     showSkipped = Property(bool, lambda self: self._show_skipped, notify=changed)
@@ -253,10 +302,13 @@ class DualGateSequenceModel(QAbstractListModel):
 
     @Property("QVariantMap", notify=overviewChanged)
     def overview(self):
+        steps = len(self._schedule)
+        unit = ("spectrum" if steps == 1 else "spectra") if self._nested else ("sweep" if steps == 1 else "sweeps")
+        files = max(0, int(self._plan.get("total_acq", 0)))
         return dict(phase=str(self._plan.get("run_outcome", "idle")).capitalize(),
                     planState=self.previewState,
-                    stepsText=f"{len(self._schedule):,} {'spectra' if self._nested else 'sweeps'}",
-                    filesText=f"{max(0, int(self._plan.get('done', 0))):,} / {max(0, int(self._plan.get('total_acq', 0))):,} files",
+                    stepsText=f"{steps:,} {unit}",
+                    filesText=f"{max(0, int(self._plan.get('done', 0))):,} / {files:,} {'file' if files == 1 else 'files'}",
                     unitHint="Each step acquires one spectrum" if self._nested else "Each step runs a full gate sweep")
 
     @Property(str, notify=changed)
@@ -288,6 +340,9 @@ class DualGateSequenceModel(QAbstractListModel):
         key = (id(schedule), id(final_sequence), id(df_batch), grouping)
         is_new = key != self._plan_key
         self._plan = dict(kwargs)
+        self._loop_rows_by_parameter = None
+        self._loop_enabled_rows = None
+        outline_key = (key, id(kwargs.get("loop_definition")), kwargs.get("loop_mode"))
         if is_new:
             self._plan_key = key
             self._schedule, self._sequence = schedule, final_sequence
@@ -297,7 +352,8 @@ class DualGateSequenceModel(QAbstractListModel):
                                   when=str(row.get("When", "") or "Always"),
                                   state="enabled" if _enabled(row.get("Run", True)) else "disabled")
                              for index, row in enumerate(definitions)]
-            self._nested = bool(schedule) and bool(schedule[0].get("nested"))
+            self._first_task = schedule[0] if len(schedule) else {}
+            self._nested = bool(self._first_task.get("nested"))
             self._potential = len(final_sequence) * len(self._batch) if not self._nested else len(schedule)
             self._prefix = [0]
             self._lookup = {}
@@ -334,6 +390,10 @@ class DualGateSequenceModel(QAbstractListModel):
                 self._nesting = (["Gate conditions", *loop_labels, "Repeat", "Gate points"]
                                  if grouping == "batch_first" else [*loop_labels, "Gate conditions", "Repeat", "Gate points"])
             self._nesting.append("Acquire")
+        if outline_key != self._outline_key:
+            self._outline_key = outline_key
+            self._varying = self._varying_keys()
+            self._outline = self._plan_outline()
             self._page = self._selected = 0
             if self._nested:
                 self._show_skipped = False
@@ -346,6 +406,61 @@ class DualGateSequenceModel(QAbstractListModel):
                 ordinal = self._ordinal(schedule[current]) if self._show_skipped else current
                 self._page, self._selected = divmod(ordinal, self.page_size)
         self._refresh()
+
+    def _enabled_loop_rows(self):
+        """Enabled loop-table rows, read from the definition once per plan update."""
+        if self._loop_enabled_rows is None:
+            self._loop_enabled_rows = [row for row in _records(self._plan.get("loop_definition"))
+                                       if _enabled(row.get("Enable", False))]
+        return self._loop_enabled_rows
+
+    def _varying_keys(self):
+        """Loop settings typed as more than one value; never scans the schedule."""
+        return frozenset(str(row.get("Parameter", "")) for row in self._enabled_loop_rows()
+                         if any(mark in str(row.get("Values", "")) for mark in ",;:("))
+
+    def _plan_outline(self):
+        """The whole plan as a few nested lines, outer loop first."""
+        if not len(self._schedule):
+            return []
+        first = self._first_task
+        typed = {str(row.get("Parameter", "")): str(row.get("Values", "")).strip()
+                 for row in self._enabled_loop_rows()}
+        batch = self._batch or [first.get("row", {})]
+        paired = len(_DETECTORS.get(str(first.get("ctx", {}).get("Measurement setup", "")), ())) == 2
+        # With two detectors the plain optical parameters belong to the PIXIS.
+        name = lambda key: ("PIXIS " if paired and key in _OPTICAL else "") + _label(key)
+        lines = []
+        for level in self._order_levels(first):
+            kind = level["kind"]
+            if kind in ("group", "flat_group", "loop"):
+                keys = (list(self._group_values(first, level)) if kind == "group"
+                        else level["parameters"] if kind == "flat_group" else list(first.get("ctx", {})))
+                keys = [key for key in keys if key in self._varying]
+                if not keys:
+                    continue
+                count = f" ({len(self._sequence):,})" if kind == "loop" and len(self._sequence) else ""
+                lines.append(dict(label="For each loop setting" + count + (" · paired" if len(keys) > 1 and kind != "loop" else ""),
+                                  text=" · ".join(f"{name(key)} {typed.get(key) or 'varies'}" for key in keys)))
+            elif kind == "conditions":
+                names = [str(row.get("condition_label") or f"Row {index + 1}") for index, row in enumerate(batch)]
+                shown = ", ".join(names[:_OUTLINE_VALUE_LIMIT])
+                if len(names) > _OUTLINE_VALUE_LIMIT:
+                    shown += f", … {len(names) - _OUTLINE_VALUE_LIMIT:,} more"
+                lines.append(dict(label=f"For each condition ({len(names):,})", text=shown))
+            elif kind == "repeat":
+                repeats = {_positive(row.get("repeat", 1)) for row in batch}
+                if repeats != {1}:
+                    lines.append(dict(label="Repeat", text=f"×{next(iter(repeats))}" if len(repeats) == 1 else "varies by condition"))
+            elif kind == "points":
+                points = {_positive(row.get("frames", 1)) for row in batch}
+                count = f" ({next(iter(points)):,})" if len(points) == 1 else ""
+                span = _gate(dict(row=batch[0]))
+                lines.append(dict(label="For each gate point" + count,
+                                  text=span + (" (first condition)" if len(batch) > 1 else "")))
+        fixed = {key: value for key, value in first.get("ctx", {}).items() if key not in self._varying}
+        lines.append(dict(label="Acquire", text=_acquire_text(fixed)))
+        return lines
 
     def _ordinal(self, task):
         seq, row = int(task.get("seq_i", 0)), int(task.get("row_i", 0))
@@ -400,9 +515,12 @@ class DualGateSequenceModel(QAbstractListModel):
         if _enabled(row.get("MeasurePower", False)):
             acquisition += " · measure power"
         kind, status = self._status(source)
+        changing = {key: value for key, value in context.items() if key in self._varying}
         return dict(step=str(source + 1) if source >= 0 else "—", status=status, statusKind=kind,
                     condition=condition, loop=_context(context, self._plan.get("param_order") or ()),
-                    gate=_gate(task), acquisition=acquisition, sourceIndex=source)
+                    gate=_gate(task), acquisition=acquisition, sourceIndex=source,
+                    loopVarying=" · ".join(f"{_label(key)} {_setting_value(key, value)}" for key, value in changing.items()),
+                    sameCondition=False, sameLoop=False, sameGate=False)
 
     def _condition_label(self, task):
         return str(task.get("row", {}).get("condition_label") or f"Row {int(task.get('row_i', 0)) + 1}")
@@ -434,10 +552,12 @@ class DualGateSequenceModel(QAbstractListModel):
         keys = list(context)
         if not keys:
             return []
-        definition = _records(self._plan.get("loop_definition"))
-        enabled = [row for row in definition if _enabled(row.get("Enable", False))]
-        by_name = {str(row.get("Parameter", "")): row for row in enabled}
-        if len(by_name) != len(enabled) or any(key not in by_name for key in keys):
+        if self._loop_rows_by_parameter is None:
+            enabled = self._enabled_loop_rows()
+            by_name = {str(row.get("Parameter", "")): row for row in enabled}
+            self._loop_rows_by_parameter = by_name if len(by_name) == len(enabled) else {}
+        by_name = self._loop_rows_by_parameter
+        if any(key not in by_name for key in keys):
             return []
         if mode == "Synchronize":
             # The compiled context retains the actual parameter_order sorting.
@@ -526,7 +646,7 @@ class DualGateSequenceModel(QAbstractListModel):
             elif kind == "repeat":
                 label = "Repeat"
                 total = _positive(row.get("repeat", 1))
-                value = f"{int(self._plan.get('current_rep_i', 0)) + 1} / {total}" if live else f"{total:,} repeats"
+                value = f"{int(self._plan.get('current_rep_i', 0)) + 1} / {total}" if live else f"{total:,} {'repeat' if total == 1 else 'repeats'}"
             elif kind == "points":
                 label, fields = "Gate points", _gate_settings(task)
                 if task.get("nested"):
@@ -536,7 +656,8 @@ class DualGateSequenceModel(QAbstractListModel):
                     total = _positive(self._plan.get("current_frame_total") or row.get("frames", 1))
                     value = f"Frame {max(0, int(self._plan.get('current_frame_i', 0)))} / {total}"
                 else:
-                    value = f"{_positive(row.get('frames', 1)):,} points per sweep"
+                    points = _positive(row.get("frames", 1))
+                    value = f"{points:,} {'point' if points == 1 else 'points'} per sweep"
             path.append(dict(label=label, value=value, detail=detail, kind=kind, fields=fields))
         absent_angles = [_READABLE_LABELS[key] for key in ("Rotation1 Angle (deg)", "Rotation2 Angle (deg)") if key not in task.get("ctx", {})]
         acquire_detail = "Skipped by When" if source < 0 else "Power " + ("On" if _enabled(row.get("MeasurePower", False)) else "Off")
@@ -680,7 +801,15 @@ class DualGateSequenceModel(QAbstractListModel):
             acquisition += (f" · repeat {int(self._plan.get('current_rep_i', 0)) + 1}"
                             f" · frame {int(self._plan.get('current_frame_i', 0))}/{int(self._plan.get('current_frame_total', 0))}")
         acquisition += " · Power " + ("On" if _enabled(task.get("row", {}).get("MeasurePower", False)) else "Off")
-        return dict(caption=caption, stepTitle=self._step_title(source), conditionLabel=self._condition_label(task),
+        live = source == current and outcome == "running" and not task.get("nested")
+        position = (self._position_text(task) if task.get("nested") else
+                    f"Frame {max(0, int(self._plan.get('current_frame_i', 0)))} / "
+                    f"{_positive(self._plan.get('current_frame_total') or task.get('row', {}).get('frames', 1))}" if live else "")
+        # Without a loop definition every requested value is shown, as before.
+        loop = formatted.get("loopVarying", "") or ("" if self._enabled_loop_rows() else
+                                                    " · ".join(f"{item['label']} {item['value']}" for item in settings))
+        summary = " · ".join(filter(None, (loop, self._condition_label(task), position)))
+        return dict(summaryLine=summary, caption=caption, stepTitle=self._step_title(source), conditionLabel=self._condition_label(task),
                     status=formatted["status"], statusKind=formatted["statusKind"], positionText=self._position_text(task),
                     acquisitionText=acquisition, settings=settings, gates=_gate_settings(task), changes=changes,
                     orderPath=self._order_path(source, task))
@@ -718,10 +847,17 @@ class DualGateSequenceModel(QAbstractListModel):
         count = min(self.page_size, max(0, total - start))
         self._selected = min(max(0, self._selected), max(0, count - 1))
         rows, detail, focus, following = [], {}, {}, {}
+        above = None  # A page's first row always shows every value in full.
         for offset in range(count):
             source, task = self._entry(start + offset)
             formatted = self._formatted(source, task)
             formatted["selected"] = offset == self._selected
+            if above is not None:
+                # Unchanged values are dimmed so each row shows what the step changes.
+                formatted.update(sameCondition=formatted["condition"] == above["condition"],
+                                 sameLoop=formatted["loop"] == above["loop"],
+                                 sameGate=formatted["gate"] == above["gate"])
+            above = formatted
             rows.append(formatted)
             if formatted["selected"]:
                 previous = self._schedule[source - 1] if source > 0 else None
@@ -771,7 +907,8 @@ class DualGateSequenceModel(QAbstractListModel):
                 ("focus", focus, self.focusStepChanged),
                 ("following", following, self.followingStepChanged),
                 ("filters", self._filters, self.filtersChanged),
-                ("nesting", self._nesting, self.nestingChanged)):
+                ("nesting", self._nesting, self.nestingChanged),
+                ("outline", self._outline, self.planOutlineChanged)):
             if name not in self._property_publications or value != self._property_publications[name]:
                 self._property_publications[name] = value
                 signal.emit()

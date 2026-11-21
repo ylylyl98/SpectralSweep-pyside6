@@ -83,26 +83,6 @@ def _split_grid_rows(grid, name):
     return tuple(owner for owner, _ in rows.values())
 
 
-class _SpectrumSectionsFit(QObject):
-    def __init__(self, panel, row):
-        super().__init__(panel)
-        self.panel, self.row = panel, row
-        panel.installEventFilter(self)
-        self.fit()
-
-    def fit(self):
-        horizontal = self.panel.width() >= 1120
-        self.row.setDirection(QBoxLayout.Direction.LeftToRight if horizontal
-                              else QBoxLayout.Direction.TopToBottom)
-        for index in range(self.row.count()):
-            self.row.setStretch(index, 1 if horizontal else 0)
-
-    def eventFilter(self, watched, event):
-        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
-            self.fit()
-        return False
-
-
 class _McdSectionsFit(QObject):
     def __init__(self, panel, display, row, status_body, progress, telemetry):
         super().__init__(panel)
@@ -147,8 +127,6 @@ def _spectrum(panel):
     # native labels to opposite edges of the desktop header.
     panel._device_status_row.setSpacing(12)
     panel._device_status_row.setStretch(0, 0)
-    panel._device_status.setMinimumWidth(max(panel._device_status.minimumWidth(), 260))
-    panel._device_status_row.addStretch(1)
     optics = _boundary(panel._spectrograph_group)
     optics_layout = optics.layout()
     optics_rows = _split_grid_rows(optics_layout.itemAt(0).layout(), "QuickSpectrumOptics")
@@ -158,26 +136,10 @@ def _spectrum(panel):
     readback_layout.addWidget(panel._optics_readback)
     optics_layout.addWidget(readback)
 
-    root = panel.layout()
-    view_layout, _ = _slot(root, panel._comparison_mode)
-    root_index = next(index for index in range(root.count()) if root.itemAt(index).layout() is view_layout)
-    root.takeAt(root_index)
-    view_layout.setParent(None)
-    view_layout.removeWidget(panel._comparison_hint)
-    view, view_group_layout = _section("Spectrum display", panel)
-    options, options_layout = _row("QuickSpectrumDisplayOptions", view)
-    options_layout.addLayout(view_layout)
-    view_group_layout.addWidget(options)
-    view_group_layout.addWidget(panel._comparison_hint)
-    # Retain the existing acquisition command location if this helper is used
-    # before the workbench has moved that command widget into the shell.
-    controls_row, _ = _slot(root, optics)
-    controls_row.setProperty("quickSectionColumns", True)
-    controls_row.addWidget(view, 1, Qt.AlignmentFlag.AlignTop)
-    controls_row.setAlignment(optics, Qt.AlignmentFlag.AlignTop)
-    fit = _SpectrumSectionsFit(panel, controls_row)
+    parameters = _boundary(panel._acquisition_group)
+    view = _boundary(panel._single_display_options)
     return dict(optics=optics, optics_rows=optics_rows, readback=readback,
-                display=view, display_options=options, fit=fit)
+                parameters=parameters, display=view)
 
 
 def _motion(panel):

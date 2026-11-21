@@ -216,6 +216,23 @@ def _workflow_params(base_output_dir: str) -> dict:
 
 
 class MCDWorkflowTests(unittest.TestCase):
+    def test_paired_history_checks_station_before_applying_any_setting(self):
+        panel = MCDPanel(_PanelMagnetController(), _EmptyController(), _EmptyController(), _EmptyController())
+        self.addCleanup(panel.close)
+        pair = {"lightfield": {"center_nm": 720, "exposure_ms": 200, "frames": 1},
+                "andor_si": {"center_nm": 500, "exposure_ms": 50, "frames": 2}}
+        controls = panel._pair_controls
+        controls.set_station("default")
+        center = panel._center.value()
+        with self.assertRaisesRegex(ValueError, "attoDRY2100"):
+            panel.apply_saved_experiment_settings({"center_nm": 515, "paired_recipes": pair})
+        self.assertEqual(panel._center.value(), center)
+        controls.set_station("attodry2100")
+        panel.apply_saved_experiment_settings({"paired_recipes": pair})
+        self.assertEqual(controls.recipes(), pair)
+        panel.apply_saved_experiment_settings({"center_nm": 515})
+        self.assertFalse(controls.andor_backend)
+
     def test_stop_between_conditions_retains_first_condition_bookkeeping(self):
         magnet = MockAPS100Adapter(time_scale=1.0)
         magnet.connect()
@@ -678,7 +695,7 @@ class MCDWorkflowTests(unittest.TestCase):
             with csv_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
             self.assertEqual(rows[0][:16], MCD_SCALAR_FIELDS)
-            self.assertEqual(rows[0][16:], ["700.000000", "701.000000", "702.000000"])
+            self.assertEqual(rows[0][16:], ["700.0000", "701.0000", "702.0000"])
             self.assertGreaterEqual(len(rows), 5)
             angles = [float(row[4]) for row in rows[1:5]]
             self.assertEqual(angles, [45.0, 135.0, 135.0, 45.0])
@@ -958,6 +975,7 @@ class MCDWorkflowTests(unittest.TestCase):
         self.assertAlmostEqual(rows[1]["vbg_v"], -0.25)
 
         # Doping / E-field: Vtg/Vbg are back-computed from the gate ratio.
+        original_check = panel._condition_table.item(0, 0)
         panel._gate_entry_mode.setCurrentIndex(
             panel._gate_entry_mode.findData("doping_efield")
         )
@@ -966,6 +984,7 @@ class MCDWorkflowTests(unittest.TestCase):
         panel._gate_entry_add.click()
         rows = panel._condition_rows()
         self.assertEqual(len(rows), 3)
+        self.assertIs(panel._condition_table.item(0, 0), original_check)
         self.assertAlmostEqual(rows[2]["vtg_v"], 0.5)
         self.assertAlmostEqual(rows[2]["vbg_v"], 0.25)
         self.assertAlmostEqual(rows[2]["doping_v"], 1.0)

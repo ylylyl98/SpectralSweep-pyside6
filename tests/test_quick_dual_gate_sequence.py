@@ -320,10 +320,14 @@ def test_running_order_path_keeps_delegates_while_live_values_change(app):
         for item in initial:
             item.destroyed.connect(lambda: destroyed.append(True))
 
+        def shown(expected):
+            # The path is one compact line, so each value is part of its text.
+            return any(expected in (item.property("text") or "") for item in subtree(path))
+
         def wait_for_text(expected):
             deadline = time.monotonic() + 3.0
             while time.monotonic() < deadline:
-                if expected in [item.property("text") for item in subtree(path)]:
+                if shown(expected):
                     return
                 QTest.qWait(10)
             pytest.fail(f"Timed out waiting for {expected!r} in execution path")
@@ -332,14 +336,14 @@ def test_running_order_path_keeps_delegates_while_live_values_change(app):
         wait_for_text("Frame 2 / 3")
         assert subtree(path) == initial
         assert not destroyed
-        assert "Frame 2 / 3" in [item.property("text") for item in subtree(path)]
+        assert shown("Frame 2 / 3")
 
         # The next task has the same structure but different requested values.
         widget.update_plan(contexts, rows, current_seq_i=1, current_frame_i=1, **kwargs)
         wait_for_text("810 nm")
         assert subtree(path) == initial
         assert not destroyed
-        assert "810 nm" in [item.property("text") for item in subtree(path)]
+        assert shown("810 nm")
         widget.update_plan(contexts, rows, current_seq_i=1, current_frame_i=1,
                            **{**kwargs, "run_outcome": "failed"})
         assert widget.sequence_model.focusStep["statusKind"] == "failed"

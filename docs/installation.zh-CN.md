@@ -124,11 +124,11 @@ py -3.13 -m venv .venv-pyside6-313
 这个环境名称与 `launch.bat` 的识别规则一致；显式使用解释器路径，无需执行 PowerShell 激活脚本。
 `requirements-quick.txt` 包含应用依赖，并固定已验证的 PySide6 6.11.0。
 
-首次双击根目录 **`launch.bat`**，自动创建带应用图标的 **SpectralSweep (Source)** 桌面快捷方式，
-检查远端最新 `main`，安全更新后启动当前文件夹的应用。以后双击桌面图标即可完成同样的更新和启动。
-需要单击启动时，先启动一次，再右键运行中应用的任务栏图标，选择 **Pin to taskbar**。
-请固定源码版图标，原安装版图标仍启动安装版。应用运行中点击任务栏图标只会切回窗口；
-关闭应用后再次启动才检查更新。
+首次双击根目录 **`launch.bat`**，会在桌面和开始菜单中添加 **SpectralSweep (Source)**，
+再检查远端最新 `main` 并启动当前文件夹的应用。两个快捷方式都会执行同样的更新和启动流程。
+要固定源码版，在开始菜单找到 **SpectralSweep (Source)**，右键选择 **固定到任务栏**（在“所有应用”列表中位于“更多”下）。
+也可以右键运行中应用的任务栏图标并选择 **固定到任务栏**。应用运行中点击任务栏图标会切回窗口，
+关闭后再次启动才检查更新。
 
 自动更新需要 Git 克隆的项目、当前 `main` 跟踪远端 `main`、没有未提交文件，
 且该文件夹没有应用或 Git 操作正在运行。仅执行快进更新。
@@ -139,7 +139,7 @@ py -3.13 -m venv .venv-pyside6-313
 
 不检查 Git 更新而直接启动：运行 `.\.venv-pyside6-313\Scripts\python.exe main.py`。
 依赖安装、帮助、smoke-test 和隔离预览参数会跳过创建快捷方式与 Git 更新。
-它创建/选择项目环境，并在 `requirements.txt` 变化时检查依赖。
+它创建/选择项目环境，并在 `requirements-quick.txt`（及其包含的 `requirements.txt`）变化时检查依赖。
 `.\launch.bat --install` 仅检查/安装 Python 依赖；`.\launch.bat --update-deps` 会升级依赖。
 升级后需要回到固定 Qt 版本时，重新安装 `requirements-quick.txt`。
 

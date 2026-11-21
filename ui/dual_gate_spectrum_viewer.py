@@ -5,6 +5,7 @@ from typing import Any, Optional
 import numpy as np
 import pyqtgraph as pg
 from ui.plot_factory import create_plot, create_image_view
+from ui.station_pair_controls import PAIR_LABELS
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -21,7 +22,7 @@ class DualGateSpectrumViewer(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
-        self.setWindowTitle("Last LightField Acquisition")
+        self.setWindowTitle("Last Spectrum Acquisition")
         self.resize(900, 650)
         self.setMinimumSize(600, 420)
 
@@ -101,7 +102,14 @@ class DualGateSpectrumViewer(QWidget):
                 voltage_bits.append(f"{label}={float(value):g} V")
         if data.ndim == 1:
             self._stack.setCurrentWidget(self._plot)
+            if payload.get("axis_unit") == "pixel":
+                self._plot.setLabel("bottom", "Detector pixel", units="")
+            else:
+                self._plot.setLabel("bottom", "Wavelength", units="nm")
             self._curve.setData(wl, shown)
+            detector = PAIR_LABELS.get(payload.get("measurement_setup"))
+            if detector:
+                voltage_bits.insert(0, detector)
             self._info.setText(point_text + " | ".join(voltage_bits + [f"1D spectrum: {data.size} points"]))
         else:
             self._stack.setCurrentWidget(self._image)

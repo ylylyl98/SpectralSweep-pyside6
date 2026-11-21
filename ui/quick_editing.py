@@ -28,10 +28,7 @@ def discard_quick_edits(panel):
     for form in getattr(panel, "_quick_parameter_forms", {}).get("forms", []):
         if not isValid(form) or form.adapter._closed:
             continue
-        form.adapter._drafts.clear()
-        for field in form.adapter._fields:
-            field.publish(invalid=False, error="")
-        form.adapter.refresh()
+        form.adapter.discard_edits()
 
 
 def require_committed_quick_edits(panel):

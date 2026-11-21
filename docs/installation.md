@@ -135,14 +135,14 @@ The environment name matches `launch.bat`'s discovery rules. Explicit interprete
 paths avoid needing a PowerShell activation script. `requirements-quick.txt`
 includes the application dependencies and pins the validated PySide6 6.11.0 runtime.
 
-Double-click **`launch.bat`** to create the **SpectralSweep (Source)** desktop
-shortcut, check for the latest remote `main`, and start the app. The shortcut uses
-the application icon and this folder's path. After the first launch, use that
-desktop shortcut for the same update-and-start flow.
-For single-click access, launch it once, then right-click the running app's taskbar
-icon and select **Pin to taskbar**. Use this source pin instead of an old installed
-version's pin. While the app is open, clicking its taskbar button returns to its
-window; updates run only on the next launch after closing it.
+Double-click **`launch.bat`** to add **SpectralSweep (Source)** to the desktop and
+Start menu, check for the latest remote `main`, and start the app. Both shortcuts
+use this folder's update-and-start flow.
+To pin the source version, find **SpectralSweep (Source)** in Start and choose
+**Pin to taskbar** from its right-click menu (under **More** in the All apps list).
+You can also right-click the running app's taskbar button and choose **Pin to
+taskbar**. While the app is open, clicking its taskbar button returns to its
+window. Updates run on the next launch after closing it.
 
 Automatic updates require a Git clone on `main` tracking a remote `main`, with a
 clean working tree and no application or Git operation running in that folder.
@@ -155,7 +155,7 @@ The shortcut is local to each computer; pulling source does not create it.
 Shortcut creation requires neither administrator rights nor Python; running the
 app still needs Python and the relevant instrument drivers.
 
-`launch.bat` creates/selects the managed environment and checks `requirements.txt` when
+`launch.bat` creates/selects the managed environment and checks `requirements-quick.txt` (and the `requirements.txt` it includes) when
 dependencies change. `.\launch.bat --install` only checks/installs Python dependencies;
 `.\launch.bat --update-deps` upgrades them. Reapply `requirements-quick.txt` if you
 want to return an upgraded environment to the pinned Qt version.

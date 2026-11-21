@@ -63,7 +63,11 @@ def test_stop_during_responsive_sensor_wait_prevents_measurement_start(app, entr
     page._lf6 = ctrl
     ctrl.abort_acquisition = Mock(side_effect=lambda: [request["cancel_event"].set() for request in ctrl.requests])
     start_measurement = Mock()
-    QTimer.singleShot(5, lambda: entry(page))
+    request_preflight = ctrl.request_sensor_preflight
+    def stop_after_dispatch(request):
+        request_preflight(request)
+        QTimer.singleShot(0, lambda: entry(page))
+    ctrl.request_sensor_preflight = stop_after_dispatch
     try:
         if ensure_sensor_readout(page, ctrl):
             start_measurement()

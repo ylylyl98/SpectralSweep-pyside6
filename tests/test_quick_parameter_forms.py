@@ -226,6 +226,21 @@ def test_invalid_draft_never_clamps_source_or_allows_apply(form):
     assert spy.count() == 1
 
 
+def test_command_checks_pending_input_before_queued_visibility_updates(form, monkeypatch):
+    panel, _, _, fields = form
+    # Commit and discard commands should never enumerate an unrelated menu.
+    monkeypatch.setattr(panel.choice, "itemText", lambda index: pytest.fail("unrelated choice read"))
+    assert not fields["number"].edit("1000")
+    panel.number.hide()
+    assert fields["button"].trigger()
+    panel.number.show()
+    assert not fields["button"].trigger()
+    from ui.quick_editing import discard_quick_edits
+    discard_quick_edits(panel)
+    assert fields["number"].text == "3.50"
+    assert fields["button"].trigger()
+
+
 def test_external_updates_preserve_field_identity_and_replace_old_draft(form):
     panel, _, widget, fields = form
     editor = find_item(widget.rootObject(), "parameter_number")

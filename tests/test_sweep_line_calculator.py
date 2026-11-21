@@ -273,7 +273,9 @@ class SweepLinePanelTests(unittest.TestCase):
         self.assertEqual(panel._safety_bar.maximumHeight(), 36)
         self.assertEqual(panel._safe_jump_spin.width(), 96)
         panel.show()
+        panel._results_tabs.setCurrentWidget(panel._output_scroll)
         self.app.processEvents()
+        self.assertTrue(panel._safe_jump_spin.isVisible())
         self.assertEqual(
             panel._initial_voltage_settle_spin.geometry().center().y(),
             panel._voltage_settle_spin.geometry().center().y(),
@@ -574,6 +576,7 @@ class SweepLinePanelTests(unittest.TestCase):
         panel.show()
         self.app.processEvents()
         height_before = panel.height()
+        results_height_before = panel._results_tabs.height()
 
         panel._sweep_calc._toggle.setChecked(True)
         self.app.processEvents()
@@ -584,10 +587,7 @@ class SweepLinePanelTests(unittest.TestCase):
             panel._workflow_scroll.verticalScrollBar().maximum(),
             0,
         )
-        self.assertGreater(
-            panel._results_scroll.verticalScrollBar().maximum(),
-            0,
-        )
+        self.assertEqual(panel._results_tabs.height(), results_height_before)
         panel.close()
 
     def test_expanding_calculator_preserves_maximized_window(self):

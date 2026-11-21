@@ -298,7 +298,7 @@ class MegaSweepLayoutTests(unittest.TestCase):
             panel._axis_b._start,
             panel._axis_b._stop,
             panel._axis_b._step,
-            *panel._fixed_widget._spins.values(),
+            *panel._fixed_widget._all_spins.values(),  # one permanent editor per axis
             *panel._safety_widget._spins.values(),
             panel._bias2_control.voltage,
             panel._bias2_control.offset,
@@ -309,6 +309,7 @@ class MegaSweepLayoutTests(unittest.TestCase):
             panel._exp_spin,
             panel._center_spin,
             panel._frames_spin,
+            *panel._pair_controls.findChildren(QAbstractSpinBox),
         ]
         self.assertEqual(
             {id(spin) for spin in spins},
@@ -411,3 +412,50 @@ class MegaSweepLayoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_quick_form_keeps_fixed_parameter_editor_after_axes_change():
+    from PySide6.QtTest import QTest
+    from ui.megasweep_panel import MegaSweepPanel
+    from ui.quick_parameter_forms import install_parameter_forms
+
+    QApplication.instance() or QApplication([])
+    panel = MegaSweepPanel()
+    try:
+        panel.resize(1200, 800)
+        panel.show()
+        install_parameter_forms(panel, "mega_sweep")
+        panel._vbias_available = lambda: True
+        panel._sync_vbias_availability()  # e.g. the source meter connects
+        panel._axis_selector._inner.setCurrentText("Vbias")
+        QTest.qWait(50)
+        (axis, editor), = panel._fixed_widget._spins.items()
+        shown = [field for form in panel._quick_parameter_forms["forms"]
+                 for field, widget in form.adapter._fields.items() if widget is editor]
+        assert axis != "Vbias" and len(shown) == 1 and shown[0].visible
+    finally:
+        panel.close()
+        panel.deleteLater()
+
+
+def test_laser_and_power_can_be_left_out_of_the_file_name():
+    QApplication.instance() or QApplication([])
+    panel = MegaSweepPanel()
+    try:
+        panel._laser_edit.setText("532")
+        panel._power_edit.setText("1")
+        shown = []
+        panel._set_summary_text = lambda text, tone=None: shown.append(text)
+        panel._refresh_preview()
+        assert "532nm1uW" in shown[-1]
+        panel._name_laser_power.setChecked(False)
+        panel._refresh_preview()
+        assert "532nm" not in shown[-1]
+        assert panel._collect_params()["laser_nm"] == "532"  # still written to the file header
+        state = panel.capture_session_state()
+        panel._name_laser_power.setChecked(True)
+        panel.restore_session_state(state)
+        assert not panel._name_laser_power.isChecked()
+    finally:
+        panel.close()
+        panel.deleteLater()

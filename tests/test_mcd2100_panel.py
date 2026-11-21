@@ -468,8 +468,8 @@ class MCD2100PanelTests(unittest.TestCase):
         self.assertIn("K_G01_", preview)
         self.assertIn("_G01_", preview)
         self.assertIn("_B-1to+1T_", preview)
-        self.assertIn("_Vtg+0p5_", preview)
-        self.assertIn("_Vbg-0p25_", preview)
+        self.assertIn("_Vtg+0.5_", preview)
+        self.assertIn("_Vbg-0.25_", preview)
         self.assertTrue(preview.endswith("_roundtrip.csv"), preview)
         self.assertEqual(panel.output.text(), derived_output)
         self.assertNotIn("p5n2", panel.output.text())
@@ -529,7 +529,7 @@ class MCD2100PanelTests(unittest.TestCase):
         self.assertIn("_MCD_4K_G01_", panel.filename_preview.text())
         panel.temperature_control_enabled.setChecked(True)
         panel.sample_target.setValue(20.25)
-        self.assertIn("_MCD_20p25K_G01_", panel.filename_preview.text())
+        self.assertIn("_MCD_20.25K_G01_", panel.filename_preview.text())
 
     def test_gate_table_modes_derived_values_reorder_and_shared_rotator(self):
         panel, _, _ = self.make_panel()

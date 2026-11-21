@@ -47,7 +47,7 @@ AppPane {
         function finish(end) {
             const flexible = []
             for (let j = first; j < end; ++j) {
-                if (["Parameter", "Values", "This run", "When", "condition_label", "Preview", "Input type"].indexOf(tableModel.columnTitles[j]) >= 0) flexible.push(j)
+                if (["Parameter", "Values", "This run", "When", "condition_label", "Preview", "Input type", "Defined by"].indexOf(tableModel.columnTitles[j]) >= 0) flexible.push(j)
             }
             const count = flexible.length || end - first
             const extra = Math.floor(Math.max(0, fieldWidth - used) / Math.max(1, count))
@@ -70,6 +70,8 @@ AppPane {
     function readCell(row, column) {
         return root.tableModel.cellAt(row, column)
     }
+    // Route changes directly to the live delegate for the affected row.
+    readonly property var recordsByRow: ({})
     property real savedScrollOffset: -1
     property bool revealCurrentRowPending: false
     function restoreViewport() {
@@ -90,6 +92,14 @@ AppPane {
     }
     Connections {
         target: root.tableModel
+        function onCellChanged(row, column) {
+            const record = root.recordsByRow[row]
+            if (record) record.updateCell(column)
+        }
+        function onRowSelectionChanged(row, selected) {
+            const record = root.recordsByRow[row]
+            if (record) record.selected = selected
+        }
         function onModelAboutToBeReset() {
             // Later resets in the same action already see a view at the top.
             if (root.savedScrollOffset < 0)
@@ -181,20 +191,34 @@ AppPane {
                 property bool ready: false
                 property bool observed: true
                 property int watchedRow: -1
-                signal cellsResumed()
+                function updateCell(column) {
+                    const entry = cellColumns.itemAt(column)
+                    if (entry) entry.cell = root.readCell(index, column)
+                }
+                function release() {
+                    if (watchedRow >= 0 && root.recordsByRow[watchedRow] === record) {
+                        delete root.recordsByRow[watchedRow]
+                        root.tableModel.releaseRow(watchedRow)
+                    }
+                    watchedRow = -1
+                }
                 function observe() {
                     if (!ready) return
-                    if (watchedRow >= 0) root.tableModel.releaseRow(watchedRow)
-                    watchedRow = observed ? index : -1
-                    if (observed) { root.tableModel.watchRow(index); selected = root.tableModel.rowSelected(index); cellsResumed() }
+                    release()
+                    if (!observed || index < 0) return
+                    watchedRow = index
+                    root.recordsByRow[index] = record
+                    root.tableModel.watchRow(index)
+                    selected = root.tableModel.rowSelected(index)
+                    for (let column = 0; column < cellColumns.count; ++column)
+                        updateCell(column)
                 }
                 Component.onCompleted: { ready = true; observe() }
-                Component.onDestruction: if (watchedRow >= 0) root.tableModel.releaseRow(watchedRow)
+                Component.onDestruction: release()
                 onIndexChanged: observe()
                 onObservedChanged: observe()
                 ListView.onPooled: observed = false
                 ListView.onReused: observed = true
-                Connections { target: root.tableModel; function onRowSelectionChanged(row, selected) { if (record.observed && row === record.index) record.selected = selected } }
                 width: rows.width - 10
                 height: fields.implicitHeight + 8
                 radius: 2
@@ -222,6 +246,7 @@ AppPane {
                     width: root.fieldWidth
                     spacing: 4
                     Repeater {
+                        id: cellColumns
                         model: root.tableModel.columnWidths.length
                         delegate: Column {
                             id: entry
@@ -229,10 +254,6 @@ AppPane {
                             readonly property int row: record.index
                             readonly property int column: index
                             property var cell: root.readCell(row, column)
-                            onRowChanged: cell = root.readCell(row, column)
-                            onColumnChanged: cell = root.readCell(row, column)
-                            Connections { target: root.tableModel; function onCellChanged(row, column) { if (record.observed && row === entry.row && column === entry.column) entry.cell = root.readCell(row, column) } }
-                            Connections { target: record; function onCellsResumed() { entry.cell = root.readCell(entry.row, entry.column) } }
                             width: root.fieldWidths[column] || 0
                             clip: root.tableModel.singleLineRows
                             spacing: 2
@@ -248,7 +269,22 @@ AppPane {
                             }
                             Loader {
                                 width: parent.width
-                                sourceComponent: entry.cell.kind === "check" ? checkCell : entry.cell.kind === "choice" ? choiceCell : entry.cell.kind === "actions" ? actionCell : textCell
+                                sourceComponent: entry.cell.kind === "check" ? checkCell : entry.cell.kind === "choice" ? choiceCell : entry.cell.kind === "actions" ? actionCell : entry.cell.kind === "label" ? labelCell : textCell
+                            }
+                            Component {
+                                id: labelCell
+                                AppLabel {
+                                    objectName: "tableCell_" + entry.row + "_" + entry.column
+                                    text: entry.cell.value
+                                    wrapMode: Text.Wrap
+                                    leftPadding: 6
+                                    rightPadding: 2
+                                    topPadding: 4
+                                    bottomPadding: 4
+                                    Accessible.name: entry.cell.label + ", " + text
+                                    HoverHandler { id: labelHover }
+                                    AppToolTip { active: labelHover.hovered; text: entry.cell.tooltip }
+                                }
                             }
                             Component {
                                 id: checkCell

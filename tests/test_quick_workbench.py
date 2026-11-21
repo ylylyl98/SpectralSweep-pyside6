@@ -445,21 +445,22 @@ def test_mcd_commands_dock_above_real_monitoring_view(workbench, page_id):
         panel.deleteLater()
 
 
-def test_spectrum_actions_dock_below_right_tools_and_survive_reference_sidebar_hide(workbench, app, request):
+@pytest.mark.parametrize("width", (1050, 1520))
+def test_spectrum_actions_share_status_row_and_survive_reference_sidebar_hide(workbench, app, request, width):
     from tests.test_quick_parameter_forms import find_item
     shell, window = workbench
     previous = app.property('spectralQuick')
     app.setProperty('spectralQuick', True)
     request.addfinalizer(lambda: app.setProperty('spectralQuick', previous))
     shell.selectPage('spectrum')
-    window.resize(1920, 1080)
+    window.resize(width, 900)
     QTest.qWait(60)
     shell.refresh()
     command = shell._commands['spectrum']
     panel = window._spectrum
-    pane = panel._content_splitter.widget(1)
+    pane = panel._spectrum_command_pane
     assert command.parentWidget() is pane
-    assert pane.isAncestorOf(panel._side_panel)
+    assert panel._content_splitter.widget(1) is panel._side_panel
     assert panel._side_panel.isVisibleTo(window)
     assert panel._content_splitter.count() == 2
     assert pane.layout().indexOf(command) == pane.layout().count() - 1
@@ -467,8 +468,10 @@ def test_spectrum_actions_dock_below_right_tools_and_survive_reference_sidebar_h
     assert command.rootObject().property('embedded')
     assert command.rootObject().property('compact')
     assert command.width() < window.width() * .75
-    assert command.height() < 150
-    assert command.y() >= panel._side_panel.y() + panel._side_panel.height()
+    assert command.height() <= 52
+    assert pane.parentWidget().objectName() == "SpectrumStatusAndCommands"
+    assert pane.parentWidget().height() == command.height()
+    assert panel._content_splitter.geometry().bottom() >= panel.height() - 10
     assert command.y() + command.height() >= pane.height() - 4
     panel._references_toggle.click()
     QTest.qWait(20)
@@ -477,6 +480,160 @@ def test_spectrum_actions_dock_below_right_tools_and_survive_reference_sidebar_h
     assert command.y() + command.height() >= pane.height() - 4
     assert find_item(command.rootObject(), 'command_stop').isVisible()
     assert not shell.command_header.isVisibleTo(window)
+
+
+def test_spectrum_active_abort_stays_reachable_when_status_row_scrolls_away(workbench):
+    shell, window = workbench
+    shell.selectPage("spectrum")
+    panel = window._spectrum
+    command = shell._commands["spectrum"]
+    panel._content_splitter.setMinimumHeight(1200)
+    panel._abort_btn.setEnabled(True)
+    QTest.qWait(40)
+    shell.refresh()
+    scroll = shell.body_scroll.verticalScrollBar()
+    assert scroll.maximum() > 0
+
+    scroll.setValue(scroll.maximum())
+    QTest.qWait(30)
+    shell.refresh()
+    assert command.parentWidget() is shell.command_stack
+    assert shell.command_header.isVisibleTo(window)
+
+    scroll.setValue(0)
+    QTest.qWait(30)
+    shell.refresh()
+    assert command.parentWidget() is panel._spectrum_command_pane
+    assert not shell.command_header.isVisibleTo(window)
+
+
+def test_spectrum_andor_controls_follow_quick_disclosure_and_backend(workbench, app, request):
+    from tests.test_quick_parameter_forms import find_item
+
+    shell, window = workbench
+    previous = app.property("spectralQuick")
+    app.setProperty("spectralQuick", True)
+    request.addfinalizer(lambda: app.setProperty("spectralQuick", previous))
+    window.resize(1600, 1000)
+    shell.selectPage("spectrum")
+    panel, controller = window._spectrum, window._lf6
+    controls = panel._andor_controls
+    form = next(form for form in panel._quick_parameter_forms["forms"]
+                if panel._andor_toggle in form.adapter._fields.values())
+    QTest.qWait(30)
+    disclosure = find_item(form.rootObject(), "parameter_andor_toggle")
+    assert not disclosure.isVisible()
+    assert controls.isHidden()
+
+    def click_disclosure():
+        # Connecting makes the disclosure visible before Quick has resized
+        # the form. Wait for its full hit area before sending the click.
+        for _ in range(100):
+            bounds = disclosure.mapRectToScene(disclosure.boundingRect()).toAlignedRect()
+            if disclosure.isVisible() and form.rect().contains(bounds):
+                break
+            QTest.qWait(10)
+        else:
+            pytest.fail("Andor disclosure did not fit in its Quick form")
+        QTest.mouseClick(form, Qt.MouseButton.LeftButton, pos=bounds.center())
+
+    controller.backend = "andor_ingaas"
+    controller.identity = {"backend": "andor_sdk2", "camera_role": "ingaas"}
+    controller.set_connected(True)
+    assert controls.isHidden()
+    click_disclosure()
+    assert panel._andor_toggle.isChecked()
+    assert controls.isVisibleTo(window)
+    assert controls.temperature_target.isEnabled()
+    controls.set_controls_locked(True)
+    assert controls.isVisibleTo(window)
+    assert not controls.temperature_target.isEnabled()
+    controls.set_controls_locked(False)
+
+    controller.backend = "lightfield"
+    controller.identity = {"backend": "lightfield"}
+    controller.set_connected(True)
+    QTest.qWait(30)
+    assert not disclosure.isVisible()
+    assert controls.isHidden()
+    controller.backend = "andor_si"
+    controller.identity = {"backend": "andor_sdk2", "camera_role": "si"}
+    controller.set_connected(True)
+    QTest.qWait(30)
+    assert disclosure.isVisible()
+    assert controls.isVisibleTo(window)
+    assert controls.read_mode.isEnabled()
+    click_disclosure()
+    assert not panel._andor_toggle.isChecked()
+    assert controls.isHidden()
+
+    controller.set_connected(False)
+    QTest.qWait(30)
+    assert not disclosure.isVisible()
+    assert controls.isHidden()
+
+
+def test_paired_spectrum_keeps_collapsible_references_and_a_compact_command_dock(workbench, app, request):
+    from tests.test_quick_parameter_forms import find_item
+
+    shell, window = workbench
+    previous = app.property("spectralQuick")
+    app.setProperty("spectralQuick", True)
+    request.addfinalizer(lambda: app.setProperty("spectralQuick", previous))
+    panel = window._spectrum
+    controls = panel._pair_controls
+    window._lf6.connected_backends = ("lightfield", "andor_ingaas")
+    window._lf6.acquire_station_pair = lambda *_: {}
+    shell.selectPage("spectrum")
+    window.resize(1120, 800)
+    QTest.qWait(80)
+    controls.set_station("attodry2100")
+    controls.mode.setCurrentIndex(1)
+    QTest.qWait(80)
+    shell.refresh()
+    QTest.qWait(80)
+
+    display = panel._pair_display
+    left, right = (display._splitter.widget(index).geometry() for index in (0, 1))
+    assert display._splitter.orientation() == Qt.Orientation.Horizontal
+    assert left.right() < right.left() and left.top() == right.top()
+    assert min(left.width(), right.width()) > 300
+    assert panel._side_panel.isVisibleTo(window)
+    assert not panel._data_scroll.isVisibleTo(window)
+    assert panel._content_splitter.height() > panel.height() * .6
+    assert not panel._quick_acquisition_sections["display"].isVisibleTo(window)
+    command = shell._commands["spectrum"]
+    assert command.parentWidget() is panel._spectrum_command_pane
+    assert command.isVisibleTo(window)
+    assert find_item(command.rootObject(), "command_acquire").property("text") == "Acquire pair"
+    assert find_item(command.rootObject(), "command_run").property("text") == "Run pair"
+    assert find_item(command.rootObject(), "command_acquire2d") is None
+    assert command.height() <= 52
+    assert panel._content_splitter.geometry().bottom() >= panel.height() - 10
+
+    toggle = panel._references_toggle
+    form = next(view for view in panel._quick_parameter_forms["forms"]
+                if toggle in view.adapter._fields.values())
+    field = next(field for field, source in form.adapter._fields.items() if source is toggle)
+    disclosure = find_item(form.rootObject(), "parameter_" + field.fieldId)
+    point = disclosure.mapToScene(disclosure.boundingRect().center()).toPoint()
+    QTest.mouseClick(form, Qt.MouseButton.LeftButton, pos=point)
+    QTest.qWait(30)
+    assert panel._content_splitter.sizes()[1] == 0
+    assert not panel._side_panel.isVisibleTo(window)
+    QTest.mouseClick(form, Qt.MouseButton.LeftButton, pos=point)
+    QTest.qWait(30)
+    assert panel._side_panel.isVisibleTo(window)
+    assert panel._content_splitter.sizes()[1] > 250
+
+    controls.mode.setCurrentIndex(0)
+    QTest.qWait(80)
+    shell.refresh()
+    assert panel._content_splitter.widget(1).isVisibleTo(window)
+    assert panel._side_panel.isVisibleTo(window)
+    assert panel._quick_acquisition_sections["display"].isVisibleTo(window)
+    assert command.parentWidget() is panel._spectrum_command_pane
+    assert command.isVisibleTo(window)
 
 
 def test_offscreen_lower_action_area_uses_header_only_for_active_stop(workbench):
@@ -626,9 +783,22 @@ def test_navigation_resize_settles_the_complete_render_viewport(workbench):
 
 
 def test_dual_gate_actions_dock_inside_right_pane_without_global_footer(workbench):
-    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtCore import QPoint
     from PySide6.QtWidgets import QScrollArea
     from tests.test_quick_parameter_forms import find_item
+
+    def assert_action_row(command):
+        root = command.rootObject()
+        items = [find_item(root, "command_" + name) for name in ("apply", "run", "stop")]
+        rects = [item.mapRectToScene(item.boundingRect()) for item in items]
+        assert all(item.isVisible() for item in items)
+        assert len({rect.top() for rect in rects}) == 1
+        for left, right in zip(rects, rects[1:]):
+            assert right.left() - left.right() >= 7
+        assert rects[0].left() >= root.property("leftPadding")
+        assert abs(rects[-1].right() - (command.width() - root.property("rightPadding"))) < 1
+        assert all(rect.bottom() <= command.height() for rect in rects)
+
     shell, window = workbench
     panel = window._presets
     pane = QWidget(panel)
@@ -657,10 +827,7 @@ def test_dual_gate_actions_dock_inside_right_pane_without_global_footer(workbenc
     scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
     QTest.qWait(10)
     assert command.mapTo(window, QPoint()) == before
-    for name in ("apply", "run", "stop"):
-        button = find_item(command.rootObject(), "command_" + name)
-        position = button.mapToScene(QPointF())
-        assert 0 <= position.x() <= command.width() - button.width()
+    assert_action_row(command)
     run = find_item(command.rootObject(), "command_run")
     QTest.mouseClick(command, Qt.MouseButton.LeftButton,
                      pos=run.mapToScene(run.boundingRect().center()).toPoint())
@@ -673,13 +840,14 @@ def test_dual_gate_actions_dock_inside_right_pane_without_global_footer(workbenc
     shell.selectPage("spectrum")
     QTest.qWait(20)
     assert not shell.command_stack.isVisibleTo(window)
-    assert shell._commands['spectrum'].parentWidget() is window._spectrum._quick_command_pane
+    assert shell._commands['spectrum'].parentWidget() is window._spectrum._spectrum_command_pane
     assert not command.isVisibleTo(window)
     shell.selectPage("dual_gate")
     QTest.qWait(20)
     assert shell._commands["dual_gate"] is command
     assert command.isVisibleTo(window)
     assert not shell.command_stack.isVisibleTo(window)
+    assert_action_row(command)
     # Replacing a page must retire the old dock and mount its new presenter
     # in the new right pane, rather than reviving the global footer.
     replacement = workflow_panel("dual_gate")
@@ -703,6 +871,7 @@ def test_dual_gate_actions_dock_inside_right_pane_without_global_footer(workbenc
     assert new_command.parentWidget() is replacement._results_pane
     assert new_command.isVisibleTo(window)
     assert not shell.command_stack.isVisibleTo(window)
+    assert_action_row(new_command)
     panel.deleteLater()
 
 

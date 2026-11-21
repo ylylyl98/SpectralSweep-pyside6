@@ -779,7 +779,10 @@ class KeithControl(PyvisaInstrument):
 
     def volt_step(self, volt: float):
         if self.mode != 'volt_step':
-            self.set_volt_step()
+            # Program the requested level before the output is enabled;
+            # otherwise :OUTP ON briefly applies whatever level the
+            # instrument retained from an earlier session.
+            self.set_volt_step(initial_voltage=volt)
         self.write(':SOUR:VOLT:LEV %.3f' % volt)
         # self.query('READ?')
 

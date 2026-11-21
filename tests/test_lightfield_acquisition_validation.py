@@ -351,3 +351,20 @@ def test_explicit_retry_verifies_again_and_can_recover_after_failed_setting(setu
     getattr(adapter, name)(value)
     adapter.acquire()
     assert setup.experiment.captures == 1
+
+
+METHOD = ExperimentSettings.OnlineProcessingFrameCombinationMethod
+
+
+def test_combined_frames_are_averaged_so_they_cannot_overflow(setup):
+    setup.experiment.values[METHOD] = 'Sum'
+    setup.change_frame_to_combine(80)
+    assert setup.experiment.values[METHOD] == 'Average'
+    assert setup.experiment.values[EPF] == 80
+
+
+def test_ignored_average_write_blocks_acquisition(setup):
+    setup.experiment.values[METHOD] = 'Sum'
+    setup.experiment.ignored.add(METHOD)
+    with pytest.raises(RuntimeError, match='frame combination readback mismatch'):
+        setup.change_frame_to_combine(80)

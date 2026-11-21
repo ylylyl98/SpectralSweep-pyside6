@@ -22,13 +22,15 @@ APP_ID = "SpectralSweep.SpectralSweep.Desktop"
 PREVIEW_APP_ID = "SpectralSweep.SpectralSweep.Preview"
 _ROOT = Path(__file__).resolve().parents[1]
 _LOG = logging.getLogger(__name__)
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 
 def runtime_app_id() -> str:
     """Keep installed apps and individual source folders on separate taskbar pins."""
     if getattr(sys, "frozen", False):
         return APP_ID
-    folder = str(_ROOT.resolve()).casefold().encode("utf-8")
+    # Keep the resolved path normalization in sync with tools/windows_shortcut.cs.
+    folder = str(_ROOT.resolve()).translate(_ASCII_LOWER).encode("utf-8")
     return f"SpectralSweep.SpectralSweep.Source.{hashlib.sha256(folder).hexdigest()[:16]}"
 
 

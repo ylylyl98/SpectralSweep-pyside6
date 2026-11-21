@@ -42,6 +42,8 @@ class LoopRunSelections:
                     state["positions"] = sorted(set(positions))
                 self.states[tuple(sorted(str(v) for v in state["rows"]))] = state
         self.groups = {}
+        self._parse = None
+        self._parsed_rows = {}
 
     def synchronize(self, rows, mode, parse):
         groups = {}
@@ -50,29 +52,52 @@ class LoopRunSelections:
                 continue
             level = len(groups) + 1 if mode == "Synchronize" else 1 if mode == "Zip" else int(row["Group"] or 1)
             groups.setdefault(level, []).append((row_i, row))
+        # The live groups own parsed values. Reuse unchanged rows even when
+        # another group is edited, renumbered, or reordered.
+        previous_groups = (
+            {group["key"]: group for group in self.groups.values()} if parse is self._parse else {}
+        )
+        previous_rows = self._parsed_rows if parse is self._parse else {}
+        parsed_rows = {}
         self.groups = {}
         for level, members in groups.items():
             key = tuple(sorted(row["_run_id"] for _, row in members))
             baseline = {}
             valid = True
             for _, row in members:
-                try:
-                    values = parse(row["Values"], row["Parameter"])
-                except ValueError:
-                    values = None
-                valid = valid and bool(values)
-                baseline[row["_run_id"]] = {"parameter": row["Parameter"], "values": values}
+                row_id = row["_run_id"]
+                source = (row["Values"], row["Parameter"])
+                previous = previous_rows.get(row_id)
+                if previous is not None and previous[0] == source:
+                    spec = previous[1]
+                else:
+                    try:
+                        values = parse(*source)
+                    except ValueError:
+                        values = None
+                    spec = {"parameter": row["Parameter"], "values": values}
+                valid = valid and bool(spec["values"])
+                baseline[row_id] = spec
+                parsed_rows[row_id] = (source, spec)
             if key not in self.states:
                 overlap = any(set(key) & set(old) and state.get("positions") is not None
                               for old, state in self.states.items())
                 self.states[key] = dict(rows=list(key), positions=[] if overlap else None,
                                         baseline=_copy_baseline(baseline), stale=overlap)
-            state = self.states[key]
-            if state.get("positions") is not None and valid and state.get("baseline") != baseline:
-                state["stale"] = True
-            if state.get("positions") is None and valid:
-                state["baseline"] = _copy_baseline(baseline)
+            elif valid:
+                previous = previous_groups.get(key)
+                changed = previous is None or any(
+                    spec is not previous["baseline"][row_id] for row_id, spec in baseline.items()
+                )
+                if changed:
+                    state = self.states[key]
+                    if state.get("positions") is None:
+                        state["baseline"] = _copy_baseline(baseline)
+                    elif state.get("baseline") != baseline:
+                        state["stale"] = True
             self.groups[level] = dict(key=key, members=members, baseline=baseline, valid=valid)
+        self._parse = parse
+        self._parsed_rows = parsed_rows
         return self.groups
 
     def choose(self, level, positions):

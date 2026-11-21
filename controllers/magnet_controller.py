@@ -34,12 +34,38 @@ class _MagnetWorker(QObject):
         super().__init__()
         self.adapter = None
         self._stop_event = threading.Event()
+        # Pause requests made from another thread that the worker has not yet
+        # executed. A queued operation must not clear the stop event (and then
+        # run to completion) while one of these is outstanding.
+        self._pause_lock = threading.Lock()
+        self._pending_pauses = 0
         self._timer = QTimer(self)
         self._timer.setInterval(max(100, int(cfg.magnet.poll_interval_s * 1000)))
         self._timer.timeout.connect(self.refresh_snapshot)
 
     def request_stop(self) -> None:
         self._stop_event.set()
+
+    def request_pause(self) -> None:
+        """Thread-safe: stop the active operation and veto queued ones.
+
+        Must be followed by a queued ``pause`` slot call, which consumes it.
+        """
+        with self._pause_lock:
+            self._pending_pauses += 1
+        self._stop_event.set()
+
+    def _begin_operation(self, label: str) -> bool:
+        """Clear the stop event for a new operation unless a pause is pending."""
+        with self._pause_lock:
+            if self._pending_pauses > 0:
+                pending = True
+            else:
+                pending = False
+                self._stop_event.clear()
+        if pending:
+            self.error.emit(f"{label} skipped: pause was requested before it started")
+        return not pending
 
     @Slot(str, bool)
     def connect_instrument(self, resource: str, use_mock: bool) -> None:
@@ -135,14 +161,19 @@ class _MagnetWorker(QObject):
     @Slot()
     def pause(self) -> None:
         self._stop_event.set()
-        self._run_simple("pause", lambda: self.adapter.pause())
+        try:
+            self._run_simple("pause", lambda: self.adapter.pause())
+        finally:
+            with self._pause_lock:
+                self._pending_pauses = max(0, self._pending_pauses - 1)
 
     @Slot()
     def enter_driven_mode(self) -> None:
         if self.adapter is None:
             self.error.emit("APS100 is not connected")
             return
-        self._stop_event.clear()
+        if not self._begin_operation("Enter driven mode"):
+            return
         try:
             self.adapter.enter_driven_mode(
                 stop_event=self._stop_event,
@@ -161,7 +192,8 @@ class _MagnetWorker(QObject):
         if self.adapter is None:
             self.error.emit("APS100 is not connected")
             return
-        self._stop_event.clear()
+        if not self._begin_operation("Enter persistent mode"):
+            return
         try:
             self.adapter.enter_persistent_mode(
                 stop_event=self._stop_event,
@@ -189,7 +221,8 @@ class _MagnetWorker(QObject):
         if self.adapter is None:
             self.error.emit("APS100 is not connected")
             return
-        self._stop_event.clear()
+        if not self._begin_operation("Safe magnet move"):
+            return
         adapter = self.adapter
         commands = []
         previous_observer = getattr(adapter, "command_observer", None)
@@ -400,7 +433,7 @@ class MagnetController(QObject):
         self._remote_requested.emit()
 
     def pause(self) -> None:
-        self._worker.request_stop()
+        self._worker.request_pause()
         self._pause_requested.emit()
 
     def enter_driven_mode(self) -> None:

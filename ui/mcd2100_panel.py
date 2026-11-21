@@ -28,13 +28,15 @@ from ui.workflow_sections import CompactRow, DisclosureSection, bind_log_toggle,
 from ui.mcd_workspace import (add_mcd_gate_settings, configure_mcd_workspace, mcd_settings_pane,
                               mcd_control_actions, mcd_readouts, mcd_control_fields,
                               add_mcd_field_settings, populate_mcd_gate_entry)
-from ui.table_layout import fit_table_columns
+from ui.table_layout import batch_table_updates, fit_table_columns
 
 from app.engine.mcd2100_worker import MCD2100Worker
 from app.engine.magnet_preparation import (
     MagnetPreparationWorker, format_preparation_progress, preparation_mode_observation,
 )
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
+from app.engine.mcd_paired_spectra import MCDPairedSpectra
+from ui.station_pair_controls import StationPairControls
 from copy import deepcopy
 from ui.sensor_readout_preflight import ensure_sensor_readout
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
@@ -66,6 +68,7 @@ class _LightFieldRotationService:
         self._smu = smu_controller
         self._last_position = None
         self.wavelengths = None
+        self.station_pair = None
 
     def prepare(self, _stop_event):
         if self._lf6 is None or not getattr(self._lf6, "is_connected", False):
@@ -82,6 +85,9 @@ class _LightFieldRotationService:
         return self.wavelengths
 
     def ensure_ready(self):
+        if self.station_pair:
+            self.station_pair.validate()
+            return
         ensure = getattr(self._lf6, "ensure_ready", None)
         if callable(ensure):
             ensure(timeout_s=15.0, poll_interval_s=0.05)
@@ -91,6 +97,8 @@ class _LightFieldRotationService:
 
     def configure(self, *, center_nm=None, exposure_ms=None, frames=None):
         """Use only the established LightField controller surface."""
+        if self.station_pair:
+            return {"dual_detector_recipes": self.station_pair.recipes}
         spectrometer = getattr(self._lf6, "adapter", None)
         if spectrometer is None:
             raise RuntimeError("LightField spectrometer is unavailable")
@@ -157,6 +165,13 @@ class _LightFieldRotationService:
                 result["Ibias2_A"] = float(read_current(strict=True))
                 if not math.isfinite(result["Ibias2_A"]): raise RuntimeError("Vbias2 current readback is non-finite")
         return result
+
+    def verify_gates(self, *, vtg_v, vbg_v, vbias_v):
+        """Check the settled gates/bias once; raises if off target or clamped."""
+        from utils.bias_control import verify_setpoints
+        device = getattr(getattr(self, "_smu", None), "device", None)
+        if device is not None:
+            verify_setpoints(device, {"Vbg": vbg_v, "Vtg": vtg_v, "Vbias": vbias_v})
 
     def move_to(self, angle):
         rotator = self._rotation.adapter(self._rotator_name) if self._rotation else None
@@ -686,8 +701,8 @@ class MCD2100Panel(QWidget):
         temperature_note.setWordWrap(True)
         temperature_form.addRow(temperature_note)
         self.temperature_control_enabled.toggled.connect(self._update_temperature_controls)
-        self.temperature_control_enabled.toggled.connect(self._update_condition_preview)
-        self.sample_target.valueChanged.connect(self._update_condition_preview)
+        self.temperature_control_enabled.toggled.connect(self._update_condition_temperature)
+        self.sample_target.valueChanged.connect(self._update_condition_temperature)
         self.sample_target.valueChanged.connect(self._on_temperature_target_edited)
         self.apply_temperature_btn.clicked.connect(self.apply_temperature)
 
@@ -720,6 +735,11 @@ class MCD2100Panel(QWidget):
         lightfield_form.addRow("Exposure", self.lf_exposure)
         lightfield_form.addRow("Frames / accums", self.lf_frames)
         compact_form_rows(lightfield_form, (self.lf_center, self.lf_exposure, self.lf_frames), labels_above=True)
+        self._pair_controls = StationPairControls(side_by_side=False)
+        lightfield_form.addRow(self._pair_controls)
+        self._pair_controls.bind_controller(self._lf6)
+        self._pair_controls.backend_changed.connect(self._on_detector_mode_changed)
+        self.run_state_changed.connect(lambda running: self._pair_controls.set_editing_enabled(not running))
 
         gate_group = QGroupBox("Gate / SMU")
         self._gate_group = gate_group
@@ -1109,6 +1129,10 @@ class MCD2100Panel(QWidget):
         widget.setDecimals(decimals)
         return widget
 
+    def _on_detector_mode_changed(self, backend):
+        for field in (self.lf_center, self.lf_exposure, self.lf_frames):
+            field.setEnabled(not backend)
+
     def _update_temperature_controls(self, *_args) -> None:
         recovery = bool(getattr(self.controller, "mode_recovery_required", False))
         pending_snapshot = self._pending_work_snapshot()
@@ -1395,11 +1419,11 @@ class MCD2100Panel(QWidget):
             stop_field = float(self.stop_field.text().strip())
             if not math.isfinite(start_field) or not math.isfinite(stop_field):
                 raise ValueError
-            enabled = [row for row in (_rows if _rows is not None else self._condition_rows()) if row.get("enabled", True)]
-            if not enabled:
+            rows = _rows if _rows is not None else self._condition_rows()
+            condition = next((row for row in rows if row.get("enabled", True)), None)
+            if condition is None:
                 self.filename_preview.setText("Enable a gate condition to preview its filename")
                 return
-            condition = enabled[0]
             temperature_k, _source = self._filename_temperature()
             filename = build_mcd2100_filename(
                 self._sample_id.text().strip() or "SampleID",
@@ -1454,23 +1478,14 @@ class MCD2100Panel(QWidget):
         if not hasattr(self, "_condition_summary"):
             return
         try:
-            rows = [resolve_condition_line(row, self._gate_ratio()) for row in self._condition_rows_raw()]
+            ratio = self._gate_ratio()
+            rows = [resolve_condition_line(row, ratio) for row in self._condition_rows_raw()]
         except (TypeError, ValueError) as exc:
             self._condition_preview_cache = None
             self._condition_summary.setText(f"Condition preview unavailable: {exc}")
             return
         enabled = [(table_row, item) for table_row, item in enumerate(rows, start=1)
                    if item.get("enabled", True)]
-        count = len(enabled)
-        try:
-            filename_temperature, _source = self._filename_temperature()
-            temperature_summary = f" · filename {filename_temperature:g} K"
-        except ValueError:
-            temperature_summary = " · filename temperature unavailable"
-        self._condition_summary.setText(
-            f"{len(rows)} total · {count} enabled · {count} round trips · "
-            f"{count * 2} field legs · {count} CSV files{temperature_summary}"
-        )
         lines = []
         for gate_index, (table_row, item) in enumerate(enabled, start=1):
             lines.append(
@@ -1488,7 +1503,25 @@ class MCD2100Panel(QWidget):
         execution_by_row = {table_row - 1: index for index, (table_row, _item) in enumerate(enabled, start=1)}
         self._condition_preview_cache = (rows, execution_by_row)
         self._update_condition_selection()
-        self._update_filename_preview(_rows=rows)
+        self._update_condition_temperature()
+
+    def _update_condition_temperature(self, *_args) -> None:
+        cached = getattr(self, "_condition_preview_cache", None)
+        if cached is None:
+            return
+        rows, execution_by_row = cached
+        count = len(execution_by_row)
+        try:
+            filename_temperature, _source = self._filename_temperature()
+            temperature_summary = f" · filename {filename_temperature:g} K"
+        except ValueError:
+            temperature_summary = " · filename temperature unavailable"
+        self._condition_summary.setText(
+            f"{len(rows)} total · {count} enabled · {count} round trips · "
+            f"{count * 2} field legs · {count} CSV files{temperature_summary}"
+        )
+        first = next(iter(execution_by_row), None)
+        self._update_filename_preview(_rows=() if first is None else (rows[first],))
 
     def _update_condition_selection(self, *_args) -> None:
         cached = getattr(self, "_condition_preview_cache", None)
@@ -1550,19 +1583,21 @@ class MCD2100Panel(QWidget):
 
     def _condition_rows_raw(self) -> list[dict[str, Any]]:
         """Capture editable condition cells verbatim, including invalid drafts."""
-        rows = []
-        for row in range(self._condition_table.rowCount()):
-            check = self._condition_table.item(row, 0)
-            mode_widget = self._condition_table.cellWidget(row, 2)
-            rows.append({
-                "enabled": bool(check and check.checkState() == Qt.CheckState.Checked),
-                "mode": mode_widget.currentData() if mode_widget is not None else MODE_DIRECT,
-                "input_a": self._condition_table.item(row, 8).text() if self._condition_table.item(row, 8) else "",
-                "input_b": self._condition_table.item(row, 9).text() if self._condition_table.item(row, 9) else "",
-                "vbias_v": self._condition_table.item(row, 5).text() if self._condition_table.item(row, 5) else "",
-                **((check.data(Qt.ItemDataRole.UserRole) or {}) if check else {}),
-            })
-        return rows
+        return [self._condition_row_raw(row) for row in range(self._condition_table.rowCount())]
+
+    def _condition_row_raw(self, row: int) -> dict[str, Any]:
+        table = self._condition_table
+        check = table.item(row, 0)
+        mode_widget = table.cellWidget(row, 2)
+        a, b, bias = (table.item(row, col) for col in (8, 9, 5))
+        return {
+            "enabled": bool(check and check.checkState() == Qt.CheckState.Checked),
+            "mode": mode_widget.currentData() if mode_widget is not None else MODE_DIRECT,
+            "input_a": a.text() if a else "",
+            "input_b": b.text() if b else "",
+            "vbias_v": bias.text() if bias else "",
+            **((check.data(Qt.ItemDataRole.UserRole) or {}) if check else {}),
+        }
 
     def _gate_ratio(self) -> float:
         return gate_ratio_from_factors(
@@ -1834,13 +1869,14 @@ class MCD2100Panel(QWidget):
             if self._gate_edit_row is None:
                 self._append_condition_rows(rows, provenance)
             else:
-                existing = [resolve_condition_line(row, self._gate_ratio()) for row in self._condition_rows_raw()]
+                existing = self._condition_rows_raw()
                 edit_row = self._gate_edit_row
                 if edit_row < 0 or edit_row >= len(existing):
                     raise ValueError("The selected gate row no longer exists")
                 replacement = [{**item, "enabled": existing[edit_row]["enabled"]} for item in rows]
                 combined = existing[:edit_row] + replacement + existing[edit_row + 1:]
-                combined = [resolve_condition_line(item, self._gate_ratio()) for item in combined]
+                ratio = self._gate_ratio()
+                combined = [resolve_condition_line(item, ratio) for item in combined]
                 validate_gate_conditions(combined, cfg.smu.volt_compliance_V)
                 if len(rows) == 1:
                     self._updating_table = True
@@ -1875,7 +1911,7 @@ class MCD2100Panel(QWidget):
         if row < 0:
             self._show_error("Select a gate row to edit")
             return
-        raw = self._condition_rows_raw()[row]
+        raw = self._condition_row_raw(row)
         try:
             condition = resolve_condition_line(raw, self._gate_ratio())
         except ValueError as exc:
@@ -1924,9 +1960,10 @@ class MCD2100Panel(QWidget):
         if not rows:
             raise ValueError("No gate rows were provided")
         # Resolve and validate the complete result before changing the table.
-        existing = [resolve_condition_line(row, self._gate_ratio()) for row in self._condition_rows_raw()]
+        ratio = self._gate_ratio()
+        existing = self._condition_rows_raw()
         if len(existing) == 1:
-            only = existing[0]
+            only = resolve_condition_line(existing[0], ratio)
             if (
                 only.get("mode") == MODE_DIRECT
                 and only.get("bias2_mode", "off") == "off"
@@ -1935,18 +1972,18 @@ class MCD2100Panel(QWidget):
                 and abs(float(only.get("vbias_v", 0.0))) <= 1e-12
             ):
                 existing = []
-        combined = resolve_gate_conditions([*existing, *rows], self._gate_ratio())
+        combined = resolve_gate_conditions([*existing, *rows], ratio)
         validate_gate_conditions(combined, cfg.smu.volt_compliance_V)
         table = self._condition_table
         replace_empty = not existing
         first_new = len(existing)
         self._updating_table = True
         try:
-            with QSignalBlocker(table):
+            with batch_table_updates(table), QSignalBlocker(table):
                 if replace_empty:
                     table.setRowCount(0)
+                table.setRowCount(len(combined))
                 for index in range(first_new, len(combined)):
-                    table.insertRow(index)
                     self._populate_condition_row(index, combined[index])
                     self._refresh_condition_row(index)
                     for column in (3, 4, 5, 6, 7, 8, 9):
@@ -1995,7 +2032,7 @@ class MCD2100Panel(QWidget):
         try:
             with QSignalBlocker(table):
                 modes = [table.cellWidget(index, 2).currentData() for index in (row, target)]
-                for column in (0, 3, 4, 5, 6, 7, 8, 9):
+                for column in (0, 3, 4, 5, 6, 7, 8, 9, 10):
                     first, second = table.takeItem(row, column), table.takeItem(target, column)
                     if second is not None:
                         table.setItem(row, column, second)
@@ -2097,9 +2134,12 @@ class MCD2100Panel(QWidget):
             "temperature_timeout_s": lambda v: self.temperature_timeout.setValue(float(v)),
         }
         if keys_only:
-            return {"supported_keys": list(allowed)}
+            return {"supported_keys": ["paired_recipes", *allowed]}
+        self._pair_controls.restore_measurement_mode(settings.get("paired_recipes"))
         skipped = []
         for key, value in dict(settings or {}).items():
+            if key == "paired_recipes":
+                continue
             setter = allowed.get(key)
             if setter is None:
                 skipped.append(key)
@@ -3147,7 +3187,7 @@ class MCD2100Panel(QWidget):
         self.sample_temperature_value.setText(display(sample_temperature))
         if isinstance(sample_temperature, (int, float)) and math.isfinite(float(sample_temperature)):
             self._last_sample_temperature_k = float(sample_temperature)
-            self._update_condition_preview()
+            self._update_condition_temperature()
         self.vti_temperature_value.setText(
             display(getattr(snapshot, "vti_temperature_k", None))
         )
@@ -3370,13 +3410,19 @@ class MCD2100Panel(QWidget):
                 stem = f"{sanitize_token(self.stem.text().strip())}_{suffix:03d}"
                 suffix += 1
             rotator_name = self.rotator.currentText().strip() or "rot1"
+            andor_backend = self._pair_controls.andor_backend
+            station_pair = None
+            if andor_backend:
+                station_pair = MCDPairedSpectra(self._lf6, andor_backend, self._pair_controls.recipes(), output, stem)
+                station_pair.validate()
             if self._optical_factory is None:
                 if self._lf6 is None or not bool(getattr(self._lf6, "is_connected", False)):
                     raise ValueError("LightField is not connected")
                 connected = getattr(self._rotation, "is_connected", None)
                 if not callable(connected) or not connected(rotator_name):
                     raise ValueError(f"{rotator_name.upper()} is not connected")
-                if not ensure_sensor_readout(self, self._lf6, mode="1d"):
+                sensor_options = {"backends": ["lightfield"]} if station_pair else {}
+                if not ensure_sensor_readout(self, self._lf6, mode="1d", **sensor_options):
                     return
             sensor_intents = deepcopy(getattr(self._lf6, "sensor_readout_intents", {}))
             self._save_config_from_ui()
@@ -3411,6 +3457,8 @@ class MCD2100Panel(QWidget):
                     "smu": {"volt_compliance_V": cfg.smu.volt_compliance_V},
                     "ramp": vars(cfg.ramp),
                 }
+                if station_pair:
+                    settings_snapshot.update(station_id="attodry2100", paired_recipes=station_pair.recipes)
                 self._experiment_run = ExperimentMetadataService(base_root).begin(
                     "mcd_attodry2100", device_id, output_dir=output,
                     sample_id=device_id, settings=settings_snapshot,
@@ -3431,6 +3479,9 @@ class MCD2100Panel(QWidget):
             optical = _LazyOpticalService(self._optical_factory) if self._optical_factory else _LightFieldRotationService(
                 self._lf6, self._rotation, rotator_name, self._smu
             )
+            if station_pair:
+                station_pair.metadata_run = self._experiment_run
+                optical.station_pair = station_pair
             worker = self._worker_factory(
                 self.controller, optical, start_field, stop_field, angles, output,
                 stem=stem, bidirectional=True,

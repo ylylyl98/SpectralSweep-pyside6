@@ -51,16 +51,19 @@ from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_con
 from copy import deepcopy
 from ui.sensor_readout_preflight import ensure_sensor_readout
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
+from app.paired_spectra import PAIRED_STATION_ID, validate_pair_recipes
+from app.paired_spectrum_files import PairedSpectrumFiles
 from app.power_reading import power_correction_factor, power_reading_lock, read_power
 from app.nd_calibration import make_power_points, positions_for_power, predict_power
 from app.devices.motion_verification import MotionCancelledError, MotionVerificationConfig, move_and_verify
 from utils.motion_conditions import (MODE_DOPING_EFIELD, build_conditions,
-    expand_sequence, resolve_rotation_plan, sequence_preview, build_motion_plan,
+    expand_sequence, resolve_rotation_plan, sequence_preview, sequence_size, build_motion_plan,
     normalize_motion_axis, parse_motion_values, MOTION_NOT_USED, MOTION_HOLD, MOTION_FIXED, MOTION_SWEEP,
     MOTION_AXES)
 from ui.motion_conditions_widget import MotionConditionsWidget
 from ui.motion_sequence_preview import create_motion_sequence_preview as MotionSequencePreviewDialog
 from ui.nd_calibration_widget import NDCalibrationWidget
+from ui.station_pair_controls import PAIR_LABELS, StationPairControls
 from ui.workflow_sections import DisclosureSection, compact_form_rows, divide_grid_fields, inline_divider
 from utils.filename_builder import (
     FilenameContext, build_base_filename, sanitize_token, format_compact_number,
@@ -287,6 +290,12 @@ def _read_scalar_row(
         vbg_m, vtg_m = _read_gates(iv)
         vbias_m = _read_bias(iv)
         Ibg, Itg, Ib = _read_currents(iv)
+        from utils.bias_control import check_setpoint_readings
+        check_setpoint_readings(
+            iv,
+            {"Vbg": Vbg_set, "Vtg": Vtg_set, "Vbias": Vbias_set},
+            {"Vbg": (vbg_m, Ibg), "Vtg": (vtg_m, Itg), "Vbias": (vbias_m, Ib)},
+        )
         values.extend([
             Vbg_set, vbg_m,
             Vtg_set, vtg_m,
@@ -345,6 +354,7 @@ class _PowerSweepWorker(QObject):
     log = Signal(str)
     progress = Signal(int, int)
     spectrum = Signal(object, object)  # wl, cts
+    paired_spectra = Signal(object)
     finished = Signal()
     error = Signal(str)
 
@@ -379,8 +389,33 @@ class _PowerSweepWorker(QObject):
         finally:
             self.finished.emit()
 
+    def _capture_paired_point(self, params):
+        try:
+            return self._lf6.acquire_station_pair(
+                params["station_pair_backend"], params["station_pair_recipes"],
+                self._stop, owner="power_sweep")
+        except RuntimeError as exc:
+            if self._stop.is_set():
+                raise _StopRequested() from exc
+            raise
+
+    def _save_paired_point(self, writer, point_id, records, columns, values):
+        paths = writer.write_point(point_id, records, scalars=dict(zip(columns, map(_csv_cell, values))))
+        self.paired_spectra.emit(records)
+        recovery_required = any(result.get("recovery_required") for result in records.values())
+        if self._stop.is_set() and not recovery_required:
+            raise _StopRequested()
+        if len(paths) != len(writer.backends):
+            errors = "; ".join(f"{PAIR_LABELS[backend]}: {records.get(backend, {}).get('error', 'No spectrum')}"
+                               for backend in writer.backends if backend not in paths)
+            raise RuntimeError(f"Paired acquisition incomplete at point {point_id}. {errors}")
+        return paths
+
     def _run_sweep(self, p):
         p.setdefault("power_correction_factor", self._p.get("power_correction_factor", 1.0))
+        paired_backend = p.get("station_pair_backend")
+        if paired_backend:
+            self._lf6.validate_station_pair(paired_backend, p["station_pair_recipes"])
         external_base = p.pop("external_gate_filename_base", None)
         if external_base is not None and not p.get("apply_gates"):
             token = ""
@@ -427,7 +462,7 @@ class _PowerSweepWorker(QObject):
         iv = self._smu.device if smu_ok else None
 
         # ── apply LF6 settings ───────────────────────────────────────────────
-        if setup is not None:
+        if setup is not None and not paired_backend:
             try:
                 prepare = getattr(self._lf6, "configure_for_acquisition", None)
                 if callable(prepare):
@@ -441,24 +476,23 @@ class _PowerSweepWorker(QObject):
                 raise RuntimeError(f"LF6 acquisition preparation failed: {exc}") from exc
 
         # ── wavelength calibration ───────────────────────────────────────────
-        self.log.emit(f"[{_ts()}] Acquiring wavelength calibration...")
         wls = np.array([])
-        if spec is not None:
-            try:
-                wls = spec.calibration_wavelengths(force=False)
-            except Exception:
-                pass
-        if wls.size <= 2 and setup is not None:
-            try:
-                wls = np.asarray(
-                    setup.get_wavelength_calibration(), dtype=float
-                ).ravel()
-            except Exception:
-                pass
-        if wls.size <= 2:
-            raise RuntimeError(
-                "Could not obtain wavelength calibration. Aborting."
-            )
+        if not paired_backend:
+            self.log.emit(f"[{_ts()}] Acquiring wavelength calibration...")
+            if spec is not None:
+                try:
+                    wls = spec.calibration_wavelengths(force=False)
+                except Exception:
+                    pass
+            if wls.size <= 2 and setup is not None:
+                try:
+                    wls = np.asarray(
+                        setup.get_wavelength_calibration(), dtype=float
+                    ).ravel()
+                except Exception:
+                    pass
+            if wls.size <= 2:
+                raise RuntimeError("Could not obtain wavelength calibration. Aborting.")
 
         # ── set PM wavelength ────────────────────────────────────────────────
         if pm is None:
@@ -522,6 +556,8 @@ class _PowerSweepWorker(QObject):
             fp = out_path / f"{p['base_name']}_{k:03d}.csv"
             k += 1
         self._last_output_path = fp
+        pair_writer = PairedSpectrumFiles(fp.parent, fp.stem, paired_backend) if paired_backend else None
+        self._last_pair_manifest = pair_writer.manifest_path if pair_writer is not None else None
 
         cols = _scalar_column_names(
             smu_ok,
@@ -604,6 +640,7 @@ class _PowerSweepWorker(QObject):
                     row_rotation_actual = p.get("rotation_actual", NAN)
                     row_rot_actual = {}
                     row_gate_observed = {}
+                    paired_records = None
                     if move_ok:
                         try:
                             if p.get("strict_sequence") and self._rot is not None:
@@ -620,31 +657,37 @@ class _PowerSweepWorker(QObject):
                             row_rotation_actual = (row_rot_actual.get("rot1", p.get("rot1_actual", p.get("rotation_actual")))
                                                    if p.get("rotation_axis") == "rot1" else
                                                    row_rot_actual.get("rot2", p.get("rot2_actual", p.get("rotation_actual"))))
-                            set_lightfield_context(self._lf6, output_file=fp, point_index=done, position=float(pos),
-                                                   condition_id=p.get("condition_id"), sequence=p.get("sequence"),
-                                                   repeat=p.get("repeat"), rotation_requested=p.get("rotation_requested"),
-                                                   rotation_actual=row_rotation_actual,
-                                                   rot1_requested=p.get("rot1_requested"), rot1_actual=row_rot_actual.get("rot1", p.get("rot1_actual")),
-                                                   rot2_requested=p.get("rot2_requested"), rot2_actual=row_rot_actual.get("rot2", p.get("rot2_actual")),
-                                                   Vtg=p.get("Vtg_target"), Vbg=p.get("Vbg_target"), Vbias=p.get("Vbias_target"),
-                                                   Vtg_observed=row_gate_observed.get("Vtg_observed", p.get("Vtg_observed")),
-                                                   Vbg_observed=row_gate_observed.get("Vbg_observed", p.get("Vbg_observed")),
-                                                   Vbias_observed=row_gate_observed.get("Vbias_observed", p.get("Vbias_observed")))
-                            wl, y = spec.acquire()
-                            self.spectrum.emit(wl, y)
+                            if pair_writer is not None:
+                                paired_records = self._capture_paired_point(p)
+                            else:
+                                set_lightfield_context(
+                                    self._lf6, output_file=fp, point_index=done, position=float(pos),
+                                    condition_id=p.get("condition_id"), sequence=p.get("sequence"),
+                                    repeat=p.get("repeat"), rotation_requested=p.get("rotation_requested"),
+                                    rotation_actual=row_rotation_actual,
+                                    rot1_requested=p.get("rot1_requested"), rot1_actual=row_rot_actual.get("rot1", p.get("rot1_actual")),
+                                    rot2_requested=p.get("rot2_requested"), rot2_actual=row_rot_actual.get("rot2", p.get("rot2_actual")),
+                                    Vtg=p.get("Vtg_target"), Vbg=p.get("Vbg_target"), Vbias=p.get("Vbias_target"),
+                                    Vtg_observed=row_gate_observed.get("Vtg_observed", p.get("Vtg_observed")),
+                                    Vbg_observed=row_gate_observed.get("Vbg_observed", p.get("Vbg_observed")),
+                                    Vbias_observed=row_gate_observed.get("Vbias_observed", p.get("Vbias_observed")))
+                                wl, y = spec.acquire()
+                                self.spectrum.emit(wl, y)
+                        except _StopRequested:
+                            raise
                         except Exception as exc:
                             self.log.emit(
                                 f"[{_ts()}]   acquire error: {exc}"
                             )
                             y = np.full(nwls, NAN, dtype=float)
-                            if p.get("strict_sequence"):
+                            if p.get("strict_sequence") or pair_writer is not None:
                                 raise RuntimeError(f"LF6 acquisition failed: {exc}") from exc
                     else:
                         y = np.full(nwls, NAN, dtype=float)
                         if p.get("strict_sequence"):
                             raise RuntimeError(f"{motion_label} move failed; acquisition skipped")
 
-                    if p.get("strict_sequence") and (
+                    if pair_writer is None and p.get("strict_sequence") and (
                         np.asarray(y).size != nwls or np.any(~np.isfinite(np.asarray(y, dtype=float)))
                     ):
                         raise RuntimeError("LF6 acquisition returned invalid spectral data")
@@ -680,9 +723,12 @@ class _PowerSweepWorker(QObject):
                             p.get("sequence", ""), p.get("repeat", ""),
                         ])
                     row = [_csv_cell(v) for v in scalar_vals]
-                    row.extend(_csv_cell(float(v)) for v in y)
+                    if pair_writer is None:
+                        row.extend(_csv_cell(float(v)) for v in y)
                     writer.writerow(row)
                     fh.flush()
+                    if paired_records is not None:
+                        self._save_paired_point(pair_writer, done, paired_records, cols, scalar_vals)
 
                     progress_total = self._progress_total_override or total
                     self.progress.emit(self._progress_offset + done, progress_total)
@@ -828,14 +874,15 @@ class _PowerSweepWorker(QObject):
                     value = float(condition.get(key, 0.0))
                     if not math.isfinite(value) or abs(value) > limit + 1e-9:
                         raise ValueError(f"condition {index} {key} exceeds SMU voltage compliance")
-        prepare = getattr(self._lf6, "configure_for_acquisition", None)
-        if callable(prepare):
+        paired_backend = p.get("station_pair_backend")
+        if not paired_backend:
             try:
+                prepare = getattr(self._lf6, "configure_for_acquisition", None)
+                if not callable(prepare):
+                    raise RuntimeError("LF6 acquisition preparation surface is unavailable")
                 prepare(center_nm=float(p["center_nm"]), exposure_ms=float(p["exp_ms"]), frames=int(p["frames"]))
             except Exception as exc:
                 raise RuntimeError(f"LF6 acquisition preparation failed: {exc}") from exc
-        else:
-            raise RuntimeError("LF6 acquisition preparation surface is unavailable")
         pm_adapter = self._pm.adapter if self._pm is not None and bool(getattr(self._pm, "is_connected", False)) else None
         if pm_adapter is not None:
             configure_pm = getattr(pm_adapter, "configure_wavelength", None)
@@ -845,22 +892,25 @@ class _PowerSweepWorker(QObject):
                         configure_pm(float(p["pm_wl_nm"]))
                 except Exception as exc:
                     raise RuntimeError(f"PM wavelength configuration failed: {exc}") from exc
-        spec_lf6 = self._lf6.adapter
-        try:
-            wls = np.asarray(spec_lf6.calibration_wavelengths(force=False), dtype=float).ravel()
-        except Exception:
-            wls = np.array([])
-        if wls.size <= 2:
+        wls = np.array([])
+        spec_lf6 = None if paired_backend else self._lf6.adapter
+        if spec_lf6 is not None:
             try:
-                wls = np.asarray(self._lf6.setup.get_wavelength_calibration(), dtype=float).ravel()
+                wls = np.asarray(spec_lf6.calibration_wavelengths(force=False), dtype=float).ravel()
             except Exception:
                 pass
-        if wls.size <= 2 or np.any(~np.isfinite(wls)):
-            raise RuntimeError("Could not obtain wavelength calibration. Aborting.")
+            if wls.size <= 2:
+                try:
+                    wls = np.asarray(self._lf6.setup.get_wavelength_calibration(), dtype=float).ravel()
+                except Exception:
+                    pass
+            if wls.size <= 2 or np.any(~np.isfinite(wls)):
+                raise RuntimeError("Could not obtain wavelength calibration. Aborting.")
         out_path = Path(p["out_path"]); out_path.mkdir(parents=True, exist_ok=True)
         fp = out_path / f"{p['base_name']}.csv"; suffix = 2
         while fp.exists():
             fp = out_path / f"{p['base_name']}_{suffix:03d}.csv"; suffix += 1
+        pair_writer = PairedSpectrumFiles(fp.parent, fp.stem, paired_backend) if paired_backend else None
         axis_columns = []
         for axis in plan["axis_order"]:
             if plan["axes"][axis]["mode"] != MOTION_NOT_USED:
@@ -880,6 +930,8 @@ class _PowerSweepWorker(QObject):
                     "axis_order": plan["axis_order"], "axes": plan["axes"], "count": plan["count"],
                     "repeat": plan["repeat"], "file": str(fp), "entries": [],
                     "cleanup_status": "pending", "cleanup_errors": []}
+        if pair_writer is not None:
+            manifest["paired_spectra"] = pair_writer.manifest_path.name
         for entry in plan["entries"]:
             manifest["entries"].append({"sequence": entry["sequence"], "condition_index": entry["condition_index"] + 1,
                                         "repeat": entry["repeat"], "targets": entry["targets"], "status": "not_started"})
@@ -983,10 +1035,17 @@ class _PowerSweepWorker(QObject):
                     if self._stop.is_set(): raise _StopRequested()
                     if bool(getattr(iv, "io_frozen", False)) or bool(getattr(iv, "requires_reconnect", False)):
                         raise RuntimeError("SMU is frozen or requires reconnect; acquisition stopped")
-                    context_position = next(iter(actual.values()), 0.0)
-                    set_lightfield_context(self._lf6, output_file=fp, point_index=number, position=float(context_position), condition_id=cond_id, sequence=number, repeat=entry["repeat"])
-                    wl, y = spec_lf6.acquire(); y = np.asarray(y, dtype=float)
-                    if y.size != wls.size or np.any(~np.isfinite(y)): raise RuntimeError("LF6 acquisition returned invalid spectral data")
+                    spectral_cells = []
+                    if pair_writer is None:
+                        context_position = next(iter(actual.values()), 0.0)
+                        set_lightfield_context(self._lf6, output_file=fp, point_index=number,
+                                               position=float(context_position), condition_id=cond_id,
+                                               sequence=number, repeat=entry["repeat"])
+                        _, y = spec_lf6.acquire()
+                        y = np.asarray(y, dtype=float)
+                        if y.size != wls.size or np.any(~np.isfinite(y)):
+                            raise RuntimeError("LF6 acquisition returned invalid spectral data")
+                        spectral_cells = [_csv_cell(value) for value in y]
                     vals = []
                     if pm_available and p.get("target_powers"):
                         target_powers = p["target_powers"]
@@ -1013,7 +1072,14 @@ class _PowerSweepWorker(QObject):
                             if not math.isfinite(current2): raise RuntimeError("Vbias2 current readback is non-finite")
                         else: current2 = NAN
                         vals += [condition.get("bias2_mode", "off"), resolve_bias2(condition, gate[2]), observed_gate.get("Vbias2_observed", NAN), current2]
-                    writer.writerow([_csv_cell(v) for v in vals] + [_csv_cell(v) for v in y]); fh.flush()
+                    if pair_writer is not None:
+                        paired_records = self._capture_paired_point(p)
+                    writer.writerow([_csv_cell(v) for v in vals] + spectral_cells)
+                    fh.flush()
+                    if pair_writer is not None:
+                        row_manifest["pair_point_id"] = str(number)
+                        paths = self._save_paired_point(pair_writer, number, paired_records, headers, vals)
+                        row_manifest["pair_files"] = {backend: path.name for backend, path in paths.items()}
                     row_manifest.update({"status": "complete", "condition_id": cond_id, "condition": dict(condition), "gate_readback": dict(observed_gate)})
                     self.progress.emit(number, len(plan["entries"]))
             complete = True; manifest["status"] = "complete"; manifest["acquisition_status"] = "complete"
@@ -1091,6 +1157,7 @@ class _PowerSweepWorker(QObject):
                 if self._stop.is_set():
                     break
                 self._last_output_path = None
+                self._last_pair_manifest = None
                 ci = int(item["condition_index"])
                 cond = dict(conditions[ci])
                 gate = (float(cond.get("vbg_v", 0.0)), float(cond.get("vtg_v", 0.0)),
@@ -1144,6 +1211,8 @@ class _PowerSweepWorker(QObject):
                     child_fp = self._run_sweep(child)
                     entry["status"] = "stopped" if self._stop.is_set() else "complete"
                     entry["file"] = str(Path(child_fp))
+                    if self._last_pair_manifest is not None:
+                        entry["paired_spectra"] = self._last_pair_manifest.name
                     manifest["files"].append(str(Path(child_fp)))
                     if self._experiment_run is not None:
                         self._experiment_run.register_file(child_fp, "raw", details={"condition_id": condition_id})
@@ -1155,6 +1224,8 @@ class _PowerSweepWorker(QObject):
                     break
                 except Exception as exc:
                     entry["status"] = "failed"; entry["error"] = str(exc)
+                    if self._last_pair_manifest is not None:
+                        entry["paired_spectra"] = self._last_pair_manifest.name
                     partial = getattr(self, "_last_output_path", None)
                     if partial is not None and Path(partial).exists():
                         entry["file"] = str(Path(partial))
@@ -1753,6 +1824,8 @@ class PowerSweepPanel(QWidget):
         opt_form.setColumnStretch(3, 1)
         divide_grid_fields(opt_form, 2, (0, 1))
         sweep_lay.addWidget(opt_grp)
+        self._station_pair = StationPairControls()
+        sweep_lay.addWidget(self._station_pair)
 
         # Gate settings (SMU)
         self._gate_grp = QGroupBox("Single condition")
@@ -1899,6 +1972,7 @@ class PowerSweepPanel(QWidget):
         empty.setWordWrap(True)
         self._spectrum_stack.addWidget(empty)
         self._spectrum_stack.addWidget(self._plot)
+        self._paired_plot_page = None
         right_lay.addWidget(self._spectrum_stack, stretch=1)
         self._cal_plot = create_plot(); self._cal_plot.setLabel("bottom", "Stage position"); self._cal_plot.setLabel("left", "Predicted sample power", units="µW")
         self._cal_plot.showGrid(x=True, y=True, alpha=0.3); self._cal_plot.setMaximumHeight(180)
@@ -2012,6 +2086,14 @@ class PowerSweepPanel(QWidget):
                     signal.connect(slot)
             if bool(getattr(self._lf6, "is_connected", False)):
                 self._on_lf6_connected([])
+            station_changed = getattr(self._lf6, "station_changed", None)
+            if station_changed is not None:
+                station_changed.connect(self._station_pair.set_station)
+            self._station_pair.backend_changed.connect(self._on_pair_mode_changed)
+            self._station_pair.set_station(cfg.lf6.station_id)
+            for spin_type in (QDoubleSpinBox, QSpinBox):
+                for editor in self._station_pair.findChildren(spin_type):
+                    editor.valueChanged.connect(self._update_est)
 
         if self._smu is not None:
             readings = getattr(self._smu, "readings_ready", None)
@@ -2058,6 +2140,7 @@ class PowerSweepPanel(QWidget):
             "center_nm": float(self._center_spin.value()),
             "exposure_ms": float(self._exp_spin.value()),
             "frames": int(self._frames_spin.value()),
+            "station_pair": self._station_pair.request_state(),
             "pm_wavelength_nm": float(self._pm_wl_spin.value()),
             "vbg": float(self._vbg_spin.value()),
             "vtg": float(self._vtg_spin.value()),
@@ -2075,6 +2158,7 @@ class PowerSweepPanel(QWidget):
         }
 
     def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
+        settings = dict(settings or {})
         allowed = {
             "center_nm": lambda v: self._center_spin.setValue(float(v)),
             "exp_ms": lambda v: self._exp_spin.setValue(float(v)),
@@ -2083,10 +2167,19 @@ class PowerSweepPanel(QWidget):
             "Vtg_target": lambda v: self._vtg_spin.setValue(float(v)),
             "Vbias_target": lambda v: self._vbias_spin.setValue(float(v)),
         }
+        pair_keys = ("station_pair_backend", "station_pair_recipes")
         if keys_only:
-            return {"supported_keys": list(allowed)}
+            return {"supported_keys": [*allowed, *pair_keys]}
+        backend = settings.get("station_pair_backend")
+        recipes = None
+        if backend or "station_pair_recipes" in settings:
+            if cfg.lf6.station_id != PAIRED_STATION_ID:
+                raise ValueError("This recipe requires the attoDRY 2100 station with dual detectors.")
+            recipes = validate_pair_recipes(backend, settings.get("station_pair_recipes"))
         skipped = []
-        for key, value in dict(settings or {}).items():
+        for key, value in settings.items():
+            if key in pair_keys:
+                continue
             setter = allowed.get(key)
             if setter is None:
                 skipped.append(key)
@@ -2095,6 +2188,11 @@ class PowerSweepPanel(QWidget):
                 setter(value)
             except Exception:
                 skipped.append(key)
+        if recipes is not None:
+            self._station_pair.restore_state({"backend": backend, "andor_detector": backend,
+                                              "pixis": recipes["lightfield"], "andor": recipes[backend]})
+        elif settings:
+            self._station_pair.mode.setCurrentIndex(0)
         return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
 
     def restore_session_state(self, state: dict) -> None:
@@ -2139,6 +2237,8 @@ class PowerSweepPanel(QWidget):
             self._return_zero_chk.setChecked(bool(state["return_zero"]))
         if isinstance(state.get("motion_conditions"), dict):
             self._condition_editor.restore_state(state["motion_conditions"])
+        if isinstance(state.get("station_pair"), dict):
+            self._station_pair.restore_state(state["station_pair"])
         selection = state.get("motion_conditions_selection")
         self._custom_condition_sequence = [dict(item) for item in selection] if isinstance(selection, list) else None
         if "conditions_enabled" in state:
@@ -2287,9 +2387,12 @@ class PowerSweepPanel(QWidget):
             conditions = self._condition_editor.conditions()
             plans = self._condition_editor.rotation_plans() if hasattr(self._condition_editor, "rotation_plans") else {}
             values = {axis: list(plan.get("values", [])) for axis, plan in plans.items() if plan.get("values")}
-            planned_sequence = self._condition_editor.sequence(values)
-            sequence = self._custom_condition_sequence or planned_sequence
-            count = len(sequence) if self._positions.size else 0
+            planned_count = sequence_size(len(conditions), values,
+                                          order=self._condition_editor.order.currentData(),
+                                          repeats=self._condition_editor.repeats.value())
+            count = len(self._custom_condition_sequence) if self._custom_condition_sequence else planned_count
+            if not self._positions.size:
+                count = 0
             custom = " · custom selection" if self._custom_condition_sequence is not None else ""
             self._condition_preview_lbl.setText(
                 f"{count} sweeps × {len(self._positions)} points = "
@@ -2575,6 +2678,7 @@ class PowerSweepPanel(QWidget):
 
     def _emit_busy_state(self):
         state = bool(self._sweep_busy or self._calibration_busy)
+        self._station_pair.set_editing_enabled(not state)
         if state != self._last_busy_signal:
             self._last_busy_signal = state
             self.busy_changed.emit(state)
@@ -2584,7 +2688,11 @@ class PowerSweepPanel(QWidget):
             self._est_lbl.setText("")
             return
         n = len(self._positions)
-        exp_s = self._exp_spin.value() / 1000.0 * self._frames_spin.value()
+        if self._station_pair.andor_backend:
+            exp_s = max(recipe["exposure_ms"] * recipe["frames"]
+                        for recipe in self._station_pair.recipes().values()) / 1000.0
+        else:
+            exp_s = self._exp_spin.value() / 1000.0 * self._frames_spin.value()
         per_pt = 1.2 + self._motion_settle_spin.value() + exp_s
         total_s = n * per_pt
         if total_s < 60:
@@ -2697,11 +2805,28 @@ class PowerSweepPanel(QWidget):
     def _on_lf6_connected(self, _experiments=None):
         self._lf6_status.setText("● Connected")
         set_style_role(self._lf6_status, 'text', tone='success', strong=True)
+        self._station_pair.set_active_backend(getattr(self._lf6, "backend", ""))
+        self._refresh_pair_connection_status()
 
     @Slot()
     def _on_lf6_disconnected(self):
         self._lf6_status.setText("○ Not connected")
         set_style_role(self._lf6_status, 'text', tone='muted', strong=True)
+        self._station_pair.set_active_backend("")
+        self._refresh_pair_connection_status()
+
+    def _refresh_pair_connection_status(self):
+        backend = self._station_pair.andor_backend
+        connected = set(getattr(self._lf6, "connected_backends", ()))
+        missing = [PAIR_LABELS[key] for key in ("lightfield", backend) if key and key not in connected]
+        self._station_pair.set_pair_status("Connect " + " and ".join(missing) + " in Instruments." if backend and missing else "")
+
+    @Slot(str)
+    def _on_pair_mode_changed(self, backend):
+        for editor in (self._center_spin, self._exp_spin, self._frames_spin):
+            editor.setEnabled(not backend)
+        self._refresh_pair_connection_status()
+        self._update_est()
 
     @Slot(list)
     def _on_smu_connected(self, _opened=None):
@@ -2849,6 +2974,10 @@ class PowerSweepPanel(QWidget):
     def _on_run(self):
         if getattr(self, "_sensor_preflight_pending", False):
             return
+        if bool(getattr(self._lf6, "switching_locked", False)):
+            QMessageBox.warning(self, "Spectrometer busy",
+                                "Wait for the current spectrometer operation to finish.")
+            return
         # Ensure a pending debounced edit cannot leave stale sweep positions.
         self._update_position_preview()
         if not self._validate():
@@ -2970,7 +3099,16 @@ class PowerSweepPanel(QWidget):
         snapshot = self._calibration_snapshot(ref)
         snapshot["planned_positions_source"] = dict(self._freeze_source) if self._freeze_source else {"mode": self._input_mode.currentData() or "position"}
         params["nd_calibration"] = snapshot
-        if not ensure_sensor_readout(self, self._lf6, mode="1d"):
+        paired_backend = self._station_pair.andor_backend
+        if paired_backend:
+            try:
+                params["station_pair_recipes"] = self._lf6.validate_station_pair(paired_backend, self._station_pair.recipes())
+            except (AttributeError, RuntimeError, ValueError) as exc:
+                QMessageBox.critical(self, "Paired spectra unavailable", str(exc))
+                return
+            params["station_pair_backend"] = paired_backend
+        sensor_scope = {"backends": {"lightfield"}} if paired_backend else {}
+        if not ensure_sensor_readout(self, self._lf6, mode="1d", **sensor_scope):
             return
         params["sensor_readout_intents"] = deepcopy(getattr(self._lf6, "sensor_readout_intents", {}))
         self._run_btn.setEnabled(False); self._run_failed = False
@@ -2988,7 +3126,8 @@ class PowerSweepPanel(QWidget):
                                                  stage=self._stg, rotation=self._rot,
                                                  power_meter=self._pm),
             )
-            bind_lightfield_metadata(self._lf6, self._experiment_run)
+            if not paired_backend:
+                bind_lightfield_metadata(self._lf6, self._experiment_run)
         except Exception as exc:
             self._on_error(f"Metadata error; run blocked: {exc}")
             self._experiment_run = None
@@ -3008,6 +3147,7 @@ class PowerSweepPanel(QWidget):
         self._worker.moveToThread(self._thread); self._thread.started.connect(self._worker.run)
         self._worker.log.connect(self._on_log); self._worker.progress.connect(self._on_progress)
         self._worker.spectrum.connect(self._on_spectrum)
+        self._worker.paired_spectra.connect(self._on_paired_spectra)
         # Quit the worker thread directly from the worker's finished emission;
         # waiting for a queued GUI slot here can deadlock during application close.
         self._worker.finished.connect(self._thread.quit, Qt.DirectConnection)
@@ -3096,6 +3236,37 @@ class PowerSweepPanel(QWidget):
         if np.asarray(wl).size and np.asarray(cts).size:
             self._spectrum_stack.setCurrentWidget(self._plot)
 
+    @Slot(object)
+    def _on_paired_spectra(self, records):
+        if self._paired_plot_page is None:
+            self._paired_plot_page = QWidget()
+            self._paired_plots = {}
+            paired_layout = QVBoxLayout(self._paired_plot_page)
+            paired_layout.setContentsMargins(0, 0, 0, 0)
+            for channel in ("lightfield", "andor"):
+                title = QLabel()
+                title.setTextFormat(Qt.TextFormat.PlainText)
+                title.setWordWrap(True)
+                plot = create_plot()
+                plot.setLabel("left", "Intensity", units="counts")
+                curve = plot.plot(pen=pg.mkPen(width=1.5))
+                paired_layout.addWidget(title)
+                paired_layout.addWidget(plot, 1)
+                self._paired_plots[channel] = (title, plot, curve)
+            self._spectrum_stack.addWidget(self._paired_plot_page)
+        for backend, record in records.items():
+            channel = "lightfield" if backend == "lightfield" else "andor"
+            title, plot, curve = self._paired_plots[channel]
+            error = record.get("error")
+            title.setText(f"{PAIR_LABELS[backend]} — {error}" if error else PAIR_LABELS[backend])
+            if error:
+                curve.clear()
+            else:
+                pixels = record.get("axis_unit") == "pixel"
+                plot.setLabel("bottom", "Pixel" if pixels else "Wavelength", units="" if pixels else "nm")
+                curve.setData(record["wavelengths"], record["counts"])
+        self._spectrum_stack.setCurrentWidget(self._paired_plot_page)
+
     @Slot(str)
     def _on_error(self, msg: str):
         self._log_section.set_expanded(True)
@@ -3129,7 +3300,7 @@ class PowerSweepPanel(QWidget):
                     self._status_lbl.setText("Saving experiment metadata…")
                 files = []
                 for data_file in Path(run.path.parent).glob("*"):
-                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".log", ".json", ".txt"}:
+                    if data_file == run.path or data_file in getattr(self, "_run_files_before", set()) or data_file.suffix.lower() not in {".csv", ".log", ".json", ".jsonl", ".txt"}:
                         continue
                     files.append({"path": data_file,
                                   "role": "raw" if data_file.suffix.lower() == ".csv" else "intermediate"})

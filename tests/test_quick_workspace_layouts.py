@@ -9,8 +9,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QUICK_BACKEND", "software")
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QCheckBox
 
 from tests.quick_helpers import quick_application, drain_qt_deletions
 from tests.test_dual_gate_sequence_model import nested_plan
@@ -59,7 +60,7 @@ def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app
         assert panel._splitter.orientation() == Qt.Orientation.Horizontal
         assert panel._batch_group.parentWidget() is panel._workflow_content
         assert panel._batch_table.property("quickSingleLineRows")
-        assert not assembly["safety"].toggle.isChecked()
+        assert assembly["safety"].toggle.isChecked()
         assert not assembly["execution"].toggle.isChecked()
         assert panel._preview_splitter.widget(0) is assembly["execution"]
         top = panel._tree.mapTo(panel._results_scroll.viewport(), QPoint(0, 0))
@@ -94,13 +95,18 @@ def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app
         for action in ("apply", "run", "stop"):
             button = buttons["command_" + action]
             assert button.isVisible() and button.height() > 0
-        assert command.y() >= scroll.y() + scroll.height()
+        tabs = panel._results_tabs
+        assert command.y() >= tabs.y() + tabs.height()
         assert command.y() + command.height() <= panel._results_pane.height()
         scroll.verticalScrollBar().setValue(0)
 
         safety_field = next(field for form in forms["forms"]
                             for field, source_widget in form.adapter._fields.items()
                             if source_widget is assembly["safety"].toggle)
+        tabs.setCurrentWidget(panel._output_scroll)
+        QTest.qWait(50)
+        assert safety_field.trigger()
+        assert not assembly["safety"].toggle.isChecked()
         assert safety_field.trigger()
         assert assembly["safety"].toggle.isChecked()
         source[0].setValue(.75)
@@ -108,13 +114,17 @@ def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app
         source[2].setValue(.125)
         state = panel.capture_session_state()
         assert (state["safe_jump_v"], state["initial_voltage_settle_s"], state["voltage_settle_s"]) == (.75, .25, .125)
+        assert state["inspector_page"] == panel._output_scroll.objectName()
         assert panel._acquisition_schedule is original_plan
         assert source == (panel._safe_jump_spin, panel._initial_voltage_settle_spin,
                           panel._voltage_settle_spin, panel._execution_order_table)
+        tabs.setCurrentWidget(panel._results_scroll)
         panel.restore_session_state(state)
         QTest.qWait(100)
+        assert tabs.currentWidget() is panel._output_scroll
         restored = panel.capture_session_state()
         assert (restored["safe_jump_v"], restored["initial_voltage_settle_s"], restored["voltage_settle_s"]) == (.75, .25, .125)
+        tabs.setCurrentWidget(panel._results_scroll)
         assert panel._preview_splitter.count() == 2
         panel.resize(1010, 580)
         QTest.qWait(150)
@@ -155,8 +165,52 @@ def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app
         panel.deleteLater()
 
 
-@pytest.mark.parametrize("width,height", [(1136, 850), (896, 580)])
-def test_dual_gate_filename_is_compact_and_precedes_collapsible_sequence(app, width, height):
+def test_dual_gate_execution_order_wraps_complete_zip_description(app):
+    panel = PresetsPanel()
+    try:
+        install_table_editors(panel)
+        assembly = configure_workspace_layout(panel, "dual_gate")
+        install_parameter_forms(panel, "dual_gate")
+        panel.setProperty("quickEditorsInstalled", True)
+        panel.show()
+        panel._mode_combo.setCurrentText("Zip")
+        for row in range(panel._loop_table.rowCount()):
+            panel._loop_table.cellWidget(row, 0).findChild(QCheckBox).setChecked(True)
+        assembly["execution"].set_expanded(True)
+        table = panel._execution_order_table
+        view = table._quick_editor
+        root = view.quick_widget.rootObject()
+        assert "Stage Position" in table.item(0, 1).text()
+        for width in (896, 1700, 896):
+            panel.resize(width, 850)
+            QTest.qWait(150)
+            assert root.property("sharedHeaders")
+            for row in range(table.rowCount()):
+                for column in (0, 1):
+                    label = find_item(root, f"tableCell_{row}_{column}")
+                    assert label.property("text") == table.item(row, column).text()
+                    assert not label.property("truncated")
+                    assert label.property("contentWidth") <= label.width() + 1
+                    assert label.property("contentHeight") <= label.height()
+                    bottom = label.mapToItem(root, QPointF(0, label.height())).y()
+                    assert 0 < bottom <= root.height() + 1
+            assert find_item(root, "tableCell_0_1").property("lineCount") > 1
+        assert not view.model.editCell(0, 1, "replacement")
+        assert view.model.editCell(0, 2, 1)
+        assert "Gate conditions" in table.item(0, 0).text()
+        assert not view.qml_warnings
+    finally:
+        for form in getattr(panel, "_quick_parameter_forms", {}).get("forms", []):
+            form.shutdown()
+        for editor in panel._quick_table_editors:
+            editor.shutdown()
+        panel.dispose_reloaded_page()
+        panel.close()
+        panel.deleteLater()
+
+
+@pytest.mark.parametrize("width,height", [(1700, 850), (896, 580)])
+def test_dual_gate_review_tabs_keep_controls_and_collapsible_sequence(app, width, height):
     original_style = app.styleSheet()
     app.setStyleSheet((Path(__file__).parents[1] / "ui/styles/quick_application.qss").read_text())
     panel = PresetsPanel()
@@ -167,32 +221,77 @@ def test_dual_gate_filename_is_compact_and_precedes_collapsible_sequence(app, wi
         coverage = install_parameter_forms(panel, "dual_gate")
         panel.setProperty("quickEditorsInstalled", True)
         panel.resize(width, height)
-        assembly["filename"].set_expanded(True)
         panel.show()
         QTest.qWait(150)
         fields = {source: (form, field) for form in coverage["forms"]
                   for field, source in form.adapter._fields.items()}
+        tabs = panel._results_tabs
+        tab_bar = tabs.tabBar()
+        assert [tabs.tabText(i).replace("&&", "&") for i in range(tabs.count())] == [
+            "Sequence", "Output & safety", "Run log"]
+        assert tabs.widget(0) is panel._results_scroll
+        assert tabs.widget(1) is panel._output_scroll
+        assert tabs.currentWidget() is panel._results_scroll
+        assert panel._tree.isVisibleTo(panel)
+
+        def click_field(form, field):
+            button = find_item(form.rootObject(), "parameter_" + field.fieldId)
+            assert button is not None
+            position = button.mapToScene(button.boundingRect().center()).toPoint()
+            QTest.mouseClick(form, Qt.MouseButton.LeftButton, pos=position)
+            QTest.qWait(100)
+
+        tab_bar.setFocus()
+        QTest.keyClick(tab_bar, Qt.Key.Key_Right)
+        QTest.qWait(100)
+        assert tabs.currentWidget() is panel._output_scroll
+        assert not panel._tree.isVisibleTo(panel)
         filename = assembly["filename"]
         form, _ = fields[panel._filename_preview_lbl]
-        assert form.mapTo(filename.content, QPoint()).y() <= 4
-        assert filename.y() + filename.height() <= panel._preview_splitter.y()
-        assert fields[panel._filename_details_toggle][1].kind == "disclosure"
+        assert panel._output_scroll.isAncestorOf(filename)
+        assert filename.isAncestorOf(form) and form.isVisibleTo(panel)
+        assert panel._output_scroll.isAncestorOf(assembly["safety"])
+        assert assembly["safety"].toggle.isChecked()
+        details_form, details_field = fields[panel._filename_details_toggle]
+        assert details_field.kind == "disclosure"
+        assert not panel._filename_details_toggle.isChecked()
+        panel._output_scroll.ensureWidgetVisible(details_form)
+        click_field(details_form, details_field)
+        assert panel._filename_details_toggle.isChecked()
+        assert panel._filename_details.isVisibleTo(panel)
+
+        QTest.mouseClick(tab_bar, Qt.MouseButton.LeftButton, pos=tab_bar.tabRect(2).center())
+        QTest.qWait(100)
+        log_page = tabs.widget(2)
+        assert tabs.currentWidget() is log_page
+        assert not filename.isVisibleTo(panel)
+        log = panel._log_text
+        assert log_page.isAncestorOf(log) and log.isVisibleTo(panel)
+        assert log.isReadOnly()
+        log.setPlainText("\n".join(f"Simulated run log entry {i}" for i in range(80)))
+        assert log.verticalScrollBar().maximum() > 0
+        clear_form, clear = next((form, field) for source, (form, field) in fields.items()
+                                 if log_page.isAncestorOf(form) and field.kind == "button"
+                                 and source.text() == "Clear")
+        click_field(clear_form, clear)
+        assert not log.toPlainText()
+
+        QTest.mouseClick(tab_bar, Qt.MouseButton.LeftButton, pos=tab_bar.tabRect(0).center())
+        QTest.qWait(100)
+        assert tabs.currentWidget() is panel._results_scroll
+        assert not log.isVisibleTo(panel)
         sequence_form, sequence_field = fields[panel._sequence_toggle]
         assert sequence_field.kind == "disclosure"
         panel._results_scroll.ensureWidgetVisible(sequence_form)
         QTest.qWait(100)
-        button = find_item(sequence_form.rootObject(), "parameter_" + sequence_field.fieldId)
         expanded_height = panel._preview_splitter.height()
-        position = button.mapToScene(button.boundingRect().center()).toPoint()
-        QTest.mouseClick(sequence_form, Qt.MouseButton.LeftButton, pos=position)
-        QTest.qWait(100)
+        click_field(sequence_form, sequence_field)
         assert not panel._sequence_toggle.isChecked()
         assert panel._tree.isHidden()
         assert panel._preview_splitter.height() < expanded_height
         collapsed = panel._preview_splitter.widget(1)
         assert collapsed.height() <= sequence_form.height() + 8
-        QTest.mouseClick(sequence_form, Qt.MouseButton.LeftButton, pos=position)
-        QTest.qWait(100)
+        click_field(sequence_form, sequence_field)
         assert panel._sequence_toggle.isChecked()
         assert not panel._tree.isHidden()
         assert panel._preview_splitter.height() >= expanded_height
@@ -200,6 +299,7 @@ def test_dual_gate_filename_is_compact_and_precedes_collapsible_sequence(app, wi
         assert panel._tree.mapTo(sequence_panel, QPoint()).y() + panel._tree.height() <= sequence_panel.height()
         assert panel._acquisition_schedule is original_plan
         assert panel._results_scroll.horizontalScrollBar().maximum() == 0
+        assert panel._output_scroll.horizontalScrollBar().maximum() == 0
     finally:
         for form in getattr(panel, "_quick_parameter_forms", {}).get("forms", []):
             form.shutdown()
@@ -233,6 +333,11 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         panel.resize(width, height)
         panel.show()
         QTest.qWait(150)
+        # Reapply the requested desktop size after lazy Quick forms replace
+        # their startup hints, so the compact case is measured at laptop height.
+        panel.resize(width, height)
+        QTest.qWait(60)
+        assert panel.size().toTuple() == (width, height)
 
         status = assembly["run_status"]
         assert status.parentWidget() is panel._results_pane
@@ -245,7 +350,7 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         assert progress_form.isVisibleTo(panel)
         assert progress_field.visible
         assert progress_field.kind == "progress"
-        for name in ("_status_lbl", "_run_time_lbl"):
+        for name in ("_readiness_lbl", "_status_lbl", "_run_time_lbl"):
             source = getattr(panel, name, None)
             if source is not None:
                 form, field = fields[source]
@@ -276,8 +381,9 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         assert position.x() + rendered.width() <= progress_form.width() + 1
 
         pane = panel._results_pane
+        tabs = panel._results_tabs
         scroll = panel._results_scroll
-        assert status.y() >= scroll.y() + scroll.height()
+        assert status.y() >= tabs.y() + tabs.height()
         assert command.y() >= status.y() + status.height()
         assert command.y() + command.height() <= pane.height()
         assert 0 <= status.x() <= pane.width() - status.width()
@@ -294,13 +400,29 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         assert (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint())) == before
         assert progress_form.isVisibleTo(panel)
         assert not assembly["run_details"].toggle.isChecked()
+        output = panel._output_scroll
+        output.widget().setMinimumHeight(1600)
+        for tab in (1, 2, 0):
+            tab_bar = tabs.tabBar()
+            QTest.mouseClick(tab_bar, Qt.MouseButton.LeftButton, pos=tab_bar.tabRect(tab).center())
+            QTest.qWait(50)
+            assert tabs.currentIndex() == tab
+            if tab == 1:
+                assert output.verticalScrollBar().maximum() > 0
+                output.verticalScrollBar().setValue(output.verticalScrollBar().maximum())
+                QTest.qWait(30)
+            assert (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint())) == before
+            assert progress_form.isVisibleTo(panel)
+            assert fields[panel._readiness_lbl][0].isVisibleTo(panel)
+            assert command.isVisibleTo(panel)
+        assert scroll.verticalScrollBar().value() == scroll.verticalScrollBar().maximum()
 
         details = assembly["run_details"]
         details_scroll = panel._quick_run_details_scroll
         header_form, header_field = fields[details.toggle]
         assert details.parentWidget() is pane
         assert header_field.kind == "disclosure"
-        assert details.y() >= scroll.y() + scroll.height()
+        assert details.y() >= tabs.y() + tabs.height()
         assert status.y() >= details.y() + details.height()
         header_before = header_form.mapTo(panel, QPoint())
         header_button = find_item(header_form.rootObject(), "parameter_" + header_field.fieldId)
@@ -324,6 +446,8 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         QTest.qWait(100)
         assert details_scroll.height() <= pane.height() // 3
         assert details_scroll.verticalScrollBar().maximum() > 0
+        assert panel.height() == height
+        assert tabs.height() >= tabs.minimumSizeHint().height()
         details_scroll.verticalScrollBar().setValue(details_scroll.verticalScrollBar().maximum())
         QTest.qWait(30)
         assert header_form.mapTo(panel, QPoint()) == header_before

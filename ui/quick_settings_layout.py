@@ -146,7 +146,6 @@ def configure_quick_settings(panel):
         ("Shamrock shutter:", "_andor_shamrock_shutter", 130),
         ("Grating:", "_andor_grating", 100),
         ("Input slit:", "_andor_slit", 130),
-        ("Safe disconnect:", "_andor_safe_disconnect_temperature", 140),
     ):
         _field(form, label, getattr(panel, name), width=width, above=True)
     form.addRow(panel._andor_invert_wl)

@@ -141,8 +141,12 @@ class _Request:
             self.state = state
 
     def get_state(self) -> RequestState:
-        with self.lock:
-            return self.state
+        # Lock-free on purpose. Controller code reads request states while
+        # holding the controller lock, and the timeout watchdog takes the
+        # controller lock while holding this request's lock; a locked read
+        # here would let those two deadlock (and freeze the GUI and Stop)
+        # exactly when an SDK call hangs. Reading one attribute is atomic.
+        return self.state
 
 
 class OperationHandle:

@@ -253,8 +253,9 @@ class SpectrumPanelControlTests(unittest.TestCase):
         controller.identity = {"backend": "lightfield"}
         panel = SpectrumPanel(controller)
         controller.connected.emit([])
-        self.assertEqual(panel._acquisition_group.title(), "Acquisition")
-        self.assertEqual(panel._spectrograph_group.title(), "Spectrograph")
+        self.assertTrue(panel._single_recipe_row.isAncestorOf(panel._center))
+        self.assertTrue(panel._spectrograph_group.isAncestorOf(panel._grating))
+        self.assertEqual(panel._apply_optics_btn.text(), "Apply optics")
         self.assertFalse(panel._grating.isEnabled())
         self.assertEqual(panel._grating.currentText(), "Not available")
         lf_calls = []

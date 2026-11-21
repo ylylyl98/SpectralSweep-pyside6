@@ -48,16 +48,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import Qt, QThread, QObject, Signal, Slot, QTimer, QItemSelection, QItemSelectionModel
+from PySide6.QtCore import Qt, QThread, QObject, Signal, Slot, QTimer, QItemSelection, QItemSelectionModel, QSignalBlocker, QRect
 from PySide6.QtGui import QAction, QColor, QKeySequence, QPalette
 from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QSplitter,
-    QGroupBox, QLabel, QPushButton, QLineEdit,
+    QGroupBox, QLabel, QPushButton, QLineEdit, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView,
     QProgressBar, QTextEdit, QSizePolicy, QFormLayout,
     QCheckBox, QAbstractItemView, QComboBox, QFrame, QToolButton,
-    QCompleter, QStyledItemDelegate, QMessageBox, QDoubleSpinBox, QSpinBox,
+    QCompleter, QAbstractItemDelegate, QStyle, QStyledItemDelegate, QStyleOptionViewItem, QMessageBox, QDoubleSpinBox, QSpinBox,
     QAbstractSpinBox, QMenu, QScrollArea, QRadioButton, QButtonGroup, QInputDialog,
 )
 
@@ -71,11 +71,13 @@ from utils.numeric_sequences import (
 )
 from app.lightfield_metadata import bind_lightfield_metadata, set_lightfield_context
 from app.dual_gate_metadata import DualGateFileMetadata
+from app.paired_spectra import PAIRED_STATION_ID
+from app.paired_spectrum_files import PairedSpectrumFiles
 from app.experiment_metadata import ExperimentMetadataService, instrument_inventory
 from app.power_reading import power_correction_factor, read_power
 from app.run_time_estimate import RunTimeEstimate
 from ui.workflow_sections import divide_grid_fields, inline_divider
-from ui.table_layout import fit_table_columns
+from ui.table_layout import batch_table_updates, fit_table_columns
 from ui.signal_connections import SignalConnections
 from utils.hardware_incidents import (
     HardwareIncidentRecorder,
@@ -139,9 +141,43 @@ _SETUP_LABELS = {
     "winspec_ingaas": "WinSpec",
     "andor_ingaas": "Andor InGaAs",
     "andor_si": "Andor Silicon",
+    "pixis_andor_ingaas": "PIXIS + Andor InGaAs",
+    "pixis_andor_si": "PIXIS + Andor Silicon",
 }
+_PAIRED_SETUPS = {"pixis_andor_si": "andor_si", "pixis_andor_ingaas": "andor_ingaas"}
 _SPECTROMETER_PARAMS = ("Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)")
-_RECIPE_PARAMS = (_SETUP_PARAM, *_SPECTROMETER_PARAMS)
+_ANDOR_PARAMS = tuple(f"Andor {parameter}" for parameter in _SPECTROMETER_PARAMS)
+_RECIPE_PARAMS = (_SETUP_PARAM, *_SPECTROMETER_PARAMS, *_ANDOR_PARAMS)
+# With a PIXIS + Andor setup the loop table shows one row per optical
+# parameter and a second value column for the Andor. The stored loop keeps one
+# record per detector parameter, so planning and saved recipes are unchanged.
+_ANDOR_COLUMN = 5
+_ANDOR_TWINS = dict(zip(_SPECTROMETER_PARAMS, _ANDOR_PARAMS))
+_LOOP_ROW_ID_ROLE = Qt.ItemDataRole.UserRole + 92
+# Stage, rotation and setup rows are not per detector: their Andor cell says so.
+_SHARED_VALUE_TEXT = "same for both detectors"
+
+
+def _setup_choices() -> dict:
+    return {backend: label for backend, label in _SETUP_LABELS.items()
+            if backend not in _PAIRED_SETUPS or cfg.lf6.station_id == PAIRED_STATION_ID}
+
+
+def _requested_setups(schedule) -> set:
+    return {_setup_backend(task["ctx"][_SETUP_PARAM])
+            for task in schedule if _SETUP_PARAM in task["ctx"]}
+
+
+def _physical_setups(requested) -> set:
+    paired = set(requested).intersection(_PAIRED_SETUPS)
+    return set(requested).difference(paired).union(
+        ("lightfield", *(_PAIRED_SETUPS[setup] for setup in paired)) if paired else ())
+
+
+def _pair_station_issue(requested) -> str:
+    if cfg.lf6.station_id != PAIRED_STATION_ID and set(requested).intersection(_PAIRED_SETUPS):
+        return "Concurrent PIXIS + Andor measurement setups require the AttoDRY2100 station."
+    return ""
 
 
 def _setup_backend(value: Any) -> str:
@@ -150,39 +186,53 @@ def _setup_backend(value: Any) -> str:
                "winspec_ingaas": "winspec_ingaas", "lightfield + winspec": "winspec_ingaas",
                "andor_ingaas": "andor_ingaas", "andor ingaas": "andor_ingaas",
                "andor_si": "andor_si", "andor si": "andor_si", "andor silicon": "andor_si"}
-    backend = aliases.get(str(value).strip().lower())
+    token = str(value).strip().lower()
+    backend = aliases.get(token, _PAIR_SETUP_ALIASES.get(token))
     if backend is None:
-        raise ValueError(f"Unknown measurement setup '{value}'. Use {', '.join(_SETUP_LABELS.values())}.")
+        raise ValueError(f"Unknown measurement setup '{value}'. Use {', '.join(_setup_choices().values())}.")
     return backend
 
 
-def _validate_setup_group(active: pd.DataFrame) -> None:
+_PAIR_SETUP_ALIASES = {token: setup for setup in _PAIRED_SETUPS
+                       for token in (setup, _SETUP_LABELS[setup].lower())}
+
+
+def _validate_setup_group(active: Sequence[tuple]) -> dict:
     """Validate optical values; ordinary loop groups determine pairing/products."""
-    if active.empty:
-        return
-    setup_rows = active[active["Parameter"] == _SETUP_PARAM]
-    if setup_rows.empty:
-        return
-    if len(setup_rows) != 1:
+    setup_count = sum(str(parameter) == _SETUP_PARAM for _, parameter, _, _ in active)
+    uses_andor_params = any(parameter in _ANDOR_PARAMS for _, parameter, _, _ in active)
+    if not setup_count:
+        if uses_andor_params:
+            raise ValueError("Andor loop parameters require a concurrent PIXIS + Andor setup.")
+        return {}
+    if setup_count != 1:
         raise ValueError("Use one Measurement setup row with comma-separated setups.")
-    optics = active[active["Parameter"].isin(_RECIPE_PARAMS)]
-    if optics["Parameter"].duplicated().any():
+    optics = [(str(parameter), raw) for _, parameter, raw, _ in active if str(parameter) in _RECIPE_PARAMS]
+    if len({parameter for parameter, _ in optics}) != len(optics):
         raise ValueError("Each optical parameter must appear once in the setup recipe.")
-    for _, row in optics.iterrows():
-        values = _parse_values(str(row["Values"]), str(row["Parameter"]))
+    parsed = {}
+    for parameter, raw in optics:
+        values = _parse_values(str(raw), parameter)
         if not values:
-            raise ValueError(f"Enter values for {row['Parameter']} in the setup recipe.")
+            raise ValueError(f"Enter values for {parameter} in the setup recipe.")
+        parsed[parameter] = values
+    if uses_andor_params and not set(parsed[_SETUP_PARAM]).intersection(_PAIRED_SETUPS):
+        raise ValueError("Andor loop parameters require a concurrent PIXIS + Andor setup.")
+    return parsed
 
 
 def _setup_readiness_issues(controller, schedule, requested=None) -> List[str]:
+    if requested is None:
+        requested = _requested_setups(schedule)
+    station_issue = _pair_station_issue(requested)
+    if station_issue:
+        return [station_issue]
     status = getattr(controller, "capture_status", {})
     if isinstance(status, dict) and status.get("recovery_required"):
         return ["LightField acquisition stalled; disconnect and reconnect after the hardware call returns."]
     if isinstance(status, dict) and status.get("active"):
         return ["Wait for the current LightField acquisition to finish before starting another run."]
-    if requested is None:
-        requested = {_setup_backend(task['ctx'][_SETUP_PARAM]) for task in schedule if _SETUP_PARAM in task['ctx']}
-    missing = requested - set(getattr(controller, 'connected_backends', ()))
+    missing = _physical_setups(requested) - set(getattr(controller, 'connected_backends', ()))
     return (["Connect all requested setups before running: " + ", ".join(_SETUP_LABELS[b] for b in sorted(missing))]
             if missing else [])
 
@@ -302,7 +352,7 @@ class _LoopRunLabels(Sequence[str]):
         self._values = tuple(values)
         self._parameter = parameter
         self._peers = tuple(tuple(peer) for peer in wavelength_peers)
-        self._counts = Counter(self._values)
+        self._counts = None
 
     def __len__(self):
         return len(self._values)
@@ -323,6 +373,8 @@ class _LoopRunLabels(Sequence[str]):
             if position < len(peers):
                 center = peers[position]
                 label += f" · {str(int(center)) if float(center).is_integer() else str(center)} nm"
+        if self._counts is None:
+            self._counts = Counter(self._values)
         if self._counts[value] > 1:
             label += f" (#{position + 1})"
         return label
@@ -341,10 +393,10 @@ def _parsed_values(raw: str, param: str) -> tuple:
     if param == _SETUP_PARAM:
         return tuple(_setup_backend(value) for value in raw.replace(';', ',').split(','))
     values = parse_numeric_sequence(raw)
-    if param in _SPECTROMETER_PARAMS and any(value <= 0 for value in values):
+    if param in (*_SPECTROMETER_PARAMS, *_ANDOR_PARAMS) and any(value <= 0 for value in values):
         raise ValueError(f"{param} requires finite positive values.")
-    if param == "Accumulations (EPF)" and any(not value.is_integer() for value in values):
-        raise ValueError("Accumulations (EPF) requires positive integers.")
+    if param in (_SPECTROMETER_PARAMS[2], _ANDOR_PARAMS[2]) and any(not value.is_integer() for value in values):
+        raise ValueError(f"{param} requires positive integers.")
     return tuple(values)
 
 
@@ -486,7 +538,7 @@ def _plan_context_count(groups: Sequence[Dict[str, Any]]) -> int:
 def _frame_records(frame):
     """Plain row mappings for the fixed scalar table schemas, without Series."""
     columns = tuple(frame.columns)
-    return [dict(zip(columns, values)) for values in frame.itertuples(index=False, name=None)]
+    return [dict(zip(columns, values)) for values in frame.to_numpy(dtype=object).tolist()]
 
 
 def _validate_plan_budget(
@@ -494,6 +546,7 @@ def _validate_plan_budget(
     batch_df: pd.DataFrame,
     *,
     nested: bool = False,
+    _enabled_rows: Optional[Sequence[dict]] = None,
 ) -> Dict[str, int]:
     """Bound planning work before products, repeat options or vectors allocate.
 
@@ -507,7 +560,8 @@ def _validate_plan_budget(
             f"Combined plan has {context_count:,} loop contexts; the total limit is "
             f"{_PLAN_CONTEXT_LIMIT:,} (separate from the per-row value limit). {advice}"
         )
-    rows = [row for row in _frame_records(batch_df) if _to_bool(row.get("Run", True))]
+    rows = (_enabled_rows if _enabled_rows is not None
+            else [row for row in _frame_records(batch_df) if _to_bool(row.get("Run", True))])
     counts = [(_sweep_point_count(row), max(int(row.get("repeat", 1) or 1), 1)) for row in rows]
     spectra = context_count * sum(frames * repeats for frames, repeats in counts)
     candidates = context_count * (
@@ -531,6 +585,8 @@ def _build_plan(
     parameter_order: Optional[Sequence[str]] = None,
     include_schedule: bool = False,
     _include_legacy_schedule: bool = True,
+    _normalized: bool = False,
+    _groups=None,
 ):
     """
     Return (final_sequence, enabled_df_batch, total_acq), optionally with schedule.
@@ -541,13 +597,15 @@ def _build_plan(
       "Zip"         – all enabled rows share Level 1 (zipped together).
       "Customized"  – use the Group column as Level.
     """
-    groups = _loop_group_combinations(loop_df, mode)
-    batch = _normalize_batch(batch_df)
+    groups = (_loop_group_combinations(loop_df, mode, _normalized=_normalized)
+              if _groups is None else _groups)
+    batch = batch_df if _normalized else _normalize_batch(batch_df)
     batch = batch[batch["Run"]].reset_index(drop=True)
-    _validate_plan_budget(_plan_context_count(groups), batch)
+    batch_rows = batch.to_dict("records")
+    _validate_plan_budget(_plan_context_count(groups), batch, _enabled_rows=batch_rows)
     if mode == "Synchronize" and parameter_order:
         priority = {parameter: index for index, parameter in enumerate(parameter_order)}
-        groups.sort(key=lambda group: priority.get(group["parameters"][0], len(priority)))
+        groups = sorted(groups, key=lambda group: priority.get(group["parameters"][0], len(priority)))
     level_combos = [group["contexts"] for group in groups]
 
     if not level_combos:
@@ -565,6 +623,7 @@ def _build_plan(
         final_sequence,
         batch,
         acquisition_grouping=acquisition_grouping,
+        _enabled_rows=batch_rows,
     ) if _include_legacy_schedule else []
     total_acq = sum(
         max(int(task["row"].get("repeat", 1)), 1)
@@ -583,19 +642,26 @@ def _resolve_execution_plan(
     acquisition_grouping: str,
     parameter_order: Optional[Sequence[str]] = None,
     execution_order: Optional[Sequence[Any]] = None,
+    _normalized: bool = False,
 ):
     """Build one reusable result for Apply and session restoration."""
+    if not _normalized:
+        loop_df = _normalize_loop(loop_df)
+    groups = _loop_group_combinations(loop_df, mode, _normalized=True)
+    if not _normalized:
+        batch_df = _normalize_batch(batch_df)
     if execution_order:
-        groups = _loop_group_combinations(loop_df, mode)
-        _validate_plan_budget(_plan_context_count(groups), _normalize_batch(batch_df), nested=True)
+        _validate_plan_budget(_plan_context_count(groups), batch_df, nested=True)
     seq, batch, total, schedule = _build_plan(
         loop_df, batch_df, mode=mode, acquisition_grouping=acquisition_grouping,
         parameter_order=parameter_order, include_schedule=True,
         _include_legacy_schedule=not bool(execution_order),
+        _normalized=True, _groups=groups,
     )
     if execution_order:
         schedule = _build_nested_execution_schedule(
             loop_df, batch_df, mode=mode, execution_order=execution_order,
+            _normalized=True, _groups=groups,
         )
         total = _count_logical_streams(schedule)
     return seq, batch, total, schedule
@@ -606,37 +672,43 @@ def _build_acquisition_schedule(
     batch_df: pd.DataFrame,
     *,
     acquisition_grouping: str = "loop_first",
+    _normalized: bool = False,
+    _enabled_rows: Optional[Sequence[dict]] = None,
 ) -> List[Dict[str, Any]]:
     """Flatten loop contexts and batch rows into their exact execution order."""
-    batch = _normalize_batch(batch_df)
-    batch = batch[batch["Run"]].reset_index(drop=True)
-    _validate_plan_budget(len(final_sequence), batch)
-    sequence = [dict(ctx) for ctx in final_sequence]
-    batch_rows = batch.to_dict("records")
+    if _enabled_rows is None:
+        batch = batch_df if _normalized else _normalize_batch(batch_df)
+        _enabled_rows = [row for row in batch.to_dict("records") if row["Run"]]
+    _validate_plan_budget(len(final_sequence), batch_df, _enabled_rows=_enabled_rows)
+    when_contexts = {}
     schedule: List[Dict[str, Any]] = []
 
     def append_if_applicable(seq_i: int, row_i: int) -> None:
         _check_plan_build_cancelled()
-        ctx = sequence[seq_i]
-        row = dict(batch_rows[row_i])
-        if not _when_ok(row.get("When", ""), _outer_ctx(ctx)):
-            return
+        ctx = final_sequence[seq_i]
+        row = _enabled_rows[row_i]
+        when = row.get("When", "")
+        if when:
+            if seq_i not in when_contexts:
+                when_contexts[seq_i] = _outer_ctx(ctx)
+            if not _when_ok(when, when_contexts[seq_i]):
+                return
         schedule.append(
             {
                 "seq_i": int(seq_i),
                 "row_i": int(row_i),
                 "ctx": dict(ctx),
-                "row": row,
+                "row": dict(row),
             }
         )
 
     if acquisition_grouping == "batch_first":
-        for row_i in range(len(batch)):
-            for seq_i in range(len(sequence)):
+        for row_i in range(len(_enabled_rows)):
+            for seq_i in range(len(final_sequence)):
                 append_if_applicable(seq_i, row_i)
     else:
-        for seq_i in range(len(sequence)):
-            for row_i in range(len(batch)):
+        for seq_i in range(len(final_sequence)):
+            for row_i in range(len(_enabled_rows)):
                 append_if_applicable(seq_i, row_i)
     return schedule
 
@@ -644,7 +716,7 @@ def _build_acquisition_schedule(
 def _loop_group_combinations(
     loop_df: pd.DataFrame,
     mode: str = "Synchronize",
-    *, metadata_only: bool = False,
+    *, metadata_only: bool = False, _normalized: bool = False,
 ) -> List[Dict[str, Any]]:
     """Resolve each enabled loop group independently.
 
@@ -655,51 +727,54 @@ def _loop_group_combinations(
     Metadata callers can request a range with the same context count, while
     retaining all parsing, group and stage-range validation.
     """
-    loop = _normalize_loop(loop_df)
-    active = loop[loop["Enable"]].reset_index(drop=True).copy()
-    if mode == "Zip":
-        active["Level"] = 1
-    elif mode == "Synchronize":
-        active["Level"] = range(1, len(active) + 1)
-    else:
-        active["Level"] = active["Group"].fillna(1).astype(int)
-
-    _validate_setup_group(active)
+    loop = loop_df if _normalized else _normalize_loop(loop_df)
+    active = [row for row in loop.itertuples(index=False, name=None) if row[0]]
+    setup_values = _validate_setup_group(active)
+    rows_by_level = {}
+    for position, (_, parameter, raw, group) in enumerate(active, 1):
+        level = 1 if mode == "Zip" else position if mode == "Synchronize" else int(group)
+        rows_by_level.setdefault(level, []).append((str(parameter), str(raw)))
 
     grouped: List[Dict[str, Any]] = []
-    for level in sorted({int(v) for v in active["Level"].tolist()}):
-        specs: List[Dict[str, Any]] = []
-        rows = active[active["Level"] == level]
-        for _, row in rows.iterrows():
-            values = _parse_values(str(row["Values"]), str(row["Parameter"]))
-            if values and str(row["Parameter"]).startswith("Stage Position"):
+    for level, rows in sorted(rows_by_level.items()):
+        specs = []
+        for parameter, raw in rows:
+            values = setup_values.get(parameter) or _parse_values(raw, parameter)
+            if values and parameter.startswith("Stage Position"):
                 values = [_validate_stage_position_value(v) for v in values]
             if values:
-                specs.append({"p": str(row["Parameter"]), "v": values})
+                specs.append((parameter, values))
         if not specs:
             continue
-        lengths = [len(spec["v"]) for spec in specs]
+        lengths = [len(values) for _, values in specs]
+        if len(set(lengths)) == 2 and min(lengths) == 1:
+            # A single value is held fixed while the group's arrays step.
+            specs = [(parameter, values * max(lengths) if len(values) == 1 else values)
+                     for parameter, values in specs]
+            lengths = [max(lengths)] * len(specs)
         if len(set(lengths)) > 1:
             raise ValueError(
                 f"Group {level}: value-count mismatch {lengths}. "
                 "All rows in the same group must have the same number of values."
             )
-        contexts = range(lengths[0]) if metadata_only else [
-            {spec["p"]: value for spec, value in zip(specs, zipped)}
-            for zipped in zip(*[spec["v"] for spec in specs])
-        ]
         selection = loop.attrs.get("loop_run_positions", {}).get(level)
         if selection == "reselect":
             raise ValueError(f"Group {level}: values or pairing changed; select values again for this run.")
-        positions = range(len(contexts)) if metadata_only else list(range(len(contexts)))
+        positions = range(lengths[0]) if metadata_only else list(range(lengths[0]))
         if selection is not None:
             if (not isinstance(selection, (list, tuple)) or not selection
-                    or any(type(i) is not int or i < 0 or i >= len(contexts) for i in selection)):
+                    or any(type(i) is not int or i < 0 or i >= lengths[0] for i in selection)):
                 raise ValueError(f"Group {level}: select at least one valid value for this run.")
             positions = sorted(set(selection))
-            contexts = range(len(positions)) if metadata_only else [contexts[i] for i in positions]
-        label = " + ".join(str(spec["p"]).replace("Rotation1", "RotIn").replace("Rotation2", "RotOut") for spec in specs)
-        grouped.append({"id": f"group:{level}", "group": level, "label": label, "parameters": [spec["p"] for spec in specs], "contexts": contexts, "positions": positions})
+        contexts = range(len(positions)) if metadata_only else [
+            {parameter: values[index] for parameter, values in specs}
+            for index in positions
+        ]
+        parameters = [parameter for parameter, _ in specs]
+        label = " + ".join(parameter.replace("Rotation1", "RotIn").replace("Rotation2", "RotOut")
+                           for parameter in parameters)
+        grouped.append({"id": f"group:{level}", "group": level, "label": label,
+                        "parameters": parameters, "contexts": contexts, "positions": positions})
     return grouped
 
 
@@ -800,6 +875,8 @@ def _build_nested_execution_schedule(
     mode: str = "Synchronize",
     execution_order: Optional[Sequence[Any]] = None,
     max_tasks: Optional[int] = None,
+    _normalized: bool = False,
+    _groups=None,
 ) -> List[Dict[str, Any]]:
     """Resolve a nested group/condition/point schedule into acquisition tasks.
 
@@ -808,22 +885,21 @@ def _build_nested_execution_schedule(
     a later loop setting.  The legacy ``_build_acquisition_schedule`` remains
     unchanged and is used unless the panel explicitly enables this schedule.
     """
-    groups = _loop_group_combinations(loop_df, mode)
-    batch = _normalize_batch(batch_df)
-    _validate_plan_budget(_plan_context_count(groups), batch, nested=True)
-    order = _normalize_execution_order(execution_order, loop_df, mode)
+    groups = (_loop_group_combinations(loop_df, mode, _normalized=_normalized)
+              if _groups is None else _groups)
+    batch = batch_df if _normalized else _normalize_batch(batch_df)
     enabled_rows = [
-        (int(i), row.to_dict())
-        for i, row in batch.iterrows()
-        if _to_bool(row.get("Run", True))
+        (i, row) for i, row in enumerate(batch.to_dict("records")) if row["Run"]
     ]
+    _validate_plan_budget(_plan_context_count(groups), batch, nested=True,
+                          _enabled_rows=[row for _, row in enabled_rows])
+    order = _normalize_execution_order(execution_order, loop_df, mode, groups=groups)
     by_group = {item["id"]: item for item in groups}
     group_order_by_param: Dict[str, int] = {}
     for order_i, level in enumerate(order):
         if level["kind"] != "group" or level["id"] not in by_group:
             continue
-        for context in by_group[level["id"]]["contexts"]:
-            group_order_by_param.update({str(param): order_i for param in context})
+        group_order_by_param.update({param: order_i for param in by_group[level["id"]]["parameters"]})
     options: List[List[Dict[str, Any]]] = []
     for level in order:
         kind = level["kind"]
@@ -1227,7 +1303,7 @@ def _compile_apply_snapshot(snapshot, cancelled):
         requirements = (
             schedule, _required_smu_roles(seq, batch, schedule),
             _required_optical_axes(seq, schedule),
-            {_setup_backend(task["ctx"][_SETUP_PARAM]) for task in schedule if _SETUP_PARAM in task["ctx"]},
+            _requested_setups(schedule),
         )
         # Wavelength advice depends only on this pairing. Preserve an absent
         # center so future default edits remain live without a schedule scan.
@@ -1235,10 +1311,10 @@ def _compile_apply_snapshot(snapshot, cancelled):
         for task in schedule:
             _check_plan_build_cancelled()
             ctx = task["ctx"]
-            key = (ctx.get(_SETUP_PARAM, ""), "Center Wavelength (nm)" in ctx,
-                   ctx.get("Center Wavelength (nm)"))
+            key = (ctx.get(_SETUP_PARAM, ""), _SPECTROMETER_PARAMS[0] in ctx,
+                   ctx.get(_SPECTROMETER_PARAMS[0]), ctx.get(_ANDOR_PARAMS[0]))
             wavelength_contexts.setdefault(key, {
-                name: ctx[name] for name in (_SETUP_PARAM, "Center Wavelength (nm)") if name in ctx
+                name: ctx[name] for name in (_SETUP_PARAM, _SPECTROMETER_PARAMS[0], _ANDOR_PARAMS[0]) if name in ctx
             })
         filename_contexts = {}
         for row in snapshot["batch"].to_dict("records"):
@@ -1607,6 +1683,17 @@ def _filename_context_from_row(
     )
 
 
+def _andor_filename_ctx(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Context that names the paired Andor file by its own recipe, not PIXIS's."""
+    named = dict(ctx)
+    for parameter, andor_parameter in zip(_SPECTROMETER_PARAMS, _ANDOR_PARAMS):
+        if andor_parameter in ctx:
+            named[parameter] = ctx[andor_parameter]
+        else:
+            named.pop(parameter, None)
+    return named
+
+
 def _build_run_filename_base(
     meta: Dict[str, Any],
     ctx: Dict[str, Any],
@@ -1614,6 +1701,7 @@ def _build_run_filename_base(
     *,
     measured_power_uw: Optional[float] = None,
     enabled_parts: Optional[List[str]] = None,
+    andor_token: bool = True,
 ) -> Tuple[str, FilenameContext, List[Tuple[str, str]]]:
     fname_ctx = _filename_context_from_row(
         meta,
@@ -1627,13 +1715,40 @@ def _build_run_filename_base(
     )
     tokens = build_filename_tokens(fname_ctx, parts)
     base = build_base_filename(fname_ctx, parts)
-    if _SETUP_PARAM in ctx:
+    # Paired files already end in _PIXIS / _Andor_*, so the setup label would repeat them.
+    if _SETUP_PARAM in ctx and _setup_backend(ctx[_SETUP_PARAM]) not in _PAIRED_SETUPS:
         setup_label = _SETUP_LABELS[_setup_backend(ctx[_SETUP_PARAM])]
         base += f"_{setup_label}"
         tokens.append(("setup", setup_label))
+    # A single detector's file is named by that detector's recipe only; the
+    # shared pair journal keeps both.
+    if andor_token and any(param in ctx for param in _ANDOR_PARAMS):
+        # Looped Andor settings: without them, outputs that differ only in the
+        # Andor centre or exposure are told apart by a _001 suffix alone.
+        from utils.filename_builder import format_center_token, format_exposure_token
+
+        defaults = meta.get("spectrometer_defaults", {})
+
+        def andor_value(index):
+            return ctx.get(_ANDOR_PARAMS[index], defaults.get(_SPECTROMETER_PARAMS[index]))
+
+        andor_parts = []
+        if _ANDOR_PARAMS[0] in ctx:
+            andor_parts.append(format_center_token(andor_value(0)))
+        if _ANDOR_PARAMS[1] in ctx or _ANDOR_PARAMS[2] in ctx:
+            andor_parts.append(format_exposure_token(andor_value(1), andor_value(2)))
+        andor_token = "_".join(["Andor", *(part for part in andor_parts if part)])
+        if andor_token != "Andor":
+            base += "_" + andor_token
+            tokens.append(("andor", andor_token))
     mode2 = str(row.get("bias2_mode", "off") or "off").strip().lower()
     if mode2 in ("independent", "follow"):
-        sweep2 = _resolve_sweep_vectors(row)
+        # Nested schedules carry one point per row (frames=1); name the file by
+        # the row's whole Vbias2 sweep, as the condition label does for Vbias.
+        sweep_row = dict(row)
+        if row.get("_nested_original_frames") is not None:
+            sweep_row["frames"] = int(row["_nested_original_frames"])
+        sweep2 = _resolve_sweep_vectors(sweep_row)
         points2 = sweep2["vbias2_points"]
         token2 = f"Vbias2_{points2[0]:g}V"
         if points2[-1] != points2[0]:
@@ -1666,11 +1781,30 @@ def _cell_checked(widget: QWidget) -> bool:
 
 def _make_param_combo(current: str) -> QComboBox:
     combo = QComboBox()
-    for parameter in LOOP_PARAMS:
-        combo.addItem(_LOOP_PARAM_DISPLAY.get(parameter, parameter), parameter)
-    idx = combo.findData(current)
-    combo.setCurrentIndex(max(0, idx))
+    _configure_param_combo(combo, current)
     return combo
+
+
+def _configure_param_combo(combo: QComboBox, current: str) -> None:
+    # Andor values are entered in the Andor column; a separate Andor row is
+    # only kept when a saved recipe cannot be shown beside its PIXIS row.
+    andor_params = tuple(param for param in _ANDOR_PARAMS if param == current)
+    with QSignalBlocker(combo):
+        combo.clear()
+        for parameter in (*LOOP_PARAMS, *andor_params):
+            combo.addItem(_LOOP_PARAM_DISPLAY.get(parameter, parameter), parameter)
+        combo.setCurrentIndex(max(0, combo.findData(current)))
+
+
+def _detector_wavelength_contexts(contexts):
+    for ctx in contexts:
+        pair_backend = _PAIRED_SETUPS.get(ctx.get(_SETUP_PARAM))
+        if pair_backend is None:
+            yield ctx
+            continue
+        yield {**ctx, _SETUP_PARAM: "lightfield"}
+        yield {_SETUP_PARAM: pair_backend, _SPECTROMETER_PARAMS[0]:
+               ctx.get(_ANDOR_PARAMS[0], cfg.lf6.center_nm)}
 
 
 # ── When-column delegate ──────────────────────────────────────────────────────
@@ -2763,9 +2897,11 @@ class _RunWorker(QObject):
         self._file_metadata = DualGateFileMetadata(metadata_run)
         self._metadata_finalizing = threading.Event()
         self.metadata_failed = False
+        self.cleanup_failed = False
         self._files_before = set(files_before or []) if startup_metadata is not None else (
             set(files_before) if files_before is not None else set(_experiment_output_files(out_dir)))
         self._setup_sequence = False
+        self._requested_setups = set()
         self._active_recipe = None
         self._required_smu_roles = ()
         self._required_optical_axes = ()
@@ -2773,7 +2909,8 @@ class _RunWorker(QObject):
             self._resolve_run_requirements()
 
     def _resolve_run_requirements(self):
-        self._setup_sequence = any(_SETUP_PARAM in task['ctx'] for task in self._schedule)
+        self._requested_setups = _requested_setups(self._schedule)
+        self._setup_sequence = bool(self._requested_setups)
         self._required_smu_roles = _required_smu_roles(self._seq, self._batch, self._schedule)
         self._required_optical_axes = _required_optical_axes(self._seq, self._schedule)
 
@@ -2793,6 +2930,9 @@ class _RunWorker(QObject):
         if issues:
             raise _RunFlowError("planning", issues[0])
         self._resolve_run_requirements()
+        station_issue = _pair_station_issue(self._requested_setups)
+        if station_issue:
+            raise _RunFlowError("acquisition", station_issue)
         if self._stop.is_set():
             raise _StopRequested()
         self.log.emit(f"Run plan validated in {time.monotonic() - started:.2f} s.")
@@ -2847,7 +2987,7 @@ class _RunWorker(QObject):
                 {"path": path, "role": "raw" if path.suffix.lower() == ".csv" else "intermediate"}
                 for path in _experiment_output_files(run.path.parent)
                 if path != run.path and path not in self._files_before
-                and path.suffix.lower() in {".csv", ".log", ".json", ".txt"}
+                and path.suffix.lower() in {".csv", ".log", ".json", ".jsonl", ".txt"}
             ]
             if failed:
                 result = run.fail(message, files=files)
@@ -2920,14 +3060,71 @@ class _RunWorker(QObject):
         return self._smu.device
 
     def _recipe(self, ctx):
-        return (_setup_backend(ctx[_SETUP_PARAM]),
-                float(ctx.get(_SPECTROMETER_PARAMS[0], self._spectrometer_defaults[_SPECTROMETER_PARAMS[0]])),
-                float(ctx.get(_SPECTROMETER_PARAMS[1], self._spectrometer_defaults[_SPECTROMETER_PARAMS[1]])),
-                int(ctx.get(_SPECTROMETER_PARAMS[2], self._spectrometer_defaults[_SPECTROMETER_PARAMS[2]])))
+        setup = _setup_backend(ctx[_SETUP_PARAM])
+        defaults = tuple(self._spectrometer_defaults[param] for param in _SPECTROMETER_PARAMS)
+        pixis = tuple(ctx.get(param, default) for param, default in zip(_SPECTROMETER_PARAMS, defaults))
+        if setup in _PAIRED_SETUPS:
+            andor = tuple(ctx.get(param, default) for param, default in zip(_ANDOR_PARAMS, defaults))
+            return (setup, *pixis, *andor)
+        return (setup, float(pixis[0]), float(pixis[1]), int(pixis[2]))
+
+    @staticmethod
+    def _paired_recipes(recipe):
+        keys = ("center_nm", "exposure_ms", "frames")
+        andor_backend = _PAIRED_SETUPS[recipe[0]]
+        return {"lightfield": dict(zip(keys, recipe[1:4])), andor_backend: dict(zip(keys, recipe[4:7]))}
+
+    def _write_paired_point(self, writer, andor_backend, recipes, scalars, point_number, point_total):
+        if self._stop.is_set():
+            raise _StopRequested()
+        try:
+            records = self._lf6.acquire_station_pair(andor_backend, recipes, self._stop, owner="presets")
+        except Exception as exc:
+            if self._stop.is_set():
+                raise _StopRequested() from exc
+            raise _RunFlowError("acquisition", f"Detector pair error: {exc}") from exc
+        try:
+            paths = writer.write_point(point_number, records, scalars=scalars)
+        except Exception as exc:
+            written = ", ".join(
+                _SETUP_LABELS.get(backend, str(backend))
+                for backend in getattr(exc, "paths", {})
+            )
+            raise _RunFlowError(
+                "save",
+                f"Paired point {point_number} was not saved completely: {exc}"
+                + (f" (written: {written})" if written else ""),
+            ) from exc
+        for backend, path in reversed(tuple(paths.items())):
+            record = records[backend]
+            settings = record.get("settings") or recipes[backend]
+            payload = {
+                **scalars, "csv_path": str(path), "measurement_setup": backend,
+                "center_nm": settings.get("center_nm"), "exposure_ms": settings.get("exposure_ms"),
+                "accumulations": settings.get("frames"), "mode": "spectrum",
+                "axis_unit": record.get("axis_unit", "nm"),
+                "point_index": point_number - 1, "point_number": point_number, "point_total": point_total,
+            }
+            if self._preview_event is not None and self._preview_event.is_set():
+                payload["wavelengths"] = np.asarray(record["wavelengths"], dtype=float).copy()
+                payload["data"] = np.asarray(record["counts"], dtype=float).copy()
+            self.acquisition_ready.emit(payload)
+        if len(paths) == 2:
+            self._file_metadata.completed_points += 1
+            return
+        requires_recovery = any(record.get("recovery_required") for record in records.values())
+        if self._stop.is_set() and not requires_recovery:
+            raise _StopRequested()
+        failed = ("{}: {}".format(_SETUP_LABELS[backend], records.get(backend, {}).get("error", "No capture result received"))
+                  for backend in recipes if backend not in paths)
+        raise _RunFlowError("acquisition", "Incomplete detector pair. " + ". ".join(failed))
 
     def _prepare_setup(self, recipe) -> None:
         if self._stop.is_set():
             raise _StopRequested()
+        if recipe[0] in _PAIRED_SETUPS:
+            # The concurrent launcher configures each detector on its SDK owner.
+            return
         prepare = getattr(self._lf6, 'prepare_scan_condition', None)
         if not callable(prepare):
             raise _RunFlowError('acquisition', 'Multi-setup scan preparation is unavailable.')
@@ -2941,25 +3138,31 @@ class _RunWorker(QObject):
                 raise _StopRequested() from exc
             raise _RunFlowError('acquisition', str(exc)) from exc
 
+    def _return_smu_to_zero(self, device):
+        settings = dict(ramp_step=max(float(cfg.ramp.step_V) * .5, 1e-6),
+                        delay_s=float(cfg.ramp.delay_s) * 2., coordinated_gates=True)
+        if "Vbias2" in self._required_smu_roles:
+            settings["include_bias2"] = True
+        if not hasattr(device, "ramp_all_to_zero_report"):
+            return {}, list(device.ramp_all_to_zero(**settings) or [])
+        roles = device.ramp_all_to_zero_report(**settings)
+        errors = [f"{role}: {result.get('error', result.get('status'))}"
+                  for role, result in roles.items() if result.get("status") != "reached_zero"]
+        errors.extend(f"{role}: no zero-return report"
+                      for role in self._required_smu_roles if role not in roles)
+        return roles, errors
+
     def _zero_before_setup_switch(self) -> None:
         """A failed return to zero must block all later detector/gate commands."""
         self.log.emit('Returning gates to zero before switching measurement setup...')
         device = self._require_smu_ready()
-        settings = dict(ramp_step=max(float(cfg.ramp.step_V) * .5, 1e-6),
-                        delay_s=float(cfg.ramp.delay_s) * 2.)
-        if "Vbias2" in self._required_smu_roles:
-            settings["include_bias2"] = True
         try:
-            if hasattr(device, 'ramp_all_to_zero_report'):
-                report = device.ramp_all_to_zero_report(**settings)
-                errors = [f"{role}: {result.get('error', result.get('status'))}"
-                          for role, result in report.items() if result.get('status') != 'reached_zero']
-                errors.extend(f'{role}: no zero-return report' for role in self._required_smu_roles if role not in report)
-            else:
-                errors = device.ramp_all_to_zero(**settings)
+            roles, errors = self._return_smu_to_zero(device)
             if errors:
-                raise RuntimeError('; '.join(str(error) for error in errors))
+                self._active_run_context["setup_switch_zero"] = {"roles": roles, "errors": errors}
+                raise RuntimeError('; '.join(errors)) from getattr(device, "last_communication_error", None)
         except Exception as exc:
+            self.cleanup_failed = True
             raise _RunFlowError('hardware', f'Return-to-zero failed before setup switch: {exc}') from exc
         if self._stop.is_set():
             raise _StopRequested()
@@ -3030,6 +3233,9 @@ class _RunWorker(QObject):
                 self.preparing_run = False
             if self._stop.is_set():
                 raise _StopRequested()
+            setup_issues = _setup_readiness_issues(self._lf6, self._schedule, self._requested_setups)
+            if setup_issues:
+                raise _RunFlowError("acquisition", setup_issues[0])
             self._require_smu_ready()
             if "Vbias2" in self._required_smu_roles:
                 validate_targets = getattr(self._smu, "validate_voltage_targets", None)
@@ -3056,15 +3262,21 @@ class _RunWorker(QObject):
                     except Exception as exc:
                         raise _RunFlowError("SMU safety", f"Bias voltage preflight failed: {exc}") from exc
             self._require_optical_ready()
-            issues = _setup_readiness_issues(self._lf6, self._schedule)
-            if issues:
-                raise _RunFlowError('acquisition', issues[0])
+            recipes = dict.fromkeys(self._recipe(task["ctx"]) for task in self._schedule) if self._setup_sequence else {}
+            for recipe in recipes:
+                if recipe[0] not in _PAIRED_SETUPS:
+                    continue
+                if self._stop.is_set():
+                    raise _StopRequested()
+                try:
+                    self._lf6.validate_station_pair(_PAIRED_SETUPS[recipe[0]], self._paired_recipes(recipe))
+                except Exception as exc:
+                    raise _RunFlowError("acquisition", f"Detector pair preflight failed: {exc}") from exc
             if self._metadata_run is not None:
                 bind_lightfield_metadata(self._lf6, self._metadata_run, capture_policy="file")
             hardware_started = True
             if self._setup_sequence:
                 # Configure every distinct complete recipe before any gate write.
-                recipes = dict.fromkeys(self._recipe(task['ctx']) for task in self._schedule)
                 for recipe_i, recipe in enumerate(recipes, 1):
                     self.log.emit(f"Preparing detector recipe {recipe_i}/{len(recipes)}: {recipe[0]}, {recipe[1]:g} nm...")
                     self._prepare_setup(recipe)
@@ -3081,12 +3293,13 @@ class _RunWorker(QObject):
             self.log.emit(
                 f"Resolved run plan: {len(self._schedule)} ordered step(s), "
                 f"{len(self._seq)} loop context(s), "
-                f"{total_acq} acquisition file(s), {total_points} sweep point(s)."
+                f"{total_acq} logical acquisition(s), {total_points} sweep point(s)."
             )
             self.log.emit(
                 f"Direct-jump mode active. Safe jump limit={float(cfg.ramp.safe_jump_V):g} V. "
-                + ("Ramp-to-zero runs after measurement and before outer setup switches, at 2x slower speed."
-                   if self._setup_sequence else "Ramp-to-zero runs after measurement only and at 2x slower speed.")
+                + ("Return to zero after measurement and before outer setup switches. "
+                   if self._setup_sequence else "Return to zero after measurement. ")
+                + "The paired gate ramp uses half the configured step and twice the delay per pair."
             )
             initial_settle_s = max(
                 0.0,
@@ -3185,6 +3398,8 @@ class _RunWorker(QObject):
                 # an ordered acquisition step, not a unique loop context.
                 seq_i = schedule_i
                 ctx = dict(task["ctx"])
+                pair_backend = _PAIRED_SETUPS.get(_setup_backend(ctx[_SETUP_PARAM])) if _SETUP_PARAM in ctx else None
+                pair_recipes = self._paired_recipes(self._recipe(ctx)) if pair_backend else None
                 target_row_i = int(task["row_i"])
                 center   = float(ctx.get("Center Wavelength (nm)", self._spectrometer_defaults["Center Wavelength (nm)"]))
                 exp_ms   = float(ctx.get("Exposure Time (ms)",     self._spectrometer_defaults["Exposure Time (ms)"]))
@@ -3193,7 +3408,7 @@ class _RunWorker(QObject):
                 val_rot2  = ctx.get("Rotation2 Angle (deg)")
                 val_stage = ctx.get("Stage Position")
                 ctx_bits = []
-                for key in (_SETUP_PARAM, "Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)", "Rotation1 Angle (deg)", "Rotation2 Angle (deg)", "Stage Position"):
+                for key in (*_RECIPE_PARAMS, "Rotation1 Angle (deg)", "Rotation2 Angle (deg)", "Stage Position"):
                     if key in ctx and ctx.get(key) is not None:
                         ctx_bits.append(f"{key}={ctx.get(key)}")
                 self.log.emit(
@@ -3542,22 +3757,35 @@ class _RunWorker(QObject):
                                         measurement_dir = _measurement_output_dir(self._out_dir, self._meta)
                                         measurement_dir.mkdir(parents=True, exist_ok=True)
                                         stem_final = make_unique_stem(measurement_dir, stem_base + rep_suffix)
-                                        csv_path = measurement_dir / f"{stem_final}.csv"
-                                        writer = CSVWriter(
-                                            out_dir=str(csv_path.parent), file_base=csv_path.stem,
-                                            wavelength_headers=[],
-                                            scalar_fields_order=[
-                                                "Vbg_set", "Vbg_meas", "Vtg_set", "Vtg_meas",
-                                                "Vbias_set", "Vbias_meas", "Ibg", "Itg", "Ibias",
-                                                *(["Vbias2_set", "Vbias2_meas", "Ibias2"] if vbias2_points is not None else []),
-                                                *(["Power_uW", "Power_raw_uW", "Power_correction_factor"] if power_reading is not None else []),
-                                            ],
-                                        )
+                                        if pair_backend:
+                                            detector_stems = [
+                                                _build_run_filename_base(
+                                                    self._meta, detector_ctx, row_dict,
+                                                    measured_power_uw=measured_power_uw,
+                                                    enabled_parts=self._parts, andor_token=False,
+                                                )[0] + rep_suffix + stem_final[len(stem_base + rep_suffix):]
+                                                for detector_ctx in (ctx, _andor_filename_ctx(ctx))]
+                                            writer = PairedSpectrumFiles(
+                                                measurement_dir, stem_final, pair_backend,
+                                                pixis_stem=detector_stems[0], andor_stem=detector_stems[1])
+                                            csv_path = writer.manifest_path
+                                        else:
+                                            csv_path = measurement_dir / f"{stem_final}.csv"
+                                            writer = CSVWriter(
+                                                out_dir=str(csv_path.parent), file_base=csv_path.stem,
+                                                wavelength_headers=[],
+                                                scalar_fields_order=[
+                                                    "Vbg_set", "Vbg_meas", "Vtg_set", "Vtg_meas",
+                                                    "Vbias_set", "Vbias_meas", "Ibg", "Itg", "Ibias",
+                                                    *(["Vbias2_set", "Vbias2_meas", "Ibias2"] if vbias2_points is not None else []),
+                                                    *(["Power_uW", "Power_raw_uW", "Power_correction_factor"] if power_reading is not None else []),
+                                                ],
+                                            )
                                         if stream_key is not None:
                                             stream_paths[stream_key] = csv_path
                                             writer_cache[stream_key] = writer
                                             stream_power[stream_key] = (measured_power_uw, power_reading)
-                                        self.log.emit(f"  -> {stem_final}.csv")
+                                        self.log.emit(f"  -> {csv_path.name}")
                                     except Exception as exc:
                                         raise _RunFlowError("metadata", f"Filename error: {exc}") from exc
                                 self._active_run_context["csv_path"] = str(csv_path)
@@ -3569,7 +3797,7 @@ class _RunWorker(QObject):
 
                                 self._require_smu_ready()
                                 wl = np.array([]); cts = np.array([])
-                                if self._lf6 and self._lf6.is_connected:
+                                if not pair_backend and self._lf6 and self._lf6.is_connected:
                                     try:
                                         set_lightfield_context(self._lf6,
                                             output_file=self._file_metadata.output_path(csv_path),
@@ -3592,7 +3820,7 @@ class _RunWorker(QObject):
                                         raise
                                     except Exception as e:
                                         raise _RunFlowError("acquisition", f"Acquire error: {e}") from e
-                                else:
+                                elif not pair_backend:
                                     raise _RunFlowError("acquisition", "LF6 is not connected.")
 
                                 if self._stop.is_set():
@@ -3624,6 +3852,18 @@ class _RunWorker(QObject):
                                     raise _RunFlowError(
                                         "readback", f"SMU read failed: {exc}"
                                     ) from exc
+                                try:
+                                    from utils.bias_control import check_setpoint_readings
+                                    check_setpoint_readings(
+                                        dev,
+                                        {"Vbg": vbg_set, "Vtg": vtg_set,
+                                         "Vbias": vbias_set, "Vbias2": vbias2_set},
+                                        {"Vbg": (Vbg_meas, Ibg), "Vtg": (Vtg_meas, Itg),
+                                         "Vbias": (Vbias_meas, Ib),
+                                         "Vbias2": (Vbias2_meas, Ibias2)},
+                                    )
+                                except Exception as exc:
+                                    raise _RunFlowError("hardware", str(exc)) from exc
                                 self.log.emit(
                                     "    "
                                     + _format_current_readback(
@@ -3634,6 +3874,28 @@ class _RunWorker(QObject):
                                     )
                                     + (f", Ibias2={Ibias2:g} A" if Ibias2 is not None else "")
                                 )
+
+                                row_data = {
+                                    "Vbg_set": float(vbg_set), "Vbg_meas": Vbg_meas,
+                                    "Vtg_set": float(vtg_set), "Vtg_meas": Vtg_meas,
+                                    "Ibg": Ibg, "Itg": Itg, "Ibias": Ib,
+                                }
+                                if power_reading is not None:
+                                    row_data.update(power_reading.csv_values())
+                                if vbias_set is not None:
+                                    row_data["Vbias_set"] = float(vbias_set)
+                                    row_data["Vbias_meas"] = Vbias_meas
+                                if vbias2_set is not None:
+                                    row_data["Vbias2_set"] = float(vbias2_set)
+                                    row_data["Vbias2_meas"] = Vbias2_meas
+                                    row_data["Ibias2"] = Ibias2
+                                if pair_backend:
+                                    self._write_paired_point(
+                                        writer, pair_backend, pair_recipes, row_data,
+                                        original_point_number, original_point_total)
+                                    done_frames += 1
+                                    self.frame_progress.emit(done_frames, total_points)
+                                    continue
 
                                 if wl.size == 0:
                                     raise _RunFlowError("acquisition", "No wavelength headers were returned by the spectrometer.")
@@ -3654,21 +3916,6 @@ class _RunWorker(QObject):
                                     writer.set_wavelength_headers(wl.tolist())
                                 elif len(writer.wavelength_headers) != len(wl) or not np.allclose(np.asarray(writer.wavelength_headers), wl, rtol=0.0, atol=0.00005):
                                     raise _RunFlowError("acquisition", "Wavelength calibration changed within a sweep CSV; acquisition stopped before writing mismatched data.")
-
-                                row_data = {
-                                    "Vbg_set": float(vbg_set), "Vbg_meas": Vbg_meas,
-                                    "Vtg_set": float(vtg_set), "Vtg_meas": Vtg_meas,
-                                    "Ibg": Ibg, "Itg": Itg, "Ibias": Ib,
-                                }
-                                if power_reading is not None:
-                                    row_data.update(power_reading.csv_values())
-                                if vbias_set is not None:
-                                    row_data["Vbias_set"] = float(vbias_set)
-                                    row_data["Vbias_meas"] = Vbias_meas
-                                if vbias2_set is not None:
-                                    row_data["Vbias2_set"] = float(vbias2_set)
-                                    row_data["Vbias2_meas"] = Vbias2_meas
-                                    row_data["Ibias2"] = Ibias2
                                 if is_full_sensor:
                                     writer.write_matrix(
                                         row_data,
@@ -3705,7 +3952,18 @@ class _RunWorker(QObject):
                         except Exception as e:
                             raise _RunFlowError("save", f"CSV write error: {e}") from e
                         finally:
-                            if writer is not None and stream_key is None:
+                            if writer is not None and pair_backend:
+                                # Paired outputs are closed per point by their
+                                # writer, but the interruption still belongs in
+                                # the run record, not only in the pair journal.
+                                pair_error = sys.exc_info()[1]
+                                if pair_error is not None or self._stop.is_set():
+                                    pair_failed = (pair_error is not None
+                                                   and not isinstance(pair_error, _StopRequested))
+                                    self._record_interruption(
+                                        "failed" if pair_failed else "stopped",
+                                        pair_error or "Run stopped by user.")
+                            if writer is not None and stream_key is None and not pair_backend:
                                 primary_error = sys.exc_info()[1]
                                 stopped_here = self._stop.is_set() or isinstance(primary_error, _StopRequested)
                                 file_status = ("failed" if primary_error is not None and not isinstance(primary_error, _StopRequested)
@@ -3727,7 +3985,8 @@ class _RunWorker(QObject):
                             # file handle and buffers before the next stream.
                             # Otherwise long runs retain every completed CSV.
                             finished_writer = writer_cache.pop(stream_key)
-                            self._close_output(finished_writer, csv_path, status="completed")
+                            if not pair_backend:
+                                self._close_output(finished_writer, csv_path, status="completed")
                             del stream_paths[stream_key]
                             del stream_power[stream_key]
                             done += 1
@@ -3781,6 +4040,8 @@ class _RunWorker(QObject):
                 self._record_interruption("failed" if failed else "stopped", summary)
             close_failed = False
             for cached_key, cached_writer in list(writer_cache.items()):
+                if isinstance(cached_writer, PairedSpectrumFiles):
+                    continue
                 try:
                     self._close_output(
                         cached_writer, stream_paths.get(cached_key),
@@ -3808,41 +4069,27 @@ class _RunWorker(QObject):
                     "automatic ramp-to-zero was skipped."
                 )
             elif self._smu and self._smu.is_connected:
-                self.log.emit("Ramping all channels to zero (2x slower than sweep settings)...")
+                self.log.emit("Returning biases to zero, then stepping Vbg and Vtg to zero together...")
                 cleanup_report["attempted"] = True
+                cleanup_exception = None
                 try:
-                    device = self._smu.device
-                    bias2_cleanup = {"include_bias2": True} if "Vbias2" in self._required_smu_roles else {}
-                    if hasattr(device, "ramp_all_to_zero_report"):
-                        cleanup_roles = device.ramp_all_to_zero_report(
-                            ramp_step=max(float(cfg.ramp.step_V) * 0.5, 1e-6),
-                            delay_s=float(cfg.ramp.delay_s) * 2.0,
-                            **bias2_cleanup,
-                        )
-                        cleanup_report["roles"] = cleanup_roles
-                        cleanup_errors = [
-                            f"{role}: {result.get('error', result.get('status'))}"
-                            for role, result in cleanup_roles.items()
-                            if result.get("status") != "reached_zero"
-                        ]
-                    else:
-                        cleanup_errors = device.ramp_all_to_zero(
-                            ramp_step=max(float(cfg.ramp.step_V) * 0.5, 1e-6),
-                            delay_s=float(cfg.ramp.delay_s) * 2.0,
-                            **bias2_cleanup,
-                        )
-                        cleanup_report["errors"] = list(cleanup_errors or [])
-                    if cleanup_errors:
-                        for error in cleanup_errors:
-                            self.log.emit(f"Cleanup warning: {error}")
-                    else:
-                        self.log.emit("All available SMU channels reached 0 V.")
-                except Exception as e:
-                    cleanup_report["error"] = str(e)
-                    self.log.emit(f"Cleanup warning: ramp-to-zero error: {e}")
+                    roles, cleanup_errors = self._return_smu_to_zero(self._smu.device)
+                    cleanup_report["roles"] = roles
+                except Exception as exc:
+                    cleanup_exception = _find_smu_communication_error(exc)
+                    cleanup_report["error"] = str(exc)
+                    cleanup_errors = [str(exc)]
+                if cleanup_errors:
+                    self.cleanup_failed = failed = True
+                    cleanup_report["errors"] = cleanup_errors
+                    summary = "Return-to-zero failed: " + "; ".join(cleanup_errors)
+                    self.log.emit(summary)
+                    self.error.emit(summary)
+                else:
+                    self.log.emit("Zero setpoints sent for all available SMU channels.")
 
                 if hardware_error is None:
-                    cleanup_error = getattr(
+                    cleanup_error = cleanup_exception or getattr(
                         self._smu.device, "last_communication_error", None
                     )
                     if cleanup_error is not None:
@@ -3906,67 +4153,156 @@ class _RunWorker(QObject):
 
 # ── Loop table read / write ────────────────────────────────────────────────────
 
+def _same_loop_group(first, second) -> bool:
+    return (_to_bool(first.get("Enable", False)) == _to_bool(second.get("Enable", False))
+            and str(first.get("Group", "")).strip() == str(second.get("Group", "")).strip())
+
+
+def _fold_loop_records(records: list[dict]) -> list[dict]:
+    """Show an Andor parameter beside its PIXIS row when both step together."""
+    names = [str(record.get("Parameter", "")) for record in records]
+    folded, hidden = {}, set()
+    for parameter, andor_parameter in _ANDOR_TWINS.items():
+        if names.count(parameter) == 1 and names.count(andor_parameter) == 1:
+            base, twin = names.index(parameter), names.index(andor_parameter)
+            if _same_loop_group(records[base], records[twin]):
+                folded[base] = twin
+                hidden.add(twin)
+    rows = []
+    for index, record in enumerate(records):
+        if index in hidden:
+            continue
+        row = dict(record)
+        if index in folded:
+            twin = records[folded[index]]
+            row.update(Andor=str(twin.get("Values", "")), _andor_id=twin.get("_run_id"))
+        rows.append(row)
+    return rows
+
+
+def _canonical_loop_order(df: pd.DataFrame) -> pd.DataFrame:
+    """Row order as the table reads it: each shown Andor value follows its PIXIS row."""
+    records = df.to_dict("records")
+    for index, record in enumerate(records):
+        record["_position"] = index
+    order = []
+    for row in _fold_loop_records(records):
+        order.append(row["_position"])
+        if "Andor" in row:
+            twin = _ANDOR_TWINS[str(row["Parameter"])]
+            order.append(next(record["_position"] for record in records if str(record.get("Parameter", "")) == twin))
+    return df.iloc[order].reset_index(drop=True)
+
+
+def _has_andor_column(table: QTableWidget) -> bool:
+    return table.columnCount() > _ANDOR_COLUMN
+
+
 def _populate_loop_table(table: QTableWidget, df: pd.DataFrame) -> None:
     """Fill the loop table from a DataFrame, using cell widgets."""
     # A partially inserted row is not a user edit. In particular setItem's
     # text/identity/style changes must not rebuild and validate the entire plan.
-    signals_were_blocked = table.blockSignals(True)
-    updates_were_enabled = table.updatesEnabled()
-    table.setUpdatesEnabled(False)
-    try:
+    saved_ids = df.attrs.get("loop_row_ids", [])
+    records = []
+    for r, row in enumerate(df.to_dict("records")):
+        row["_run_id"] = row.get("_run_id") or (saved_ids[r] if r < len(saved_ids) else None)
+        records.append(row)
+    rows = _fold_loop_records(records) if _has_andor_column(table) else records
+    with QSignalBlocker(table), batch_table_updates(table):
         table.setRowCount(0)
-        for r, row in df.iterrows():
-            table.insertRow(r)
-            table.setCellWidget(r, 0, _make_check_cell(_to_bool(row.get("Enable", False))))
-            table.setCellWidget(r, 1, _make_param_combo(str(row.get("Parameter", LOOP_PARAMS[0]))))
-            table.setItem(r, 2, QTableWidgetItem(str(row.get("Values", ""))))
-            saved_ids = df.attrs.get("loop_row_ids", [])
-            row_id = row.get("_run_id") or (saved_ids[r] if r < len(saved_ids) else None)
-            table.item(r, 2).setData(Qt.ItemDataRole.UserRole + 92, str(row_id or uuid.uuid4()))
-            # Draft snapshots must preserve exactly what the user typed, including
-            # blanks and temporarily invalid values.  Validation happens only when
-            # Apply/Run parses the recipe.
-            group = row.get("Group", 1)
-            table.setItem(r, 3, QTableWidgetItem("" if group is None else str(group)))
-    finally:
-        table.setUpdatesEnabled(updates_were_enabled)
-        table.blockSignals(signals_were_blocked)
-    if updates_were_enabled:
-        table.viewport().update()
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            _populate_loop_row(table, r, row, row.get("_run_id"))
+        _sync_andor_column(table)
 
+
+def _populate_loop_row(table, row_index, values, row_id=None):
+    table.setCellWidget(row_index, 0, _make_check_cell(_to_bool(values.get("Enable", False))))
+    table.setCellWidget(row_index, 1, _make_param_combo(str(values.get("Parameter", LOOP_PARAMS[0]))))
+    item = QTableWidgetItem(str(values.get("Values", "")))
+    item.setData(_LOOP_ROW_ID_ROLE, str(row_id or uuid.uuid4()))
+    table.setItem(row_index, 2, item)
+    # Preserve unfinished input for draft validation and undo.
+    group = values.get("Group", 1)
+    table.setItem(row_index, 3, QTableWidgetItem("" if group is None else str(group)))
+    if _has_andor_column(table):
+        andor = QTableWidgetItem(str(values.get("Andor", "")))
+        andor.setData(_LOOP_ROW_ID_ROLE, str(values.get("_andor_id") or uuid.uuid4()))
+        table.setItem(row_index, _ANDOR_COLUMN, andor)
+
+
+def _paired_andor_label(table: QTableWidget) -> str:
+    """Name of the Andor detector an enabled PIXIS + Andor setup row requests."""
+    for row in range(table.rowCount()):
+        combo, item = table.cellWidget(row, 1), table.item(row, 2)
+        if (combo is None or item is None or combo.currentData() != _SETUP_PARAM
+                or not _cell_checked(table.cellWidget(row, 0))):
+            continue
+        for token in item.text().replace(';', ',').split(','):
+            try:
+                backend = _setup_backend(token)
+            except ValueError:
+                continue
+            if backend in _PAIRED_SETUPS:
+                return _SETUP_LABELS[_PAIRED_SETUPS[backend]]
+    return ""
+
+
+def _sync_andor_column(table: QTableWidget) -> None:
+    """Show the Andor value column only while a PIXIS + Andor setup is selected."""
+    if not _has_andor_column(table):
+        return
+    label = _paired_andor_label(table)
+    blocked = table.blockSignals(True)
+    try:
+        for column, text in ((2, "PIXIS" if label else "Values"), (_ANDOR_COLUMN, label or "Andor")):
+            header = table.horizontalHeaderItem(column)
+            if header is not None and header.text() != text:
+                header.setText(text)
+        if table.isColumnHidden(_ANDOR_COLUMN) == bool(label):
+            table.setColumnHidden(_ANDOR_COLUMN, not label)
+        editable = Qt.ItemFlag.ItemIsEditable
+        for row in range(table.rowCount()):
+            combo, item = table.cellWidget(row, 1), table.item(row, _ANDOR_COLUMN)
+            if combo is None or item is None:
+                continue
+            optical = combo.currentData() in _ANDOR_TWINS
+            if bool(item.flags() & editable) != optical:
+                item.setFlags(item.flags() | editable if optical else item.flags() & ~editable)
+            shared = "" if optical else "—" if combo.currentData() == _SETUP_PARAM else _SHARED_VALUE_TEXT
+            if not optical and item.text() != shared:
+                item.setText(shared)
+                item.setForeground(table.palette().brush(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text))
+                item.setToolTip("This setting applies to the whole measurement, so both detectors use it.")
+            elif optical and item.text() in (_SHARED_VALUE_TEXT, "—"):
+                item.setText("")
+                item.setData(Qt.ItemDataRole.ForegroundRole, None)
+                item.setToolTip("")
+    finally:
+        table.blockSignals(blocked)
 
 
 def _read_loop_table(table: QTableWidget) -> pd.DataFrame:
-    rows = []
-    for r in range(table.rowCount()):
-        enabled = _cell_checked(table.cellWidget(r, 0))
-        combo   = table.cellWidget(r, 1)
-        param   = (
-            str(combo.currentData())
-            if combo is not None and combo.currentData() is not None
-            else (combo.currentText() if combo else LOOP_PARAMS[0])
-        )
-        v_item  = table.item(r, 2)
-        values  = v_item.text() if v_item else ""
-        g_item  = table.item(r, 3)
+    rows = _read_loop_table_raw(table)
+    for row in rows:
         try:
-            group = int(g_item.text()) if g_item and g_item.text().strip() else 1
+            row["Group"] = int(row["Group"]) if row["Group"].strip() else 1
         except ValueError:
-            group = 1
-        rows.append({"Enable": enabled, "Parameter": param, "Values": values, "Group": group})
+            row["Group"] = 1
     result = pd.DataFrame(rows, columns=LOOP_SCHEMA) if rows else pd.DataFrame(columns=LOOP_SCHEMA)
-    result.attrs["loop_row_ids"] = [row["_run_id"] for row in _read_loop_table_raw(table)]
+    result.attrs["loop_row_ids"] = [row["_run_id"] for row in rows]
     result.attrs["loop_run_positions"] = deepcopy(getattr(table, "_loop_run_positions", {}))
     return result
 
 
-def _read_loop_table_raw(table: QTableWidget) -> list[dict]:
-    """Capture editable loop cells without coercing unfinished input."""
+def _read_loop_table_rows(table: QTableWidget) -> list[dict]:
+    """One record per visible table row, including its Andor cell."""
     rows = []
     for r in range(table.rowCount()):
         combo = table.cellWidget(r, 1)
         value_item = table.item(r, 2)
         group_item = table.item(r, 3)
+        andor_item = table.item(r, _ANDOR_COLUMN) if _has_andor_column(table) else None
         rows.append({
             "Enable": _cell_checked(table.cellWidget(r, 0)),
             "Parameter": (
@@ -3976,9 +4312,36 @@ def _read_loop_table_raw(table: QTableWidget) -> list[dict]:
             ),
             "Values": value_item.text() if value_item is not None else "",
             "Group": group_item.text() if group_item is not None else "",
-            "_run_id": str(value_item.data(Qt.ItemDataRole.UserRole + 92)) if value_item is not None else "",
+            "_run_id": str(value_item.data(_LOOP_ROW_ID_ROLE)) if value_item is not None else "",
+            "Andor": (andor_item.text() if andor_item is not None
+                      and andor_item.text() not in (_SHARED_VALUE_TEXT, "—") else ""),
+            "_andor_id": str(andor_item.data(_LOOP_ROW_ID_ROLE)) if andor_item is not None else "",
         })
     return rows
+
+
+def _loop_record_cells(table: QTableWidget, rows=None) -> list[tuple]:
+    """(table row, value column) of every stored loop record, in record order."""
+    paired = _has_andor_column(table) and not table.isColumnHidden(_ANDOR_COLUMN)
+    cells = []
+    for r, row in enumerate(_read_loop_table_rows(table) if rows is None else rows):
+        cells.append((r, 2))
+        if paired and row["Parameter"] in _ANDOR_TWINS and row["Andor"].strip():
+            cells.append((r, _ANDOR_COLUMN))
+    return cells
+
+
+def _read_loop_table_raw(table: QTableWidget) -> list[dict]:
+    """Capture editable loop cells without coercing unfinished input."""
+    rows = _read_loop_table_rows(table)
+    records = []
+    for r, column in _loop_record_cells(table, rows):
+        row = rows[r]
+        record = {key: row[key] for key in ("Enable", "Parameter", "Values", "Group", "_run_id")}
+        if column == _ANDOR_COLUMN:
+            record.update(Parameter=_ANDOR_TWINS[row["Parameter"]], Values=row["Andor"], _run_id=row["_andor_id"])
+        records.append(record)
+    return records
 
 
 # ── Batch table read / write ───────────────────────────────────────────────────
@@ -4028,7 +4391,9 @@ def _configure_batch_table_columns(table: QTableWidget) -> None:
                 cell = table.item(r, BATCH_SCHEMA.index(name))
                 if cell is not None:
                     flags = cell.flags()
-                    cell.setFlags(flags | Qt.ItemFlag.ItemIsEditable if relevant else flags & ~Qt.ItemFlag.ItemIsEditable)
+                    editable = bool(flags & Qt.ItemFlag.ItemIsEditable)
+                    if editable != relevant:
+                        cell.setFlags(flags | Qt.ItemFlag.ItemIsEditable if relevant else flags & ~Qt.ItemFlag.ItemIsEditable)
     finally:
         table.blockSignals(blocked)
     used = any(mode not in ("", "off") for mode in modes)
@@ -4409,15 +4774,21 @@ class PresetsPanel(QWidget):
         self._measurement_order_indicator.hide()
 
         # Loop table itself
-        self._loop_table = QTableWidget(0, len(LOOP_SCHEMA) + 1)
+        self._loop_table = QTableWidget(0, len(LOOP_SCHEMA) + 2)
         self._loop_table.setObjectName("DualGateLoopTable")
         set_style_role(self._loop_table, 'loopTable')
         self._loop_table.setMinimumHeight(80)
         self._loop_table.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self._loop_table.setHorizontalHeaderLabels([*LOOP_SCHEMA, "This run"])
+        self._loop_table.setHorizontalHeaderLabels([*LOOP_SCHEMA, "This run", "Andor"])
         self._loop_table.horizontalHeader().moveSection(4, 3)
+        # Shown order: Enable, Parameter, Values (PIXIS), Andor, This run, Group.
+        self._loop_table.horizontalHeader().moveSection(_ANDOR_COLUMN, 3)
+        self._loop_table.setColumnHidden(_ANDOR_COLUMN, True)
+        self._loop_table.horizontalHeaderItem(_ANDOR_COLUMN).setToolTip(
+            "Values for the Andor detector of a PIXIS + Andor setup.\n"
+            "Shown only while that setup is selected; uses the row's Group.")
         self._loop_table.horizontalHeaderItem(4).setToolTip(
             "Choose All values, one value, or several values for this run.\n"
             "Rows paired in the same group share this choice; the full Values arrays are kept.")
@@ -4442,7 +4813,7 @@ class PresetsPanel(QWidget):
             item = self._loop_table.horizontalHeaderItem(i)
             if item and col in _loop_hdr_tips:
                 item.setToolTip(_loop_hdr_tips[col])
-        fit_table_columns(self._loop_table, (52, 190, 250, 54, 170))
+        fit_table_columns(self._loop_table, (52, 190, 250, 54, 170, 200))
         loop_btn_row = QHBoxLayout()
         loop_btn_row.setSpacing(4)
         self._loop_add_btn = QPushButton("+ Row"); self._loop_add_btn.setFixedWidth(64)
@@ -4682,6 +5053,9 @@ class PresetsPanel(QWidget):
         lay_right = QVBoxLayout(right)
         lay_right.setContentsMargins(4, 0, 0, 0)
         lay_right.setSpacing(6)
+        output_content = QWidget()
+        output_layout = QVBoxLayout(output_content)
+        output_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self._summary_lbl = QLabel("Apply tables to update the Dual Gate plan.")
         self._summary_lbl.setWordWrap(True)
@@ -4714,9 +5088,9 @@ class PresetsPanel(QWidget):
         order_header.addWidget(reset_order)
         execution_lay.addLayout(order_header)
         self._execution_order_table = QTableWidget(0, 3)
-        self._execution_order_table.setHorizontalHeaderLabels(
-            ["Level · outer → inner", "Defined by", "Change order"]
-        )
+        self._execution_order_table.setObjectName("DualGateExecutionOrderTable")
+        self._execution_order_table.setHorizontalHeaderLabels(["Level", "Defined by", "Move"])
+        self._execution_order_table.horizontalHeaderItem(0).setToolTip("Execution order, outer to inner")
         self._execution_order_table.verticalHeader().setVisible(False)
         self._execution_order_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows
@@ -4725,19 +5099,7 @@ class PresetsPanel(QWidget):
             QAbstractItemView.EditTrigger.NoEditTriggers
         )
         self._execution_order_table.setMinimumHeight(108)
-        self._execution_order_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
-        self._execution_order_table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch
-        )
-        self._execution_order_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch
-        )
-        self._execution_order_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.Fixed
-        )
-        self._execution_order_table.setColumnWidth(
-            2, max(94, self._execution_order_table.horizontalHeader().fontMetrics().horizontalAdvance("Change order") + 20)
-        )
+        self._execution_order_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         execution_lay.addWidget(self._execution_order_table)
         self._execution_order_hint = QLabel(
             "↳ Gate points remain inside Gate conditions · Acquire spectrum is always last"
@@ -4780,7 +5142,7 @@ class PresetsPanel(QWidget):
         safety_row.addWidget(safety_label)
         safety_row.addWidget(self._safe_jump_spin)
         safety_row.addStretch()
-        lay_right.addWidget(self._safety_bar)
+        output_layout.addWidget(self._safety_bar)
 
         self._voltage_timing_bar = QFrame()
         self._voltage_timing_bar.setObjectName("DualGateVoltageTimingBar")
@@ -4839,7 +5201,7 @@ class PresetsPanel(QWidget):
         timing_row.addWidget(point_settle_label)
         timing_row.addWidget(self._voltage_settle_spin)
         timing_row.addStretch(1)
-        lay_right.addWidget(self._voltage_timing_bar)
+        output_layout.addWidget(self._voltage_timing_bar)
 
         file_grp = QGroupBox("Filename preview")
         file_lay = QVBoxLayout(file_grp)
@@ -4847,7 +5209,7 @@ class PresetsPanel(QWidget):
         self._filename_parts_table.setHorizontalHeaderLabels(["Use", "Part", "Preview"])
         self._filename_parts_table.verticalHeader().setVisible(False)
         self._filename_parts_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        fit_table_columns(self._filename_parts_table, (40, 108, 230))
+        fit_table_columns(self._filename_parts_table, (36, 150, 122))
         self._filename_parts_table.setMaximumHeight(200)
         self._filename_parts_table.setAlternatingRowColors(True)
         self._filename_parts_table.hide()
@@ -4864,6 +5226,8 @@ class PresetsPanel(QWidget):
         self._preview_note_lbl.setWordWrap(True)
         set_style_role(self._preview_note_lbl, 'text', tone='muted', size='caption')
         self._upcoming_preview = QTextEdit()
+        self._upcoming_preview.setAccessibleName("Upcoming filenames")
+        self._upcoming_preview.setProperty("quickSectionBoundary", True)
         self._upcoming_preview.setReadOnly(True)
         self._upcoming_preview.setMaximumHeight(72)
         set_style_role(self._upcoming_preview, 'monospace', size='status')
@@ -4881,13 +5245,14 @@ class PresetsPanel(QWidget):
         details_lay.addWidget(self._preview_note_lbl)
         details_lay.addWidget(self._filename_parts_table)
         self._filename_parts_table.show()
+        details_lay.addWidget(QLabel("Upcoming filenames"))
         details_lay.addWidget(self._upcoming_preview)
         self._filename_details.hide()
         self._filename_details_toggle.toggled.connect(self._filename_details.setVisible)
         self._filename_details_toggle.toggled.connect(lambda opened: self._filename_details_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow))
         file_lay.addWidget(self._filename_details_toggle)
         file_lay.addWidget(self._filename_details)
-        lay_right.addWidget(file_grp)
+        output_layout.insertWidget(0, file_grp)
 
         sequence_title = QToolButton()
         sequence_title.setText("Measurement sequence")
@@ -4932,6 +5297,7 @@ class PresetsPanel(QWidget):
             self._full_sequence_btn.setVisible(opened and not hasattr(self._tree, "sequence_model"))
             sequence_panel.setMaximumHeight(16777215 if opened else sequence_header.sizeHint().height())
 
+        self._set_sequence_expanded = toggle_sequence
         sequence_title.toggled.connect(toggle_sequence)
 
         # Give operators a useful vertical divider between editing execution
@@ -5019,33 +5385,22 @@ class PresetsPanel(QWidget):
         run_row.addStretch()
         footer_lay.addLayout(run_row)
 
-        log_grp = QGroupBox("Log")
+        log_grp = QWidget()
+        log_grp.setObjectName("DualGateRunLog")
         log_lay = QVBoxLayout(log_grp)
         self._log_text = QTextEdit()
         self._log_text.setReadOnly(True)
-        self._log_text.setMaximumHeight(190)
         self._log_text.setMinimumHeight(80)
+        self._log_text.setAccessibleName("Run log entries")
         set_style_role(self._log_text, 'log')
         clear_log_btn = QPushButton("Clear")
         clear_log_btn.setFixedWidth(55)
         clear_log_btn.clicked.connect(self._log_text.clear)
         log_hdr = QHBoxLayout()
-        log_hdr.addWidget(QLabel("Run log"))
         log_hdr.addStretch()
         log_hdr.addWidget(clear_log_btn)
         log_lay.addLayout(log_hdr)
-        log_lay.addWidget(self._log_text)
-        self._log_toggle = QToolButton()
-        self._log_toggle.setText("Run log")
-        self._log_toggle.setCheckable(True)
-        self._log_toggle.setProperty("quickDisclosure", True)
-        self._log_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self._log_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self._log_toggle.toggled.connect(log_grp.setVisible)
-        self._log_toggle.toggled.connect(lambda opened: self._log_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow))
-        log_grp.hide()
-        lay_right.addWidget(self._log_toggle)
-        lay_right.addWidget(log_grp)
+        log_lay.addWidget(self._log_text, 1)
 
         self._results_content = right
         self._results_scroll = QScrollArea()
@@ -5060,11 +5415,24 @@ class PresetsPanel(QWidget):
         )
         self._results_scroll.setMinimumWidth(380)
         self._results_scroll.setWidget(right)
+        self._output_scroll = QScrollArea()
+        self._output_scroll.setObjectName("DualGateOutputScroll")
+        self._output_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._output_scroll.setWidgetResizable(True)
+        self._output_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._output_scroll.setWidget(output_content)
+        self._results_tabs = QTabWidget()
+        self._results_tabs.setObjectName("DualGateReviewTabs")
+        self._results_tabs.setAccessibleName("Dual Gate run inspector")
+        self._results_tabs.setDocumentMode(True)
+        self._results_tabs.addTab(self._results_scroll, "Sequence")
+        self._results_tabs.addTab(self._output_scroll, "Output && safety")
+        self._results_tabs.addTab(log_grp, "Run log")
         results_pane = QWidget()
         results_lay = QVBoxLayout(results_pane)
         results_lay.setContentsMargins(0, 0, 0, 0)
         results_lay.setSpacing(0)
-        results_lay.addWidget(self._results_scroll, 1)
+        results_lay.addWidget(self._results_tabs, 1)
         results_lay.addWidget(run_footer)
         splitter.addWidget(results_pane)
         splitter.setChildrenCollapsible(False)
@@ -5072,7 +5440,26 @@ class PresetsPanel(QWidget):
         splitter.setStretchFactor(1, 7)
         splitter.setSizes([880, 500])
         self._results_pane = results_pane
-        fit_table_columns(self._execution_order_table, (180, 180, 110))
+        order_table = self._execution_order_table
+
+        def execution_order_minimum_widths():
+            header = order_table.horizontalHeader()
+            actions = order_table.cellWidget(0, 2)
+            actions_width = 0
+            if actions is not None:
+                hint = actions.sizeHint()
+                option = QStyleOptionViewItem()
+                option.initFrom(order_table)
+                option.rect = QRect(0, 0, hint.width(), hint.height())
+                option.features = QStyleOptionViewItem.ViewItemFeature.HasDisplay
+                content = order_table.style().subElementRect(
+                    QStyle.SubElement.SE_ItemViewItemText, option, order_table)
+                # Embedded widgets live inside the styled item and grid insets.
+                actions_width = hint.width() + max(0, hint.width() - content.width()) + int(order_table.showGrid())
+            return (header.sectionSizeHint(0), header.sectionSizeHint(1),
+                    max(header.sectionSizeHint(2), actions_width))
+
+        fit_table_columns(order_table, (125, 255, 84), minimum_widths=execution_order_minimum_widths)
         QTimer.singleShot(0, self, self._fit_workflow_layout)
 
         # ── wire ──────────────────────────────────────────────────────────
@@ -5104,8 +5491,6 @@ class PresetsPanel(QWidget):
         self._loop_table.itemChanged.connect(self._on_draft_edited)
         self._batch_table.itemChanged.connect(self._on_batch_item_changed)
         self._batch_table.itemSelectionChanged.connect(self._on_batch_selection_changed)
-        self._batch_table.itemSelectionChanged.connect(self._update_batch_row_buttons)
-        self._loop_table.itemSelectionChanged.connect(self._update_filename_preview)
         self._loop_table.itemSelectionChanged.connect(self._update_loop_row_buttons)
         self._mode_combo.currentTextChanged.connect(lambda _mode: self._update_filename_preview())
         self._mode_combo_name.currentTextChanged.connect(self._update_filename_preview)
@@ -5165,6 +5550,8 @@ class PresetsPanel(QWidget):
                 connect(self._lf6.capture_status_changed, self._on_capture_status_changed)
             if hasattr(self._lf6, 'settings_applied'):
                 connect(self._lf6.settings_applied, self._refresh_detector_wavelength_advice)
+            if hasattr(self._lf6, "station_changed"):
+                connect(self._lf6.station_changed, self._refresh_station_choices)
         if self._pm is not None:
             connect(self._pm.connected, self._refresh_readiness)
             connect(self._pm.disconnected, self._refresh_readiness)
@@ -5233,6 +5620,15 @@ class PresetsPanel(QWidget):
         """Convert a table to JSON-native records (including NaN -> null)."""
         return json.loads(df.to_json(orient="records"))
 
+    def _set_inspector_page(self, page):
+        if not isinstance(page, str):
+            return
+        tabs = self._results_tabs
+        for index in range(tabs.count()):
+            if tabs.widget(index).objectName() == page:
+                tabs.setCurrentIndex(index)
+                return
+
     def capture_session_state(self) -> dict:
         """Capture both the edited draft and last applied Dual Gate recipe."""
         calc = self._sweep_calc
@@ -5298,6 +5694,8 @@ class PresetsPanel(QWidget):
             "splitter_sizes": [int(v) for v in self._splitter.sizes()],
             "splitter_orientation": self._splitter.orientation().name,
             "preview_splitter_sizes": [int(v) for v in self._preview_splitter.sizes()],
+            "inspector_page": self._results_tabs.currentWidget().objectName(),
+            "sequence_expanded": self._sequence_toggle.isChecked(),
         }
 
     def apply_saved_experiment_settings(self, settings: dict, *, keys_only: bool = False) -> dict:
@@ -5309,9 +5707,13 @@ class PresetsPanel(QWidget):
             "voltage_settle_s": lambda v: self._voltage_settle_spin.setValue(float(v)),
         }
         if keys_only:
-            return {"supported_keys": list(allowed)}
+            return {"supported_keys": [*allowed, "paired_station_required"]}
+        if settings.get("paired_station_required") and cfg.lf6.station_id != PAIRED_STATION_ID:
+            raise ValueError("The saved PIXIS + Andor recipe requires the AttoDRY2100 station.")
         skipped = []
         for key, value in dict(settings or {}).items():
+            if key == "paired_station_required":
+                continue
             setter = allowed.get(key)
             if setter is None:
                 skipped.append(key)
@@ -5320,7 +5722,7 @@ class PresetsPanel(QWidget):
                 setter(value)
             except Exception:
                 skipped.append(key)
-        return {"applied": [k for k in settings if k not in skipped], "skipped": skipped}
+        return {"applied": [k for k in allowed if k in settings and k not in skipped], "skipped": skipped}
 
     def restore_session_state(self, state: dict) -> None:
         if not isinstance(state, dict):
@@ -5543,6 +5945,9 @@ class PresetsPanel(QWidget):
                 self._preview_splitter.setSizes([max(0, int(v)) for v in sizes])
             except (TypeError, ValueError):
                 pass
+        if isinstance(state.get("sequence_expanded"), bool):
+            self._sequence_toggle.setChecked(state["sequence_expanded"])
+        self._set_inspector_page(state.get("inspector_page"))
         self._update_plan()
         self._refresh_draft_state()
         self._refresh_filename_preview()
@@ -5564,9 +5969,10 @@ class PresetsPanel(QWidget):
         # Show/hide the Group column
         show_group = (mode == "Customized")
         self._loop_table.setColumnHidden(3, not show_group)
-        self._refresh_execution_order_table()
         if hasattr(self, "_draft_badge"):
             self._on_draft_edited()
+        else:
+            self._refresh_execution_order_table()
 
     def _draft_loop_groups(self, loop_df=None):
         """Borrow checked group metadata; only a planner needs context dictionaries."""
@@ -5574,14 +5980,14 @@ class PresetsPanel(QWidget):
             loop_df = _normalize_loop(_read_loop_table(self._loop_table))
         mode = self._mode_combo.currentText()
         stage_profile = (_active_stage_profile() if any(
-            bool(row.Enable) and str(row.Parameter).startswith("Stage Position")
-            for row in loop_df.itertuples(index=False)
+            enabled and str(parameter).startswith("Stage Position")
+            for enabled, parameter in zip(loop_df["Enable"], loop_df["Parameter"])
         ) else None)
-        key = (mode, tuple(loop_df[LOOP_SCHEMA].itertuples(index=False, name=None)),
+        key = (mode, tuple(zip(*(loop_df[col] for col in LOOP_SCHEMA))),
                repr(loop_df.attrs.get("loop_run_positions", {})), stage_profile)
         cached = getattr(self, "_draft_loop_groups_cache", None)
         if cached is None or cached[0] != key:
-            groups = _loop_group_combinations(loop_df, mode, metadata_only=True)
+            groups = _loop_group_combinations(loop_df, mode, metadata_only=True, _normalized=True)
             frozen = tuple(MappingProxyType({
                 **group, "parameters": tuple(group["parameters"]),
                 "positions": (group["positions"] if isinstance(group["positions"], range)
@@ -5611,11 +6017,12 @@ class PresetsPanel(QWidget):
             self._execution_order_error = str(exc)
             return []
 
-    def _refresh_execution_order_table(self) -> None:
+    def _refresh_execution_order_table(self, loop_df=None) -> None:
         table = getattr(self, "_execution_order_table", None)
         if table is None:
             return
-        loop_df = _normalize_loop(_read_loop_table(self._loop_table))
+        if loop_df is None:
+            loop_df = _read_loop_table(self._loop_table)
         try:
             groups = self._draft_loop_groups(loop_df)
         except Exception as exc:
@@ -5625,12 +6032,23 @@ class PresetsPanel(QWidget):
             entries = self._execution_order_entries(loop_df=loop_df, groups=groups)
         by_id = {group["id"]: group for group in groups}
         self._execution_order_hint.setText(getattr(self, "_execution_order_error", "") or "Gate points remain inside Gate conditions - Acquire spectrum is always last")
-        table.blockSignals(True)
-        try:
+        captions = []
+        for index, entry in enumerate(entries, start=1):
+            label = entry["label"]
+            if entry["kind"] == "group":
+                group = by_id[entry["id"]]
+                label = f"Group {group['group']} {'ZIP ' if len(group['parameters']) > 1 else ''}x{len(group['contexts'])}"
+            captions.append(f"{index}. {label}")
+        if entries == getattr(self, "_displayed_execution_order", None) and table.rowCount() == len(entries):
+            for row_i, caption in enumerate(captions):
+                item = table.item(row_i, 0)
+                if item.text() != caption:
+                    item.setText(caption)
+            return
+        with batch_table_updates(table), QSignalBlocker(table):
             table.setRowCount(0)
+            table.setRowCount(len(entries))
             for row_i, entry in enumerate(entries):
-                table.insertRow(row_i)
-                label = str(entry.get("label", entry.get("id", "")))
                 kind = str(entry.get("kind", ""))
                 defined = {
                     "group": "Enabled loop rows",
@@ -5639,11 +6057,12 @@ class PresetsPanel(QWidget):
                 }.get(kind, "")
                 if kind == "group":
                     group = by_id[entry["id"]]
-                    label = f"Group {group['group']} {'ZIP ' if len(group['parameters']) > 1 else ''}x{len(group['contexts'])}"
                     defined = " + ".join(_LOOP_PARAM_DISPLAY.get(param, param).replace(" Angle (deg)", "").replace(" (nm)", "").replace(" (ms)", "").replace(" (EPF)", "") for param in group["parameters"])
-                table.setItem(row_i, 0, QTableWidgetItem(f"{row_i + 1}. {label}"))
-                table.setItem(row_i, 1, QTableWidgetItem(defined))
-                table.item(row_i, 0).setToolTip(str(entry.get("label", label)))
+                for column, text in enumerate((captions[row_i], defined)):
+                    item = QTableWidgetItem(text)
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    table.setItem(row_i, column, item)
+                table.item(row_i, 0).setToolTip(entry["label"])
                 table.item(row_i, 1).setToolTip(defined)
                 table.item(row_i, 0).setData(Qt.ItemDataRole.UserRole, dict(entry))
                 cell = QWidget(table)
@@ -5691,9 +6110,7 @@ class PresetsPanel(QWidget):
                 row_lay.addWidget(down)
                 table.setCellWidget(row_i, 2, cell)
                 table.setRowHeight(row_i, max(32, cell.sizeHint().height() + 2))
-                table.setColumnWidth(2, max(table.columnWidth(2), cell.sizeHint().width() + 4))
-        finally:
-            table.blockSignals(False)
+        self._displayed_execution_order = entries
 
     def _reset_execution_order(self) -> None:
         self._execution_order = _default_execution_order(
@@ -5934,6 +6351,7 @@ class PresetsPanel(QWidget):
 
     def _refresh_tables(self):
         _populate_loop_table(self._loop_table, self._loop_src)
+        self._loop_selection_sync_key = None
         _populate_batch_table(self._batch_table, self._batch_src)
         # Reapply mode (column visibility may have changed)
         self._on_mode_changed(self._mode_combo.currentText())
@@ -5942,7 +6360,7 @@ class PresetsPanel(QWidget):
         self._update_filename_preview()
 
     def _batch_snapshot(self) -> pd.DataFrame:
-        return _read_batch_table(self._batch_table).copy(deep=True)
+        return _read_batch_table(self._batch_table)
 
     def _reset_batch_history(self):
         if not hasattr(self, "_batch_table"):
@@ -5975,9 +6393,10 @@ class PresetsPanel(QWidget):
         # Ctrl-deselecting keeps a current cell even with no selected rows.
         # Undo should retain that location instead of falling back to row 0.
         preferred_row = selected[0] if selected else max(0, self._batch_table.currentRow())
+        snapshot = self._batch_history[index]
         self._batch_history_restoring = True
         try:
-            self._restore_batch_values(self._batch_history[index])
+            bias2_changed = self._restore_batch_values(snapshot)
             self._batch_history_index = index
             if self._batch_table.rowCount():
                 self._batch_table.selectRow(
@@ -5986,8 +6405,16 @@ class PresetsPanel(QWidget):
         finally:
             self._batch_history_restoring = False
         self._update_batch_row_buttons()
-        _configure_batch_table_columns(self._batch_table)
-        self._on_batch_draft_edited()
+        if bias2_changed:
+            _configure_batch_table_columns(self._batch_table)
+        table = self._batch_table
+        # All changed cells now match the target snapshot. Its listeners only
+        # read the draft or restore display roles during this refresh.
+        table._batch_read_snapshot = snapshot
+        try:
+            self._on_batch_draft_edited()
+        finally:
+            del table._batch_read_snapshot
 
     @_coalesce_batch_updates
     def _restore_batch_values(self, snapshot):
@@ -6007,10 +6434,10 @@ class PresetsPanel(QWidget):
         updates = table.updatesEnabled()
         table.setUpdatesEnabled(False)
         try:
-            for _ in range(max(0, old_count - new_count)):
-                table.removeRow(first + new_count)
-            for offset in range(max(0, new_count - old_count)):
-                table.insertRow(first + old_count + offset)
+            if old_count > new_count:
+                table.model().removeRows(first + new_count, old_count - new_count)
+            elif new_count > old_count:
+                table.model().insertRows(first + old_count, new_count - old_count)
             for row in range(first, first + new_count):
                 for column, name in enumerate(BATCH_SCHEMA):
                     value = after[row][name]
@@ -6026,6 +6453,10 @@ class PresetsPanel(QWidget):
         finally:
             table.blockSignals(blocked)
             table.setUpdatesEnabled(updates)
+        return old_count != new_count or any(
+            before[row]["bias2_mode"] != after[row]["bias2_mode"]
+            for row in range(first, first + new_count)
+        )
 
     @Slot()
     def _undo_batch_edit(self):
@@ -6042,9 +6473,9 @@ class PresetsPanel(QWidget):
 
     def _when_names_for_loop(self, loop_df: pd.DataFrame) -> set[str]:
         names: set[str] = set()
-        active = _normalize_loop(loop_df)
-        active = active[active["Enable"]]
-        for param in active["Parameter"].tolist():
+        for enabled, param in zip(loop_df.get("Enable", ()), loop_df.get("Parameter", ())):
+            if not _to_bool(enabled):
+                continue
             full, short = _param_to_expr_name(str(param))
             names.update(name for name in (full, short) if name)
         return names
@@ -6058,41 +6489,44 @@ class PresetsPanel(QWidget):
     ) -> List[Tuple[int, str]]:
         names = self._when_names_for_loop(loop_df)
         errors: List[Tuple[int, str]] = []
-        when_column = BATCH_SCHEMA.index("When")
-        normalized = batch_df.reset_index(drop=True)
-        signals_were_blocked = self._batch_table.blockSignals(True) if mark_cells else False
-        try:
-            for row_index, row in enumerate(_frame_records(normalized)):
-                error = None
-                if _to_bool(row.get("Run", True)):
-                    error = validate_when_expression(row.get("When", ""), names)
+        runs = batch_df["Run"].tolist() if "Run" in batch_df else itertools.repeat(True)
+        conditions = batch_df["When"].tolist() if "When" in batch_df else itertools.repeat("")
+        for row, (enabled, condition) in enumerate(itertools.islice(zip(runs, conditions), len(batch_df))):
+            if _to_bool(enabled):
+                error = validate_when_expression(condition, names)
                 if error:
-                    errors.append((int(row_index), error))
-                if mark_cells and row_index < self._batch_table.rowCount():
-                    item = self._batch_table.item(int(row_index), when_column)
+                    errors.append((row, error))
+        if mark_cells:
+            table = self._batch_table
+            when_column = BATCH_SCHEMA.index("When")
+            invalid_rows = {row for row, _error in errors}
+            with QSignalBlocker(table):
+                for item in list(getattr(self, "_batch_error_items", {}).values()):
+                    if isValid(item) and item.column() == when_column and item.row() not in invalid_rows:
+                        self._mark_batch_draft_error(item, "")
+                for row, error in errors:
+                    item = table.item(row, when_column)
                     if item is not None:
-                        self._mark_batch_draft_error(item, f"Invalid When condition: {error}" if error else "")
-        finally:
-            if mark_cells:
-                self._batch_table.blockSignals(signals_were_blocked)
+                        self._mark_batch_draft_error(item, f"Invalid When condition: {error}")
         return errors
 
-    def _draft_frames(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def _draft_frames(self, loop_df=None) -> Tuple[pd.DataFrame, pd.DataFrame]:
         return (
-            _normalize_loop(_read_loop_table(self._loop_table)),
+            _normalize_loop(_read_loop_table(self._loop_table) if loop_df is None else loop_df),
             _normalize_batch(_read_batch_table(self._batch_table)),
         )
 
-    def _draft_change_reasons(self) -> List[str]:
+    def _draft_change_reasons(self, draft_frames=None) -> List[str]:
         """Return stable operator-facing reasons for pending plan changes."""
         reasons: List[str] = []
         try:
-            loop_df, batch_df = self._draft_frames()
-            if not loop_df.equals(_normalize_loop(self._loop_src)):
+            loop_df, batch_df = draft_frames if draft_frames is not None else self._draft_frames()
+            if (not loop_df.equals(self._loop_src) and not loop_df.equals(_normalize_loop(self._loop_src))
+                    and not loop_df.reset_index(drop=True).equals(_canonical_loop_order(_normalize_loop(self._loop_src)))):
                 reasons.append("Loop variables changed")
             if loop_df.attrs.get("loop_run_positions", {}) != self._loop_src.attrs.get("loop_run_positions", {}):
                 reasons.append("Run selection changed")
-            if not batch_df.equals(_normalize_batch(self._batch_src)):
+            if not batch_df.equals(self._batch_src) and not batch_df.equals(_normalize_batch(self._batch_src)):
                 reasons.append("Gate conditions changed")
         except Exception:
             reasons.append("Plan tables changed")
@@ -6105,7 +6539,7 @@ class PresetsPanel(QWidget):
         if self._nested_schedule_enabled and self._applied_execution_order:
             try:
                 order_changed = order_changed or (
-                    self._execution_order_entries()
+                    self._execution_order_entries(loop_df=loop_df)
                     != [dict(item) for item in self._applied_execution_order]
                 )
             except Exception:
@@ -6141,9 +6575,10 @@ class PresetsPanel(QWidget):
             self._mark_draft_error(item, "")
             marked.pop(id(item), None)
 
-    def _draft_validation_issues(self) -> List[str]:
+    def _draft_validation_issues(self, loop_df=None) -> List[str]:
         """Validate the draft without interrupting editing with dialogs."""
-        loop_df = _read_loop_table(self._loop_table)
+        if loop_df is None:
+            loop_df = _read_loop_table(self._loop_table)
         batch_df = _read_batch_table(self._batch_table)
         issues: List[str] = []
         # Valid cells have no error roles to restore. Retain item identity so
@@ -6195,14 +6630,14 @@ class PresetsPanel(QWidget):
                         mark(name, message)
                 for name in ("Vbg_start", "Vbg_stop", "Vtg_start", "Vtg_stop"):
                     number = _safe_float(row.get(name))
-                    if number is None or not np.isfinite(number):
+                    if number is None or not math.isfinite(number):
                         message = f"Batch row {row_number}: {name} must be numeric."
                         issues.append(message)
                         mark(name, message)
                 for name in ("Vbias_start", "Vbias_stop", "Vbias2_start", "Vbias2_stop", "bias2_offset_v"):
                     raw = str(row.get(name, "")).strip()
                     number = _safe_float(raw)
-                    if raw and (number is None or not np.isfinite(number)):
+                    if raw and (number is None or not math.isfinite(number)):
                         message = f"Batch row {row_number}: {name} must be numeric or blank."
                         issues.append(message)
                         mark(name, message)
@@ -6212,26 +6647,40 @@ class PresetsPanel(QWidget):
         table = self._loop_table
         signals_were_blocked = table.blockSignals(True)
         try:
-            for row_index, row in loop_df.iterrows():
-                for column in (2, 3):
-                    item = table.item(int(row_index), column)
+            cells = _loop_record_cells(table)
+            paired = _has_andor_column(table) and not table.isColumnHidden(_ANDOR_COLUMN)
+            for table_row in range(table.rowCount()):
+                for column in (2, 3, _ANDOR_COLUMN):
+                    item = table.item(table_row, column)
                     if item is not None:
                         self._mark_draft_error(item, "")
+            for record_index, row in enumerate(_frame_records(loop_df)):
+                row_index, value_column = cells[record_index] if record_index < len(cells) else (record_index, 2)
                 if not row["Enable"]:
                     continue
+                andor_item = table.item(int(row_index), _ANDOR_COLUMN) if paired else None
+                if (value_column == 2 and row["Parameter"] in _ANDOR_TWINS
+                        and andor_item is not None and not andor_item.text().strip()):
+                    message = f"Loop row {row_index + 1}: enter the Andor value."
+                    issues.append(message)
+                    self._mark_draft_error(andor_item, message)
                 try:
                     values = _parse_values(str(row["Values"]), str(row["Parameter"]))
                     # Numeric parsing already rejects nonfinite values; repeating
                     # a Python/NumPy check here walks long arrays on every edit.
                     valid_values = bool(values)
                     value_error = 'enter valid numeric values.'
+                    if row["Parameter"] == _SETUP_PARAM and values:
+                        station_issue = _pair_station_issue(values)
+                        if station_issue:
+                            valid_values, value_error = False, station_issue
                 except ValueError as exc:
                     valid_values, value_error = False, str(exc)
                 if not valid_values:
                     message = f"Loop row {row_index + 1}: {value_error}"
                     issues.append(message)
-                    self._mark_draft_error(table.item(int(row_index), 2), message)
-                if self._mode_combo.currentText() == "Customized":
+                    self._mark_draft_error(table.item(int(row_index), value_column), message)
+                if value_column == 2 and self._mode_combo.currentText() == "Customized":
                     item = table.item(int(row_index), 3)
                     try:
                         valid = int(item.text()) >= 1
@@ -6278,10 +6727,8 @@ class PresetsPanel(QWidget):
     def _on_draft_edited(self, *_args):
         self._filename_selection_independent = False
         self._sync_setup_value_editors()
-        self._sync_loop_run_selectors()
         self._update_loop_row_buttons()
-        self._refresh_execution_order_table()
-        self._refresh_draft_state()
+        self._refresh_draft_state(refresh_order=True)
         self._update_filename_preview()
 
     def _on_batch_draft_edited(self):
@@ -6340,19 +6787,26 @@ class PresetsPanel(QWidget):
         self._refresh_filename_preview()
 
     @_batch_read_transaction
-    def _refresh_draft_state(self, *, refresh_readiness: bool = True):
+    def _refresh_draft_state(self, *, refresh_readiness: bool = True, refresh_order: bool = False):
         if not hasattr(self, "_draft_badge"):
             return
         self._sync_loop_run_selectors()
+        loop_df = _read_loop_table(self._loop_table)
+        if refresh_order:
+            self._refresh_execution_order_table(loop_df)
         self._order_reset_required = ""
         try:
-            validation_issues = self._draft_validation_issues()
+            validation_issues = self._draft_validation_issues(loop_df)
         except Exception as exc:
             validation_issues = [str(exc)]
         self._draft_issues = validation_issues
         self._order_reset_notice.setText(self._order_reset_required)
         self._order_reset_notice.setVisible(bool(self._order_reset_required))
-        reasons = self._draft_change_reasons()
+        try:
+            draft_frames = self._draft_frames(loop_df)
+        except Exception:
+            draft_frames = None
+        reasons = self._draft_change_reasons(draft_frames)
         self._tables_dirty = bool(reasons or validation_issues)
 
         if validation_issues:
@@ -6382,9 +6836,9 @@ class PresetsPanel(QWidget):
         self._discard_btn.setEnabled(self._tables_dirty)
         if refresh_readiness:
             self._refresh_readiness(validation_issues=validation_issues)
-            self._refresh_sequence_preview()
+            self._refresh_sequence_preview(draft_frames)
 
-    def _refresh_sequence_preview(self) -> None:
+    def _refresh_sequence_preview(self, draft_frames=None) -> None:
         """Render the editable draft when valid; otherwise explain applied data."""
         if not hasattr(self, "_tree"):
             return
@@ -6399,37 +6853,30 @@ class PresetsPanel(QWidget):
                 self._show_applied_sequence()
             self._refresh_detector_wavelength_advice()
             return
-        key = repr((
-            _read_loop_table(self._loop_table).to_dict("records"),
-            _frame_records(_read_batch_table(self._batch_table)),
-            self._mode_combo.currentText(), self._current_acquisition_grouping(),
-            self._nested_schedule_enabled, self._execution_order,
-            self._legacy_loop_order,
-            self._loop_run_selections.positions(),
-            getattr(self, "_draft_issues", []),
-        ))
-        if key == getattr(self, "_draft_preview_key", None):
-            self._refresh_detector_wavelength_advice()
-            return
-        self._draft_preview_key = key
         unavailable = "Applied sequence · draft unavailable"
         try:
             if getattr(self, "_draft_issues", []):
                 raise ValueError(self._draft_issues[0])
-            loop_df, batch_df = self._draft_frames()
+            loop_df, batch_df = draft_frames if draft_frames is not None else self._draft_frames()
             mode = self._mode_combo.currentText()
             grouping = self._current_acquisition_grouping()
-            count = 1
-            for group in self._draft_loop_groups(loop_df):
-                count *= len(group["contexts"])
-            context_count = count
-            count *= sum(
-                max(int(row["repeat"]), 1) * max(int(row["frames"]), 1)
-                for row in _frame_records(batch_df[batch_df["Run"]])
+            context_count = _plan_context_count(self._draft_loop_groups(loop_df))
+            count = context_count * sum(
+                max(int(repeats), 1) * max(int(frames), 1)
+                for enabled, repeats, frames in zip(batch_df["Run"], batch_df["repeat"], batch_df["frames"])
+                if enabled
             )
             if context_count > _LIVE_DRAFT_SPECTRA_LIMIT or count > _LIVE_DRAFT_SPECTRA_LIMIT:
                 unavailable = "Applied sequence · apply to preview large draft"
                 raise ValueError(f"Live draft preview is limited to {_LIVE_DRAFT_SPECTRA_LIMIT:,} potential spectra.")
+            key = repr((
+                _frame_records(loop_df), _frame_records(batch_df),
+                mode, grouping, self._nested_schedule_enabled, self._execution_order,
+                self._legacy_loop_order, self._loop_run_selections.positions(),
+            ))
+            if key == getattr(self, "_draft_preview_key", None):
+                self._refresh_detector_wavelength_advice()
+                return
             seq, batch, total, schedule = _build_plan(
                 loop_df,
                 batch_df,
@@ -6438,6 +6885,7 @@ class PresetsPanel(QWidget):
                 parameter_order=self._legacy_loop_order if not self._nested_schedule_enabled else None,
                 include_schedule=True,
                 _include_legacy_schedule=not self._nested_schedule_enabled,
+                _normalized=True,
             )
             if self._nested_schedule_enabled:
                 schedule = _build_nested_execution_schedule(
@@ -6445,6 +6893,7 @@ class PresetsPanel(QWidget):
                     batch_df,
                     mode=mode,
                     execution_order=self._execution_order,
+                    _normalized=True,
                 )
                 total = _count_logical_streams(schedule)
             draft_param_order = [
@@ -6470,9 +6919,12 @@ class PresetsPanel(QWidget):
             # The applied plan remains the only runnable plan while the draft
             # is invalid.  Its label makes that distinction explicit in both
             # compact and full sequence views.
-            self._show_applied_sequence(unavailable)
+            self._draft_preview_key = None
+            if (self._tree._last_plan or {}).get("preview_state") != unavailable:
+                self._show_applied_sequence(unavailable)
             self._tree.setToolTip(str(exc))
         else:
+            self._draft_preview_key = key
             self._tree.setToolTip("")
         self._refresh_detector_wavelength_advice()
 
@@ -6494,7 +6946,7 @@ class PresetsPanel(QWidget):
                         if wavelength_contexts is not None and wavelength_contexts[0] is schedule
                         else (task['ctx'] for task in schedule))
             message = sequence_wavelength_warning(
-                contexts, identity, cfg.lf6.center_nm)
+                _detector_wavelength_contexts(contexts), identity, cfg.lf6.center_nm)
             if message:
                 message = 'Detector wavelength reminder\n' + message
         self._detector_warning_lbl.setText(message)
@@ -6561,7 +7013,7 @@ class PresetsPanel(QWidget):
                 self._acquisition_schedule,
                 _required_smu_roles(self._final_seq, self._df_batch, self._acquisition_schedule),
                 _required_optical_axes(self._final_seq, self._acquisition_schedule),
-                {_setup_backend(task['ctx'][_SETUP_PARAM]) for task in self._acquisition_schedule if _SETUP_PARAM in task['ctx']},
+                _requested_setups(self._acquisition_schedule),
             )
             self._plan_readiness_cache = requirements
         issues.extend(_setup_readiness_issues(self._lf6, self._acquisition_schedule, requirements[3]))
@@ -6662,18 +7114,29 @@ class PresetsPanel(QWidget):
             self._run_btn.setEnabled(True)
 
     def _connect_loop_param_signals(self):
-        for r in range(self._loop_table.rowCount()):
-            check_widget = self._loop_table.cellWidget(r, 0)
-            checkbox = check_widget.findChild(QCheckBox) if check_widget is not None else None
-            if checkbox is not None and not checkbox.property("draft_connected"):
-                checkbox.toggled.connect(self._on_draft_edited)
-                checkbox.setProperty("draft_connected", True)
-            combo = self._loop_table.cellWidget(r, 1)
-            if combo is not None and not combo.property("draft_connected"):
-                combo.currentTextChanged.connect(self._on_draft_edited)
-                combo.setProperty("draft_connected", True)
+        for row in range(self._loop_table.rowCount()):
+            self._connect_loop_row_signals(row)
         self._sync_setup_value_editors()
         self._sync_loop_run_selectors()
+
+    @Slot(str)
+    def _refresh_station_choices(self, _station):
+        for row in range(self._loop_table.rowCount()):
+            combo = self._loop_table.cellWidget(row, 1)
+            if isinstance(combo, QComboBox):
+                _configure_param_combo(combo, combo.currentData())
+        self._refresh_draft_state()
+
+    def _connect_loop_row_signals(self, row):
+        check_widget = self._loop_table.cellWidget(row, 0)
+        checkbox = check_widget.findChild(QCheckBox) if check_widget is not None else None
+        if checkbox is not None and not checkbox.property("draft_connected"):
+            checkbox.toggled.connect(self._on_draft_edited)
+            checkbox.setProperty("draft_connected", True)
+        combo = self._loop_table.cellWidget(row, 1)
+        if combo is not None and not combo.property("draft_connected"):
+            combo.currentTextChanged.connect(self._on_draft_edited)
+            combo.setProperty("draft_connected", True)
 
     def _sync_loop_run_selectors(self):
         table = self._loop_table
@@ -6681,52 +7144,85 @@ class PresetsPanel(QWidget):
         try:
             used = set()
             for row_i in range(table.rowCount()):
-                item = table.item(row_i, 2)
-                if item is None:
-                    continue
-                row_id = item.data(Qt.ItemDataRole.UserRole + 92)
-                if not row_id or row_id in used:
-                    row_id = str(uuid.uuid4())
-                    item.setData(Qt.ItemDataRole.UserRole + 92, row_id)
-                used.add(row_id)
+                for column in (2, _ANDOR_COLUMN):
+                    item = table.item(row_i, column)
+                    if item is None:
+                        continue
+                    row_id = item.data(_LOOP_ROW_ID_ROLE)
+                    if not row_id or row_id in used:
+                        row_id = str(uuid.uuid4())
+                        item.setData(_LOOP_ROW_ID_ROLE, row_id)
+                    used.add(row_id)
             rows = _read_loop_table_raw(table)
+            cells = _loop_record_cells(table)
             running = bool(self._run_thread and self._run_thread.isRunning())
-            key = repr((rows, self._mode_combo.currentText(), running))
-            if key == getattr(self, "_loop_selection_sync_key", None):
+            mode = self._mode_combo.currentText()
+            key = (mode, tuple(
+                (row["_run_id"], row["Parameter"], row["Values"], row["Group"])
+                if row["Enable"] else (row["_run_id"], row["Parameter"])
+                for row in rows
+            ))
+            definition_changed = key != getattr(self, "_loop_selection_sync_key", None)
+            if not definition_changed and running == self._loop_selectors_running:
                 return
-            # Invalid Group text stays in the table for normal draft validation.
-            for row in rows:
-                try:
-                    row["Group"] = int(row["Group"] or 1)
-                except ValueError:
-                    row["Group"] = 1
-            groups = self._loop_run_selections.synchronize(rows, self._mode_combo.currentText(), _parse_values)
-            table._loop_run_positions = self._loop_run_selections.positions()
-            by_row = {row_i: (level, group) for level, group in groups.items()
-                      for row_i, _ in group["members"]}
+            if definition_changed:
+                # Invalid Group text stays in the table for draft validation.
+                for row in rows:
+                    try:
+                        row["Group"] = int(row["Group"] or 1)
+                    except ValueError:
+                        row["Group"] = 1
+                self._loop_run_selections.synchronize(rows, mode, _parse_values)
+                table._loop_run_positions = self._loop_run_selections.positions()
+            by_row = {}
+            for group in self._loop_run_selections.groups.values():
+                lengths = {len(spec["values"] or []) for spec in group["baseline"].values()}
+                enabled = group["valid"] and len(lengths) == 1
+                for row_i, _row in group["members"]:
+                    by_row[row_i] = group, enabled
             for row_i, row in enumerate(rows):
-                combo = table.cellWidget(row_i, 4)
+                table_row, value_column = cells[row_i]
+                if value_column != 2:
+                    continue  # The Andor value shares its row's selector.
+                combo = table.cellWidget(table_row, 4)
                 if not isinstance(combo, RunSelectionCombo):
                     combo = RunSelectionCombo()
                     combo.tab_to_group = lambda target=combo: self._tab_loop_run_to_group(target)
                     combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
                     combo.activated.connect(lambda index, target=combo: self._choose_loop_run_value(target, index))
-                    table.setCellWidget(row_i, 4, combo)
-                combo.setProperty("loop_row_id", row["_run_id"])
-                combo.setAccessibleName(f"This run: {row['Parameter']}")
+                    table.setCellWidget(table_row, 4, combo)
+                identity = (row["_run_id"], row["Parameter"])
+                if identity != getattr(combo, "_loop_row_identity", None):
+                    combo._loop_row_identity = identity
+                    combo.setProperty("loop_row_id", row["_run_id"])
+                    combo.setAccessibleName(f"This run: {row['Parameter']}")
                 if row_i not in by_row:
-                    combo.configure([], "all", "Disabled")
+                    if combo.summary != "Disabled":
+                        combo.configure([], "all", "Disabled")
+                    combo._loop_label_sources = ()
                     combo.setEnabled(False)
                     continue
-                level, group = by_row[row_i]
+                group, enabled = by_row[row_i]
+                combo.setEnabled(enabled and not running)
+                if not definition_changed:
+                    continue
                 state = self._loop_run_selections.states[group["key"]]
-                values = group["baseline"][row["_run_id"]]["values"] or []
-                peers = [group["baseline"][peer["_run_id"]]["values"] or []
-                         for _, peer in group["members"]
-                         if peer["Parameter"] == "Center Wavelength (nm)" and row["Parameter"] == _SETUP_PARAM]
-                labels = _LoopRunLabels(values, row["Parameter"], peers)
-                if len(labels) <= 100:
-                    labels = list(labels)
+                baseline = group["baseline"]
+                values = baseline[row["_run_id"]]
+                peers = tuple(baseline[peer["_run_id"]] for _, peer in group["members"]
+                              if peer["Parameter"] == "Center Wavelength (nm)") if row["Parameter"] == _SETUP_PARAM else ()
+                sources = (values, *peers)
+                previous = getattr(combo, "_loop_label_sources", ())
+                same_labels = len(sources) == len(previous) and all(
+                    source is old for source, old in zip(sources, previous)
+                )
+                labels = combo.labels
+                if not same_labels:
+                    labels = _LoopRunLabels(values["values"] or [], row["Parameter"],
+                                            [peer["values"] or [] for peer in peers])
+                    if len(labels) <= 100:
+                        labels = list(labels)
+                    combo._loop_label_sources = sources
                 positions = state["positions"]
                 if state.get("stale"):
                     choice, summary = "reselect", "Select again…"
@@ -6736,11 +7232,12 @@ class PresetsPanel(QWidget):
                     choice, summary = positions[0], labels[positions[0]]
                 else:
                     choice, summary = "subset", f"{len(positions)} selected"
-                combo.configure(labels, choice, summary)
-                lengths = [len(v["values"] or []) for v in group["baseline"].values()]
-                combo.setEnabled(not running and group["valid"] and len(set(lengths)) == 1)
-                table.setRowHeight(row_i, max(table.rowHeight(row_i), combo.sizeHint().height() + 1))
+                if (not same_labels or combo.choice != choice or combo.summary != summary
+                        or combo.currentData() != choice or combo.currentText() != summary):
+                    combo.configure(labels, choice, summary)
+                    table.setRowHeight(table_row, max(table.rowHeight(table_row), combo.sizeHint().height() + 1))
             self._loop_selection_sync_key = key
+            self._loop_selectors_running = running
         finally:
             table.blockSignals(blocked)
 
@@ -6759,7 +7256,7 @@ class PresetsPanel(QWidget):
         if table.isColumnHidden(3):
             return False
         row_id = combo.property("loop_row_id")
-        for row, record in enumerate(_read_loop_table_raw(table)):
+        for row, record in enumerate(_read_loop_table_rows(table)):
             if record["_run_id"] == row_id:
                 table.setCurrentCell(row, 3)
                 table.editItem(table.item(row, 3))
@@ -6801,23 +7298,36 @@ class PresetsPanel(QWidget):
                 item = table.item(row, 2)
                 if parameter is None or item is None:
                     continue
-                if parameter.currentData() != _SETUP_PARAM:
+                is_setup = parameter.currentData() == _SETUP_PARAM
+                button = table.cellWidget(row, 2)
+                if is_setup and isinstance(button, QLineEdit):
+                    # Qt still owns the in-place Values editor. Finish its
+                    # edit before replacing that index with the setup picker.
+                    table.commitData(button)
+                    table.closeEditor(button, QAbstractItemDelegate.EndEditHint.NoHint)
+                    button = None
+                flags = item.flags()
+                editable_flag = Qt.ItemFlag.ItemIsEditable
+                if bool(flags & editable_flag) == is_setup:
+                    item.setFlags(flags & ~editable_flag if is_setup else flags | editable_flag)
+                if not is_setup:
                     # cellWidget() also returns Qt's transient line editor
                     # during commit. Removing it here strands EditingState.
-                    if isinstance(table.cellWidget(row, 2), QPushButton):
+                    if isinstance(button, QPushButton):
                         table.removeCellWidget(row, 2)
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                     continue
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                button = table.cellWidget(row, 2)
-                if button is None:
+                if not isinstance(button, QPushButton) or getattr(button, "_setup_value_item", None) is not item:
                     button = QPushButton()
+                    button._setup_value_item = item
                     button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
                     button.setAccessibleName("Select measurement setups")
                     button.clicked.connect(lambda _checked=False, target=item: self._edit_setup_values(target))
                     table.setCellWidget(row, 2, button)
+                raw = item.text()
+                if getattr(button, "_setup_value_text", None) == raw:
+                    continue
                 try:
-                    labels = [_SETUP_LABELS[value] for value in (_parse_values(item.text(), _SETUP_PARAM) or [])]
+                    labels = [_SETUP_LABELS[value] for value in (_parse_values(raw, _SETUP_PARAM) or [])]
                     summary = ', '.join(labels[:3])
                     if len(labels) > 3:
                         summary += f' (+{len(labels) - 3})'
@@ -6830,8 +7340,10 @@ class PresetsPanel(QWidget):
                 button.setAccessibleDescription(button.toolTip())
                 button.ensurePolished()
                 table.setRowHeight(row, max(table.rowHeight(row), button.sizeHint().height() + 1))
+                button._setup_value_text = raw
         finally:
             table.blockSignals(blocked)
+        _sync_andor_column(table)
 
     def _edit_setup_values(self, item):
         # Retain each unrecognized old value as an unselected position so
@@ -6842,21 +7354,32 @@ class PresetsPanel(QWidget):
                 values.append(_setup_backend(token))
             except ValueError:
                 values.append(token.strip())
-        dialog = SetupSequenceDialog(values, _SETUP_LABELS, self)
-        if dialog.exec() == SetupSequenceDialog.DialogCode.Accepted:
-            item.setText(', '.join(_SETUP_LABELS[value] for value in dialog.selected_backends()))
-        dialog.deleteLater()
-        button = self._loop_table.cellWidget(item.row(), 2)
-        if button is not None:
-            button.setFocus()
+        dialog = SetupSequenceDialog(values, _setup_choices(), self,
+                                     concurrent_choices=cfg.lf6.station_id == PAIRED_STATION_ID)
+        def finish(result):
+            if not isValid(item) or item.tableWidget() is not self._loop_table:
+                return
+            button = self._loop_table.cellWidget(item.row(), 2)
+            if getattr(button, "_setup_value_item", None) is item:
+                if result == SetupSequenceDialog.DialogCode.Accepted:
+                    item.setText(', '.join(_SETUP_LABELS[value] for value in dialog.selected_backends()))
+                if button.isVisible():
+                    button.setFocus()
+
+        # Return to the table's Quick click handler before processing dialog input.
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.finished.connect(finish)
+        dialog.open()
 
     def _populate_filename_parts(self):
         enabled = set(self._manual_filename_parts)
         self._filename_parts_table.setRowCount(len(PART_SPECS))
         for r, (key, label) in enumerate(PART_SPECS):
             self._filename_parts_table.setCellWidget(r, 0, _make_check_cell(key in enabled))
-            self._filename_parts_table.setItem(r, 1, QTableWidgetItem(label))
-            self._filename_parts_table.setItem(r, 2, QTableWidgetItem(""))
+            for column, text in ((1, label), (2, "")):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self._filename_parts_table.setItem(r, column, item)
             cb = self._filename_parts_table.cellWidget(r, 0).findChild(QCheckBox)
             if cb and not cb.property("preview_connected"):
                 cb.toggled.connect(self._on_filename_parts_changed)
@@ -6960,6 +7483,7 @@ class PresetsPanel(QWidget):
             mode=mode,
             acquisition_grouping=grouping,
             parameter_order=self._legacy_loop_order if not self._nested_schedule_enabled else None,
+            _normalized=True,
         )
         return loop_df, batch_df, seq, batch
 
@@ -7031,6 +7555,7 @@ class PresetsPanel(QWidget):
 
     @Slot()
     def _on_batch_selection_changed(self):
+        self._update_batch_row_buttons()
         # Invalid/large-draft placeholders describe the whole draft, not a row.
         # Selection must not revalidate that entire table merely to repeat it.
         if not getattr(self, "_filename_selection_independent", False):
@@ -7084,10 +7609,21 @@ class PresetsPanel(QWidget):
             )
             if power_pending:
                 base_name += "_PowerPending"
-            self._filename_preview_lbl.setText(f"Filename: {base_name}.csv")
+            pair_backend = _PAIRED_SETUPS.get(ctx.get(_SETUP_PARAM))
+            filename = f"{base_name}.csv"
+            if pair_backend:
+                andor_name = "Andor_InGaAs" if pair_backend == "andor_ingaas" else "Andor_Si"
+                pixis_base, andor_base = (
+                    _build_run_filename_base(
+                        run_meta, detector_ctx, selected_row,
+                        enabled_parts=self._selected_filename_parts(), andor_token=False,
+                    )[0] + ("_PowerPending" if power_pending else "")
+                    for detector_ctx in (ctx, _andor_filename_ctx(ctx)))
+                filename = f"{pixis_base}_PIXIS.csv\n{andor_base}_{andor_name}.csv\n{base_name}_pairs.jsonl"
+            self._filename_preview_lbl.setText(f"Filename: {filename}")
             self._filename_preview_lbl.setToolTip(
-                f"{base_name}.csv\nPowerPending is a preview placeholder. The saved filename uses a fresh measured value in uW."
-                if power_pending else f"{base_name}.csv"
+                f"{filename}\nPowerPending is a preview placeholder. The saved filename uses a fresh measured value in uW."
+                if power_pending else filename
             )
             self._save_path_preview_lbl.setText(f"Folder: {out_dir}")
             note = (
@@ -7233,17 +7769,22 @@ class PresetsPanel(QWidget):
         return run_meta, None
 
     def _add_loop_row(self):
-        r = self._loop_table.rowCount()
-        self._loop_table.insertRow(r)
-        self._loop_table.setCellWidget(r, 0, _make_check_cell(False))
-        self._loop_table.setCellWidget(r, 1, _make_param_combo(LOOP_PARAMS[0]))
-        self._loop_table.setItem(r, 2, QTableWidgetItem(""))
-        self._loop_table.setItem(r, 3, QTableWidgetItem("1"))
-        self._connect_loop_param_signals()
-        self._on_draft_edited()
+        table = self._loop_table
+        # A new row goes directly below the selection, or at the end without one.
+        selected = [index.row() for index in table.selectionModel().selectedRows()]
+        row = max(selected) + 1 if selected else table.rowCount()
+        with batch_table_updates(table):
+            with QSignalBlocker(table):
+                table.insertRow(row)
+                _populate_loop_row(table, row, {})
+            self._connect_loop_row_signals(row)
+            self._on_draft_edited()
+        if selected:
+            table.selectRow(row)
+            table.scrollTo(table.model().index(row, 1), QAbstractItemView.ScrollHint.EnsureVisible)
 
     def _update_loop_row_buttons(self):
-        rows = {index.row() for index in self._loop_table.selectedIndexes()}
+        rows = {index.row() for index in self._loop_table.selectionModel().selectedRows()}
         row = next(iter(rows)) if len(rows) == 1 else -1
         running = bool(self._run_thread and self._run_thread.isRunning())
         for button in (self._loop_up_btn, self._loop_top_btn):
@@ -7253,14 +7794,14 @@ class PresetsPanel(QWidget):
 
     def _move_loop_row(self, offset):
         table = self._loop_table
-        rows = {index.row() for index in table.selectedIndexes()}
+        rows = {index.row() for index in table.selectionModel().selectedRows()}
         if len(rows) != 1 or (self._run_thread and self._run_thread.isRunning()):
             return
         source = next(iter(rows))
         target = min(max(source + int(offset), 0), table.rowCount() - 1)
         if target == source:
             return
-        values = _read_loop_table_raw(table)
+        values = _read_loop_table_rows(table)
         # Capture topology without parsing unfinished Values or changing legacy
         # repeat/frame semantics. Explicit nested orders already use membership.
         if not self._nested_schedule_enabled and self._mode_combo.currentText() == 'Synchronize':
@@ -7273,8 +7814,26 @@ class PresetsPanel(QWidget):
         updates = table.updatesEnabled()
         table.setUpdatesEnabled(False)
         try:
-            _populate_loop_table(table, pd.DataFrame(values))
-            self._connect_loop_param_signals()
+            # Cell widgets belong to their indexes. Update the moved range in
+            # place so unaffected editors and their connections stay intact.
+            start, stop = sorted((source, target))
+            for row in range(start, stop + 1):
+                value = values[row]
+                checkbox = table.cellWidget(row, 0).findChild(QCheckBox)
+                combo = table.cellWidget(row, 1)
+                with QSignalBlocker(checkbox), QSignalBlocker(combo):
+                    checkbox.setChecked(value["Enable"])
+                    combo.setCurrentIndex(max(0, combo.findData(value["Parameter"])))
+                item = table.item(row, 2)
+                item.setData(_LOOP_ROW_ID_ROLE, value["_run_id"])
+                item.setText(value["Values"])
+                table.item(row, 3).setText(value["Group"])
+                andor = table.item(row, _ANDOR_COLUMN)
+                if andor is not None:
+                    andor.setData(_LOOP_ROW_ID_ROLE, value["_andor_id"])
+                    andor.setText(value["Andor"])
+            model = table.model()
+            model.dataChanged.emit(model.index(start, 0), model.index(stop, 1), [])
             table.setCurrentCell(target, column)
             table.selectRow(target)
         finally:
@@ -7285,10 +7844,13 @@ class PresetsPanel(QWidget):
 
     @Slot()
     def _del_loop_row(self):
-        rows = {i.row() for i in self._loop_table.selectedIndexes()}
-        for r in sorted(rows, reverse=True):
-            self._loop_table.removeRow(r)
-        self._on_draft_edited()
+        table = self._loop_table
+        rows = {index.row() for index in table.selectionModel().selectedRows()}
+        with batch_table_updates(table):
+            with QSignalBlocker(table):
+                for row in sorted(rows, reverse=True):
+                    table.removeRow(row)
+            self._on_draft_edited()
 
     @Slot()
     def _add_batch_row(self):
@@ -7316,17 +7878,23 @@ class PresetsPanel(QWidget):
     @Slot()
     @_coalesce_batch_updates
     def _del_batch_row(self):
-        rows = {i.row() for i in self._batch_table.selectedIndexes()}
-        signals_were_blocked = self._batch_table.blockSignals(True)
-        try:
-            for r in sorted(rows, reverse=True):
-                self._batch_table.removeRow(r)
-        finally:
-            self._batch_table.blockSignals(signals_were_blocked)
-        if rows and self._batch_table.rowCount():
-            self._batch_table.selectRow(
-                min(min(rows), self._batch_table.rowCount() - 1)
-            )
+        self._remove_batch_rows(self._selected_batch_rows())
+
+    def _remove_batch_rows(self, rows):
+        """Remove sorted row indices in contiguous ranges, from bottom to top."""
+        if not rows:
+            return
+        table = self._batch_table
+        with QSignalBlocker(table):
+            first = last = rows[-1]
+            for row in reversed(rows[:-1]):
+                if row + 1 != first:
+                    table.model().removeRows(first, last - first + 1)
+                    last = row
+                first = row
+            table.model().removeRows(first, last - first + 1)
+        if table.rowCount():
+            table.selectRow(min(rows[0], table.rowCount() - 1))
         self._update_batch_row_buttons()
         self._commit_batch_change()
 
@@ -7369,9 +7937,9 @@ class PresetsPanel(QWidget):
         updates_were_enabled = table.updatesEnabled()
         table.setUpdatesEnabled(False)
         try:
+            table.model().insertRows(target, len(rows))
             for offset, values in enumerate(rows):
                 row_index = target + offset
-                table.insertRow(row_index)
                 for column, name in enumerate(BATCH_SCHEMA):
                     table.setItem(
                         row_index,
@@ -7394,9 +7962,8 @@ class PresetsPanel(QWidget):
     @Slot()
     def _update_batch_row_buttons(self):
         rows = self._selected_batch_rows()
-        row = self._selected_batch_row_index()
-        self._batch_duplicate_btn.setEnabled(row >= 0)
-        self._batch_rev_btn.setEnabled(row >= 0)
+        self._batch_duplicate_btn.setEnabled(len(rows) == 1)
+        self._batch_rev_btn.setEnabled(len(rows) == 1)
         self._batch_up_btn.setEnabled(bool(rows) and rows != list(range(len(rows))))
         self._batch_down_btn.setEnabled(
             bool(rows)
@@ -7450,12 +8017,9 @@ class PresetsPanel(QWidget):
         update(self._batch_move_bottom_action,
                has_rows and rows != list(range(row_count - len(rows), row_count)),
                "Select one or more rows first." if not has_rows else "Selected rows are already at the bottom.")
-        has_disabled = any(
-            self._batch_table.item(row_index, BATCH_SCHEMA.index("Run"))
-            and self._batch_table.item(
-                row_index, BATCH_SCHEMA.index("Run")
-            ).checkState() != Qt.CheckState.Checked
-            for row_index in range(row_count)
+        has_disabled = (
+            self._batch_history_index >= 0
+            and not bool(self._batch_history[self._batch_history_index]["Run"].all())
         )
         update(self._batch_delete_disabled_action, has_disabled,
                "The batch table is empty." if not row_count else "There are no disabled rows.")
@@ -7654,19 +8218,7 @@ class PresetsPanel(QWidget):
                 ).checkState() != Qt.CheckState.Checked
             )
         ]
-        if not disabled:
-            return
-        table = self._batch_table
-        signals_were_blocked = table.blockSignals(True)
-        try:
-            for row in reversed(disabled):
-                table.removeRow(row)
-        finally:
-            table.blockSignals(signals_were_blocked)
-        if table.rowCount():
-            table.selectRow(min(disabled[0], table.rowCount() - 1))
-        self._update_batch_row_buttons()
-        self._commit_batch_change()
+        self._remove_batch_rows(disabled)
 
     @Slot()
     def _auto_frames_for_selected_rows(self):
@@ -8274,6 +8826,17 @@ class PresetsPanel(QWidget):
             QMessageBox.warning(self, "Cannot start run", err)
             self._log(err)
             return
+        requirements = getattr(self, "_plan_readiness_cache", None)
+        requested_setups = (requirements[3]
+                            if requirements is not None and requirements[0] is self._acquisition_schedule
+                            else _requested_setups(self._acquisition_schedule))
+        station_issue = _pair_station_issue(requested_setups)
+        if station_issue:
+            QMessageBox.warning(self, "Cannot start run", station_issue)
+            self._log(station_issue)
+            return
+        if requested_setups.intersection(_PAIRED_SETUPS):
+            run_meta["paired_station_required"] = PAIRED_STATION_ID
         out_dir = self._current_output_dir(run_meta)
         from ui.detector_wavelength_advice import confirm_sequence_wavelength
         wavelength_cache = getattr(self, "_plan_wavelength_contexts_cache", None)
@@ -8281,17 +8844,12 @@ class PresetsPanel(QWidget):
                                if wavelength_cache is not None and wavelength_cache[0] is self._acquisition_schedule
                                else (task['ctx'] for task in self._acquisition_schedule))
         if not confirm_sequence_wavelength(
-                self, wavelength_contexts,
+                self, _detector_wavelength_contexts(wavelength_contexts),
                 getattr(self._lf6, 'identity', {}),
                 run_meta.get('spectrometer_defaults', {}).get('Center Wavelength (nm)', cfg.lf6.center_nm)):
             self._log('Run cancelled at detector wavelength reminder.')
             return
-        requirements = getattr(self, "_plan_readiness_cache", None)
-        requested_setups = (requirements[3]
-                            if requirements is not None and requirements[0] is self._acquisition_schedule
-                            else {_setup_backend(ctx[_SETUP_PARAM]) for ctx in self._final_seq
-                                  if _SETUP_PARAM in ctx})
-        if not ensure_sensor_readout(self, self._lf6, mode="1d", backends=sorted(requested_setups) or None):
+        if not ensure_sensor_readout(self, self._lf6, mode="1d", backends=sorted(_physical_setups(requested_setups)) or None):
             self._log("Run cancelled at sensor readout preflight.")
             return
         run_meta["sensor_readout_intents"] = deepcopy(getattr(self._lf6, "sensor_readout_intents", {}))
@@ -8652,6 +9210,10 @@ class PresetsPanel(QWidget):
         elif self._hardware_incident_active:
             self._run_outcome = "failed"
             self._status_lbl.setText("Hardware fault - reconnect SMUs")
+            set_style_role(self._status_lbl, 'text', tone='danger')
+        elif getattr(self._run_worker, "cleanup_failed", False):
+            self._run_outcome = "failed"
+            self._status_lbl.setText("Return to zero failed")
             set_style_role(self._status_lbl, 'text', tone='danger')
         elif getattr(self._run_worker, "metadata_failed", False):
             self._run_outcome = "failed"

@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QApplication, QTableWidget, QTableWidgetItem
+from PySide6.QtWidgets import QApplication, QPushButton, QTableWidget, QTableWidgetItem
 
 from ui.table_layout import fit_table_columns
 
@@ -147,6 +147,54 @@ class FittedTableTests(unittest.TestCase):
         dialog.show()
         self.assert_fits(dialog._table)
         self.assertEqual(dialog.selected_rows()[0]["repeat"], 2)
+
+    def test_dual_gate_execution_order_fits_controls_and_scrolls_tall_zip_row(self):
+        import pandas as pd
+        from ui import presets_panel
+
+        stylesheet = Path(__file__).parents[1] / "ui/styles/application.qss"
+        self.addCleanup(self.app.setStyleSheet, self.app.styleSheet())
+        self.app.setStyleSheet(stylesheet.read_text(encoding="utf-8"))
+        panel = presets_panel.PresetsPanel(bind_controller=False, initialize_plan=False)
+        self.addCleanup(panel.close)
+        loop = pd.DataFrame([
+            dict(Enable=True, Parameter=parameter,
+                 Values="WinSpec" if parameter == "Measurement setup" else "1", Group=1)
+            for parameter in presets_panel.LOOP_PARAMS
+        ])
+        panel._mode_combo.setCurrentText("Zip")
+        presets_panel._populate_loop_table(panel._loop_table, loop)
+        panel._connect_loop_param_signals()
+        panel._on_draft_edited()
+        table = panel._execution_order_table
+        panel.resize(1400, 850)
+        panel.show()
+        for width in (1320, 1400, 1700):
+            with self.subTest(width=width):
+                panel.resize(width, 850)
+                self.assert_fits(table)
+                header = table.horizontalHeader()
+                for column in range(table.columnCount()):
+                    self.assertGreaterEqual(table.columnWidth(column), header.sectionSizeHint(column))
+                self.assertGreater(table.columnWidth(1), table.columnWidth(0))
+                for row in range(table.rowCount()):
+                    controls = table.cellWidget(row, 2)
+                    for button in controls.findChildren(QPushButton):
+                        self.assertTrue(controls.rect().contains(button.geometry()))
+
+        panel.resize(1320, 850)
+        self.settle()
+        self.assertIn("Measurement setup", table.item(0, 1).text())
+        # Use half the measured wrapped row so the scroll check exercises a
+        # partial row at any font metrics or display scale.
+        table.setFixedHeight(table.horizontalHeader().height() + 2 * table.frameWidth() + table.rowHeight(0) // 2)
+        self.settle()
+        pixels_to_bottom = table.rowHeight(0) - table.viewport().height()
+        self.assertGreater(pixels_to_bottom, 0)
+        table.verticalScrollBar().setValue(pixels_to_bottom)
+        self.settle()
+        self.assertEqual(table.verticalScrollBar().value(), pixels_to_bottom)
+        self.assertEqual(table.rowViewportPosition(0) + table.rowHeight(0), table.viewport().height())
 
     def test_optical_editors_fit_inside_cells_with_large_values(self):
         from ui.megasweep_panel import MegaSweepPanel

@@ -69,16 +69,20 @@ def test_spectrum_optics_routing_and_display_keep_separate_forms(quick_app):
         panel.show()
         QTest.qWait(100)
         forms = _forms_by_source(coverage)
-        assert forms[id(panel._center)] is forms[id(panel._apply_optics_btn)]
+        assert panel._single_recipe_row.isAncestorOf(forms[id(panel._center)])
+        assert panel._single_recipe_row.isVisible()
         assert forms[id(panel._center)] is not forms[id(panel._grating)]
         assert forms[id(panel._grating)] is not forms[id(panel._comparison_mode)]
         assert commands.adapter.fields == {}
-        for source in (panel._center, panel._exposure, panel._accumulations):
-            assert sections["optics"].isAncestorOf(forms[id(source)])
+        for source in (panel._exposure, panel._accumulations):
+            assert sections["parameters"].isAncestorOf(forms[id(source)])
             assert not sections["display"].isAncestorOf(forms[id(source)])
         assert forms[id(panel._exposure)] is forms[id(panel._accumulations)]
         assert sections["display"].isAncestorOf(forms[id(panel._comparison_mode)])
         assert sections["readback"].isAncestorOf(panel._optics_readback)
+        assert sections["optics"].isHidden()
+        panel._optics_toggle.setChecked(True)
+        assert sections["optics"].isVisible()
         field = next(field for form in coverage["forms"]
                      for field, source in form.adapter._fields.items()
                      if source is panel._references_toggle)
@@ -86,6 +90,20 @@ def test_spectrum_optics_routing_and_display_keep_separate_forms(quick_app):
         assert not panel._side_panel.isVisible()
         assert field.trigger()
         assert panel._side_panel.isVisible()
+        panel._pair_controls.set_station("attodry2100")
+        single_form = forms[id(panel._center)]
+        for width in (1450, 900):
+            panel.resize(width, 800)
+            for mode in (1, 0):
+                panel._pair_controls.mode.setCurrentIndex(mode)
+                QTest.qWait(50)
+                visible_forms = ([forms[id(editors[0])] for editors in
+                                  (panel._pair_controls._pixis_editors, panel._pair_controls._andor_editors)]
+                                 if mode else [single_form])
+                for form in visible_forms:
+                    assert form.isVisibleTo(panel)
+                    assert form.height() < 2 * panel._center.sizeHint().height()
+                assert panel._side_panel.isVisibleTo(panel)
         assert sources == (panel._center, panel._energy, panel._apply_optics_btn,
                            panel._grating, panel._output_port, panel._comparison_mode,
                            panel._normalize_references_chk, panel._references_toggle)
@@ -96,7 +114,6 @@ def test_spectrum_optics_routing_and_display_keep_separate_forms(quick_app):
 
 def test_spectrum_sensor_reminder_survives_quick_command_replacement(quick_app):
     from PySide6.QtCore import Signal
-    from tests.test_quick_parameter_forms import find_item
     from tests.test_spectrum_panel_controls import _FakeSpectrumController
     from ui.quick_controls import install_spectrum_controls
     from ui.spectrum_panel import SpectrumPanel
@@ -123,12 +140,9 @@ def test_spectrum_sensor_reminder_survives_quick_command_replacement(quick_app):
         assert panel._exposure.value() == 127.5
         assert panel._accumulations.value() == 3
         assert commands.adapter.presenter.fields == []
-        form, field = next((form, field) for form in coverage["forms"]
-                           for field, source in form.adapter._fields.items()
-                           if source is panel._sensor_mode_hint)
-        rendered = find_item(form.rootObject(), "parameter_label_" + field.fieldId)
-        assert panel._acquisition_group.isHidden()
-        assert form.isVisible() and field.visible and rendered.isVisible()
+        rendered = panel._sensor_mode_hint
+        assert panel._acquisition_group.isVisible()
+        assert rendered.isVisibleTo(panel)
         assert "1D → Bin All" in rendered.property("text")
         assert "2D → Full sensor" in rendered.property("text")
 
@@ -138,7 +152,7 @@ def test_spectrum_sensor_reminder_survives_quick_command_replacement(quick_app):
         assert "switched to FullSensor" in rendered.property("text")
         controller.disconnected.emit()
         QTest.qWait(200)
-        assert not field.visible and not rendered.isVisible()
+        assert not rendered.isVisibleTo(panel)
     finally:
         commands.shutdown()
         _close(panel)

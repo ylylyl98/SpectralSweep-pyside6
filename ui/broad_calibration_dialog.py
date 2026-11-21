@@ -5,7 +5,7 @@ from PySide6.QtCore import Signal, QTimer, QObject
 from PySide6.QtWidgets import QDialog,QVBoxLayout,QLabel,QComboBox,QPushButton,QTableWidget,QCheckBox,QDoubleSpinBox,QHBoxLayout
 from app.wavelength_calibration import fit_broad_calibration
 from utils.config import cfg
-from ui.table_layout import fit_table_columns
+from ui.table_layout import batch_table_updates, fit_table_columns
 
 class _AnalysisSignals(QObject):
     progress=Signal(str)
@@ -237,15 +237,22 @@ class BroadCalibrationDialog(QDialog):
         super().hideEvent(event)
 
     def refresh(self):
-        self.invalidate();self.table.setRowCount(0)
+        self.invalidate()
         self.records=[r for r in cfg.lf6.winspec_wavelength_calibrations if r.get('kind')!='broad_piecewise']
-        for r in self.records:
-            i=self.table.rowCount();self.table.insertRow(i)
-            role=QComboBox();role.addItems(['Ignore','Anchor','Check']);role.currentIndexChanged.connect(self.invalidate)
-            self.table.setCellWidget(i,0,role)
-            c=r.get('context',{})
-            label=QLabel(f"{c.get('profile')} | grating {c.get('grating')} | {c.get('center_nm')} nm | {c.get('output_port')} | {r.get('created_utc')}")
-            self.table.setCellWidget(i,1,label)
+        with batch_table_updates(self.table):
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(self.records))
+            for row, record in enumerate(self.records):
+                role = QComboBox()
+                role.addItems(['Ignore', 'Anchor', 'Check'])
+                role.currentIndexChanged.connect(self.invalidate)
+                self.table.setCellWidget(row, 0, role)
+                context = record.get('context', {})
+                label = QLabel(
+                    f"{context.get('profile')} | grating {context.get('grating')} | "
+                    f"{context.get('center_nm')} nm | {context.get('output_port')} | {record.get('created_utc')}"
+                )
+                self.table.setCellWidget(row, 1, label)
 
     def fit(self):
         self.invalidate()

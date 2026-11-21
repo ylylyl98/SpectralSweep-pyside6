@@ -89,8 +89,14 @@ def test_preserves_applied_plan_invalid_draft_selections_history_and_logs(shell,
     old._sweep_calc._label_auto = False
     old._run_outcome = "stopped"
     old._done_frames = 1
+    old._log_text.setPlainText("\n".join(f"Previous log entry {index}" for index in range(100)))
     old._log("unsaved operator log")
-    old._log_toggle.setChecked(True)
+    old._set_inspector_page("DualGateRunLog")
+    old._sequence_toggle.setChecked(False)
+    QApplication.processEvents()
+    old._log_text.verticalScrollBar().setValue(47)
+    log_scroll = old._log_text.verticalScrollBar().value()
+    assert log_scroll > 0
     old._status_lbl.setText("Last run stopped")
     old._run_time_lbl.setText("Elapsed 01:23 · Remaining —")
     old._status_lbl.setProperty("spectralTone", "warning")
@@ -123,6 +129,11 @@ def test_preserves_applied_plan_invalid_draft_selections_history_and_logs(shell,
     assert new._batch_history_index == old._batch_history_index
     assert new._batch_row_clipboard == old._batch_row_clipboard
     assert "unsaved operator log" in new._log_text.toPlainText()
+    assert new._results_tabs.currentWidget().objectName() == "DualGateRunLog"
+    assert not new._sequence_toggle.isChecked()
+    assert new._tree.isHidden()
+    QApplication.processEvents()
+    assert new._log_text.verticalScrollBar().value() == log_scroll
     assert new._status_lbl.text() == "Last run stopped"
     assert new._run_time_lbl.text() == "Elapsed 01:23 · Remaining —"
     assert not new._run_time_timer.isActive()
@@ -136,6 +147,28 @@ def test_preserves_applied_plan_invalid_draft_selections_history_and_logs(shell,
     cfg.save.assert_not_called()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     assert not isValid(old)
+
+
+def test_legacy_log_toggle_selects_new_inspector_log(shell):
+    from ui.dual_gate_reload_state import capture_dual_gate_state, restore_dual_gate_state
+
+    old = shell._presets
+    old._log("Legacy log entry")
+    state = capture_dual_gate_state(old)
+    state["session"].pop("inspector_page")
+    state["session"].pop("sequence_expanded")
+    state["controls"]["_log_toggle"] = ("checked", True)
+    state["controls"]["_sequence_toggle"] = ("checked", False)
+    state.pop("inspector_scrolls")
+    new = PresetsPanel(initialize_plan=False, bind_controller=False)
+    try:
+        restore_dual_gate_state(new, state)
+        assert new._results_tabs.currentWidget().objectName() == "DualGateRunLog"
+        assert new._tree.isHidden()
+        assert "Legacy log entry" in new._log_text.toPlainText()
+    finally:
+        new.dispose_reloaded_page()
+        new.deleteLater()
 
 
 def test_retains_open_spectrum_viewer_and_rebinds_it(shell):

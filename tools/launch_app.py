@@ -9,7 +9,9 @@ import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-REQUIREMENTS = PROJECT_ROOT / "requirements.txt"
+# The validated runtime: requirements.txt plus the pinned Qt version. Installing
+# only requirements.txt lets each PC drift to whatever PySide6 is newest.
+REQUIREMENTS = PROJECT_ROOT / "requirements-quick.txt"
 
 
 def launch_log_path() -> Path:
@@ -44,8 +46,25 @@ def run_application(args: list[str]) -> int:
     return result.returncode
 
 
+def _requirement_files(requirements: Path) -> list[Path]:
+    """The file plus every existing file it pulls in with ``-r``."""
+    files, pending = [], [requirements]
+    while pending:
+        path = pending.pop()
+        if path in files or not path.is_file():
+            continue
+        files.append(path)
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] in ("-r", "--requirement"):
+                pending.append(path.parent / parts[1])
+    return files or [requirements]
+
+
 def dependency_fingerprint(requirements: Path) -> str:
-    digest = hashlib.sha256(requirements.read_bytes())
+    digest = hashlib.sha256()
+    for path in _requirement_files(requirements):
+        digest.update(path.read_bytes())
     # A recreated/upgraded interpreter must establish its own install record.
     digest.update(str(Path(sys.executable).resolve()).encode())
     digest.update(sys.version.encode())

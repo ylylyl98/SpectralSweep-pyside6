@@ -6,6 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pandas as pd
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from ui import presets_panel as panel
@@ -147,13 +148,13 @@ def test_batch_edits_and_history_preserve_loop_and_order_controls(widget):
     assert widget._execution_order[1]["kind"] == "group"
 
 
-def test_loop_and_execution_order_changes_still_rebuild_order_controls(widget):
+def test_loop_count_updates_caption_and_order_change_rebuilds_controls(widget):
     order = widget._execution_order_table
     previous = order.cellWidget(0, 2)
     with patch.object(widget, "_refresh_execution_order_table", wraps=widget._refresh_execution_order_table) as rebuild:
         widget._loop_table.item(0, 2).setText("860, 861")
         assert rebuild.call_count == 1
-        assert order.cellWidget(0, 2) is not previous
+        assert order.cellWidget(0, 2) is previous
         assert "x2" in order.item(0, 0).text()
         previous = order.cellWidget(0, 2)
         widget._move_execution_order(0, 1)
@@ -172,6 +173,37 @@ def test_large_draft_selection_does_not_recompute_a_row_independent_filename(wid
     cell(widget, 500, "frames").setText("bad")
     assert widget._preview_timer.isActive()
     assert not widget._apply_btn.isEnabled()
+
+
+def test_selection_does_not_read_run_cells_and_disabled_action_follows_history(widget):
+    table = widget._batch_table
+    with patch.object(table, "item", wraps=table.item) as reads:
+        table.selectRow(100)
+        assert reads.call_count == 0
+    assert not widget._batch_delete_disabled_action.isEnabled()
+    cell(widget, 100, "Run").setCheckState(Qt.CheckState.Unchecked)
+    assert widget._batch_delete_disabled_action.isEnabled()
+    widget._undo_batch_edit()
+    assert not widget._batch_delete_disabled_action.isEnabled()
+    widget._redo_batch_edit()
+    assert widget._batch_delete_disabled_action.isEnabled()
+
+
+def test_bulk_paste_and_undo_use_one_contiguous_native_row_operation(widget):
+    table = widget._batch_table
+    tail = cell(widget, 999, "condition_label")
+    inserted = QSignalSpy(table.model().rowsInserted)
+    removed = QSignalSpy(table.model().rowsRemoved)
+    rows = [dict(widget._batch_row_values(0), condition_label=f"added {i}") for i in range(20)]
+    widget._insert_batch_rows(10, rows)
+    assert inserted.count() == 1
+    assert inserted.at(0)[1:] == [10, 29]
+    assert cell(widget, 29, "condition_label").text() == "added 19"
+    assert cell(widget, 1019, "condition_label") is tail
+    widget._undo_batch_edit()
+    assert removed.count() == 1
+    assert removed.at(0)[1:] == [10, 29]
+    assert cell(widget, 999, "condition_label") is tail
 
 
 def test_power_readbacks_skip_filename_work_and_preserve_real_edit_updates(app):
@@ -195,7 +227,7 @@ def test_power_readbacks_skip_filename_work_and_preserve_real_edit_updates(app):
                 result._cache_preview_power((i + 1) * 1e-6)
                 app.processEvents()
             assert preview.call_count == 0
-            assert reads.call_count == 0
+            assert all(call.args[0] is not result._batch_table for call in reads.call_args_list)
             assert displayed == (
                 result._filename_preview_lbl.text(),
                 result._save_path_preview_lbl.text(),

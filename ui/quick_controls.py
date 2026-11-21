@@ -7,10 +7,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Signal, QTimer, QUrl, QSize
+from PySide6.QtCore import QEvent, QObject, Signal, QTimer, QUrl, QSize, Qt
 from PySide6.QtQuickWidgets import QQuickWidget
 from ui.quick_engine import QuickSurface
-from PySide6.QtWidgets import QGridLayout, QLabel, QSizePolicy, QWidget
+from PySide6.QtWidgets import QSizePolicy
 
 from app.command_presenter import CommandPresenter
 
@@ -45,7 +45,7 @@ class PanelCommandAdapter(QObject):
 
     def eventFilter(self, watched, event):
         if event.type() in (QEvent.Type.EnabledChange, QEvent.Type.LayoutRequest,
-                            QEvent.Type.Show, QEvent.Type.Hide):
+                            QEvent.Type.Show, QEvent.Type.Hide, QEvent.Type.DynamicPropertyChange):
             self.schedule()
         return False
 
@@ -59,7 +59,8 @@ class PanelCommandAdapter(QObject):
         actions = [dict(id=key, text=button.text().strip("▶■ "),
                         enabled=button.isEnabled() and (self.availability is None or self.availability(key)),
                         cancel=key in {"stop", "abort", "pause"},
-                        tooltip=button.toolTip()) for key, button in self.buttons.items()]
+                        tooltip=button.toolTip()) for key, button in self.buttons.items()
+                   if not button.property("quickCommandHidden")]
         fields = [dict(id=key, label=label, value=field.value(),
                        minimum=field.minimum(), maximum=field.maximum(),
                        integer=not hasattr(field, "decimals"), enabled=field.isEnabled(),
@@ -132,8 +133,8 @@ class QuickCommandWidget(QuickSurface):
             if root.property("embedded"):
                 self.setMaximumWidth(max(1, ceil(root.property("dockPreferredWidth"))))
             previous = self.height()
-            self.setFixedHeight(max(36 if root.property("compact") else 48,
-                                    ceil(root.implicitHeight()) + 2))
+            minimum = 32 if root.property("denseToolbar") else (36 if root.property("compact") else 48)
+            self.setFixedHeight(max(minimum, ceil(root.implicitHeight()) + 2))
             # Qt may update QWidget geometry while a stacked page is hidden
             # without resizing its render-control window. Updating just the
             # QML root masks that mismatch and clips the framebuffer at 48px.
@@ -197,40 +198,22 @@ class QuickCommandWidget(QuickSurface):
 
 
 def install_spectrum_controls(panel):
-    """Keep measurement parameters together and replace only run actions."""
+    """Use the same compact acquisition commands beside status in either mode."""
     if getattr(panel, "_quick_acquisition", None) is not None:
         return panel._quick_acquisition
-    # Source controls keep their controller/configuration bindings. Reparent
-    # them before hiding the old action group so parameter-form migration can
-    # discover them beside wavelength, independently of the command dock.
-    timing = QWidget(panel._spectrograph_group)
-    timing.setObjectName("QuickSpectrumAcquisitionTiming")
-    timing.setProperty("quickSectionBoundary", True)
-    timing.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-    timing_layout = QGridLayout(timing)
-    timing_layout.setContentsMargins(0, 0, 0, 0)
-    timing_layout.setHorizontalSpacing(8)
-    timing_layout.addWidget(QLabel("Exposure / frame:", timing), 0, 0)
-    timing_layout.addWidget(panel._exposure, 0, 1)
-    timing_layout.addWidget(panel._frames_label, 0, 2)
-    timing_layout.addWidget(panel._accumulations, 0, 3)
-    timing_layout.setColumnStretch(4, 1)
-    panel._spectrograph_group.setTitle("Measurement settings")
-    panel._spectrograph_group.layout().insertWidget(1, timing)
-    for source in (panel._exposure, panel._frames_label, panel._accumulations):
-        source.show()
-    panel._quick_acquisition_timing = timing
     adapter = PanelCommandAdapter("Acquisition", {
-        "apply": panel._apply_btn, "acquire": panel._acquire_btn,
-        "acquire2d": panel._acquire_2d_btn, "abort": panel._abort_btn,
-        "run": panel._run_1d_btn, "run2d": panel._run_2d_btn, "stop": panel._stop_btn,
+        "acquire": panel._acquire_btn, "acquire2d": panel._acquire_2d_btn,
+        "run": panel._run_1d_btn, "run2d": panel._run_2d_btn,
+        "stop": panel._stop_btn, "abort": panel._abort_btn, "apply": panel._apply_btn,
     }, status=panel._status_lbl)
-    widget = QuickCommandWidget(adapter, panel)
-    replaced = panel.layout().replaceWidget(panel._acquisition_group, widget)
-    if replaced is None:
-        widget.deleteLater()
-        raise RuntimeError("Acquisition layout could not be replaced")
-    panel._acquisition_group.hide()
+    pane = panel._spectrum_command_pane
+    pane.setProperty("quickSectionBoundary", True)
+    pane.layout().removeWidget(panel._native_commands)
+    widget = QuickCommandWidget(adapter, pane)
+    widget.rootObject().setProperty("denseToolbar", True)
+    widget.set_docked(compact=True)
+    pane.layout().addWidget(widget, 0, Qt.AlignmentFlag.AlignRight)
+    panel._native_commands.hide()
     panel._quick_acquisition = widget
     return widget
 

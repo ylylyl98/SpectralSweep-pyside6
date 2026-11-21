@@ -63,6 +63,8 @@ def center_context(setup, value):
 def trace_center_write(method):
     @wraps(method)
     def traced(setup, value, *args, **kwargs):
+        if not kwargs.get('record_diagnostics', True):
+            return method(setup, value, *args, **kwargs)
         try:
             path = diagnostic_path(setup)
             record = {

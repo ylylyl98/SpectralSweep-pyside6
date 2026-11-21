@@ -144,7 +144,7 @@ class MCD2100BatchTests(unittest.TestCase):
                 metadata["filename_temperature"],
                 {"sample_temperature_k": 4.2, "source": "live_sample_readback"},
             )
-            self.assertTrue(all("_MCD_4p2K_G" in Path(path).name for path in result["csv_paths"]))
+            self.assertTrue(all("_MCD_4.2K_G" in Path(path).name for path in result["csv_paths"]))
 
     def test_long_gate_settling_is_cancelable(self):
         with tempfile.TemporaryDirectory() as td:
@@ -200,7 +200,7 @@ class MCD2100BatchTests(unittest.TestCase):
                 all(Path(path).name.startswith("YZ365_p5n2_MCD_") for path in result["csv_paths"])
             )
             self.assertTrue(all("_G0" in Path(path).name for path in result["csv_paths"]))
-            self.assertTrue(all("B-0p01to+0p01T" in Path(path).name for path in result["csv_paths"]))
+            self.assertTrue(all("B-0.01to+0.01T" in Path(path).name for path in result["csv_paths"]))
             self.assertTrue(all("_roundtrip.csv" in path for path in result["csv_paths"]))
             self.assertEqual(len(optical.gates), 3)
             self.assertTrue(observed)

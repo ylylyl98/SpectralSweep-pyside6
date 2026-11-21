@@ -144,10 +144,10 @@ def test_small_panel_preview_uses_first_when_match_of_selected_paired_values(wid
     widget._batch_table.item(0, panel.BATCH_SCHEMA.index("When")).setText("Exposure_Time == 200")
     widget._refresh_filename_preview()
     assert "1150" in widget._filename_preview_lbl.text()
-    assert "0p2s" in widget._filename_preview_lbl.text()
+    assert "0.2s" in widget._filename_preview_lbl.text()
     upcoming = widget._upcoming_preview.toPlainText().splitlines()
     assert len(upcoming) == 1
-    assert "1150" in upcoming[0] and "0p2s" in upcoming[0]
+    assert "1150" in upcoming[0] and "0.2s" in upcoming[0]
     assert "730" not in upcoming[0]
 
 
@@ -182,7 +182,7 @@ def test_small_panel_preview_reuses_resolved_sequence(widget, applied):
     with patch.object(panel, "_build_plan", side_effect=AssertionError("resolved plan rebuilt")):
         widget._refresh_filename_preview()
     assert "1150" in widget._filename_preview_lbl.text()
-    assert "0p2s" in widget._filename_preview_lbl.text()
+    assert "0.2s" in widget._filename_preview_lbl.text()
     assert "invalid" not in widget._filename_preview_lbl.text().lower()
 
 
@@ -199,4 +199,4 @@ def test_nested_panel_upcoming_preview_keeps_condition_point_selection_order(wid
         widget._refresh_filename_preview()
     upcoming = widget._upcoming_preview.toPlainText().splitlines()
     assert len(upcoming) == 3
-    assert all("1150" in name and "0p2s" in name and "WinSpec" in name for name in upcoming)
+    assert all("1150" in name and "0.2s" in name and "WinSpec" in name for name in upcoming)

@@ -415,7 +415,13 @@ def move_and_verify(
     try:
         while True:
             check_deadline()
-            result = _call_move(adapter, target, stop_event, deadline - clock()) if issue_move else True
+            try:
+                result = _call_move(adapter, target, stop_event, deadline - clock()) if issue_move else True
+            except BaseException:
+                # A move that raised (typically the adapter's own timeout) may
+                # have left the axis travelling; reporting failure is not enough.
+                _cancel(adapter)
+                raise
             check_deadline()
             if result is False:
                 raise MotionVerificationError(f"adapter reported move to {target:g} was not completed")

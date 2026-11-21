@@ -39,8 +39,16 @@ class ReferenceRow(QObject):
         if self.model._closed:
             return None, None
         panel = self.model.panel
-        ref = next((ref for ref in panel._references if str(ref["id"]) == self._id), None)
         table = panel._reference_list
+        # Look up the live source row directly while typing or navigating.
+        # An insertion/removal can precede the queued index rebuild.
+        index = self.model._indices.get(self._id, -1)
+        if 0 <= index < min(len(panel._references), table.count()):
+            ref = panel._references[index]
+            item = table.item(index)
+            if str(ref["id"]) == self._id and str(item.data(Qt.ItemDataRole.UserRole)) == self._id:
+                return ref, item
+        ref = next((ref for ref in panel._references if str(ref["id"]) == self._id), None)
         item = next((table.item(i) for i in range(table.count())
                      if str(table.item(i).data(Qt.ItemDataRole.UserRole)) == self._id), None)
         return ref, item
@@ -290,8 +298,11 @@ class ReferenceListModel(QObject):
         return True
 
     def discardEdits(self):
-        self._drafts.clear()
-        self.refresh()
+        drafts, self._drafts = self._drafts, {}
+        for key in drafts:
+            row = self._cache.get(key)
+            if row is not None:
+                row.refresh()
 
     def shutdown(self):
         self._closed = True

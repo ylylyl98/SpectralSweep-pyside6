@@ -63,6 +63,29 @@ def test_points_paused_and_paired(tmp_path):
     assert [rows[i][17] for i in (0, 2, 4)] == ["1", "2", "3"]
 
 
+def test_dual_detector_rows_follow_each_field_and_angle(tmp_path):
+    from app.engine.mcd_paired_spectra import MCDPairedSpectra
+
+    worker, magnet, rotator, params = setup_worker()
+    del worker._acquire_spectrum
+    records = {"lightfield": {"wavelengths": [700, 701], "counts": [1, 2]},
+               "andor_si": {"wavelengths": [800, 801, 802], "counts": [3, 4, 5]}}
+    capture = Mock(return_value=records)
+    metadata = Mock()
+    worker._station_pair = MCDPairedSpectra(SimpleNamespace(acquire_station_pair=capture),
+                                             "andor_si", {}, tmp_path, "dual", metadata_run=metadata)
+    _, rows = run(worker, magnet, rotator, params, tmp_path)
+    ids = [row[-1] for row in rows]
+    assert len(set(ids)) == capture.call_count == 6
+    for detector in ("PIXIS", "Andor_Si"):
+        with (tmp_path / f"dual_{detector}.csv").open(newline="") as handle:
+            results = list(csv.DictReader(handle))
+        assert [row["point_id"] for row in results] == ids
+        assert [row["polarization"] for row in results] == ["A", "B"] * 3
+    assert {call.args[0].name for call in metadata.register_file.call_args_list} == {
+        "dual_pairs.jsonl", "dual_PIXIS.csv", "dual_Andor_Si.csv"}
+
+
 def test_drift_keeps_acquired_raw_row_and_stops(tmp_path):
     worker, magnet, rotator, params = setup_worker()
     magnet.offsets = [0, .011]

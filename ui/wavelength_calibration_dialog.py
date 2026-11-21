@@ -5,12 +5,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtCore import QSignalBlocker, Signal, Qt
 from PySide6.QtWidgets import (QDialog,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QCheckBox,
     QTableWidget,QTableWidgetItem,QComboBox,QDoubleSpinBox,QPlainTextEdit,
     QWidget,QTabWidget,QScrollArea,QHeaderView,QToolButton)
 from app.wavelength_calibration import fit_calibration, reference_lines, valid_context
-from ui.table_layout import fit_table_columns
+from ui.table_layout import batch_table_updates, fit_table_columns
 from ui.plot_factory import create_plot
 
 REFERENCE = Path(__file__).resolve().parents[1]/'calibrations/ingaas-2026-09-26/LightField-SourceSpectra.xml'
@@ -263,16 +263,21 @@ class WavelengthCalibrationDialog(QDialog):
         except Exception as exc:self.result.setText(str(exc))
 
     def add_peak(self, pixel):
-        row=self.table.rowCount(); self.table.insertRow(row)
+        with QSignalBlocker(self.table), batch_table_updates(self.table):
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self._populate_peak_row(row, pixel)
+        self.invalidate()
+
+    def _populate_peak_row(self, row, pixel):
         role=QComboBox(); role.addItems(['Ignore','Fit','Check']); role.currentIndexChanged.connect(self.invalidate)
         self.table.setCellWidget(row,0,role); self.table.setItem(row,1,QTableWidgetItem(f'{pixel:.4f}'))
         line=QComboBox(); line.setEditable(True); line.addItem('')
         for w,s,_ in self.lines: line.addItem(f'{w:.5f}  {s}',w)
         line.currentTextChanged.connect(self.invalidate); self.table.setCellWidget(row,2,line)
-        self.invalidate()
 
     def set_frame(self, frame):
-        self.frame=copy.deepcopy(frame); self.invalidate(); self.table.setRowCount(0)
+        self.frame=copy.deepcopy(frame); self.invalidate()
         y=np.asarray(frame['counts']); self.plot.clear(); self.plot.plot(np.arange(1,513),y)
         context=frame.get('context')
         self.context_label.setText(
@@ -280,6 +285,7 @@ class WavelengthCalibrationDialog(QDialog):
             if valid_context(context) else 'Live optics identity unavailable / changed during exposure. This frame cannot be calibrated.')
         broad = self.broad_dialog
         if broad is not None and (broad.batch_active or broad.sweep_active or broad.analysis_running):
+            self.table.setRowCount(0)
             self.result.setText('Lamp spectrum captured. Automatic matching and validation follow the scan.')
             return
         self.steps.setCurrentIndex(1)
@@ -289,10 +295,13 @@ class WavelengthCalibrationDialog(QDialog):
         for i in sorted(peaks,key=lambda i:y[i],reverse=True):
             if all(abs(i-j)>3 for j in selected): selected.append(i)
             if len(selected)>=18: break
-        for i in sorted(selected):
-            denominator=y[i-1]-2*y[i]+y[i+1]
-            offset=.5*(y[i-1]-y[i+1])/denominator if denominator else 0
-            self.add_peak(i+1+float(np.clip(offset,-.5,.5)))
+        with QSignalBlocker(self.table), batch_table_updates(self.table):
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(selected))
+            for row, i in enumerate(sorted(selected)):
+                denominator=y[i-1]-2*y[i]+y[i+1]
+                offset=.5*(y[i-1]-y[i+1])/denominator if denominator else 0
+                self._populate_peak_row(row, i+1+float(np.clip(offset,-.5,.5)))
         self.result.setText(f'{len(selected)} candidate peaks; no wavelengths assigned automatically. Verify identities and avoid saturated/blended peaks.')
 
     def save_raw_frame(self):

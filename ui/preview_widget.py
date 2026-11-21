@@ -147,13 +147,20 @@ def _fmt_sweep_range(r: dict) -> str:
 
 
 def _fmt_ctx(ctx: dict, param_order: Optional[List[str]] = None) -> str:
-    default_keys = ["Measurement setup", "Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)", "Stage Position", "Rotation1 Angle (deg)", "Rotation2 Angle (deg)"]
+    default_keys = [
+        "Measurement setup", "Center Wavelength (nm)", "Exposure Time (ms)", "Accumulations (EPF)",
+        "Andor Center Wavelength (nm)", "Andor Exposure Time (ms)", "Andor Accumulations (EPF)",
+        "Stage Position", "Rotation1 Angle (deg)", "Rotation2 Angle (deg)",
+    ]
     keys = param_order or default_keys
     aliases = {
         "Measurement setup": "Setup",
         "Center Wavelength (nm)": "CW",
         "Exposure Time (ms)": "Exp",
         "Accumulations (EPF)": "EPF",
+        "Andor Center Wavelength (nm)": "Andor CW",
+        "Andor Exposure Time (ms)": "Andor Exp",
+        "Andor Accumulations (EPF)": "Andor EPF",
         "Rotation1 Angle (deg)": "RotIn",
         "Rotation2 Angle (deg)": "RotOut",
         "Stage Position": "Stage",
@@ -172,6 +179,7 @@ def _fmt_ctx(ctx: dict, param_order: Optional[List[str]] = None) -> str:
             value = {
                 'lightfield': 'PIXIS', 'winspec_ingaas': 'WinSpec',
                 'andor_ingaas': 'Andor InGaAs', 'andor_si': 'Andor Silicon',
+                'pixis_andor_ingaas': 'PIXIS + Andor InGaAs', 'pixis_andor_si': 'PIXIS + Andor Silicon',
             }.get(value, value)
         parts.append(f"{k0}={value}")
     return ", ".join(parts) if parts else "(no loop vars)"

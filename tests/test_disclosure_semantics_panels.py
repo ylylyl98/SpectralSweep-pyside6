@@ -51,8 +51,11 @@ def test_dual_gate_disclosures_do_not_convert_menu_actions(monkeypatch):
     monkeypatch.setattr(cfg, "save", lambda *args: None)
     panel = PresetsPanel()
     assert all(_kind(button) == "disclosure" for button in
-               (panel._filename_details_toggle, panel._sequence_toggle, panel._log_toggle))
+               (panel._filename_details_toggle, panel._sequence_toggle))
     check_toggle(panel._filename_details_toggle, panel._filename_details)
+    log_tab = panel._results_tabs.widget(2)
+    assert log_tab.isAncestorOf(panel._log_text)
+    assert not any(_kind(button) == "disclosure" for button in log_tab.findChildren(QToolButton))
     assert _kind(panel._batch_actions_btn) != "disclosure"
     assert panel._batch_actions_btn.menu() is not None
     panel.dispose_reloaded_page()

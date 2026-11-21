@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QCheckBox
 from ui import presets_panel as panel
 from ui.preview_widget import RunPlanTree
@@ -96,19 +97,35 @@ class NestedReviewTests(unittest.TestCase):
         self.assertEqual(widget._execution_order_table.rowCount(), 2)
         self.assertIn("Gate conditions", widget._execution_order_table.item(0, 0).text())
 
-    def test_run_footer_stays_visible_when_details_expand(self):
+    def test_run_footer_stays_visible_across_review_tabs(self):
         widget = self.panel()
         widget.resize(1400, 900)
         widget.show()
-        widget._filename_details_toggle.setChecked(True)
-        widget._log_toggle.setChecked(True)
         self.app.processEvents()
-        for button in (widget._run_btn, widget._stop_btn, widget._spectrum_btn):
-            self.assertFalse(widget._results_scroll.isAncestorOf(button))
-            top_left = button.mapTo(widget, QPoint(0, 0))
-            self.assertGreaterEqual(top_left.y(), 0)
-            self.assertLessEqual(top_left.y() + button.height(), widget.height())
-            self.assertTrue(button.isVisible())
+        tabs = widget._results_tabs
+        tab_bar = tabs.tabBar()
+        controls = (widget._readiness_lbl, widget._run_btn, widget._stop_btn, widget._spectrum_btn)
+        before = [control.mapTo(widget, QPoint()) for control in controls]
+        schedule = widget._acquisition_schedule
+        for index in (1, 2, 0):
+            QTest.mouseClick(tab_bar, Qt.MouseButton.LeftButton, pos=tab_bar.tabRect(index).center())
+            self.app.processEvents()
+            self.assertEqual(tabs.currentIndex(), index)
+            if index == 1:
+                widget._filename_details_toggle.setChecked(True)
+                widget._output_scroll.verticalScrollBar().setValue(
+                    widget._output_scroll.verticalScrollBar().maximum())
+                self.app.processEvents()
+            elif index == 2:
+                self.assertTrue(widget._log_text.isVisible())
+            for control in controls:
+                self.assertFalse(tabs.isAncestorOf(control))
+                top_left = control.mapTo(widget, QPoint())
+                self.assertGreaterEqual(top_left.y(), 0)
+                self.assertLessEqual(top_left.y() + control.height(), widget.height())
+                self.assertTrue(control.isVisible())
+            self.assertEqual([control.mapTo(widget, QPoint()) for control in controls], before)
+            self.assertIs(widget._acquisition_schedule, schedule)
 
     def test_nested_preview_uses_points_not_file_counter(self):
         definition = loops(("Rotation1 Angle (deg)", "0,90"))

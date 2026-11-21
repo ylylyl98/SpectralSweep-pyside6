@@ -6,12 +6,15 @@ AppPane {
     id: root
     required property QtObject bridge
     property bool compact: false
+    property bool denseToolbar: false
     property bool embedded: false
     property bool fullStatus: false
     property var state: bridge.snapshot
-    padding: compact ? 6 : 8
-    leftPadding: compact ? 8 : 16
-    rightPadding: compact ? 8 : 16
+    padding: denseToolbar ? 2 : compact ? 6 : 8
+    leftPadding: denseToolbar ? 0 : compact ? 8 : 16
+    rightPadding: denseToolbar ? 0 : compact ? 8 : 16
+    readonly property int actionSpacing: denseToolbar ? 4 : 8
+    onActionSpacingChanged: if (actions) actions.scheduleLayout()
     implicitHeight: content.implicitHeight + topPadding + bottomPadding
     Accessible.name: state.title
     readonly property real detailsNaturalWidth: {
@@ -26,6 +29,7 @@ AppPane {
     readonly property bool stacked: !compact && availableWidth < detailsNaturalWidth + actions.naturalWidth + 16
     readonly property real dockPreferredWidth: Math.ceil(Math.max(
         actions.naturalWidth, compact ? 0 : detailsNaturalWidth) + leftPadding + rightPadding)
+    onEmbeddedChanged: if (embedded) actions.layoutActions()
     background: Rectangle {
         color: root.embedded ? "transparent" : Theme.commandSurface
         Rectangle { visible: !root.embedded; anchors { left: parent.left; right: parent.right; top: parent.top } height: 1; color: Theme.divider }
@@ -121,8 +125,10 @@ AppPane {
                     let natural = 0
                     for (let i = 0; i < actionItems.count; ++i) {
                         const item = actionItems.itemAt(i)
-                        if (!item || !item.visible) continue
-                        natural += (items.length ? 8 : 0) + item.implicitWidth
+                        // All model actions occupy a slot, even while their
+                        // containing page is hidden or moving between docks.
+                        if (!item) continue
+                        natural += (items.length ? root.actionSpacing : 0) + item.implicitWidth
                         items.push(item)
                     }
                     // Qt Quick Layouts rounds an allocated width to pixels.
@@ -136,11 +142,11 @@ AppPane {
                         const item = items[i]
                         item.width = Math.min(width, item.implicitWidth)
                         item.height = item.implicitHeight
-                        if (band.items.length && band.width + 8 + item.width > width) {
+                        if (band.items.length && band.width + root.actionSpacing + item.width > width) {
                             bands.push(band)
                             band = {items: [], width: 0, height: 0}
                         }
-                        band.width += (band.items.length ? 8 : 0) + item.width
+                        band.width += (band.items.length ? root.actionSpacing : 0) + item.width
                         band.height = Math.max(band.height, item.height)
                         band.items.push(item)
                     }
@@ -153,14 +159,16 @@ AppPane {
                             const item = current.items[column]
                             item.x = x
                             item.y = y + (current.height - item.height) / 2
-                            x += item.width + 8
+                            x += item.width + root.actionSpacing
                         }
                         y += current.height + (row + 1 < bands.length ? 8 : 0)
                     }
                     laidOutHeight = y
                 }
-                onWidthChanged: scheduleLayout()
-                Component.onCompleted: scheduleLayout()
+                // A newly docked surface may be painted before a deferred
+                // callback. Position its buttons when it receives its width.
+                onWidthChanged: if (actionItems) layoutActions()
+                Component.onCompleted: layoutActions()
                 Repeater {
                     id: actionItems
                     model: root.bridge.actions
@@ -171,8 +179,10 @@ AppPane {
                         property var spec: modelData.info
                         objectName: "command_" + spec.id
                         text: spec.text
+                        leftPadding: root.denseToolbar ? 8 : 12
+                        rightPadding: root.denseToolbar ? 8 : 12
                         appearance: spec.cancel ? "danger"
-                            : ["run", "run2d", "acquire", "acquire2d"].indexOf(spec.id) >= 0 ? "primary"
+                            : ["run", "acquire"].indexOf(spec.id) >= 0 ? "primary"
                             : spec.id === "apply" ? "accent" : "standard"
                         enabled: spec.enabled && (spec.cancel || !root.bridge.validationError)
                         Accessible.name: text

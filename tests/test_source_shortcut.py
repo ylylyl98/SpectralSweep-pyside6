@@ -10,6 +10,8 @@ import sys
 
 import pytest
 
+from ui import application_identity
+
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows shortcuts")
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,8 +28,8 @@ def powershell(*args, env=None):
 
 
 @pytest.mark.parametrize("update_code", [0, 1])
-def test_shortcut_updates_then_launches_same_folder_even_when_update_skipped(tmp_path, update_code):
-    project = tmp_path / "source 空格 & folder"
+def test_shortcut_matches_source_identity_and_launches_after_update(tmp_path, update_code, monkeypatch):
+    project = tmp_path / "Source 空格 Straße & folder"
     tools = project / "tools"
     tools.mkdir(parents=True)
     icons = project / "assets/icons"
@@ -59,12 +61,17 @@ def test_shortcut_updates_then_launches_same_folder_even_when_update_skipped(tmp
     result = powershell("-Command", """[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut($env:SPECTRAL_TEST_SHORTCUT)
-@{Target=$link.TargetPath} | ConvertTo-Json -Compress
+$explorer = New-Object -ComObject Shell.Application
+$folder = $explorer.NameSpace((Split-Path -Parent $env:SPECTRAL_TEST_SHORTCUT))
+$item = $folder.ParseName((Split-Path -Leaf $env:SPECTRAL_TEST_SHORTCUT))
+@{Target=$link.TargetPath; AppId=$item.ExtendedProperty('System.AppUserModel.ID')} | ConvertTo-Json -Compress
 exit $shell.Run(('"' + $env:SPECTRAL_TEST_SHORTCUT + '"'), 0, $true)
 """, env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     metadata = json.loads(result.stdout.strip())
     assert Path(metadata["Target"]) == Path(POWERSHELL)
+    monkeypatch.setattr(application_identity, "_ROOT", project)
+    assert metadata["AppId"] == application_identity.runtime_app_id()
     # WScript's property reader is ANSI too. Verify the persisted Unicode values
     # directly, as well as executing the actual .lnk through Windows above.
     saved = shortcut.read_bytes()

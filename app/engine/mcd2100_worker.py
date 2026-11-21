@@ -324,7 +324,8 @@ class DiscreteMCD2100Worker:
             wavelengths = self._prepare_wavelengths()
             with csv_path.open("w", newline="", encoding="utf-8") as stream:
                 writer = csv.writer(stream)
-                writer.writerow(MCD2100_SCALAR_FIELDS + wavelengths)
+                # Wavelength columns use four decimals on every page.
+                writer.writerow(MCD2100_SCALAR_FIELDS + [f"{value:.4f}" for value in wavelengths])
                 stream.flush()
                 for target in self.targets:
                     self._check_cancelled()
@@ -893,6 +894,7 @@ class MCD2100Worker:
         metadata.setdefault("gate_settling", []).append(record)
         if settle_s <= 0:
             record.update({"actual_s": 0.0, "completed": True})
+            self._verify_gates()
             return
         self._emit_phase(f"Gate settling after {phase}: {settle_s:g} s")
         started = self.clock()
@@ -904,6 +906,13 @@ class MCD2100Worker:
         record.update({"actual_s": elapsed, "completed": True,
                        "completed_utc": _utc_now()})
         self._emit_log(f"Gate settling complete after {elapsed:.3g} s")
+        self._verify_gates()
+
+    def _verify_gates(self) -> None:
+        """Fail the run if the settled gates are off target or current-limited."""
+        verify = getattr(self.optical, "verify_gates", None)
+        if callable(verify):
+            verify(vtg_v=self.vtg_v, vbg_v=self.vbg_v, vbias_v=self.vbias_v)
 
     def _wait_gate(self, target: float, *, increasing: bool, initial: Any = None) -> Any:
         gate = self._target_gate(target)
@@ -959,6 +968,9 @@ class MCD2100Worker:
             )
 
     def _prepare_wavelengths(self) -> list[float]:
+        if self._station_pair:
+            # Paired detector CSVs take their own axis from each capture.
+            return []
         prepare = getattr(self.optical, "prepare", None)
         raw = prepare(self.stop_event) if callable(prepare) else getattr(self.optical, "wavelengths", None)
         if raw is None:
@@ -967,6 +979,23 @@ class MCD2100Worker:
         if not values or any(not math.isfinite(value) for value in values):
             raise RuntimeError("optical wavelengths must be finite and non-empty")
         return values
+
+    @property
+    def _station_pair(self):
+        return getattr(self.optical, "station_pair", None)
+
+    def _capture_point(self, angle, acquisition_id, measured_angle, field_before, condition_index, leg, **scalars):
+        pair = self._station_pair
+        if pair is None:
+            return _optical_acquire(self.optical, angle, str(angle), self.stop_event, acquisition_id)
+        try:
+            axis, counts = pair.capture(acquisition_id, self.stop_event, dict(
+                condition_index=condition_index, leg=leg, requested_angle_deg=angle,
+                measured_angle_deg=measured_angle, field_before_T=field_before,
+                Vtg=self.vtg_v, Vbg=self.vbg_v, Vbias=self.vbias_v, **scalars))
+        except InterruptedError as exc:
+            raise MCD2100Cancelled(str(exc)) from exc
+        return axis, counts, measured_angle
 
     def _apply_setup(self, *, condition: Optional[Mapping[str, Any]] = None,
                      configure: bool = True, apply_gate: bool = True,
@@ -1142,10 +1171,13 @@ class MCD2100Worker:
                 before = wait_stable()
                 timestamp_start = _utc_now()
                 acquisition_id = str(uuid.uuid4())
-                acquired = _optical_acquire(self.optical, angle, str(angle), self.stop_event, acquisition_id)
+                acquired = self._capture_point(angle, acquisition_id, observed_angle, before, condition_index, leg,
+                                               pair_id=pair_id, field_target_T=point)
                 timestamp_end = _utc_now()
                 raw_wavelengths, raw_counts, measured_angle = acquired
                 raw_wavelengths = [float(v) for v in raw_wavelengths]
+                if self._station_pair:
+                    wavelengths = raw_wavelengths
                 counts = [float(v) for v in raw_counts]
                 if not counts or any(not math.isfinite(v) for v in counts + raw_wavelengths):
                     raise RuntimeError("optical spectrum is invalid")
@@ -1173,7 +1205,8 @@ class MCD2100Worker:
                 writer.writerow([timestamp_start, timestamp_end, direction, "increasing" if target > start else "decreasing", measured_angle,
                                  before, after, (before + after) / 2 if after is not None else "",
                                  self.vtg_v, self.vbg_v, self.vbias_v, doping, efield,
-                                 sample_t0, sample_t1, sample_tmid, pair_id, point, *counts])
+                                 sample_t0, sample_t1, sample_tmid, pair_id, point,
+                                 *([acquisition_id] if self._station_pair else counts)])
                 stream.flush(); os.fsync(stream.fileno())
                 metadata["spectra_written"] += 1
                 pair["spectra"].append({"acquisition_id": acquisition_id, "angle": angle,
@@ -1328,21 +1361,25 @@ class MCD2100Worker:
                 timestamp_start = _utc_now()
                 acquisition_id = str(uuid.uuid4())
                 try:
-                    acquired = _optical_acquire(
-                        self.optical, angle, str(angle), self.stop_event, acquisition_id
-                    )
+                    acquired = self._capture_point(angle, acquisition_id, measured_angle, b0, condition_index, leg)
                 except BaseException as exc:
-                    if self.stop_event.is_set():
+                    if self.stop_event.is_set() and self._station_pair is None:
                         raise MCD2100Cancelled(
                             "measurement cancelled during optical acquisition"
                         ) from exc
                     raise
                 timestamp_end = _utc_now()
-                self._check_cancelled()
+                if not self._station_pair:
+                    self._check_cancelled()
+                # else: the paired spectra are already on disk under this
+                # acquisition id; write the row that references them, then let
+                # the next cancellation check end the run.
                 if not isinstance(acquired, tuple) or len(acquired) != 3:
                     raise RuntimeError("optical acquire must return wavelengths, counts, measured angle")
                 raw_wavelengths, raw_counts, reported_angle = acquired
                 row_wavelengths = [float(v) for v in raw_wavelengths]
+                if self._station_pair:
+                    wavelengths = row_wavelengths
                 counts = [float(v) for v in raw_counts]
                 if not counts or len(row_wavelengths) != len(counts) or any(
                     not math.isfinite(v) for v in row_wavelengths + counts
@@ -1365,7 +1402,7 @@ class MCD2100Worker:
                     timestamp_start, timestamp_end, leg_label, direction, measured_angle,
                     b0, b1, (b0 + b1) / 2.0, self.vtg_v, self.vbg_v,
                     self.vbias_v, doping, efield,
-                    sample_t0, sample_t1, sample_tmid, *counts,
+                    sample_t0, sample_t1, sample_tmid, *([acquisition_id] if self._station_pair else counts),
                 ])
                 metadata["spectra_written"] += 1
                 metadata["last_field_t"] = b1
@@ -1588,7 +1625,9 @@ class MCD2100Worker:
             if self.metadata_run is not None and isinstance(metadata.get("setup_applied"), Mapping):
                 self.metadata_run.update_applied({"mcd2100": metadata["setup_applied"]})
             wavelengths = self._prepare_wavelengths()
-            self._emit_log(f"Optical wavelength axis prepared: {len(wavelengths)} pixel(s)")
+            spectral_headers = ["point_id"] if self._station_pair else [f"{value:.4f}" for value in wavelengths]
+            self._emit_log("Dual detector axes will be recorded at each capture." if self._station_pair
+                           else f"Optical wavelength axis prepared: {len(wavelengths)} pixel(s)")
             if not self.conditions:
                 gate_setup = self._apply_setup(
                     configure=False, apply_gate=True,
@@ -1601,7 +1640,7 @@ class MCD2100Worker:
                     )
                 with csv_path.open("w", newline="", encoding="utf-8") as stream:
                     writer = csv.writer(stream)
-                    writer.writerow(CONTINUOUS_SCALAR_FIELDS + (["pair_id", "field_target_t"] if self.point_pairing else []) + wavelengths)
+                    writer.writerow(CONTINUOUS_SCALAR_FIELDS + (["pair_id", "field_target_t"] if self.point_pairing else []) + spectral_headers)
                     stream.flush(); os.fsync(stream.fileno())
                     turnaround_snapshot = (self._point_leg if self.point_pairing else self._leg)(
                         leg=1, start=self.start_field_t, target=self.stop_field_t,
@@ -1711,7 +1750,7 @@ class MCD2100Worker:
                     turnaround_snapshot = None
                     with batch_path.open("w", newline="", encoding="utf-8") as stream:
                         writer = csv.writer(stream)
-                        writer.writerow(CONTINUOUS_SCALAR_FIELDS + (["pair_id", "field_target_t"] if self.point_pairing else []) + wavelengths)
+                        writer.writerow(CONTINUOUS_SCALAR_FIELDS + (["pair_id", "field_target_t"] if self.point_pairing else []) + spectral_headers)
                         stream.flush(); os.fsync(stream.fileno())
                         for leg, start, target, _direction in legs:
                             self._check_cancelled()

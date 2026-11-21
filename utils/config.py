@@ -63,6 +63,7 @@ _CONFIG_FILE = _default_config_file()
 class LF6Config:
     """Shared spectrometer defaults (legacy name retained for compatibility)."""
     backend: str = "lightfield"         # lightfield | andor_si | andor_ingaas
+    station_id: str = "default"         # Physical station on this PC, independent of sample/recipe.
     winspec_host: str = "192.168.170.128"
     winspec_port: int = 5000
     winspec_acquisition_backend: str = 'winspec'  # winspec | pvcam | winusb_local (same detector)
@@ -108,7 +109,6 @@ class LF6Config:
     andor_ingaas_cooler_on_connect: bool = False
     andor_ingaas_fan_mode: str = "full"
     andor_ingaas_output_port: str = "direct"
-    andor_safe_disconnect_temperature_c: float = 5.0
     andor_shutter_mode: str = "auto"
     andor_shamrock_shutter_mode: str = "unchanged"
     andor_grating: int = 1
@@ -131,6 +131,12 @@ class SMUConfig:
     require_live_read_on_connect: bool = False  # connection verification never depends on READ?
     max_system_errors_drained: int = 8     # :SYST:ERR? drain limit during connect
     rsyn_enabled: Optional[bool] = None    # None=auto (skip MODEL 2400 only), True=force on, False=force off
+    # After an experiment sets a gate/bias, read it back once and abort the
+    # run if the source is not at the requested value or is current-limited.
+    verify_setpoints: bool = True
+    setpoint_tolerance_V: float = 0.005            # floor; 5 mV on the 20 V range
+    setpoint_tolerance_range_fraction: float = 2.5e-4   # of voltage range; 50 mV on 200 V
+    compliance_trip_fraction: float = 0.95         # |I| >= fraction * compliance => clamped
     vbg_resource: str = ""
     vtg_resource: str = ""
     vbias_resource: str = ""
@@ -512,9 +518,16 @@ class AppConfig:
         try:
             with target.open("r", encoding="utf-8") as fh:
                 data = json.load(fh)
-        except (json.JSONDecodeError, OSError):
-            return  # corrupt / unreadable — keep defaults
+        except OSError:
+            return  # unreadable — keep defaults
+        except ValueError:
+            # Corrupt JSON or non-UTF-8 bytes (UnicodeDecodeError). Keep
+            # defaults, but preserve the file: the next save would otherwise
+            # replace the user's settings with defaults for good.
+            _preserve_unreadable_config(target)
+            return
         if not isinstance(data, dict):
+            _preserve_unreadable_config(target)
             return
 
         lf6_data = data.get("lf6", {})
@@ -604,6 +617,16 @@ class AppConfig:
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
+
+def _preserve_unreadable_config(path: Path) -> None:
+    """Copy a config file that could not be parsed next to itself as ``.bad``."""
+    try:
+        import shutil
+
+        shutil.copy2(path, path.with_name(path.name + ".bad"))
+    except OSError:
+        pass
+
 
 def _update_dataclass(obj, mapping: dict) -> None:
     """Overwrite dataclass fields from a dict, ignoring unknown keys."""
