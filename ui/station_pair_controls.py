@@ -1,7 +1,7 @@
 """Shared detector selection and per-device recipes for Station 2100."""
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+    QBoxLayout, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -19,7 +19,7 @@ PAIR_LABELS = {
 class StationPairControls(QWidget):
     backend_changed = Signal(str)
 
-    def __init__(self, parent=None, *, side_by_side=True, compact=False):
+    def __init__(self, parent=None, *, side_by_side=True, compact=False, responsive_recipes=False):
         super().__init__(parent)
         self._station = "default"
         self._controller = None
@@ -29,6 +29,7 @@ class StationPairControls(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._compact = compact
+        self._responsive_recipe_row = None
         selection = QFormLayout()
         self.mode = QComboBox()
         self.mode.setObjectName("StationPairMode")
@@ -64,6 +65,21 @@ class StationPairControls(QWidget):
             self._active_detector.setParent(self)
             selectors.addStretch(1)
             layout.addLayout(selectors)
+        elif responsive_recipes:
+            self._selectors = QHBoxLayout()
+            self._selectors.setSpacing(6)
+            for form in (selection, detector_row):
+                column = QWidget()
+                column.setProperty("quickSectionBoundary", True)
+                column.setLayout(form)
+                form.setContentsMargins(0, 0, 0, 0)
+                self._selectors.addWidget(column, 1)
+            selection.addRow(self._active_detector)
+            self._detector_selector = detector_row.parentWidget()
+            self.mode.setProperty("quickPreferredWidth", 146)
+            self.andor_detector.setProperty("quickPreferredWidth", 146)
+            layout.setSpacing(4)
+            layout.addLayout(self._selectors)
         else:
             selection.addRow(self._active_detector)
             layout.addLayout(selection)
@@ -78,7 +94,28 @@ class StationPairControls(QWidget):
             recipe_row.addWidget(self._pixis, 1)
             recipe_row.addWidget(self._andor, 1)
             details.addLayout(recipe_row)
+            if responsive_recipes:
+                self._responsive_recipe_row = recipe_row
+                recipe_row.setSpacing(self._selectors.spacing())
+                labels = [selection.labelForField(self.mode), detector_row.labelForField(self.andor_detector)]
+                recipe_editor_width = 122
+                for group, editors in ((self._pixis, self._pixis_editors), (self._andor, self._andor_editors)):
+                    labels.extend(group.layout().labelForField(editor) for editor in editors)
+                    for editor in editors:
+                        editor.setProperty("quickPreferredWidth", recipe_editor_width)
+                    group.setProperty("detectorRecipeCard", True)
+                    group.layout().setProperty("quickRowBoundary", True)
+                    group.layout().setContentsMargins(5, 2, 5, 2)
+                    group.layout().setVerticalSpacing(3)
+                label_width = max(label.sizeHint().width() for label in labels) + 4
+                for label in labels:
+                    label.setMinimumWidth(label_width)
+                    label.setProperty("quickPreferredWidth", label_width)
+                # Reserve the label/editor gap and both padded card edges.
+                self._recipe_column_width = label_width + recipe_editor_width + 26
         self._status = QLabel()
+        if responsive_recipes:
+            self._status.hide()
         self._status.setWordWrap(True)
         self._status.setTextFormat(Qt.TextFormat.PlainText)
         details.addWidget(self._status)
@@ -89,6 +126,15 @@ class StationPairControls(QWidget):
         self.hide()
         self.mode.currentIndexChanged.connect(self._selection_changed)
         self.andor_detector.currentIndexChanged.connect(self._selection_changed)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        row = self._responsive_recipe_row
+        if row is not None:
+            fits = self.contentsRect().width() >= 2 * self._recipe_column_width + row.spacing()
+            direction = QBoxLayout.Direction.LeftToRight if fits else QBoxLayout.Direction.TopToBottom
+            row.setDirection(direction)
+            self._selectors.setDirection(direction)
 
     def add_selector_action(self, widget):
         self._selectors.insertWidget(self._selectors.count() - 1, widget)
@@ -187,6 +233,8 @@ class StationPairControls(QWidget):
         self._active_detector.setVisible(not backend and not self._compact)
         if self._compact:
             self._detector_row.setRowVisible(self.andor_detector, bool(backend))
+        elif self._responsive_recipe_row is not None:
+            self._detector_selector.setVisible(bool(backend))
         self.backend_changed.emit(backend)
 
     @staticmethod

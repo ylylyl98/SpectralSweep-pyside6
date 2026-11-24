@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QCheckBox
 
 from tests.quick_helpers import quick_application, drain_qt_deletions
 from tests.test_dual_gate_sequence_model import nested_plan
-from tests.test_quick_parameter_forms import find_item
+from tests.test_quick_parameter_forms import find_item, layout_font
 from ui.presets_panel import PresetsPanel
 from ui.megasweep_panel import MegaSweepPanel
 from ui.quick_table_editor import install_table_editors
@@ -33,6 +33,44 @@ def app(monkeypatch):
     yield application
     application.setProperty("spectralQuick", previous)
     drain_qt_deletions()
+
+
+def test_motion_axes_keep_their_mode_and_value_on_the_same_row(app, layout_font):
+    from ui.power_sweep_panel import PowerSweepPanel
+
+    panel = PowerSweepPanel()
+    configure_workspace_layout(panel, "power_sweep")
+    coverage = install_parameter_forms(panel, "power_sweep")
+    sources = {source: (surface, field) for surface in coverage["forms"]
+               for field, source in surface.adapter._fields.items()}
+    try:
+        for width in (1024, 1400):
+            panel.resize(width, 850)
+            panel.show()
+            QTest.qWait(90)
+            rows = []
+            for axis in ("stage", "rot1", "rot2"):
+                rects = []
+                for source in (panel._axis_mode_combos[axis], panel._axis_value_edits[axis]):
+                    surface, field = sources[source]
+                    editor = find_item(surface.rootObject(), "parameter_" + field.fieldId)
+                    rect = editor.mapRectToScene(editor.boundingRect())
+                    assert 0 <= rect.left() < rect.right() <= surface.width()
+                    rects.append(rect)
+                mode, value = rects
+                assert mode.top() <= value.center().y() <= mode.bottom()
+                assert mode.right() < value.left()
+                rows.append(rects)
+            assert len({mode.x() for mode, _ in rows}) == 1
+            assert len({value.x() for _, value in rows}) == 1
+            assert rows[0][0].bottom() < rows[1][0].top()
+            assert rows[1][0].bottom() < rows[2][0].top()
+    finally:
+        for surface in coverage["forms"]:
+            surface.shutdown()
+        panel.close()
+        panel.deleteLater()
+        drain_qt_deletions()
 
 
 def test_dual_gate_sequence_is_initially_visible_and_source_controls_survive(app):
@@ -424,19 +462,17 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         assert header_field.kind == "disclosure"
         assert details.y() >= tabs.y() + tabs.height()
         assert status.y() >= details.y() + details.height()
-        header_before = header_form.mapTo(panel, QPoint())
         header_button = find_item(header_form.rootObject(), "parameter_" + header_field.fieldId)
         header_position = header_button.mapToScene(header_button.boundingRect().center()).toPoint()
         QTest.mouseClick(header_form, Qt.MouseButton.LeftButton, pos=header_position)
         QTest.qWait(100)
         assert details.toggle.isChecked()
         assert details_scroll.isVisibleTo(panel)
-        assert header_form.mapTo(panel, QPoint()) == header_before
         assert (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint())) == before
-        assert details_scroll.mapTo(details, QPoint()).y() < header_form.mapTo(details, QPoint()).y()
+        assert details_scroll.y() >= header_form.y() + header_form.height()
         for source in (panel._discard_btn, panel._spectrum_btn):
             form, field = fields[source]
-            assert field.visible and form.isVisibleTo(panel)
+            assert field.kind == "button" and field.visible and form.isVisibleTo(panel)
 
         # Long detail text scrolls internally without moving the disclosure,
         # telemetry or command buttons down out of the fixed footer.
@@ -448,14 +484,14 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         assert details_scroll.verticalScrollBar().maximum() > 0
         assert panel.height() == height
         assert tabs.height() >= tabs.minimumSizeHint().height()
+        header_expanded = header_form.mapTo(panel, QPoint())
         details_scroll.verticalScrollBar().setValue(details_scroll.verticalScrollBar().maximum())
         QTest.qWait(30)
-        assert header_form.mapTo(panel, QPoint()) == header_before
+        assert header_form.mapTo(panel, QPoint()) == header_expanded
         assert (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint())) == before
         assert command.y() + command.height() <= pane.height()
 
-        bottom_offsets = (pane.height() - header_form.mapTo(pane, QPoint()).y(),
-                          pane.height() - status.y(), pane.height() - command.y())
+        bottom_offsets = (pane.height() - status.y(), pane.height() - command.y())
         panel.resize(max(896, width - 240), height + 120)
         QTest.qWait(100)
         # Resize and the coalesced height calculation run on the Qt event loop.
@@ -467,10 +503,10 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         assert details_scroll.horizontalScrollBar().maximum() == 0
         panel.resize(width, height)
         QTest.qWait(100)
-        assert (pane.height() - header_form.mapTo(pane, QPoint()).y(),
-                pane.height() - status.y(), pane.height() - command.y()) == bottom_offsets
-        header_before = header_form.mapTo(panel, QPoint())
-        before = (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint()))
+        assert panel.size().toTuple() == (width, height)
+        assert (pane.height() - status.y(), pane.height() - command.y()) == bottom_offsets
+        assert details_scroll.height() > 0
+        assert details_scroll.y() >= header_form.y() + header_form.height()
 
         from ui.quick_reload_state import capture_quick_view_state, restore_quick_view_state
         details_scroll.verticalScrollBar().setValue(details_scroll.verticalScrollBar().maximum())
@@ -495,7 +531,8 @@ def test_dual_gate_live_progress_stays_above_right_pane_actions(app, width, heig
         QTest.mouseClick(header_form, Qt.MouseButton.LeftButton, pos=header_position)
         QTest.qWait(100)
         assert not details.toggle.isChecked() and details_scroll.isHidden()
-        assert header_form.mapTo(panel, QPoint()) == header_before
+        assert panel.size().toTuple() == (width, height)
+        assert header_form.mapTo(pane, QPoint()).y() + header_form.height() <= status.y()
         assert (status.mapTo(panel, QPoint()), command.mapTo(panel, QPoint())) == before
     finally:
         command.shutdown()
@@ -830,6 +867,45 @@ def test_mega_optical_recipe_stays_with_parameters_and_keeps_dynamic_rows(app):
         panel.deleteLater()
 
 
+def test_mega_dual_detector_recipes_reflow_without_clipping(app):
+    panel = MegaSweepPanel()
+    try:
+        configure_workspace_layout(panel, "mega_sweep")
+        install_parameter_forms(panel, "mega_sweep")
+        pair = panel._pair_controls
+        pair.set_station("attodry2100")
+        pair.mode.setCurrentIndex(1)
+        recipes = pair.recipes()
+        panel.resize(2000, 920)
+        panel.show()
+        QTest.qWait(150)
+        panel._optical_group.set_expanded(True)
+        for width, side_by_side in ((1040, True), (440, False), (1040, True)):
+            panel._splitter.setSizes([width, panel.width() - width])
+            QTest.qWait(200)
+            pixis, andor = pair._pixis.geometry(), pair._andor.geometry()
+            mode_column = pair._selectors.itemAt(0).widget()
+            andor_column = pair._detector_selector
+            assert andor_column.isVisibleTo(panel)
+            assert (mode_column.y() == andor_column.y()) == side_by_side
+            assert pixis.width() == andor.width()
+            if side_by_side:
+                assert pixis.top() == andor.top() and pixis.right() < andor.left()
+            else:
+                assert pixis.left() == andor.left() and pixis.bottom() < andor.top()
+            assert panel._optical_scroll.verticalScrollBar().maximum() == 0
+            assert panel._optical_scroll.horizontalScrollBar().maximum() == 0
+            assert pair.recipes() == recipes
+        pair.mode.setCurrentIndex(0)
+        assert not andor_column.isVisibleTo(panel)
+        assert mode_column.isVisibleTo(panel)
+    finally:
+        for form in getattr(panel, "_quick_parameter_forms", {}).get("forms", []):
+            form.shutdown()
+        panel.close()
+        panel.deleteLater()
+
+
 def test_mega_short_viewport_summarizes_optics_and_explicit_edit_survives_resize(app):
     panel = MegaSweepPanel()
     try:
@@ -838,12 +914,16 @@ def test_mega_short_viewport_summarizes_optics_and_explicit_edit_survives_resize
         coverage = install_parameter_forms(panel, "mega_sweep")
         panel.resize(1024, 768)
         panel.show()
-        QTest.qWait(250)
         section = panel._optical_group
         header = next((form, field) for form in coverage["forms"]
                       for field, source in form.adapter._fields.items()
                       if source is section._header)
         form, field = header
+        for _ in range(50):
+            if (not section.is_expanded() and "1/1 active" in field.text
+                    and 0 < panel._optical_scroll.height() < 90):
+                break
+            QTest.qWait(20)
         assert not section.is_expanded()
         assert field.kind == "disclosure"
         assert "1/1 active" in field.text and "nm" in field.text and "ms" in field.text

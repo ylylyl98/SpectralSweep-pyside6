@@ -2824,7 +2824,7 @@ class MegaSweepPanel(QWidget):
         optical_controls = QWidget()
         optical_layout = QVBoxLayout(optical_controls)
         optical_layout.setContentsMargins(0, 0, 0, 0)
-        self._pair_controls = StationPairControls(optical_controls)
+        self._pair_controls = StationPairControls(optical_controls, responsive_recipes=True)
         for spin in self._pair_controls.findChildren(QAbstractSpinBox):
             _set_compact_editor(spin)
             spin.resize(spin.sizeHint())
@@ -3124,7 +3124,11 @@ class MegaSweepPanel(QWidget):
             return
         if hasattr(self, "_optical_scroll"):
             optical_height = self._optical_group.sizeHint().height()
-            self._optical_scroll.setMinimumHeight(min(90, optical_height))
+            # In the Quick settings pane the outer scrolling surface already
+            # owns navigation. Give both detector recipes their full height.
+            nested_pair = (self._pair_controls.andor_backend
+                           and self._settings_content.isAncestorOf(self._optical_scroll))
+            self._optical_scroll.setMinimumHeight(optical_height if nested_pair else min(90, optical_height))
             self._optical_scroll.setMaximumHeight(optical_height)
         self._apply_settings_card_layout()
         self._left_lay.invalidate()
@@ -3172,6 +3176,9 @@ class MegaSweepPanel(QWidget):
             in_optical = (self._optical_widget.isAncestorOf(watched)
                           or self._pair_controls.isAncestorOf(watched))
             scroll = self._optical_scroll if in_optical else self._settings_scroll
+            if (in_optical and self._settings_content.isAncestorOf(scroll)
+                    and scroll.verticalScrollBar().maximum() == 0):
+                scroll = self._settings_scroll
             scrollbar = scroll.verticalScrollBar()
             pixel_delta = int(event.pixelDelta().y())
             if pixel_delta:

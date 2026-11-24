@@ -643,8 +643,8 @@ class MCD2100Panel(QWidget):
         self.rotator.setMinimumWidth(120)
         self.rotator.setMaximumWidth(180)
         self.rotator.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        rotation_form.addRow(mcd_control_fields("McdRotationDevice", (("Rotator", self.rotator),)))
-        rotation_form.addRow(mcd_control_fields("McdRotationAngles", (("Angles (°)", self.angles),)))
+        rotation_form.addRow(mcd_control_fields("McdRotationDevice", (
+            ("Rotator", self.rotator), ("Angles (°)", self.angles))))
 
         field_rotation_row = QHBoxLayout()
         self._field_rotation_row = field_rotation_row
@@ -731,12 +731,11 @@ class MCD2100Panel(QWidget):
         self._compact(self.lf_frames, 80, 100)
         self.lf_center.setSuffix(" nm")
         self.lf_exposure.setSuffix(" ms")
-        lightfield_form.addRow("Center", self.lf_center)
-        lightfield_form.addRow("Exposure", self.lf_exposure)
-        lightfield_form.addRow("Frames / accums", self.lf_frames)
-        compact_form_rows(lightfield_form, (self.lf_center, self.lf_exposure, self.lf_frames), labels_above=True)
-        self._pair_controls = StationPairControls(side_by_side=False)
+        self._single_detector_recipe = mcd_control_fields("McdSingleDetectorRecipe", (
+            ("Center", self.lf_center), ("Exposure", self.lf_exposure), ("Frames / accums", self.lf_frames)))
+        self._pair_controls = StationPairControls(responsive_recipes=True)
         lightfield_form.addRow(self._pair_controls)
+        lightfield_form.addRow(self._single_detector_recipe)
         self._pair_controls.bind_controller(self._lf6)
         self._pair_controls.backend_changed.connect(self._on_detector_mode_changed)
         self.run_state_changed.connect(lambda running: self._pair_controls.set_editing_enabled(not running))
@@ -1130,6 +1129,7 @@ class MCD2100Panel(QWidget):
         return widget
 
     def _on_detector_mode_changed(self, backend):
+        self._single_detector_recipe.setVisible(not backend)
         for field in (self.lf_center, self.lf_exposure, self.lf_frames):
             field.setEnabled(not backend)
 

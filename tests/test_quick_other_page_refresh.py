@@ -62,12 +62,13 @@ def test_spectrum_refresh_loads_acquisition_helper_and_keeps_data_and_controller
     reference["_row_checkbox"].setChecked(False)
     old._reference_list.setCurrentRow(0)
     source_override(monkeypatch, tmp_path, "ui.quick_acquisition_sections",
-                    lambda text: text.replace('"Spectrum display"', '"Updated spectrum display"'))
+                    lambda text: text.replace('panel._device_status_row.setSpacing(12)',
+                                              'panel._device_status_row.setSpacing(19)'))
 
     new = page_reload.reload_page(window, "spectrum")
     QTest.qWait(80)
     assert new is not old and new._ctrl is controller is window._lf6
-    assert new._quick_acquisition_sections["display"].title() == "Updated spectrum display"
+    assert new._device_status_row.spacing() == 19
     assert (new._exposure.value(), new._center.value(), new._accumulations.value()) == (345, 765, 7)
     np.testing.assert_array_equal(new._spectrum_data[0], x)
     np.testing.assert_array_equal(new._spectrum_data[1], y)
@@ -135,7 +136,7 @@ def test_failed_other_page_layout_keeps_previous_quick_interface(
     assert all(not form.adapter._closed for form in entry[2]["forms"])
     command = quick._commands.get(page_id)
     modules = {name: sys.modules.get(name) for name in QUICK_PAGE_MODULES[page_id]}
-    helper, target = (("ui.quick_acquisition_sections", '    view, view_group_layout = _section(')
+    helper, target = (("ui.quick_acquisition_sections", '    view = _boundary(panel._single_display_options)')
                       if page_id == "spectrum" else
                       ("ui.quick_settings_layout", '    acquisition, form = _group('))
     source_override(monkeypatch, tmp_path, helper, lambda text: text.replace(

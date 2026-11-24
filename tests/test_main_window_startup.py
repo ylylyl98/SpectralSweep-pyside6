@@ -54,10 +54,12 @@ from unittest.mock import patch
 faulthandler.enable(all_threads=True)
 faulthandler.dump_traceback_later(20, repeat=False)
 sys.path.insert(0, str(Path.cwd()))
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtCore import QProcess, QTimer, Qt
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 """ + _QSETTINGS + r"""
-failures, windows, watchdog_events = [], [], []
+failures, windows, watchdog_events, restart_events = [], [], [], []
+restart = os.environ['STARTUP_ACTION'] == 'restart'
 
 def report_error(kind, value, tb):
     failures.append(str(value))
@@ -131,8 +133,32 @@ import app.ntfy_notifications as notifications
 import app.process_watchdog as watchdog
 notifications.NtfyNotifier = QuietNotifier
 watchdog.WatchdogSession = QuietWatchdog
-for name in ('critical', 'warning', 'question'):
-    handle = patch.object(QMessageBox, name, forbidden)
+
+def confirm_restart(parent, title, text, buttons, default):
+    assert restart and parent is windows[0]._source_dialog and parent.isVisible()
+    assert title == 'Restart SpectralSweep?' and 'Instrument connections will close' in text
+    assert buttons == QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+    assert default == QMessageBox.StandardButton.Cancel
+    restart_events.append('confirmed')
+    return QMessageBox.StandardButton.Yes
+
+def start_detached(program, arguments, working_directory):
+    assert restart and restart_events == ['confirmed'], restart_events
+    assert program == sys.executable
+    assert arguments == [str(Path.cwd() / 'tools' / 'launch_app.py'), '--ui', 'quick']
+    assert working_directory == str(Path.cwd())
+    assert len(windows) == 1 and not windows[0].isVisible()
+    assert windows[0]._source_dialog is None
+    assert not windows[0]._session_poll_timer.isActive()
+    assert watchdog_events == ['start', 'normal', 'cleanup'], watchdog_events
+    restart_events.append('launched')
+    return True, 12345
+
+for owner, name, replacement in (
+    (QMessageBox, 'critical', forbidden), (QMessageBox, 'warning', forbidden),
+    (QMessageBox, 'question', confirm_restart), (QProcess, 'startDetached', start_detached),
+):
+    handle = patch.object(owner, name, replacement)
     handle.start()
     patches.append(handle)
 
@@ -148,13 +174,27 @@ def construct(*args, **kwargs):
     assert type(window._lf6).__name__ == 'LF6Controller'
     assert window._lf6.sensor_readout_intents == {}
     assert not window._lf6.sensor_preflight_pending
-    def close_normally():
+    def finish_session():
         assert window.isVisible()
         assert window.isMaximized()
         assert window._quick_workbench is not None
         print('REAL_MAINWINDOW_VISIBLE_MAXIMIZED', flush=True)
-        assert window.close(), 'Real MainWindow rejected normal shutdown'
-    QTimer.singleShot(400, window, close_normally)
+        if restart:
+            pending = [{'path': 'ui/qml/ParameterForm.qml', 'pages': [],
+                        'restart': True, 'styles': False}]
+            with patch.object(window._source_changes, 'pending', return_value=pending):
+                window._show_source_changes()
+                dialog = window._source_dialog
+                QTest.qWait(60)
+                assert dialog.isVisible() and not dialog.property('quickDialogMigrated')
+                restart_button = next(button for button in dialog.findChildren(QPushButton)
+                                      if button.text() == 'Restart application…')
+                assert restart_button.isVisible() and restart_button.isEnabled()
+                QTest.mouseClick(restart_button, Qt.MouseButton.LeftButton)
+            assert not window.isVisible(), 'Real MainWindow rejected restart shutdown'
+        else:
+            assert window.close(), 'Real MainWindow rejected normal shutdown'
+    QTimer.singleShot(400, window, finish_session)
     return window
 
 window_module.MainWindow = construct
@@ -167,6 +207,9 @@ except SystemExit as result:
     assert not failures, failures
     assert len(windows) == 1 and not windows[0].isVisible()
     assert watchdog_events == ['start', 'normal', 'cleanup'], watchdog_events
+    assert restart_events == (['confirmed', 'launched'] if restart else []), restart_events
+    if restart:
+        print('REAL_MAIN_ENTRY_RESTART_REQUESTED', flush=True)
     print('REAL_MAIN_ENTRY_CLOSED_NORMALLY', flush=True)
     faulthandler.cancel_dump_traceback_later()
 else:
@@ -174,8 +217,12 @@ else:
 """
 
 
-@pytest.mark.parametrize("saved_maximized", [False, True], ids=["first-quick-maximize", "saved-maximized"])
-def test_real_main_entry_shows_and_closes_maximized_window(tmp_path, saved_maximized):
+@pytest.mark.parametrize("saved_maximized,restart", [
+    pytest.param(False, False, id="first-quick-maximize"),
+    pytest.param(True, False, id="saved-maximized"),
+    pytest.param(False, True, id="confirmed-restart"),
+])
+def test_real_main_entry_shows_and_closes_maximized_window(tmp_path, saved_maximized, restart):
     config = tmp_path / "config.json"
     config.write_text("{}", encoding="utf-8")  # Prevent fallback to repository/user configuration.
     environment = dict(os.environ)
@@ -184,6 +231,7 @@ def test_real_main_entry_shows_and_closes_maximized_window(tmp_path, saved_maxim
         "SPECTRALSWEEP_CONFIG_PATH": str(config),
         "SPECTRALSWEEP_HISTORY_PATH": str(tmp_path / "history.sqlite3"),
         "STARTUP_QSETTINGS_PATH": str(tmp_path / "qsettings"),
+        "STARTUP_ACTION": "restart" if restart else "close",
         "PROGRAMDATA": str(tmp_path / "programdata"),
     })
     environment.pop("QSG_RHI_BACKEND", None)
@@ -200,4 +248,5 @@ def test_real_main_entry_shows_and_closes_maximized_window(tmp_path, saved_maxim
     assert result.returncode == 0, f"Main entry exited {result.returncode}:\n{output}"
     assert "REAL_MAINWINDOW_VISIBLE_MAXIMIZED" in output
     assert "REAL_MAIN_ENTRY_CLOSED_NORMALLY" in output
+    assert ("REAL_MAIN_ENTRY_RESTART_REQUESTED" in output) is restart
     assert "QSETTINGS_ISOLATED" in output and tmp_path.as_posix() in output

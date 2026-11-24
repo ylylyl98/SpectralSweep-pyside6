@@ -18,6 +18,21 @@ AppPane {
                 required property var modelData
                 width: contentColumn.width
                 spacing: 6
+                FontMetrics { id: captionMetrics; font.family: Theme.fontFamily; font.pixelSize: Theme.bodySize }
+                // Short captions share a column when their fields wrap onto the next line.
+                readonly property real captionWidth: {
+                    let largest = 45
+                    for (const group of modelData.groups) {
+                        const fields = group.fields
+                        if (fields.length !== 2 || fields[0].kind !== "label" || fields[1].labelAbove ||
+                            !["number", "choice", "text"].includes(fields[1].kind))
+                            continue
+                        const natural = Math.ceil(captionMetrics.advanceWidth(fields[0].text)) + 4
+                        if (natural <= 100)
+                            largest = Math.max(largest, natural)
+                    }
+                    return largest
+                }
                 visible: modelData.groups.some(group => group.fields.some(field => field.visible && (field.kind !== "heading" || field.text.trim().length > 0)))
                 Repeater {
                     model: contentFlow.modelData.groups
@@ -29,16 +44,40 @@ AppPane {
                         readonly property var editorField: fields[fields.length - 1]
                         readonly property bool longNote: editorField.kind === "label" && (editorField.text.length > 90 || editorField.text.indexOf("\n") >= 0)
                         readonly property bool fullRow: !paired && (longNote || ["heading", "groupcheck", "log", "progress"].indexOf(editorField.kind) >= 0 || (editorField.kind === "disclosure" && !editorField.compactDisclosure))
-                        readonly property real labelWidth: paired ? Math.min(180, Math.max(45, Math.ceil(labelMetrics.advanceWidth(fields[0].text)) + 4)) : 0
+                        readonly property real labelWidth: paired ? Math.min(180, Math.max(editorField.labelAbove ? 45 : contentFlow.captionWidth,
+                            fields[0].preferredWidth, Math.ceil(labelMetrics.advanceWidth(fields[0].text)) + 4)) : 0
                         // A width hint covers the entire numeric control. Reserve
                         // the editable value first, then add units and steppers.
                         // Size from the range, never the draft, to avoid moving
                         // nearby actions while the user types.
-                        readonly property real numericInputWidth: editorField.kind !== "number" ? 0 : Math.max(80, Math.min(140, Math.ceil(Math.max(
+                        readonly property real numericInputWidth: editorField.kind !== "number" ? 0 : Math.max(editorField.decimals ? 80 : 52, Math.min(140, Math.ceil(Math.max(
+                            groupMetrics.advanceWidth(editorField.specialText),
                             groupMetrics.advanceWidth(editorField.minimum.toFixed(Math.min(20, editorField.decimals))),
                             groupMetrics.advanceWidth(editorField.maximum.toFixed(Math.min(20, editorField.decimals))))) + 20))
                         readonly property real numericEditorWidth: numericInputWidth + Math.ceil(groupMetrics.advanceWidth(editorField.prefix + editorField.suffix)) + 30
-                        readonly property real editorWidth: editorField.kind === "number" ? Math.max(editorField.preferredWidth || 156, numericEditorWidth) : editorField.preferredWidth > 0 ? editorField.preferredWidth : editorField.kind === "divider" ? 1 : editorField.kind === "label" ? Math.max(1, Math.ceil(labelMetrics.advanceWidth(editorField.text)) + 4) : editorField.kind === "text" ? 208 : editorField.kind === "choice" ? 188 : editorField.kind === "disclosure" ? Math.ceil(disclosureMetrics.advanceWidth(editorField.text)) + 36 : Math.max(64, Math.min(300, Math.ceil(groupMetrics.advanceWidth(editorField.text)) + (editorField.kind === "check" ? 36 : editorField.kind === "menu" ? 48 : 32)))
+                        readonly property real editorWidth: {
+                            if (editorField.kind === "number")
+                                return Math.max(editorField.preferredWidth, numericEditorWidth)
+                            if (editorField.preferredWidth > 0)
+                                return editorField.preferredWidth
+                            switch (editorField.kind) {
+                            case "choice": {
+                                if (editorField.editable) return 188
+                                let width = 92
+                                for (const option of editorField.options) {
+                                    width = Math.max(width, Math.ceil(groupMetrics.advanceWidth(option)) + 40)
+                                    if (width >= 188) return 188
+                                }
+                                return width
+                            }
+                            case "text": return 208
+                            case "divider": return 1
+                            case "label": return Math.max(1, Math.ceil(labelMetrics.advanceWidth(editorField.text)) + 4)
+                            case "disclosure": return Math.ceil(disclosureMetrics.advanceWidth(editorField.text)) + 36
+                            default: return Math.max(64, Math.min(300, Math.ceil(groupMetrics.advanceWidth(editorField.text)) +
+                                (editorField.kind === "check" ? 36 : editorField.kind === "menu" ? 48 : 32)))
+                            }
+                        }
                         readonly property real minimumEditorWidth: editorField.kind === "number" ? numericEditorWidth : Math.min(editorWidth, 140)
                         readonly property bool stacked: paired && (editorField.labelAbove || width < labelWidth + 6 + minimumEditorWidth)
                         readonly property real allocatedLabelWidth: stacked ? width : labelWidth

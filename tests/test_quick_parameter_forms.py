@@ -1,11 +1,12 @@
 """Real Quick scalar editors against isolated state-only source controls."""
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt, QPoint
-from PySide6.QtGui import QIntValidator
+from PySide6.QtGui import QFontDatabase, QIntValidator
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
                                QGroupBox, QLineEdit, QPushButton, QSpinBox,
@@ -642,7 +643,8 @@ def test_label_ceil_allowance_keeps_exposure_colon_and_stacks_when_narrow():
     quick_application()
     panel = QWidget()
     form = QFormLayout(panel)
-    panel.exposure = QSpinBox()
+    panel.exposure = QDoubleSpinBox()
+    panel.exposure.setDecimals(2)
     form.addRow("Exposure:", panel.exposure)
     coverage = install_parameter_forms(panel, "settings")
     surface = coverage["forms"][0]
@@ -662,6 +664,89 @@ def test_label_ceil_allowance_keeps_exposure_colon_and_stacks_when_narrow():
         assert editor.mapToScene(editor.boundingRect().topLeft()).y() >= label.mapToScene(label.boundingRect().bottomRight()).y()
         assert editor.width() > 70
         assert editor.mapToScene(editor.boundingRect().bottomRight()).x() <= surface.width() + 1
+    finally:
+        surface.shutdown()
+        panel.close()
+        panel.deleteLater()
+        drain_qt_deletions()
+
+
+@pytest.fixture
+def layout_font():
+    quick_application()
+    font = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "segoeui.ttf"
+    if font.is_file() and "Segoe UI" not in QFontDatabase.families():
+        QFontDatabase.addApplicationFont(str(font))
+
+
+def test_numeric_and_choice_editors_reserve_space_for_their_values(layout_font):
+    panel = QWidget()
+    form = QFormLayout(panel)
+    panel.count = QSpinBox()
+    panel.precise = QDoubleSpinBox()
+    panel.precise.setRange(-9999.999, 9999.999)
+    panel.precise.setDecimals(3)
+    panel.precise.setValue(panel.precise.minimum())
+    panel.precise.setSuffix(" stage units")
+    panel.automatic = QSpinBox()
+    panel.automatic.setSpecialValueText("N/A (zero order)")
+    panel.short_choice = QComboBox()
+    panel.short_choice.addItems(["One", "Two"])
+    panel.long_choice = QComboBox()
+    panel.long_choice.addItems(["One", "Manual wavelength"])
+    for label, source in (("Count", panel.count), ("Precise", panel.precise),
+                          ("Automatic", panel.automatic), ("Short", panel.short_choice),
+                          ("Long", panel.long_choice)):
+        form.addRow(label, source)
+    coverage = install_parameter_forms(panel, "settings")
+    surface = coverage["forms"][0]
+    try:
+        panel.resize(640, 400)
+        panel.show()
+        QTest.qWait(50)
+        editors = {key: find_item(surface.rootObject(), "parameter_" + key) for key in
+                   ("count", "precise", "automatic", "short_choice", "long_choice")}
+        count, precise, automatic, short_choice, long_choice = editors.values()
+        assert 0 < count.width() < 80 <= precise.width()
+        for editor in (precise, automatic):
+            available = editor.width() - editor.property("leftPadding") - editor.property("rightPadding")
+            assert editor.property("contentWidth") <= available + 1
+        assert automatic.width() > count.width()
+        assert automatic.property("text") == "N/A (zero order)"
+        assert 0 < short_choice.width() < long_choice.width() <= 188
+        long_width = long_choice.width()
+        panel.long_choice.setCurrentIndex(1)
+        surface.adapter.refresh()
+        QTest.qWait(30)
+        assert long_choice.width() == long_width
+    finally:
+        surface.shutdown()
+        panel.close()
+        panel.deleteLater()
+        drain_qt_deletions()
+
+
+def test_short_captions_align_inputs_when_a_form_wraps(layout_font):
+    panel = QWidget()
+    form = QFormLayout(panel)
+    panel.count = QSpinBox()
+    panel.frames = QSpinBox()
+    form.addRow("N", panel.count)
+    form.addRow("Accumulations", panel.frames)
+    coverage = install_parameter_forms(panel, "settings")
+    surface = coverage["forms"][0]
+    try:
+        panel.resize(244, 300)
+        panel.show()
+        QTest.qWait(50)
+        count = find_item(surface.rootObject(), "parameter_count")
+        frames = find_item(surface.rootObject(), "parameter_frames")
+        count_rect, frames_rect = (
+            editor.mapRectToScene(editor.boundingRect()) for editor in (count, frames))
+        assert count_rect.right() <= surface.width()
+        assert frames_rect.right() <= surface.width()
+        assert count_rect.bottom() < frames_rect.top()
+        assert count_rect.x() == frames_rect.x()
     finally:
         surface.shutdown()
         panel.close()

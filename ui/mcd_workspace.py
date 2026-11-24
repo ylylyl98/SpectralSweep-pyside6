@@ -1,6 +1,6 @@
 """Stable presentation boundaries shared by the two MCD workspaces."""
 from PySide6.QtWidgets import (
-    QBoxLayout, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+    QAbstractSpinBox, QBoxLayout, QFormLayout, QGridLayout, QHBoxLayout, QLabel, QPushButton,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -88,35 +88,47 @@ def populate_mcd_gate_entry(group, mode, label_a, input_a, label_b, input_b,
 
 
 def add_mcd_field_settings(form, start, stop, mode, step, tolerance, hold):
-    """Identical acquisition controls and row boundaries on both magnet pages."""
+    """Both magnet pages show point-specific fields when that mode is selected."""
     form.addRow(mcd_control_fields("McdAcquisitionMode", (("Acquisition", mode),)))
     form.addRow(mcd_control_fields("McdFieldEndpoints", (("Start field (T)", start), ("Stop field (T)", stop))))
-    form.addRow(mcd_control_fields("McdPointSettings", (("Point step", step), ("Point tolerance", tolerance))))
-    form.addRow(mcd_control_fields("McdStableDuration", (("Stable for", hold),)))
+    point_settings = mcd_control_fields("McdPointSettings", (("Point step", step), ("Point tolerance", tolerance)))
+    stable_duration = mcd_control_fields("McdStableDuration", (("Stable for", hold),))
+    form.addRow(point_settings)
+    form.addRow(stable_duration)
+
+    def show_point_settings():
+        point_pairing = mode.currentData() == "point_pairing"
+        point_settings.setVisible(point_pairing)
+        stable_duration.setVisible(point_pairing)
+
+    mode.currentIndexChanged.connect(show_point_settings)
+    show_point_settings()
 
 
 def _gate_pair(name, fields):
-    """Two equal columns retain their labels in native and Quick forms."""
+    """Equal columns retain their labels in native and Quick forms."""
     row = QWidget()
     row.setObjectName(name)
     row.setProperty("quickSectionBoundary", True)
     grid = QGridLayout(row)
     grid.setContentsMargins(0, 0, 0, 0)
-    grid.setHorizontalSpacing(12)
+    grid.setHorizontalSpacing(10)
     for column, (caption, editor) in enumerate(fields):
         owner = QWidget(row)
         owner.setProperty("quickSectionBoundary", True)
         form = QFormLayout(owner)
         form.setContentsMargins(0, 0, 0, 0)
-        form.setVerticalSpacing(4)
+        form.setVerticalSpacing(2)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        editor.setMinimumWidth(140)
-        editor.setMaximumWidth(240)
+        editor.setMinimumWidth(112)
+        width = 140 if isinstance(editor, QAbstractSpinBox) else 184
+        editor.setMaximumWidth(width)
         editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         editor.setAccessibleName(caption)
         editor.setProperty("quickLabelAbove", True)
-        editor.setProperty("quickPreferredWidth", 240)
+        editor.setProperty("quickPreferredWidth", width)
+        editor.setProperty("mcdColumnEditor", True)
         form.addRow(caption, editor)
         grid.addWidget(owner, 0, column)
         grid.setColumnStretch(column, 1)
@@ -183,7 +195,7 @@ def configure_mcd_workspace(panel, groups, rows, preferred_width):
         row.setDirection(QBoxLayout.Direction.TopToBottom)
         for index in range(row.count()):
             row.setStretch(index, 0)
-        row.setSpacing(12)
+        row.setSpacing(6)
     panel._mcd_settings_groups = groups
     panel._mcd_pane_width = WorkspacePaneWidth(panel, panel._splitter, preferred_width)
 

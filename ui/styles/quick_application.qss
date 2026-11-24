@@ -15,9 +15,30 @@ QWidget[quickWorkspaceSurface="true"] QScrollArea > QWidget#qt_scrollarea_viewpo
 QWidget[quickSidebar="true"] { background: palette(alternate-base); border: none; border-right: 1px solid palette(midlight); }
 QGroupBox { border: none; margin-top: 20px; padding: 6px 0px 0px 0px; background: transparent; }
 QGroupBox::title { subcontrol-origin: margin; left: 0px; top: 2px; color: palette(window-text); font-weight: 600; }
-/* MCD keeps each workflow section on its own band as panes are resized. */
-QGroupBox[mcdSection="true"] { border-top: 1px solid palette(midlight); border-radius: 0px; margin-top: 22px; padding-top: 8px; }
-QGroupBox[mcdSection="true"][title=""] { border: none; margin-top: 0px; padding-top: 0px; }
+/* Keep each 2D Sweep section identifiable inside the settings pane. */
+QWidget#MegaSweepSettings QGroupBox[compactCard="true"] {
+    border-top: 1px solid palette(mid); margin-top: 7px; padding: 18px 0px 2px; font-weight: 600;
+}
+QWidget#MegaSweepSettings QGroupBox[compactCard="true"]::title {
+    subcontrol-origin: padding; subcontrol-position: top left; top: 3px; left: 0px;
+}
+QGroupBox[detectorRecipeCard="true"] {
+    background: palette(base); border: 1px solid palette(mid);
+    border-radius: 6px; margin: 0px; padding: 19px 3px 2px; font-weight: 600;
+}
+QGroupBox[detectorRecipeCard="true"]::title {
+    subcontrol-origin: padding; subcontrol-position: top left; left: 8px; top: 2px;
+}
+/* MCD settings keep a common inset across editable and collapsible sections. */
+QGroupBox[mcdWorkspaceBody="true"] { border: none; margin: 0px; padding: 0px; }
+QGroupBox[mcdSection="true"], QWidget[mcdDisclosure="true"] {
+    background: palette(base); border: 1px solid palette(mid); border-radius: 6px;
+}
+QGroupBox[mcdSection="true"] { margin: 0px; padding: 20px 0px 0px; }
+QGroupBox[mcdSection="true"]::title {
+    subcontrol-origin: padding; subcontrol-position: top left; left: 9px; top: 4px;
+}
+QGroupBox[mcdSection="true"][title=""] { border: none; margin: 0px; padding: 0px; }
 /* The calculator already has its own disclosure heading. */
 QGroupBox#SweepLineCalculator { margin: 0px; padding: 0px; border: none; }
 /* Filename preview already has a disclosure heading; its body has no title. */

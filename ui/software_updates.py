@@ -184,6 +184,9 @@ class SoftwareUpdateController(QObject):
                     return True
         return False
 
+    def restart_blocked(self):
+        return self._busy() or self.downloader.busy or self._installing
+
     def start_automatic(self):
         if not self._closed and self.service.current.can_check:
             self._startup.start()

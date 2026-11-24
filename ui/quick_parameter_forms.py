@@ -924,23 +924,33 @@ def _rows(layout, identifiers, prefix):
 
     if isinstance(layout, QFormLayout):
         for row in range(layout.rowCount()):
+            label = layout.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            field = layout.itemAt(row, QFormLayout.ItemRole.FieldRole)
+            nested_grid = field.layout() if field else None
+            if isinstance(nested_grid, QGridLayout) and nested_grid.property("quickRowBoundary"):
+                # Keep each logical grid row together in its own Quick flow.
+                if label:
+                    rows.extend(ParameterSourceRow(entry, bounded=True) for entry in item_rows(label))
+                rows.extend(item_rows(field))
+                continue
             entries = []
             # A spanning item is also returned for FieldRole by Qt. Querying
             # both roles duplicates the editor and its signal connections.
-            for role in (QFormLayout.ItemRole.LabelRole, QFormLayout.ItemRole.FieldRole):
-                item = layout.itemAt(row, role)
+            for item in (label, field):
                 if item:
                     entries.extend(item_rows(item))
             if entries:
                 fields = [field for entry in entries for field in entry]
-                rows.append(ParameterSourceRow(fields, bounded=len(fields) > 2))
+                rows.append(ParameterSourceRow(fields, bounded=len(fields) > 2 or bool(layout.property("quickRowBoundary"))))
     elif isinstance(layout, QGridLayout):
         grouped = {}
         for i in range(layout.count()):
             row, col, _, _ = layout.getItemPosition(i)
             grouped.setdefault(row, []).append((col, item_rows(layout.itemAt(i))))
         for row in sorted(grouped):
-            rows.append([field for _, entries in sorted(grouped[row], key=lambda e: e[0]) for entry in entries for field in entry])
+            columns = sorted(grouped[row], key=lambda entry: entry[0])
+            fields = [field for _, entries in columns for entry in entries for field in entry]
+            rows.append(ParameterSourceRow(fields, bounded=bool(layout.property("quickRowBoundary"))))
     elif isinstance(layout, QBoxLayout) and layout.direction() in (QBoxLayout.Direction.LeftToRight, QBoxLayout.Direction.RightToLeft):
         rows.append(ParameterSourceRow(
             [field for i in range(layout.count()) for row in item_rows(layout.itemAt(i)) for field in row],

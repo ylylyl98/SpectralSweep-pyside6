@@ -85,9 +85,10 @@ AppPane {
                     leftPadding: 0
                     rightPadding: 0
                     contentItem: Canvas {
+                        id: sampleDropdownArrow
                         implicitWidth: 10; implicitHeight: 6
                         onPaint: { const ctx = getContext("2d"); ctx.reset(); ctx.strokeStyle = Theme.textSecondary; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(width/2-4,height/2-2); ctx.lineTo(width/2,height/2+2); ctx.lineTo(width/2+4,height/2-2); ctx.stroke() }
-                        Connections { target: Theme; function onDarkChanged() { parent.requestPaint() } }
+                        Connections { target: Theme; function onDarkChanged() { sampleDropdownArrow.requestPaint() } }
                     }
                     enabled: !!root.bridge && !!root.bridge.sampleEditable
                     tooltipText: "Search and select a saved sample"

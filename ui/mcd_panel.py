@@ -21,7 +21,7 @@ import numpy as np
 import pyqtgraph as pg
 from ui.plot_factory import create_plot, create_image_view
 from PySide6.QtCore import QEvent, QObject, QThread, Qt, Signal, Slot
-from ui.workflow_sections import CompactRow, bind_log_toggle, disclosure_toggle, compact_form_rows, inline_divider
+from ui.workflow_sections import CompactRow, bind_log_toggle, disclosure_toggle, inline_divider
 from ui.mcd_workspace import (add_mcd_gate_settings, configure_mcd_workspace, mcd_settings_pane,
                               mcd_control_actions, mcd_control_fields, mcd_readouts, add_mcd_field_settings,
                               populate_mcd_gate_entry)
@@ -1795,10 +1795,10 @@ class MCDPanel(QWidget):
         self._rotation_settle.setToolTip(
             "Wait after the rotator reaches an angle before acquiring."
         )
-        rotation_form.addRow(mcd_control_fields("McdRotationMotor", (("Rotator", self._rotator),)))
+        rotation_form.addRow(mcd_control_fields("McdRotationMotor", (
+            ("Rotator", self._rotator), ("Rotation settle", self._rotation_settle))))
         rotation_form.addRow(mcd_control_fields("McdRotationAngles", (
             ("Angle A", self._angle_a), ("Angle B", self._angle_b))))
-        rotation_form.addRow(mcd_control_fields("McdRotationSettle", (("Rotation settle", self._rotation_settle),)))
 
         lightfield_group = QGroupBox("LightField")
         lightfield_group.setToolTip(
@@ -1823,12 +1823,11 @@ class MCDPanel(QWidget):
         self._compact(self._center, 100, 140)
         self._compact(self._exposure, 100, 140)
         self._compact(self._frames, 80, 100)
-        lightfield_form.addRow("Center", self._center)
-        lightfield_form.addRow("Exposure", self._exposure)
-        lightfield_form.addRow("Frames / accums", self._frames)
-        compact_form_rows(lightfield_form, (self._center, self._exposure, self._frames), labels_above=True)
-        self._pair_controls = StationPairControls(side_by_side=False)
+        self._single_detector_recipe = mcd_control_fields("McdSingleDetectorRecipe", (
+            ("Center", self._center), ("Exposure", self._exposure), ("Frames / accums", self._frames)))
+        self._pair_controls = StationPairControls(responsive_recipes=True)
         lightfield_form.addRow(self._pair_controls)
+        lightfield_form.addRow(self._single_detector_recipe)
         self._pair_controls.bind_controller(self._lf6)
         self._pair_controls.backend_changed.connect(self._on_detector_mode_changed)
         self.run_state_changed.connect(lambda running: self._pair_controls.set_editing_enabled(not running))
@@ -2082,8 +2081,8 @@ class MCDPanel(QWidget):
             "Legacy filename coefficient; no longer applied."
         )
         sample_form.addRow(mcd_control_fields("McdSampleIdentity", (
-            ("Sample ID", self._sample_id), ("Point / Location", self._point))))
-        sample_form.addRow(mcd_control_fields("McdTemperatureMetadata", (("Temperature · metadata", self._temperature),)))
+            ("Sample ID", self._sample_id), ("Point / Location", self._point),
+            ("Temperature · metadata", self._temperature))))
 
         self._metadata_toggle = QToolButton()
         self._metadata_toggle.setCheckable(True)
@@ -3197,6 +3196,7 @@ class MCDPanel(QWidget):
             self._path_preview.setText("—")
 
     def _on_detector_mode_changed(self, backend):
+        self._single_detector_recipe.setVisible(not backend)
         for widget in (self._center, self._exposure, self._frames):
             widget.setEnabled(not backend)
 

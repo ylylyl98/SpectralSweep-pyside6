@@ -66,7 +66,7 @@ def _workspace_surface(widget):
 
 
 class _RunDetailsHeight(QObject):
-    """Bound upward-opening details while retaining room for live run controls."""
+    """Bound run details while retaining room for live run controls."""
 
     def __init__(self, pane, preview, section, scroll, content):
         super().__init__(section)
@@ -112,8 +112,10 @@ class _RunDetailsHeight(QObject):
         width = max(1, self.scroll.viewport().width())
         wanted = body.totalHeightForWidth(width) if body.hasHeightForWidth() else body.sizeHint().height()
         height = min(max(0, wanted), budget)
-        if self.scroll.minimumHeight() != height or self.scroll.maximumHeight() != height:
-            self.scroll.setFixedHeight(height)
+        # A stale minimum would prevent the window from shrinking until the
+        # resize reaches this coalesced calculation.
+        if self.scroll.maximumHeight() != height:
+            self.scroll.setMaximumHeight(height)
 
 
 class _PreviewLayoutRefit(QObject):
@@ -327,6 +329,15 @@ def _fold_groups(panel, specifications):
 
 
 def _mcd_layout(panel, page_id):
+    groups = panel._mcd_settings_groups
+    workflow = groups["Sample"].parentWidget()
+    workflow.setProperty("mcdWorkspaceBody", True)
+    _clear_group_title(workflow)
+    workflow.layout().setContentsMargins(0, 0, 0, 0)
+    workflow.layout().setSpacing(6)
+    for group in groups.values():
+        group.layout().setContentsMargins(8, 3, 8, 5)
+
     # Routine identity/range values do not need path-sized text fields. These
     # are presentation hints consumed by the scalar adapter, never input limits.
     for name, width in {"_sample_id": 160, "_point": 140, "_temperature": 140,
@@ -341,7 +352,7 @@ def _mcd_layout(panel, page_id):
                         "rotator": 120, "lf_center": 120, "lf_exposure": 120,
                         "lf_frames": 100}.items():
         widget = getattr(panel, name, None)
-        if isinstance(widget, QWidget):
+        if isinstance(widget, QWidget) and not widget.property("mcdColumnEditor"):
             widget.setProperty("quickPreferredWidth", width)
     # Paired sweep/rotation sections have room for two compact fields per row
     # when their labels sit above the controls instead of consuming a column.
@@ -390,6 +401,13 @@ def _mcd_layout(panel, page_id):
     for section in result.values():
         if section is not None:
             section.setProperty("quickSectionBoundary", True)
+    for key in ("APS100 — attoDRY1000", "attoDRY2100 connection and telemetry",
+                "Temperature", "Filename"):
+        section = result.get(key)
+        if section is not None:
+            section.setProperty("mcdDisclosure", True)
+            section.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            section.layout().setContentsMargins(8, 2, 8, 2)
     scroll = getattr(panel, "_settings_scroll", getattr(panel, "_scroll", None))
     if scroll is not None:
         _compact_sections(scroll.widget())
@@ -433,6 +451,10 @@ def _motion_layout(panel):
         item = form.itemAt(row, QFormLayout.ItemRole.FieldRole)
         if item and isinstance(item.layout(), QGridLayout):
             grid = item.layout()
+            grid.setProperty("quickRowBoundary", True)
+            caption = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+            if caption and caption.widget():
+                caption.widget().hide()
             for column in range(3):
                 heading = grid.itemAtPosition(0, column)
                 if heading and isinstance(heading.widget(), QLabel) and heading.widget().text() in {"Axis", "Mode", "Values"}:
@@ -580,8 +602,8 @@ def _dual_gate_layout(panel):
     panel._log_text.setProperty("quickSectionBoundary", True)
 
     # QuickWorkbench mounts compact Apply/Run/Stop below the right scroll area.
-    # Keep optional run tools beside those actions, with their own bounded
-    # upward-opening body so progress and Stop remain visible on laptops.
+    # Keep optional run tools above those actions, in a bounded body below
+    # its header so progress and Stop remain visible on laptops.
     results_layout = panel._results_pane.layout()
     footer = results_layout.itemAt(1).widget()
     results_layout.removeWidget(footer)
@@ -609,8 +631,6 @@ def _dual_gate_layout(panel):
     details_scroll.setWidget(footer)
     run_details = DisclosureSection("Run details", details_scroll, expanded=False)
     run_details.setObjectName("QuickDualGateRunDetailsDisclosure")
-    run_details.layout().removeWidget(details_scroll)
-    run_details.layout().insertWidget(0, details_scroll)
     results_layout.addWidget(run_details)
     results_layout.addWidget(run_status)
     panel._quick_run_details_height = _RunDetailsHeight(

@@ -5367,17 +5367,12 @@ class PresetsPanel(QWidget):
             "Voltages are ramped back to zero before the run exits."
         )
         self._stop_btn.setEnabled(False)
-        self._spectrum_btn = QToolButton()
-        self._spectrum_btn.setText("Show Spectrum")
-        self._spectrum_btn.setCheckable(True)
-        self._spectrum_btn.setProperty("quickDisclosure", True)
-        self._spectrum_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self._spectrum_btn.setArrowType(Qt.ArrowType.RightArrow)
-        self._spectrum_btn.toggled.connect(lambda opened: self._spectrum_btn.setArrowType(
-            Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow))
+        self._spectrum_btn = QPushButton("Show Spectrum")
+        self._spectrum_btn.setProperty("quickPresentationAction", True)
+        self._spectrum_btn.setProperty("spectrumViewerVisible", False)
         self._spectrum_btn.setMinimumHeight(32)
         self._spectrum_btn.setToolTip(
-            "Show the most recent completed LightField acquisition in a separate window."
+            "The spectrum window displays the most recent completed LightField acquisition."
         )
         run_row.addWidget(self._run_btn)
         run_row.addWidget(self._stop_btn)
@@ -5487,7 +5482,8 @@ class PresetsPanel(QWidget):
         self._batch_repeat_all_btn.clicked.connect(self._set_all_rows_repeat)
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn.clicked.connect(self._on_stop)
-        self._spectrum_btn.clicked.connect(self._toggle_spectrum_viewer)
+        self._spectrum_btn.clicked.connect(lambda: self._toggle_spectrum_viewer(
+            not self._spectrum_btn.property("spectrumViewerVisible")))
         self._loop_table.itemChanged.connect(self._on_draft_edited)
         self._batch_table.itemChanged.connect(self._on_batch_item_changed)
         self._batch_table.itemSelectionChanged.connect(self._on_batch_selection_changed)
@@ -8965,14 +8961,9 @@ class PresetsPanel(QWidget):
             self._preview_event.set()
         else:
             self._preview_event.clear()
-        changed = self._spectrum_btn.isChecked() != bool(visible)
-        self._spectrum_btn.blockSignals(True)
-        self._spectrum_btn.setChecked(bool(visible))
-        self._spectrum_btn.setArrowType(Qt.ArrowType.DownArrow if visible else Qt.ArrowType.RightArrow)
         self._spectrum_btn.setText("Hide Spectrum" if visible else "Show Spectrum")
-        self._spectrum_btn.blockSignals(False)
-        if changed:
-            self._spectrum_btn.toggled.emit(bool(visible))
+        # The Quick button observes this state change when the viewer is closed independently.
+        self._spectrum_btn.setProperty("spectrumViewerVisible", visible)
 
     @Slot(object)
     def _on_acquisition_ready(self, payload: dict):

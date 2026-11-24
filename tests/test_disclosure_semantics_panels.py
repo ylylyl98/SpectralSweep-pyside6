@@ -4,7 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QT_QUICK_BACKEND", "software")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget, QToolButton
+from PySide6.QtWidgets import QPushButton, QWidget, QToolButton
 from tests.quick_helpers import quick_application
 from ui.quick_parameter_forms import _kind
 
@@ -62,26 +62,28 @@ def test_dual_gate_disclosures_do_not_convert_menu_actions(monkeypatch):
     panel.close()
 
 
-def test_spectrum_window_visibility_updates_disclosure(monkeypatch):
+def test_spectrum_button_controls_viewer_visibility(monkeypatch):
     quick_application()
-    from PySide6.QtTest import QSignalSpy
     from ui.presets_panel import PresetsPanel
     from utils.config import cfg
     monkeypatch.setattr(cfg, "save", lambda *args: None)
     panel = PresetsPanel()
     button = panel._spectrum_btn
-    spy = QSignalSpy(button.toggled)
-    panel._on_spectrum_viewer_visibility_changed(True)
-    assert _kind(button) == "disclosure" and button.isChecked()
-    assert button.arrowType() == Qt.ArrowType.DownArrow
-    panel._on_spectrum_viewer_visibility_changed(False)
-    assert not button.isChecked() and button.arrowType() == Qt.ArrowType.RightArrow
-    assert spy.count() == 2
-    panel.dispose_reloaded_page()
-    panel.close()
+    try:
+        assert isinstance(button, QPushButton) and _kind(button) == "button"
+        assert button.text() == "Show Spectrum"
+        button.click()
+        assert panel._spectrum_viewer.isVisible() and panel._preview_event.is_set()
+        assert button.text() == "Hide Spectrum"
+        button.click()
+        assert panel._spectrum_viewer.isHidden() and not panel._preview_event.is_set()
+        assert button.text() == "Show Spectrum"
+    finally:
+        panel.dispose_reloaded_page()
+        panel.close()
 
 
-def test_quick_spectrum_disclosure_tracks_real_window_close(monkeypatch):
+def test_quick_spectrum_button_tracks_real_window_close(monkeypatch):
     from PySide6.QtCore import QPointF
     from PySide6.QtTest import QTest
     from tests.test_quick_parameter_forms import find_item
@@ -94,7 +96,8 @@ def test_quick_spectrum_disclosure_tracks_real_window_close(monkeypatch):
     monkeypatch.setattr(cfg, "save", lambda *args: None)
     panel = PresetsPanel()
     button = panel._spectrum_btn
-    adapter = WidgetsParameterAdapter([[('spectrum', button, 'disclosure')]], visibility_root=panel)
+    adapter = WidgetsParameterAdapter([[('spectrum', button, _kind(button))]], visibility_root=panel)
+    adapter.validate_page = lambda: False
     form = QuickParameterForm(adapter)
     form.resize(260, 80)
     form.show()
@@ -107,11 +110,9 @@ def test_quick_spectrum_disclosure_tracks_real_window_close(monkeypatch):
             QTest.mouseClick(form, Qt.MouseButton.LeftButton, pos=point)
             QTest.qWait(80)
         def check(opened):
-            assert button.isChecked() is opened
-            assert item.property('expanded') is opened
+            assert panel._spectrum_viewer.isVisible() is opened
             assert item.property('text') == ('Hide Spectrum' if opened else 'Show Spectrum')
-            arrow = find_item(item, 'disclosureChevron_spectrum')
-            assert arrow.property('rotation') == (90 if opened else 0)
+            assert find_item(item, 'disclosureChevron_spectrum') is None
         click()
         check(True)
         click()

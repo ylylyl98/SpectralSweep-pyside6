@@ -23,7 +23,7 @@ if str(_ROOT) not in sys.path:
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore    import Qt
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QProcess, QTimer
 
 from ui.application_identity import (
     APP_NAME as _APP_NAME,
@@ -130,6 +130,15 @@ def main():
     finally:
         uninstall_exception_reporting()
         watchdog.close(normal_exit=False)
+    if exit_code == 0 and getattr(win, "_restart_requested", False):
+        # Source-checkout restarts use the normal launcher, including its
+        # diagnostic log, after controllers and the watchdog have shut down.
+        launcher = _ROOT / "tools" / "launch_app.py"
+        started, _ = QProcess.startDetached(sys.executable, [str(launcher), *sys.argv[1:]], str(_ROOT))
+        if not started:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "Restart failed", "SpectralSweep closed. Open launch.bat to start it again.")
+            exit_code = 1
     sys.exit(exit_code)
 
 

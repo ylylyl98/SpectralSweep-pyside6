@@ -485,7 +485,23 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _reload_current_page(self) -> None:
-        self._reload_registered_page(self._active_tab_id())
+        from ui.page_reload import PAGE_RELOAD_REGISTRY
+        page_id = self._active_tab_id()
+        tracker = getattr(self, "_source_changes", None)
+        if tracker is not None:
+            tracker.refresh()
+            pending = tracker.pending()
+            if not pending:
+                self._status.showMessage("Current interface is up to date.", 5000)
+                return
+            if all(item["styles"] for item in pending):
+                self._application_style.reload()
+                return
+            if (page_id not in PAGE_RELOAD_REGISTRY or any(item["restart"] for item in pending)
+                    or not any(page_id in item["pages"] for item in pending)):
+                self._show_source_changes()
+                return
+        self._reload_registered_page(page_id)
 
     def _reload_registered_page(self, page_id: str) -> None:
         from ui.page_reload import PAGE_RELOAD_REGISTRY, reload_page
@@ -503,9 +519,11 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f"Wait for acquisition and saving to finish before reloading {title}", 10000)
             return
         tracker = getattr(self, "_source_changes", None)
-        snapshot = tracker.snapshot(tracker.groups.get(page_id, ())) if tracker else {}
         self._page_reload_in_progress = True
         try:
+            self._status.showMessage(f"Refreshing {title} interface…")
+            self._status.repaint()
+            snapshot = tracker.snapshot(tracker.groups.get(page_id, ())) if tracker else {}
             new = reload_page(self, page_id)
         except Exception as exc:
             self._status.showMessage(f"{title} unchanged — reload failed: {type(exc).__name__}: {exc}", 15000)
@@ -646,36 +664,93 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _show_source_changes(self) -> None:
+        from ui.page_reload import PAGE_RELOAD_REGISTRY
         tracker = getattr(self, "_source_changes", None)
         if tracker is not None:
             tracker.refresh()
+        existing = getattr(self, "_source_dialog", None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return
         dialog = QDialog(self)
+        self._source_dialog = dialog
         dialog.setWindowTitle("Code update status")
         dialog.resize(720, 460)
         layout = QVBoxLayout(dialog)
+        page_id = self._active_tab_id()
+        spec = PAGE_RELOAD_REGISTRY.get(page_id)
         explanation = QLabel(
-            "Refresh current interface (Ctrl+Alt+U) refreshes registered Dual Gate, Spectrum and Settings "
-            "Python layouts, tables and forms while idle and keeps instrument connections open. "
-            "Other pages using shared helpers still require restart. QML components, the global shell, "
-            "controllers and drivers require an application restart.")
+            (f"{spec.title} supports live refresh of its Python layout while idle. "
+             if spec else "Changes to this page’s layout require an application restart. ")
+            + "Restart to apply shared QML or other changes marked below. "
+              "Restarting closes the current session and instrument connections.")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         details = QPlainTextEdit(self._source_changes_text())
         details.setReadOnly(True)
         layout.addWidget(details, 1)
         self._source_details = details
-        refresh = QPushButton("Check again")
-        refresh.clicked.connect(lambda: (tracker.refresh() if tracker else None,
-                                         details.setPlainText(self._source_changes_text())))
-        layout.addWidget(refresh)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        apply_page = None
+        if spec:
+            apply_page = buttons.addButton(f"Refresh {spec.title}", QDialogButtonBox.ButtonRole.ActionRole)
+
+            def refresh_page():
+                dialog.accept()
+                self._reload_registered_page(page_id)
+
+            apply_page.clicked.connect(refresh_page)
+        if tracker is not None:
+            style = buttons.addButton("Reload styles", QDialogButtonBox.ButtonRole.ActionRole)
+            style.clicked.connect(lambda: self._application_style.reload())
+            restart = buttons.addButton("Restart application…", QDialogButtonBox.ButtonRole.ActionRole)
+            restart.clicked.connect(self._confirm_layout_restart)
+
+            def update_actions():
+                pending = tracker.pending()
+                style.setVisible(any(item["styles"] for item in pending))
+                restart.setVisible(any(item["restart"] for item in pending))
+                if apply_page is not None:
+                    apply_page.setVisible(not pending or any(page_id in item["pages"] for item in pending))
+
+            tracker.changed.connect(update_actions)
+            update_actions()
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        try:
-            dialog.exec()
-        finally:
+
+        def finished():
+            if tracker is not None:
+                tracker.changed.disconnect(update_actions)
             self._source_details = None
+            self._source_dialog = None
             dialog.deleteLater()
+
+        dialog.finished.connect(finished)
+        # The page-specific action belongs to the tab that opened this window.
+        self._tabs.currentChanged.connect(dialog.reject)
+        dialog.show()
+
+    @Slot()
+    def _confirm_layout_restart(self) -> None:
+        def blocked():
+            if self._software_updates.restart_blocked():
+                self._status.showMessage("Wait for acquisition, saving or software update to finish before restarting.", 10000)
+                return True
+            return False
+        if blocked():
+            return
+        answer = QMessageBox.question(
+            self._source_dialog, "Restart SpectralSweep?",
+            "Close SpectralSweep and reopen it with the updated layout? "
+            "Instrument connections will close. Save any spectra or edits you want to keep.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if answer == QMessageBox.StandardButton.Yes and not blocked():
+            self._source_dialog.accept()
+            if self.close():
+                self._restart_requested = True
+                QApplication.instance().quit()
 
     @Slot(bool)
     def _set_calibration_visible(self, visible: bool) -> None:

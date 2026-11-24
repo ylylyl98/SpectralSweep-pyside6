@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QUICK_BACKEND", "software")
 import pytest
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QBoxLayout
+from PySide6.QtWidgets import QBoxLayout, QWidget
 
 from tests.quick_helpers import quick_application, drain_qt_deletions
 from ui.quick_parameter_forms import install_parameter_forms
@@ -136,12 +136,18 @@ def test_batch_gate_entry_is_visible_and_adds_multiple_conditions(
 
 def test_pairing_fields_are_editable_and_restore_in_both_shells(workspace):
     panel, page_id, quick, sections, coverage = workspace
+    sweep = panel._mcd_settings_groups["FieldSweep"]
+    step_row = sweep.findChild(QWidget, "McdPointSettings")
+    duration_row = sweep.findChild(QWidget, "McdStableDuration")
+    panel._acquisition_mode.setCurrentIndex(panel._acquisition_mode.findData("continuous"))
+    assert step_row.isHidden() and duration_row.isHidden()
     if page_id == "mcd":
         step, tolerance, hold = panel._point_step_mt, panel._point_tolerance_mt, panel._point_hold_s
         panel._acquisition_mode.setCurrentIndex(1)
     else:
         step, tolerance, hold = panel.point_step, panel.point_tolerance, panel.point_stable
         panel.point_pairing.setChecked(True)
+    assert not step_row.isHidden() and not duration_row.isHidden()
     assert tolerance.value() == 10
     for widget, value in ((step, 75), (tolerance, 4), (hold, 2)):
         widget.setValue(value)
@@ -154,6 +160,27 @@ def test_pairing_fields_are_editable_and_restore_in_both_shells(workspace):
     if quick:
         fields = {source for form in coverage["forms"] for source in form.adapter._fields.values()}
         assert {step, tolerance, hold} <= fields
+
+
+def test_dual_detector_mode_keeps_one_recipe_editor_per_detector(workspace):
+    panel, page_id, _quick, _sections, _coverage = workspace
+    pair = panel._pair_controls
+    single = panel._single_detector_recipe
+    center = panel._center if page_id == "mcd" else panel.lf_center
+    single_center = center.value()
+    pair.set_station("attodry2100")
+    pair.mode.setCurrentIndex(1)
+    assert single.isHidden()
+    assert not pair._pixis.isHidden() and not pair._andor.isHidden()
+    assert pair._pixis.title() == "PIXIS"
+    assert "Andor" in pair._andor.title()
+    pair._pixis_editors[0].setValue(700.0)
+    pair._andor_editors[0].setValue(1200.0)
+    assert pair.recipes()["lightfield"]["center_nm"] == 700.0
+    assert pair.recipes()[pair.andor_backend]["center_nm"] == 1200.0
+    pair.mode.setCurrentIndex(0)
+    assert not single.isHidden() and pair._details.isHidden()
+    assert center.value() == single_center
 
 
 def test_dragging_keeps_full_width_sections_in_the_same_order(workspace):

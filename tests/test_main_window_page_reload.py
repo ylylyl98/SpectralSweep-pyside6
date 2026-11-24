@@ -2,7 +2,7 @@ from types import MethodType
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtWidgets import QApplication, QLineEdit, QMainWindow
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QLineEdit, QMainWindow, QMessageBox, QTabWidget
 
 from tests.test_dual_gate_page_reload import shell
 from ui import page_reload
@@ -36,7 +36,11 @@ def tracked_window(tmp_path, monkeypatch):
     window._status = window.statusBar()
     style = tmp_path / "ui/styles/quick_application.qss"
     window._application_style = SimpleNamespace(path=style, _last_source=style.read_text())
-    window._show_source_changes = Mock()
+    window._tabs = QTabWidget(window)
+    window._active_tab_id = lambda: "dual_gate"
+    window._show_source_changes = MethodType(MainWindow._show_source_changes, window)
+    window._confirm_layout_restart = MethodType(MainWindow._confirm_layout_restart, window)
+    window._reload_registered_page = Mock()
     window._update_source_status = MethodType(MainWindow._update_source_status, window)
     window._source_changes_text = MethodType(MainWindow._source_changes_text, window)
     MainWindow._initialize_source_tracking(window)
@@ -49,6 +53,62 @@ def tracked_window(tmp_path, monkeypatch):
 def test_quick_startup_does_not_report_legacy_style_as_a_pending_reload(tracked_window):
     assert tracked_window._source_changes.pending() == []
     assert tracked_window._source_status.text() == "Code: up to date"
+
+
+def test_code_status_opens_once_and_refreshes_page_without_blocking_main_window(tracked_window):
+    window = tracked_window
+    window._source_status.click()
+    dialog = window._source_dialog
+    assert dialog.isVisible() and not dialog.isModal()
+    window._source_status.click()
+    assert window._source_dialog is dialog
+    box = dialog.findChild(QDialogButtonBox)
+    next(button for button in box.buttons() if button.text() == "Refresh Dual Gate").click()
+    window._reload_registered_page.assert_called_once_with("dual_gate")
+    assert window._source_dialog is None
+
+
+def test_refresh_dispatches_changed_style_and_current_python_layout(tracked_window):
+    window = tracked_window
+    style = window._application_style
+    style.reload = Mock()
+    style.path.write_text("QWidget { color: red; }", encoding="utf-8")
+    MainWindow._reload_current_page(window)
+    style.reload.assert_called_once()
+    window._reload_registered_page.assert_not_called()
+    window._source_changes.mark_styles_applied(style.path.read_text(encoding="utf-8"))
+    source = window._source_changes.root / "ui/quick_sweep_calculator.py"
+    source.write_text("value = 2\n", encoding="utf-8")
+    MainWindow._reload_current_page(window)
+    window._reload_registered_page.assert_called_once_with("dual_gate")
+
+
+def test_refresh_skips_unchanged_page_and_offers_restart_for_qml(tracked_window, monkeypatch):
+    window = tracked_window
+    MainWindow._reload_current_page(window)
+    assert "up to date" in window._status.currentMessage()
+    window._active_tab_id = lambda: "mcd2100"
+    qml = window._source_changes.root / "ui/qml/ParameterForm.qml"
+    qml.write_text("import QtQuick\nItem { height: 180 }", encoding="utf-8")
+    MainWindow._reload_current_page(window)
+    dialog = window._source_dialog
+    assert dialog.isVisible() and not dialog.isModal()
+    assert "ParameterForm.qml" in window._source_details.toPlainText()
+    box = dialog.findChild(QDialogButtonBox)
+    restart = next(button for button in box.buttons() if button.text().startswith("Restart application"))
+    question = Mock(return_value=QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "question", question)
+    window.close = Mock(return_value=False)
+    window._software_updates = Mock()
+    window._software_updates.restart_blocked.side_effect = [True, False, True, False, False]
+    restart.click()
+    question.assert_not_called()
+    restart.click()  # Acquisition starts during the confirmation.
+    window.close.assert_not_called()
+    restart.click()  # The normal shutdown path can also refuse to close.
+    window.close.assert_called_once()
+    assert not getattr(window, "_restart_requested", False)
+    window._reload_registered_page.assert_not_called()
 
 
 def test_refresh_current_interface_keeps_the_existing_action_and_shortcut(tracked_window):
@@ -88,7 +148,8 @@ def test_quick_tracking_groups_include_only_the_supported_page_helpers(tracked_w
         paths = tuple(name.replace(".", "/") + ".py" for name in helpers)
         assert tracker.groups[key][:len(paths)] == paths
     assert tracker.shared == QUICK_SHARED_RESTART_SOURCES | {
-        "ui/spectrum_plot.py", "ui/andor_controls_widget.py"}
+        "ui/spectrum_plot.py", "ui/andor_controls_widget.py",
+        "ui/spectrum_pair.py", "ui/station_pair_controls.py"}
     assert "ui/quick_sweep_calculator.py" not in tracker.groups["spectrum"]
 
 
@@ -97,7 +158,8 @@ def test_widgets_tracking_excludes_quick_workspace_helpers(tracked_window):
     MainWindow._initialize_source_tracking(tracked_window)
     tracker = tracked_window._source_changes
     assert "ui/quick_sweep_calculator.py" not in tracker.groups["dual_gate"]
-    assert tracker.shared == {"ui/spectrum_plot.py", "ui/andor_controls_widget.py"}
+    assert tracker.shared == {"ui/spectrum_plot.py", "ui/andor_controls_widget.py",
+                              "ui/spectrum_pair.py", "ui/station_pair_controls.py"}
 
 
 def test_calculator_change_stays_pending_until_the_loaded_source_is_applied(tracked_window):

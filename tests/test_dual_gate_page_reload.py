@@ -181,10 +181,11 @@ def test_retains_open_spectrum_viewer_and_rebinds_it(shell):
     new = page_reload.reload_dual_gate_page(shell)
     assert new._spectrum_viewer is viewer and viewer.parentWidget() is new
     assert viewer.isVisible() and viewer._log.isChecked()
+    assert new._spectrum_btn.text() == "Hide Spectrum"
     assert viewer._last_payload is payload
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     viewer.hide()
-    assert not new._spectrum_btn.isChecked()
+    assert new._spectrum_btn.text() == "Show Spectrum"
     assert not new._preview_event.is_set()
 
 

@@ -27,7 +27,8 @@ ADMITTED_DIALOGS = {
     ("ui.broad_calibration_dialog", "BroadCalibrationDialog"),
     ("ui.mcd2100_panel", "_RampTablesDialog"),
 }
-ADMITTED_PLAIN_TITLES = {"Set imaging reference", "Code update status", "Full measurement sequence"}
+# Keep the source-update controls usable even when a Quick component fails to load.
+ADMITTED_PLAIN_TITLES = {"Set imaging reference", "Full measurement sequence"}
 NATIVE_DIALOGS = (QFileDialog, QColorDialog, QFontDialog, QInputDialog, QMessageBox)
 
 
